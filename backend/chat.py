@@ -1,0 +1,209 @@
+from openai import OpenAI
+from pathlib import Path
+from typing import List, Dict
+import json
+import requests
+from .config import Settings
+from .skill import SkillEngine
+
+
+class ChatHandler:
+    """对话处理器"""
+
+    def __init__(self, settings: Settings, skill_engine: SkillEngine):
+        self.settings = settings
+        self.skill_engine = skill_engine
+        self.client = OpenAI(
+            api_key=settings.api_key,
+            base_url=settings.api_base
+        )
+
+    def chat(self, project_name: str, user_message: str, max_iterations: int = 5) -> str:
+        """处理对话"""
+        # 验证消息长度
+        if len(user_message) > 10000:
+            return "消息过长，请控制在10000字符以内。"
+
+        # 加载对话历史
+        conversation = self._load_conversation(project_name)
+
+        # 添加用户消息
+        conversation.append({"role": "user", "content": user_message})
+
+        # 循环处理Function Calling（降低到5次防止过度调用）
+        iterations = 0
+        while iterations < max_iterations:
+            try:
+                # 调用LLM（支持Function Calling，添加超时）
+                response = self.client.chat.completions.create(
+                    model=self.settings.model,
+                    messages=conversation,
+                    temperature=0.7,
+                    max_tokens=4096,
+                    tools=self._get_tools(),
+                    tool_choice="auto",
+                    timeout=30.0
+                )
+            except Exception as e:
+                return f"API调用失败: {str(e)}"
+
+            message = response.choices[0].message
+
+            # 处理Function Calling
+            if message.tool_calls:
+                conversation.append(message.model_dump())
+                for tool_call in message.tool_calls:
+                    result = self._execute_tool(project_name, tool_call)
+                    conversation.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(result, ensure_ascii=False)
+                    })
+                iterations += 1
+            else:
+                assistant_message = message.content
+                break
+        else:
+            assistant_message = "抱歉，处理超时，请简化您的请求。"
+
+        # 保存助手回复和对话历史
+        conversation.append({"role": "assistant", "content": assistant_message})
+        self._save_conversation(project_name, conversation)
+
+        return assistant_message
+
+    def _get_tools(self):
+        """定义可用工具"""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "写入或更新项目文件",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string", "description": "文件路径，如plan/outline.md"},
+                            "content": {"type": "string", "description": "文件内容"}
+                        },
+                        "required": ["file_path", "content"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "读取项目文件",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string", "description": "文件路径"}
+                        },
+                        "required": ["file_path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "搜索互联网获取最新信息、数据、案例等",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "搜索关键词"}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }
+        ]
+
+    def _execute_tool(self, project_name: str, tool_call):
+        """执行工具调用"""
+        import logging
+        try:
+            func_name = tool_call.function.name
+            args = json.loads(tool_call.function.arguments)
+
+            if func_name == "write_file":
+                self.skill_engine.write_file(project_name, args["file_path"], args["content"])
+                return {"status": "success", "message": f"已写入文件: {args['file_path']}"}
+            elif func_name == "read_file":
+                content = self.skill_engine.read_file(project_name, args["file_path"])
+                return {"status": "success", "content": content}
+            elif func_name == "web_search":
+                results = self._web_search(args["query"])
+                return {"status": "success", "results": results}
+            else:
+                return {"status": "error", "message": f"未知工具: {func_name}"}
+        except json.JSONDecodeError as e:
+            logging.error(f"工具参数解析失败: {func_name}, 错误: {str(e)}")
+            return {"status": "error", "message": f"参数解析失败: {str(e)}"}
+        except ValueError as e:
+            logging.error(f"工具参数验证失败: {func_name}, 错误: {str(e)}")
+            return {"status": "error", "message": str(e)}
+        except Exception as e:
+            logging.error(f"工具执行异常: {func_name}, 错误: {str(e)}")
+            return {"status": "error", "message": f"工具执行失败: {str(e)}"}
+
+    def _web_search(self, query: str) -> str:
+        """简单的网络搜索（使用DuckDuckGo）"""
+        try:
+            url = "https://api.duckduckgo.com/"
+            params = {"q": query, "format": "json"}
+            response = requests.get(url, params=params, timeout=10)
+            data = response.json()
+
+            results = []
+            if data.get("AbstractText"):
+                results.append(f"摘要: {data['AbstractText']}")
+            if data.get("RelatedTopics"):
+                for topic in data["RelatedTopics"][:3]:
+                    if isinstance(topic, dict) and topic.get("Text"):
+                        results.append(f"- {topic['Text']}")
+
+            return "\n".join(results) if results else "未找到相关信息"
+        except Exception as e:
+            return f"搜索失败: {str(e)}"
+
+    def _load_conversation(self, project_name: str) -> List[Dict]:
+        """加载对话历史"""
+        project_path = self.skill_engine.get_project_path(project_name)
+        if not project_path:
+            return [{"role": "system", "content": self._build_system_prompt(project_name)}]
+
+        conv_file = project_path / "conversation.json"
+        if conv_file.exists():
+            return json.loads(conv_file.read_text(encoding="utf-8"))
+
+        return [{"role": "system", "content": self._build_system_prompt(project_name)}]
+
+    def _save_conversation(self, project_name: str, conversation: List[Dict]):
+        """保存对话历史"""
+        project_path = self.skill_engine.get_project_path(project_name)
+        if project_path:
+            conv_file = project_path / "conversation.json"
+            conv_file.write_text(json.dumps(conversation, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _build_system_prompt(self, project_name: str) -> str:
+        """构建系统提示"""
+        # 读取Skill定义
+        skill_prompt = self.skill_engine.get_skill_prompt()
+
+        # 读取项目上下文
+        project_context = ""
+        project_path = self.skill_engine.get_project_path(project_name)
+        if project_path:
+            # 读取项目信息
+            info_file = project_path / "plan" / "project-info.md"
+            if info_file.exists():
+                project_context += f"\n\n## 当前项目信息\n{info_file.read_text(encoding='utf-8')}"
+
+            # 读取大纲
+            outline_file = project_path / "plan" / "outline.md"
+            if outline_file.exists():
+                project_context += f"\n\n## 当前大纲\n{outline_file.read_text(encoding='utf-8')}"
+
+        return f"{skill_prompt}\n\n{project_context}"

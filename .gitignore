@@ -1,0 +1,8 @@
+config.json
+projects/
+frontend/node_modules/
+frontend/dist/
+backend/static/
+*.pyc
+__pycache__/
+.env
