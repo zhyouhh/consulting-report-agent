@@ -67,6 +67,25 @@ async def update_settings(update: SettingsUpdate):
     return {"status": "ok"}
 
 
+class ModelsRequest(BaseModel):
+    """获取模型列表请求"""
+    api_key: str
+    api_base: str
+
+
+@app.post("/api/models/list")
+async def list_models(request: ModelsRequest):
+    """从API获取可用模型列表"""
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=request.api_key, base_url=request.api_base)
+        models = client.models.list()
+        model_ids = [m.id for m in models.data]
+        return {"models": model_ids}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取模型列表失败: {str(e)}")
+
+
 @app.get("/api/projects")
 async def list_projects():
     return skill_engine.list_projects()

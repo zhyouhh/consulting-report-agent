@@ -9,6 +9,8 @@ export default function SettingsModal({ onClose }) {
   })
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [models, setModels] = useState([])
+  const [fetchingModels, setFetchingModels] = useState(false)
 
   useEffect(() => {
     axios.get('/api/settings').then(res => {
@@ -20,6 +22,32 @@ export default function SettingsModal({ onClose }) {
       setLoaded(true)
     }).catch(() => setLoaded(true))
   }, [])
+
+  const fetchModels = async () => {
+    if (!form.api_key.trim()) {
+      alert('请先输入API Key')
+      return
+    }
+    if (!form.api_base.trim()) {
+      alert('请先输入API地址')
+      return
+    }
+    setFetchingModels(true)
+    try {
+      const res = await axios.post('/api/models/list', {
+        api_key: form.api_key,
+        api_base: form.api_base
+      })
+      setModels(res.data.models)
+      if (res.data.models.length > 0 && !res.data.models.includes(form.model)) {
+        setForm({...form, model: res.data.models[0]})
+      }
+    } catch (e) {
+      alert('获取模型列表失败: ' + (e.response?.data?.detail || e.message))
+    } finally {
+      setFetchingModels(false)
+    }
+  }
 
   const handleSave = async () => {
     if (!form.api_key.trim()) {
@@ -67,12 +95,31 @@ export default function SettingsModal({ onClose }) {
         />
 
         <label className="block text-sm text-[#8888a8] mb-1">模型</label>
-        <input
-          value={form.model}
-          onChange={e => setForm({...form, model: e.target.value})}
-          placeholder="例如: deepseek-ai/DeepSeek-V3"
-          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-1"
-        />
+        <div className="flex gap-2 mb-1">
+          {models.length > 0 ? (
+            <select
+              value={form.model}
+              onChange={e => setForm({...form, model: e.target.value})}
+              className="flex-1 bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2"
+            >
+              {models.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          ) : (
+            <input
+              value={form.model}
+              onChange={e => setForm({...form, model: e.target.value})}
+              placeholder="例如: deepseek-ai/DeepSeek-V3"
+              className="flex-1 bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2"
+            />
+          )}
+          <button
+            onClick={fetchModels}
+            disabled={fetchingModels}
+            className="bg-[#2a2a4a] text-[#e2e2f0] px-4 py-2 rounded hover:bg-[#3a3a5a] disabled:bg-[#1a1a2a] disabled:text-[#6a6a8a]"
+          >
+            {fetchingModels ? '获取中...' : '获取模型'}
+          </button>
+        </div>
         <p className="text-xs text-[#6a6a8a] mb-4">
           硅基流动常用模型: deepseek-ai/DeepSeek-V3, Qwen/Qwen2.5-72B-Instruct
         </p>
