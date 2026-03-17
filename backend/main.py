@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional
 from pathlib import Path
 import uvicorn
 import threading
@@ -38,10 +40,26 @@ async def get_settings():
     return data
 
 
+class SettingsUpdate(BaseModel):
+    """前端提交的设置更新（只包含API相关字段）"""
+    api_provider: Optional[str] = None
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    model: Optional[str] = None
+
+
 @app.post("/api/settings")
-async def update_settings(new_settings: Settings):
+async def update_settings(update: SettingsUpdate):
     global settings, chat_handler
-    settings = new_settings
+    # 只更新前端传来的字段，保留路径等其他配置
+    if update.api_provider is not None:
+        settings.api_provider = update.api_provider
+    if update.api_key is not None and update.api_key != "***":
+        settings.api_key = update.api_key
+    if update.api_base is not None:
+        settings.api_base = update.api_base
+    if update.model is not None:
+        settings.model = update.model
     save_settings(settings)
     chat_handler = ChatHandler(settings, skill_engine)
     return {"status": "ok"}

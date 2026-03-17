@@ -1,7 +1,9 @@
 import React, { useState } from 'react'
+import SettingsModal from './SettingsModal'
 
 export default function Sidebar({ projects, currentProject, onSelectProject, onCreateProject }) {
   const [showModal, setShowModal] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState(null)
   const [formData, setFormData] = useState({
     name: '',
@@ -54,6 +56,17 @@ export default function Sidebar({ projects, currentProject, onSelectProject, onC
           </div>
         ))}
       </div>
+
+      <div className="p-4 border-t border-gray-200">
+        <button
+          onClick={() => setShowSettings(true)}
+          className="w-full text-gray-500 hover:text-gray-700 text-sm py-2 flex items-center justify-center gap-1"
+        >
+          ⚙ API 设置
+        </button>
+      </div>
+
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
 
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
