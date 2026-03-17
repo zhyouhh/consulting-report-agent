@@ -255,33 +255,40 @@ class ChatHandler:
             return {"status": "error", "message": f"工具执行失败: {str(e)}"}
 
     def _web_search(self, query: str) -> str:
-        """网络搜索（使用SearXNG公共实例）"""
+        """网络搜索（使用Tavily API）"""
         import logging
         try:
-            # 使用SearXNG公共实例（完全免费，无需API Key）
-            url = "https://searx.be/search"
-            params = {
-                "q": query,
-                "format": "json",
-                "language": "zh-CN"
+            # 使用Tavily API（专为AI设计的搜索）
+            tavily_key = "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"
+            url = "https://api.tavily.com/search"
+            payload = {
+                "api_key": tavily_key,
+                "query": query,
+                "max_results": 3,
+                "include_answer": True
             }
-            headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(url, params=params, headers=headers, timeout=10)
+            response = requests.post(url, json=payload, timeout=15)
 
             if response.status_code != 200:
-                return "搜索服务暂时不可用，请稍后重试"
+                return f"搜索服务暂时不可用（状态码：{response.status_code}）"
 
             data = response.json()
-            results = data.get("results", [])[:3]  # 取前3个结果
 
-            if not results:
+            # 优先返回AI生成的答案摘要
+            if data.get("answer"):
+                output = f"搜索摘要：\n{data['answer']}\n\n"
+            else:
+                output = "搜索结果：\n"
+
+            # 添加具体搜索结果
+            results = data.get("results", [])
+            if results:
+                for i, r in enumerate(results, 1):
+                    title = r.get("title", "")
+                    content = r.get("content", "")
+                    output += f"{i}. {title}\n{content[:150]}...\n\n"
+            else:
                 return "未找到相关信息"
-
-            output = "搜索结果：\n"
-            for i, r in enumerate(results, 1):
-                title = r.get("title", "")
-                content = r.get("content", "")
-                output += f"{i}. {title}\n{content[:200]}...\n\n"
 
             return output.strip()
         except Exception as e:
