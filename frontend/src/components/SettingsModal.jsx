@@ -70,11 +70,15 @@ export default function SettingsModal({ onClose }) {
         <input
           value={form.model}
           onChange={e => setForm({...form, model: e.target.value})}
-          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-4"
+          placeholder="例如: deepseek-ai/DeepSeek-V3"
+          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-1"
         />
+        <p className="text-xs text-[#6a6a8a] mb-4">
+          硅基流动常用模型: deepseek-ai/DeepSeek-V3, Qwen/Qwen2.5-72B-Instruct
+        </p>
 
         <p className="text-xs text-[#6a6a8a] mb-4">
-          默认使用硅基流动API，也可换成其他兼容OpenAI格式的服务
+          支持硅基流动API及其他兼容OpenAI格式的服务
         </p>
 
         <div className="flex gap-2">

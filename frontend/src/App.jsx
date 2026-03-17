@@ -56,6 +56,21 @@ function App() {
     }
   }
 
+  const deleteProject = async (projectName) => {
+    try {
+      await axios.delete(`/api/projects/${projectName}`)
+      if (currentProject === projectName) {
+        setCurrentProject(null)
+      }
+      await loadProjects()
+      return true
+    } catch (error) {
+      console.error('删除项目失败:', error)
+      alert('删除项目失败，请重试')
+      return false
+    }
+  }
+
   if (loading) {
     return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
   }
@@ -68,6 +83,7 @@ function App() {
           currentProject={currentProject}
           onSelectProject={setCurrentProject}
           onCreateProject={createProject}
+          onDeleteProject={deleteProject}
         />
         <ChatPanel
           project={currentProject}

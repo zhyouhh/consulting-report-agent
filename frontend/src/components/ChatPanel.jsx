@@ -6,6 +6,7 @@ export default function ChatPanel({ project, onTogglePreview }) {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [tokenUsage, setTokenUsage] = useState(null)
+  const [abortController, setAbortController] = useState(null)
   const messagesEndRef = useRef(null)
 
   useEffect(() => {
@@ -23,6 +24,36 @@ export default function ChatPanel({ project, onTogglePreview }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  const clearConversation = async () => {
+    if (!confirm('确定要清空对话历史吗？')) return
+    try {
+      await axios.delete(`/api/projects/${project}/conversation`)
+      setMessages([{
+        id: `${Date.now()}-${Math.random()}`,
+        role: 'assistant',
+        content: '对话已清空。请告诉我你想写什么类型的报告？'
+      }])
+      setTokenUsage(null)
+    } catch (error) {
+      alert('清空失败: ' + (error.response?.data?.detail || error.message))
+    }
+  }
+
+  const stopGeneration = () => {
+    if (abortController) {
+      abortController.abort()
+      setLoading(false)
+    }
+  }
+
+  const copyMessage = (content) => {
+    navigator.clipboard.writeText(content).then(() => {
+      // 简单提示，不打断用户
+    }).catch(() => {
+      alert('复制失败，请手动选择文本')
+    })
+  }
+
   const sendMessage = async () => {
     if (!input.trim() || !project) return
 
@@ -31,11 +62,14 @@ export default function ChatPanel({ project, onTogglePreview }) {
     setInput('')
     setLoading(true)
 
+    const controller = new AbortController()
+    setAbortController(controller)
+
     try {
       const res = await axios.post('/api/chat', {
         project_name: project,
         message: input
-      })
+      }, { signal: controller.signal })
       setMessages(prev => [...prev, {
         id: `${Date.now()}-${Math.random()}`,
         role: 'assistant',
@@ -45,32 +79,55 @@ export default function ChatPanel({ project, onTogglePreview }) {
         setTokenUsage(res.data.token_usage)
       }
     } catch (error) {
-      console.error('发送消息失败:', error)
-      setMessages(prev => [...prev, {
-        id: `${Date.now()}-${Math.random()}`,
-        role: 'assistant',
-        content: `API调用失败: ${error.response?.data?.detail || error.message}`
-      }])
+      if (error.name === 'CanceledError') {
+        setMessages(prev => [...prev, {
+          id: `${Date.now()}-${Math.random()}`,
+          role: 'assistant',
+          content: '已停止生成'
+        }])
+      } else {
+        console.error('发送消息失败:', error)
+        setMessages(prev => [...prev, {
+          id: `${Date.now()}-${Math.random()}`,
+          role: 'assistant',
+          content: `API调用失败: ${error.response?.data?.detail || error.message}`
+        }])
+      }
     }
     setLoading(false)
+    setAbortController(null)
   }
 
   return (
     <div className="flex-1 flex flex-col bg-[#1a1a2e]">
       <div className="p-4 border-b border-[#2a2a4a] flex justify-between items-center">
         <h2 className="font-semibold text-[#e2e2f0]">{project || '请选择或创建项目'}</h2>
-        <button onClick={onTogglePreview} className="text-sm text-[#8888a8] hover:text-[#e2e2f0]">
-          切换预览
-        </button>
+        <div className="flex gap-2">
+          {project && (
+            <button onClick={clearConversation} className="text-sm text-[#8888a8] hover:text-[#e2e2f0]">
+              清空对话
+            </button>
+          )}
+          <button onClick={onTogglePreview} className="text-sm text-[#8888a8] hover:text-[#e2e2f0]">
+            切换预览
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((msg) => (
           <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-2xl px-4 py-2 rounded-lg ${
+            <div className={`max-w-2xl px-4 py-2 rounded-lg relative group ${
               msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-[#252545] text-[#e2e2f0]'
             }`}>
               <div className="whitespace-pre-wrap">{msg.content}</div>
+              <button
+                onClick={() => copyMessage(msg.content)}
+                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 text-xs px-2 py-1 bg-[#1a1a2e] rounded hover:bg-[#2a2a4a] transition-opacity"
+                title="复制"
+              >
+                复制
+              </button>
             </div>
           </div>
         ))}
@@ -110,13 +167,22 @@ export default function ChatPanel({ project, onTogglePreview }) {
             disabled={!project || loading}
             className="flex-1 bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
           />
-          <button
-            onClick={sendMessage}
-            disabled={!project || loading}
-            className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 disabled:bg-[#3a3a5a]"
-          >
-            发送
-          </button>
+          {loading ? (
+            <button
+              onClick={stopGeneration}
+              className="bg-red-600 text-white px-6 py-2 rounded-lg hover:bg-red-700"
+            >
+              停止
+            </button>
+          ) : (
+            <button
+              onClick={sendMessage}
+              disabled={!project}
+              className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 disabled:bg-[#3a3a5a]"
+            >
+              发送
+            </button>
+          )}
         </div>
       </div>
     </div>

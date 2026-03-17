@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import SettingsModal from './SettingsModal'
 
-export default function Sidebar({ projects, currentProject, onSelectProject, onCreateProject }) {
+export default function Sidebar({ projects, currentProject, onSelectProject, onCreateProject, onDeleteProject }) {
   const [showModal, setShowModal] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState(null)
@@ -28,6 +28,13 @@ export default function Sidebar({ projects, currentProject, onSelectProject, onC
     }
   }
 
+  const handleDelete = async (projectName) => {
+    const success = await onDeleteProject(projectName)
+    if (success) {
+      setDeleteConfirm(null)
+    }
+  }
+
   return (
     <div className="w-64 bg-[#1a1a2e] border-r border-[#2a2a4a] flex flex-col">
       <div className="p-4 border-b border-[#2a2a4a]">
@@ -47,12 +54,25 @@ export default function Sidebar({ projects, currentProject, onSelectProject, onC
         {projects.map((project) => (
           <div
             key={project.name}
-            onClick={() => onSelectProject(project.name)}
-            className={`p-3 mb-2 rounded-lg cursor-pointer ${
+            className={`p-3 mb-2 rounded-lg flex items-center justify-between ${
               currentProject === project.name ? 'bg-[#1e1e4a] border border-[#3b5998]' : 'hover:bg-[#222244]'
             }`}
           >
-            <div className="font-medium text-sm text-[#e2e2f0]">{project.name}</div>
+            <div
+              onClick={() => onSelectProject(project.name)}
+              className="flex-1 cursor-pointer font-medium text-sm text-[#e2e2f0]"
+            >
+              {project.name}
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                setDeleteConfirm(project.name)
+              }}
+              className="text-red-400 hover:text-red-300 ml-2"
+            >
+              🗑
+            </button>
           </div>
         ))}
       </div>
@@ -67,6 +87,19 @@ export default function Sidebar({ projects, currentProject, onSelectProject, onC
       </div>
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+
+      {deleteConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-[#1a1a2e] rounded-lg p-6 w-96">
+            <h2 className="text-lg font-semibold mb-4 text-[#e2e2f0]">确认删除</h2>
+            <p className="text-[#8888a8] mb-6">确定要删除项目 "{deleteConfirm}" 吗？此操作无法撤销。</p>
+            <div className="flex gap-2">
+              <button onClick={() => setDeleteConfirm(null)} className="flex-1 border border-[#3a3a5a] text-[#e2e2f0] px-4 py-2 rounded hover:bg-[#222244]">取消</button>
+              <button onClick={() => handleDelete(deleteConfirm)} className="flex-1 bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">删除</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">

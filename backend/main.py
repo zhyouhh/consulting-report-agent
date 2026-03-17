@@ -18,7 +18,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],  # 限制为必需的方法
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -119,6 +119,31 @@ async def read_file(project_name: str, file_path: str):
         return {"content": content}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.delete("/api/projects/{project_name}")
+async def delete_project(project_name: str):
+    import shutil
+    project_path = skill_engine.get_project_path(project_name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    try:
+        shutil.rmtree(project_path)
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+
+@app.delete("/api/projects/{project_name}/conversation")
+async def clear_conversation(project_name: str):
+    """清空对话历史"""
+    project_path = skill_engine.get_project_path(project_name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    conv_file = project_path / "conversation.json"
+    if conv_file.exists():
+        conv_file.unlink()
+    return {"status": "ok"}
 
 
 # 静态文件挂载必须在所有API路由之后，避免拦截/api请求
