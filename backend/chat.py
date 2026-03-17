@@ -255,16 +255,38 @@ class ChatHandler:
             return {"status": "error", "message": f"工具执行失败: {str(e)}"}
 
     def _web_search(self, query: str) -> str:
-        """网络搜索（DuckDuckGo API已废弃，暂时禁用）"""
+        """网络搜索（使用SearXNG公共实例）"""
         import logging
-        logging.warning(f"web_search被调用但已禁用: {query}")
-        return (
-            "网络搜索功能暂时不可用（DuckDuckGo API已废弃）。\n"
-            "建议：\n"
-            "1. 如果您有相关数据或资料，请直接提供\n"
-            "2. 可以引用您已知的权威来源\n"
-            "3. 标注数据来源以保证真实性"
-        )
+        try:
+            # 使用SearXNG公共实例（完全免费，无需API Key）
+            url = "https://searx.be/search"
+            params = {
+                "q": query,
+                "format": "json",
+                "language": "zh-CN"
+            }
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(url, params=params, headers=headers, timeout=10)
+
+            if response.status_code != 200:
+                return "搜索服务暂时不可用，请稍后重试"
+
+            data = response.json()
+            results = data.get("results", [])[:3]  # 取前3个结果
+
+            if not results:
+                return "未找到相关信息"
+
+            output = "搜索结果：\n"
+            for i, r in enumerate(results, 1):
+                title = r.get("title", "")
+                content = r.get("content", "")
+                output += f"{i}. {title}\n{content[:200]}...\n\n"
+
+            return output.strip()
+        except Exception as e:
+            logging.error(f"搜索失败: {str(e)}")
+            return "搜索功能暂时不可用，建议直接提供相关信息"
 
     def _load_conversation(self, project_name: str) -> List[Dict]:
         """加载对话历史"""
