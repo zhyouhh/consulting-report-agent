@@ -261,7 +261,7 @@ class ChatHandler:
         import logging
         try:
             # 使用Tavily API（专为AI设计的搜索）
-            tavily_key = "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"
+            tavily_key = os.getenv("TAVILY_API_KEY", "")
             url = "https://api.tavily.com/search"
             payload = {
                 "api_key": tavily_key,
