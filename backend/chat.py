@@ -53,6 +53,11 @@ class ChatHandler:
         recent_msgs = conversation[-keep_n:]
         old_msgs = conversation[1:-keep_n]
 
+        # 按消息数量截断，避免破坏JSON结构
+        max_old_msgs = 50
+        if len(old_msgs) > max_old_msgs:
+            old_msgs = old_msgs[-max_old_msgs:]
+
         # 用LLM生成摘要
         summary_prompt = [
             {"role": "system", "content": (
@@ -64,7 +69,7 @@ class ChatHandler:
                 "5. 所有精确的名称、路径、数据、引用来源\n"
                 "只输出摘要内容，不要加前缀。"
             )},
-            {"role": "user", "content": json.dumps(old_msgs, ensure_ascii=False)[:20000]}
+            {"role": "user", "content": json.dumps(old_msgs, ensure_ascii=False)}
         ]
 
         try:
@@ -100,6 +105,7 @@ class ChatHandler:
         if estimated > self.settings.compress_threshold:
             conversation = self._compress_conversation(conversation)
             compressed = True
+            estimated = self._estimate_tokens(conversation)  # 重新估算压缩后的token
 
         # 循环处理Function Calling
         total_tokens = 0
@@ -126,7 +132,22 @@ class ChatHandler:
             message = response.choices[0].message
 
             if message.tool_calls:
-                conversation.append(message.model_dump())
+                # 安全地序列化message，避免非JSON对象
+                try:
+                    msg_dict = message.model_dump()
+                except Exception:
+                    msg_dict = {
+                        "role": "assistant",
+                        "content": message.content or "",
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                            } for tc in message.tool_calls
+                        ]
+                    }
+                conversation.append(msg_dict)
                 for tool_call in message.tool_calls:
                     result = self._execute_tool(project_name, tool_call)
                     conversation.append({
@@ -234,24 +255,16 @@ class ChatHandler:
             return {"status": "error", "message": f"工具执行失败: {str(e)}"}
 
     def _web_search(self, query: str) -> str:
-        """简单的网络搜索（使用DuckDuckGo）"""
-        try:
-            url = "https://api.duckduckgo.com/"
-            params = {"q": query, "format": "json"}
-            response = requests.get(url, params=params, timeout=10)
-            data = response.json()
-
-            results = []
-            if data.get("AbstractText"):
-                results.append(f"摘要: {data['AbstractText']}")
-            if data.get("RelatedTopics"):
-                for topic in data["RelatedTopics"][:3]:
-                    if isinstance(topic, dict) and topic.get("Text"):
-                        results.append(f"- {topic['Text']}")
-
-            return "\n".join(results) if results else "未找到相关信息"
-        except Exception as e:
-            return f"搜索失败: {str(e)}"
+        """网络搜索（DuckDuckGo API已废弃，暂时禁用）"""
+        import logging
+        logging.warning(f"web_search被调用但已禁用: {query}")
+        return (
+            "网络搜索功能暂时不可用（DuckDuckGo API已废弃）。\n"
+            "建议：\n"
+            "1. 如果您有相关数据或资料，请直接提供\n"
+            "2. 可以引用您已知的权威来源\n"
+            "3. 标注数据来源以保证真实性"
+        )
 
     def _load_conversation(self, project_name: str) -> List[Dict]:
         """加载对话历史"""

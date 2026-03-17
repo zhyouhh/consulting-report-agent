@@ -18,14 +18,15 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],  # 限制为必需的方法
     allow_headers=["*"],
 )
 
-# 全局变量
+# 全局变量（带线程锁保护）
 settings = load_settings()
 skill_engine = SkillEngine(settings.projects_dir, settings.skill_dir)
 chat_handler = ChatHandler(settings, skill_engine)
+_settings_lock = threading.Lock()  # 保护settings和chat_handler的并发修改
 
 
 @app.get("/api/health")
@@ -51,17 +52,18 @@ class SettingsUpdate(BaseModel):
 @app.post("/api/settings")
 async def update_settings(update: SettingsUpdate):
     global settings, chat_handler
-    # 只更新前端传来的字段，保留路径等其他配置
-    if update.api_provider is not None:
-        settings.api_provider = update.api_provider
-    if update.api_key is not None and update.api_key != "***":
-        settings.api_key = update.api_key
-    if update.api_base is not None:
-        settings.api_base = update.api_base
-    if update.model is not None:
-        settings.model = update.model
-    save_settings(settings)
-    chat_handler = ChatHandler(settings, skill_engine)
+    with _settings_lock:  # 线程安全保护
+        # 只更新前端传来的字段，保留路径等其他配置
+        if update.api_provider is not None:
+            settings.api_provider = update.api_provider
+        if update.api_key is not None and update.api_key != "***":
+            settings.api_key = update.api_key
+        if update.api_base is not None:
+            settings.api_base = update.api_base
+        if update.model is not None:
+            settings.model = update.model
+        save_settings(settings)
+        chat_handler = ChatHandler(settings, skill_engine)
     return {"status": "ok"}
 
 
