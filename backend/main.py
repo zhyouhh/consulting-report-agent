@@ -1,11 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from pathlib import Path
 import uvicorn
 import threading
+import asyncio
+import json
 from .config import load_settings, save_settings, Settings
 from .skill import SkillEngine
 from .chat import ChatHandler
@@ -107,8 +110,15 @@ async def create_project(info: ProjectInfo):
 
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
+    """非流式响应（保持兼容）"""
+    import asyncio
     try:
-        result = chat_handler.chat(request.project_name, request.message)
+        # 在线程池中运行阻塞调用，避免阻塞事件循环
+        result = await asyncio.to_thread(
+            chat_handler.chat,
+            request.project_name,
+            request.message
+        )
         return ChatResponse(
             content=result["content"],
             token_usage=result.get("token_usage")
@@ -163,6 +173,36 @@ async def clear_conversation(project_name: str):
     if conv_file.exists():
         conv_file.unlink()
     return {"status": "ok"}
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """流式响应接口"""
+    async def generate():
+        try:
+            # 在线程池中运行，避免阻塞
+            result = await asyncio.to_thread(
+                chat_handler.chat,
+                request.project_name,
+                request.message
+            )
+            # 分块发送内容
+            content = result["content"]
+            chunk_size = 50
+            for i in range(0, len(content), chunk_size):
+                chunk = content[i:i+chunk_size]
+                yield f"data: {json.dumps({'type': 'content', 'data': chunk}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.01)  # 小延迟让前端有时间渲染
+
+            # 发送token统计
+            if result.get("token_usage"):
+                yield f"data: {json.dumps({'type': 'usage', 'data': result['token_usage']}, ensure_ascii=False)}\n\n"
+
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'data': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # 静态文件挂载必须在所有API路由之后，避免拦截/api请求

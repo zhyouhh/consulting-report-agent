@@ -59,39 +59,70 @@ export default function ChatPanel({ project, onTogglePreview }) {
 
     const userMsg = { id: `${Date.now()}-${Math.random()}`, role: 'user', content: input }
     setMessages(prev => [...prev, userMsg])
+    const userInput = input
     setInput('')
     setLoading(true)
 
     const controller = new AbortController()
     setAbortController(controller)
 
+    // 创建助手消息占位
+    const assistantId = `${Date.now()}-${Math.random()}`
+    setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '' }])
+
     try {
-      const res = await axios.post('/api/chat', {
-        project_name: project,
-        message: input
-      }, { signal: controller.signal })
-      setMessages(prev => [...prev, {
-        id: `${Date.now()}-${Math.random()}`,
-        role: 'assistant',
-        content: res.data.content
-      }])
-      if (res.data.token_usage) {
-        setTokenUsage(res.data.token_usage)
+      const response = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_name: project, message: userInput }),
+        signal: controller.signal
+      })
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6)
+            if (data === '[DONE]') break
+
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.type === 'content') {
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantId ? { ...m, content: m.content + parsed.data } : m
+                ))
+              } else if (parsed.type === 'usage') {
+                setTokenUsage(parsed.data)
+              } else if (parsed.type === 'error') {
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantId ? { ...m, content: `错误: ${parsed.data}` } : m
+                ))
+              }
+            } catch (e) {
+              console.error('解析SSE失败:', e)
+            }
+          }
+        }
       }
     } catch (error) {
-      if (error.name === 'CanceledError') {
-        setMessages(prev => [...prev, {
-          id: `${Date.now()}-${Math.random()}`,
-          role: 'assistant',
-          content: '已停止生成'
-        }])
+      if (error.name === 'AbortError') {
+        setMessages(prev => prev.map(m =>
+          m.id === assistantId ? { ...m, content: m.content || '已停止生成' } : m
+        ))
       } else {
-        console.error('发送消息失败:', error)
-        setMessages(prev => [...prev, {
-          id: `${Date.now()}-${Math.random()}`,
-          role: 'assistant',
-          content: `API调用失败: ${error.response?.data?.detail || error.message}`
-        }])
+        setMessages(prev => prev.map(m =>
+          m.id === assistantId ? { ...m, content: `API调用失败: ${error.message}` } : m
+        ))
       }
     }
     setLoading(false)

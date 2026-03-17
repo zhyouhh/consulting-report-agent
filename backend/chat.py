@@ -113,6 +113,8 @@ class ChatHandler:
         assistant_message = ""
         while iterations < max_iterations:
             try:
+                # DeepSeek V3.2 needs longer timeout for reasoning phase
+                timeout = 180.0 if "v3.2" in self.settings.model.lower() else 30.0
                 response = self.client.chat.completions.create(
                     model=self.settings.model,
                     messages=conversation,
@@ -120,7 +122,7 @@ class ChatHandler:
                     max_tokens=4096,
                     tools=self._get_tools(),
                     tool_choice="auto",
-                    timeout=30.0
+                    timeout=timeout
                 )
             except Exception as e:
                 return {"content": f"API调用失败: {str(e)}", "token_usage": None}
