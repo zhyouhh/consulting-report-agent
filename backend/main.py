@@ -9,10 +9,18 @@ import uvicorn
 import threading
 import asyncio
 import json
+import logging
 from .config import load_settings, save_settings, Settings
 from .skill import SkillEngine
 from .chat import ChatHandler
 from .models import ChatRequest, ChatResponse, ProjectInfo
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="咨询报告写作助手")
 
@@ -113,17 +121,20 @@ async def chat(request: ChatRequest):
     """非流式响应（保持兼容）"""
     import asyncio
     try:
+        logger.info(f"Chat request for project: {request.project_name}")
         # 在线程池中运行阻塞调用，避免阻塞事件循环
         result = await asyncio.to_thread(
             chat_handler.chat,
             request.project_name,
             request.message
         )
+        logger.info(f"Chat completed, tokens: {result.get('token_usage', {}).get('current_tokens', 0)}")
         return ChatResponse(
             content=result["content"],
             token_usage=result.get("token_usage")
         )
     except Exception as e:
+        logger.error(f"Chat error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

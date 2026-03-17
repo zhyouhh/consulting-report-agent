@@ -35,8 +35,9 @@ export default function PreviewPanel({ project }) {
   useEffect(() => {
     if (project) {
       loadFiles()
-      setCurrentFile('plan/project-info.md')
-      loadFile('plan/project-info.md')
+      const defaultFile = 'plan/project-info.md'
+      setCurrentFile(defaultFile)
+      loadFile(defaultFile)
     } else {
       setFiles([])
       setContent('')
