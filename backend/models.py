@@ -15,7 +15,7 @@ class Message(BaseModel):
     """对话消息"""
     role: str  # user | assistant
     content: str
-    timestamp: datetime = Field(default_factory=datetime.now)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now())
 
 
 class ChatRequest(BaseModel):

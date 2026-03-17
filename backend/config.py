@@ -57,5 +57,10 @@ def load_settings() -> Settings:
 def save_settings(settings: Settings):
     """保存配置"""
     config_file = get_user_config_dir() / "config.json"
+    data = settings.model_dump()
+    # 将Path对象转为字符串（兼容已经是字符串的情况）
+    for key in ["projects_dir", "skill_dir"]:
+        if isinstance(data[key], Path):
+            data[key] = str(data[key])
     with open(config_file, "w", encoding="utf-8") as f:
-        json.dump(settings.model_dump(), f, indent=2, ensure_ascii=False)
+        json.dump(data, f, indent=2, ensure_ascii=False)
