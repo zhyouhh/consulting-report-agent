@@ -47,44 +47,44 @@ export default function SettingsModal({ onClose }) {
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-6 w-[420px]">
-        <h2 className="text-lg font-semibold mb-4">API 设置</h2>
+      <div className="bg-[#1a1a2e] rounded-lg p-6 w-[420px]">
+        <h2 className="text-lg font-semibold mb-4 text-[#e2e2f0]">API 设置</h2>
 
-        <label className="block text-sm text-gray-600 mb-1">API Key</label>
+        <label className="block text-sm text-[#8888a8] mb-1">API Key</label>
         <input
           type="password"
           placeholder="输入你的API Key"
           value={form.api_key}
           onChange={e => setForm({...form, api_key: e.target.value})}
-          className="w-full border border-gray-300 rounded px-3 py-2 mb-3"
+          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-3"
         />
 
-        <label className="block text-sm text-gray-600 mb-1">API 地址</label>
+        <label className="block text-sm text-[#8888a8] mb-1">API 地址</label>
         <input
           value={form.api_base}
           onChange={e => setForm({...form, api_base: e.target.value})}
-          className="w-full border border-gray-300 rounded px-3 py-2 mb-3"
+          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-3"
         />
 
-        <label className="block text-sm text-gray-600 mb-1">模型</label>
+        <label className="block text-sm text-[#8888a8] mb-1">模型</label>
         <input
           value={form.model}
           onChange={e => setForm({...form, model: e.target.value})}
-          className="w-full border border-gray-300 rounded px-3 py-2 mb-4"
+          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-4"
         />
 
-        <p className="text-xs text-gray-400 mb-4">
+        <p className="text-xs text-[#6a6a8a] mb-4">
           默认使用硅基流动API，也可换成其他兼容OpenAI格式的服务
         </p>
 
         <div className="flex gap-2">
-          <button onClick={onClose} className="flex-1 border border-gray-300 px-4 py-2 rounded hover:bg-gray-50">
+          <button onClick={onClose} className="flex-1 border border-[#3a3a5a] text-[#e2e2f0] px-4 py-2 rounded hover:bg-[#222244]">
             取消
           </button>
           <button
             onClick={handleSave}
             disabled={saving}
-            className="flex-1 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 disabled:opacity-50"
+            className="flex-1 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:bg-[#3a3a5a]"
           >
             {saving ? '保存中...' : '保存'}
           </button>

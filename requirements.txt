@@ -7,3 +7,4 @@ pydantic==2.9.2
 pydantic-settings==2.6.0
 pywebview==5.3.1
 requests==2.31.0
+tiktoken==0.7.0

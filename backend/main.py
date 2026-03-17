@@ -87,8 +87,11 @@ async def create_project(info: ProjectInfo):
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
     try:
-        response = chat_handler.chat(request.project_name, request.message)
-        return ChatResponse(content=response)
+        result = chat_handler.chat(request.project_name, request.message)
+        return ChatResponse(
+            content=result["content"],
+            token_usage=result.get("token_usage")
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

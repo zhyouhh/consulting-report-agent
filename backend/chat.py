@@ -6,6 +6,12 @@ import requests
 from .config import Settings
 from .skill import SkillEngine
 
+try:
+    import tiktoken
+    _encoding = tiktoken.get_encoding("cl100k_base")
+except Exception:
+    _encoding = None
+
 
 class ChatHandler:
     """对话处理器"""
@@ -18,23 +24,89 @@ class ChatHandler:
             base_url=settings.api_base
         )
 
-    def chat(self, project_name: str, user_message: str, max_iterations: int = 5) -> str:
-        """处理对话"""
-        # 验证消息长度
+    def _estimate_tokens(self, messages: List[Dict]) -> int:
+        """预估消息列表的token数"""
+        total = 0
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                if _encoding:
+                    total += len(_encoding.encode(content)) + 4
+                else:
+                    # 粗略估算：混合中英文约0.6 token/字符
+                    total += int(len(content) * 0.6)
+            elif isinstance(content, dict):
+                text = json.dumps(content, ensure_ascii=False)
+                if _encoding:
+                    total += len(_encoding.encode(text)) + 4
+                else:
+                    total += int(len(text) * 0.6)
+        return total
+
+    def _compress_conversation(self, conversation: List[Dict]) -> List[Dict]:
+        """压缩对话历史：保留system + LLM摘要 + 最近N条消息"""
+        keep_n = self.settings.keep_recent_messages
+        if len(conversation) <= keep_n + 2:
+            return conversation
+
+        system_msg = conversation[0]
+        recent_msgs = conversation[-keep_n:]
+        old_msgs = conversation[1:-keep_n]
+
+        # 用LLM生成摘要
+        summary_prompt = [
+            {"role": "system", "content": (
+                "你是一个对话摘要助手。请将以下对话历史压缩为简洁摘要，必须保留：\n"
+                "1. 项目名称、报告类型、主题\n"
+                "2. 已完成的章节和内容要点\n"
+                "3. 用户提出的修改意见和偏好\n"
+                "4. 当前工作进度和下一步计划\n"
+                "5. 所有精确的名称、路径、数据、引用来源\n"
+                "只输出摘要内容，不要加前缀。"
+            )},
+            {"role": "user", "content": json.dumps(old_msgs, ensure_ascii=False)[:20000]}
+        ]
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.settings.model,
+                messages=summary_prompt,
+                temperature=0.3,
+                max_tokens=2000,
+                timeout=30.0
+            )
+            summary = resp.choices[0].message.content
+        except Exception:
+            # 压缩失败，退回简单截断
+            return [system_msg] + recent_msgs
+
+        return [
+            system_msg,
+            {"role": "assistant", "content": f"[对话摘要]\n{summary}"},
+            *recent_msgs
+        ]
+
+    def chat(self, project_name: str, user_message: str, max_iterations: int = 5) -> dict:
+        """处理对话，返回 {content, token_usage}"""
         if len(user_message) > 10000:
-            return "消息过长，请控制在10000字符以内。"
+            return {"content": "消息过长，请控制在10000字符以内。", "token_usage": None}
 
-        # 加载对话历史
         conversation = self._load_conversation(project_name)
-
-        # 添加用户消息
         conversation.append({"role": "user", "content": user_message})
 
-        # 循环处理Function Calling（降低到5次防止过度调用）
+        # 检查是否需要压缩
+        compressed = False
+        estimated = self._estimate_tokens(conversation)
+        if estimated > self.settings.compress_threshold:
+            conversation = self._compress_conversation(conversation)
+            compressed = True
+
+        # 循环处理Function Calling
+        total_tokens = 0
         iterations = 0
+        assistant_message = ""
         while iterations < max_iterations:
             try:
-                # 调用LLM（支持Function Calling，添加超时）
                 response = self.client.chat.completions.create(
                     model=self.settings.model,
                     messages=conversation,
@@ -45,11 +117,14 @@ class ChatHandler:
                     timeout=30.0
                 )
             except Exception as e:
-                return f"API调用失败: {str(e)}"
+                return {"content": f"API调用失败: {str(e)}", "token_usage": None}
+
+            # 获取usage信息
+            if hasattr(response, 'usage') and response.usage:
+                total_tokens = getattr(response.usage, 'total_tokens', 0) or 0
 
             message = response.choices[0].message
 
-            # 处理Function Calling
             if message.tool_calls:
                 conversation.append(message.model_dump())
                 for tool_call in message.tool_calls:
@@ -66,11 +141,21 @@ class ChatHandler:
         else:
             assistant_message = "抱歉，处理超时，请简化您的请求。"
 
-        # 保存助手回复和对话历史
         conversation.append({"role": "assistant", "content": assistant_message})
         self._save_conversation(project_name, conversation)
 
-        return assistant_message
+        # token统计：优先用API返回值，否则用预估
+        if total_tokens == 0:
+            total_tokens = self._estimate_tokens(conversation)
+
+        return {
+            "content": assistant_message,
+            "token_usage": {
+                "current_tokens": total_tokens,
+                "max_tokens": self.settings.context_window,
+                "compressed": compressed
+            }
+        }
 
     def _get_tools(self):
         """定义可用工具"""
@@ -189,21 +274,14 @@ class ChatHandler:
 
     def _build_system_prompt(self, project_name: str) -> str:
         """构建系统提示"""
-        # 读取Skill定义
         skill_prompt = self.skill_engine.get_skill_prompt()
-
-        # 读取项目上下文
         project_context = ""
         project_path = self.skill_engine.get_project_path(project_name)
         if project_path:
-            # 读取项目信息
             info_file = project_path / "plan" / "project-info.md"
             if info_file.exists():
                 project_context += f"\n\n## 当前项目信息\n{info_file.read_text(encoding='utf-8')}"
-
-            # 读取大纲
             outline_file = project_path / "plan" / "outline.md"
             if outline_file.exists():
                 project_context += f"\n\n## 当前大纲\n{outline_file.read_text(encoding='utf-8')}"
-
         return f"{skill_prompt}\n\n{project_context}"

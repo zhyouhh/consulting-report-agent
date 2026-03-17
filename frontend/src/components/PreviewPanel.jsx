@@ -44,18 +44,18 @@ export default function PreviewPanel({ project }) {
   }, [project, loadFiles, loadFile])
 
   return (
-    <div className="w-96 bg-white border-l border-gray-200 flex flex-col">
-      <div className="p-4 border-b border-gray-200">
-        <h3 className="font-semibold text-gray-800">文件预览</h3>
+    <div className="w-96 bg-[#1a1a2e] border-l border-[#2a2a4a] flex flex-col">
+      <div className="p-4 border-b border-[#2a2a4a]">
+        <h3 className="font-semibold text-[#e2e2f0]">文件预览</h3>
       </div>
 
-      <div className="border-b border-gray-200 max-h-64 overflow-y-auto">
+      <div className="border-b border-[#2a2a4a] max-h-64 overflow-y-auto">
         {files.map(file => (
           <div
             key={file.path}
             onClick={() => loadFile(file.path)}
             className={`px-4 py-2 cursor-pointer text-sm ${
-              currentFile === file.path ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-50 text-gray-700'
+              currentFile === file.path ? 'bg-[#1e1e4a] text-blue-400' : 'hover:bg-[#222244] text-[#c8c8e0]'
             }`}
           >
             {file.name}
@@ -64,7 +64,7 @@ export default function PreviewPanel({ project }) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
-        <div className="prose prose-sm max-w-none">
+        <div className="prose-dark prose-sm max-w-none">
           <ReactMarkdown>{content}</ReactMarkdown>
         </div>
       </div>

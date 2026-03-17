@@ -24,7 +24,15 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=10000)
 
 
+class TokenUsage(BaseModel):
+    """Token使用统计"""
+    current_tokens: int = 0
+    max_tokens: int = 128000
+    compressed: bool = False
+
+
 class ChatResponse(BaseModel):
     """对话响应"""
     content: str
     files_updated: Optional[List[str]] = None
+    token_usage: Optional[TokenUsage] = None

@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     projects_dir: Path = get_user_config_dir() / "projects"
     skill_dir: Path = get_base_path() / "skill"
 
+    # 上下文管理配置
+    context_window: int = 128000       # 模型上下文窗口大小
+    compress_threshold: int = 60000    # 压缩触发阈值（tokens）
+    keep_recent_messages: int = 6      # 压缩时保留最近N条消息
+
     # 服务配置
     host: str = "127.0.0.1"
     port: int = 8080

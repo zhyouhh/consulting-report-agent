@@ -57,12 +57,12 @@ function App() {
   }
 
   if (loading) {
-    return <div className="flex items-center justify-center h-screen"><div className="text-gray-600">加载中...</div></div>
+    return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
   }
 
   return (
     <ErrorBoundary>
-      <div className="flex h-screen bg-gray-50">
+      <div className="flex h-screen bg-[#0f0f23]">
         <Sidebar
           projects={projects}
           currentProject={currentProject}
