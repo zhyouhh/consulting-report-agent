@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -10,6 +10,9 @@ import threading
 import asyncio
 import json
 import logging
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from .config import load_settings, save_settings, Settings
 from .skill import SkillEngine
 from .chat import ChatHandler
@@ -22,7 +25,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 速率限制
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="咨询报告写作助手")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS
 app.add_middleware(
@@ -36,8 +43,14 @@ app.add_middleware(
 # 全局变量（带线程锁保护）
 settings = load_settings()
 skill_engine = SkillEngine(settings.projects_dir, settings.skill_dir)
-chat_handler = ChatHandler(settings, skill_engine)
-_settings_lock = threading.Lock()  # 保护settings和chat_handler的并发修改
+_chat_handlers = {}  # 每个项目独立的ChatHandler
+_settings_lock = threading.Lock()  # 保护settings和chat_handlers的并发修改
+
+def get_chat_handler(project_name: str) -> ChatHandler:
+    """获取或创建项目的ChatHandler"""
+    if project_name not in _chat_handlers:
+        _chat_handlers[project_name] = ChatHandler(settings, skill_engine)
+    return _chat_handlers[project_name]
 
 
 @app.get("/api/health")
@@ -62,9 +75,8 @@ class SettingsUpdate(BaseModel):
 
 @app.post("/api/settings")
 async def update_settings(update: SettingsUpdate):
-    global settings, chat_handler
-    with _settings_lock:  # 线程安全保护
-        # 只更新前端传来的字段，保留路径等其他配置
+    global settings, _chat_handlers
+    with _settings_lock:
         if update.api_provider is not None:
             settings.api_provider = update.api_provider
         if update.api_key is not None and update.api_key != "***":
@@ -74,7 +86,7 @@ async def update_settings(update: SettingsUpdate):
         if update.model is not None:
             settings.model = update.model
         save_settings(settings)
-        chat_handler = ChatHandler(settings, skill_engine)
+        _chat_handlers.clear()  # 清空所有handler，下次使用时重新创建
     return {"status": "ok"}
 
 
@@ -117,16 +129,17 @@ async def create_project(info: ProjectInfo):
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest):
+@limiter.limit("20/minute")
+async def chat(request: Request, chat_request: ChatRequest):
     """非流式响应（保持兼容）"""
     import asyncio
     try:
-        logger.info(f"Chat request for project: {request.project_name}")
-        # 在线程池中运行阻塞调用，避免阻塞事件循环
+        logger.info(f"Chat request for project: {chat_request.project_name}")
+        handler = get_chat_handler(chat_request.project_name)
         result = await asyncio.to_thread(
-            chat_handler.chat,
-            request.project_name,
-            request.message
+            handler.chat,
+            chat_request.project_name,
+            chat_request.message
         )
         logger.info(f"Chat completed, tokens: {result.get('token_usage', {}).get('current_tokens', 0)}")
         return ChatResponse(
@@ -187,15 +200,16 @@ async def clear_conversation(project_name: str):
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(request: ChatRequest):
+@limiter.limit("20/minute")
+async def chat_stream(request: Request, chat_request: ChatRequest):
     """流式响应接口"""
     async def generate():
         try:
-            # 在线程池中运行，避免阻塞
+            handler = get_chat_handler(chat_request.project_name)
             result = await asyncio.to_thread(
-                chat_handler.chat,
-                request.project_name,
-                request.message
+                handler.chat,
+                chat_request.project_name,
+                chat_request.message
             )
             # 分块发送内容
             content = result["content"]
