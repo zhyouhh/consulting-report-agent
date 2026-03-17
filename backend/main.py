@@ -47,10 +47,11 @@ _chat_handlers = {}  # 每个项目独立的ChatHandler
 _settings_lock = threading.Lock()  # 保护settings和chat_handlers的并发修改
 
 def get_chat_handler(project_name: str) -> ChatHandler:
-    """获取或创建项目的ChatHandler"""
-    if project_name not in _chat_handlers:
-        _chat_handlers[project_name] = ChatHandler(settings, skill_engine)
-    return _chat_handlers[project_name]
+    """获取或创建项目的ChatHandler（线程安全）"""
+    with _settings_lock:
+        if project_name not in _chat_handlers:
+            _chat_handlers[project_name] = ChatHandler(settings, skill_engine)
+        return _chat_handlers[project_name]
 
 
 @app.get("/api/health")

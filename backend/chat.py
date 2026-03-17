@@ -4,6 +4,7 @@ from typing import List, Dict
 import json
 import requests
 import time
+import os
 from .config import Settings
 from .skill import SkillEngine
 
@@ -113,10 +114,10 @@ class ChatHandler:
         iterations = 0
         assistant_message = ""
         while iterations < max_iterations:
-            # API调用重试机制（最多3次）
-            for retry in range(3):
+            # API调用重试机制（最多2次，避免超长等待）
+            for retry in range(2):
                 try:
-                    timeout = 180.0 if "v3.2" in self.settings.model.lower() else 30.0
+                    timeout = 120.0 if "v3.2" in self.settings.model.lower() else 30.0
                     response = self.client.chat.completions.create(
                         model=self.settings.model,
                         messages=conversation,
@@ -128,8 +129,8 @@ class ChatHandler:
                     )
                     break  # 成功则跳出重试循环
                 except Exception as e:
-                    if retry < 2:  # 还有重试机会
-                        time.sleep(2 ** retry)  # 指数退避：1s, 2s
+                    if retry < 1:  # 还有1次重试机会
+                        time.sleep(2)  # 固定等待2秒
                         continue
                     return {"content": f"API调用失败: {str(e)}", "token_usage": None}
 
