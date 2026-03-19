@@ -1,0 +1,215 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1773861741408,
+  "projectRoot": "/home/cpilot/projects/consulting-report-agent",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "requirements.txt"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "pip",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "backend": {
+      "path": "backend",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1773861741400,
+      "keyFiles": [
+        "chat.py",
+        "config.py",
+        "main.py",
+        "models.py",
+        "skill.py"
+      ]
+    },
+    "frontend": {
+      "path": "frontend",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1773861741401,
+      "keyFiles": [
+        "index.html",
+        "package-lock.json",
+        "package.json",
+        "postcss.config.cjs",
+        "tailwind.config.js"
+      ]
+    },
+    "skill": {
+      "path": "skill",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1773861741401,
+      "keyFiles": [
+        "SKILL.md"
+      ]
+    },
+    "frontend/dist": {
+      "path": "frontend/dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 1,
+      "lastAccessed": 1773861741406,
+      "keyFiles": [
+        "index.html"
+      ]
+    },
+    "frontend/node_modules": {
+      "path": "frontend/node_modules",
+      "purpose": "Dependencies",
+      "fileCount": 1,
+      "lastAccessed": 1773861741406,
+      "keyFiles": []
+    },
+    "frontend/src": {
+      "path": "frontend/src",
+      "purpose": "Source code",
+      "fileCount": 3,
+      "lastAccessed": 1773861741407,
+      "keyFiles": [
+        "App.jsx",
+        "index.css",
+        "main.jsx"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "frontend/src/components/PreviewPanel.jsx",
+      "accessCount": 7,
+      "lastAccessed": 1773862216069,
+      "type": "file"
+    },
+    {
+      "path": "frontend/package.json",
+      "accessCount": 4,
+      "lastAccessed": 1773862184481,
+      "type": "file"
+    },
+    {
+      "path": "frontend/src/components/ChatPanel.jsx",
+      "accessCount": 4,
+      "lastAccessed": 1773862245945,
+      "type": "file"
+    },
+    {
+      "path": "frontend/src",
+      "accessCount": 3,
+      "lastAccessed": 1773883121537,
+      "type": "directory"
+    },
+    {
+      "path": "frontend/src/index.css",
+      "accessCount": 2,
+      "lastAccessed": 1773861832822,
+      "type": "file"
+    },
+    {
+      "path": "backend/main.py",
+      "accessCount": 2,
+      "lastAccessed": 1773862089609,
+      "type": "file"
+    },
+    {
+      "path": "frontend/src/App.jsx",
+      "accessCount": 2,
+      "lastAccessed": 1773862092361,
+      "type": "file"
+    },
+    {
+      "path": "frontend/src/components/Sidebar.jsx",
+      "accessCount": 2,
+      "lastAccessed": 1773862092696,
+      "type": "file"
+    },
+    {
+      "path": "frontend/src/components/SettingsModal.jsx",
+      "accessCount": 2,
+      "lastAccessed": 1773862097702,
+      "type": "file"
+    },
+    {
+      "path": "frontend/src/main.jsx",
+      "accessCount": 1,
+      "lastAccessed": 1773861827530,
+      "type": "file"
+    },
+    {
+      "path": "backend/chat.py",
+      "accessCount": 1,
+      "lastAccessed": 1773861828383,
+      "type": "file"
+    },
+    {
+      "path": "backend/config.py",
+      "accessCount": 1,
+      "lastAccessed": 1773861828780,
+      "type": "file"
+    },
+    {
+      "path": "backend/models.py",
+      "accessCount": 1,
+      "lastAccessed": 1773861829079,
+      "type": "file"
+    },
+    {
+      "path": "backend/skill.py",
+      "accessCount": 1,
+      "lastAccessed": 1773861829441,
+      "type": "file"
+    },
+    {
+      "path": "app.py",
+      "accessCount": 1,
+      "lastAccessed": 1773861829966,
+      "type": "file"
+    },
+    {
+      "path": "frontend/vite.config.js",
+      "accessCount": 1,
+      "lastAccessed": 1773861833331,
+      "type": "file"
+    },
+    {
+      "path": "requirements.txt",
+      "accessCount": 1,
+      "lastAccessed": 1773862089942,
+      "type": "file"
+    },
+    {
+      "path": "backend",
+      "accessCount": 1,
+      "lastAccessed": 1773862256659,
+      "type": "directory"
+    }
+  ],
+  "userDirectives": []
+}

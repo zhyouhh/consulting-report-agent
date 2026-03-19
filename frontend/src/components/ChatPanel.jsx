@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
+import { showError, showSuccess } from '../utils/toast'
 
 export default function ChatPanel({ project, onTogglePreview }) {
   const [messages, setMessages] = useState([])
@@ -35,7 +36,7 @@ export default function ChatPanel({ project, onTogglePreview }) {
       }])
       setTokenUsage(null)
     } catch (error) {
-      alert('清空失败: ' + (error.response?.data?.detail || error.message))
+      showError('清空失败: ' + (error.response?.data?.detail || error.message))
     }
   }
 
@@ -50,7 +51,7 @@ export default function ChatPanel({ project, onTogglePreview }) {
     navigator.clipboard.writeText(content).then(() => {
       // 简单提示，不打断用户
     }).catch(() => {
-      alert('复制失败，请手动选择文本')
+      showError('复制失败，请手动选择文本')
     })
   }
 

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { Toaster } from 'react-hot-toast'
 import Sidebar from './components/Sidebar'
 import ChatPanel from './components/ChatPanel'
 import PreviewPanel from './components/PreviewPanel'
@@ -77,6 +78,7 @@ function App() {
 
   return (
     <ErrorBoundary>
+      <Toaster position="top-right" />
       <div className="flex h-screen bg-[#0f0f23]">
         <Sidebar
           projects={projects}
