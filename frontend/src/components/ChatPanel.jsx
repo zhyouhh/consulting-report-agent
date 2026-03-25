@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
+import ReactMarkdown from 'react-markdown'
 import { showError, showSuccess } from '../utils/toast'
 
 export default function ChatPanel({ project, onTogglePreview }) {
@@ -12,11 +13,37 @@ export default function ChatPanel({ project, onTogglePreview }) {
 
   useEffect(() => {
     if (project) {
-      setMessages([{
-        id: `${Date.now()}-${Math.random()}`,
-        role: 'assistant',
-        content: '你好！请告诉我你想写什么类型的报告？报告的主题是什么？'
-      }])
+      // 加载历史对话
+      axios.get(`/api/projects/${project}/conversation`)
+        .then(res => {
+          const history = res.data.messages || []
+          if (history.length > 0) {
+            // 过滤掉 system/tool 消息，只显示 user/assistant
+            const displayMessages = history
+              .filter(m => m.role === 'user' || m.role === 'assistant')
+              .map((m, i) => ({
+                id: `${Date.now()}-${i}`,
+                role: m.role,
+                content: m.content
+              }))
+            setMessages(displayMessages)
+          } else {
+            // 没有历史，显示欢迎消息
+            setMessages([{
+              id: `${Date.now()}-${Math.random()}`,
+              role: 'assistant',
+              content: '你好！请告诉我你想写什么类型的报告？报告的主题是什么？'
+            }])
+          }
+        })
+        .catch(() => {
+          // 加载失败，显示欢迎消息
+          setMessages([{
+            id: `${Date.now()}-${Math.random()}`,
+            role: 'assistant',
+            content: '你好！请告诉我你想写什么类型的报告？报告的主题是什么？'
+          }])
+        })
       setTokenUsage(null)
     }
   }, [project])
@@ -102,6 +129,11 @@ export default function ChatPanel({ project, onTogglePreview }) {
                 setMessages(prev => prev.map(m =>
                   m.id === assistantId ? { ...m, content: m.content + parsed.data } : m
                 ))
+              } else if (parsed.type === 'tool') {
+                // 显示工具调用信息
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantId ? { ...m, content: m.content + '\n' + parsed.data } : m
+                ))
               } else if (parsed.type === 'usage') {
                 setTokenUsage(parsed.data)
               } else if (parsed.type === 'error') {
@@ -147,22 +179,56 @@ export default function ChatPanel({ project, onTogglePreview }) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-2xl px-4 py-2 rounded-lg relative group ${
-              msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-[#252545] text-[#e2e2f0]'
-            }`}>
-              <div className="whitespace-pre-wrap">{msg.content}</div>
-              <button
-                onClick={() => copyMessage(msg.content)}
-                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 text-xs px-2 py-1 bg-[#1a1a2e] rounded hover:bg-[#2a2a4a] transition-opacity"
-                title="复制"
-              >
-                复制
-              </button>
+        {messages.map((msg) => {
+          // 分离工具调用和普通内容
+          const lines = msg.content.split('\n')
+          const toolCalls = []
+          const normalContent = []
+
+          lines.forEach(line => {
+            if (line.startsWith('🔧 调用工具:') || line.startsWith('✅ 结果:')) {
+              toolCalls.push(line)
+            } else {
+              normalContent.push(line)
+            }
+          })
+
+          return (
+            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-2xl px-4 py-2 rounded-lg relative group ${
+                msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-[#252545] text-[#e2e2f0]'
+              }`}>
+                {/* 工具调用 */}
+                {toolCalls.length > 0 && (
+                  <div className="mb-2 space-y-1">
+                    {toolCalls.map((tool, i) => (
+                      <div key={i} className="text-xs bg-[#1a1a2e] px-2 py-1 rounded border border-[#3a3a5a] text-[#8888a8] font-mono">
+                        {tool}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* 普通内容 - Markdown 渲染 */}
+                {msg.role === 'assistant' ? (
+                  <ReactMarkdown className="prose prose-invert prose-sm max-w-none">
+                    {normalContent.join('\n')}
+                  </ReactMarkdown>
+                ) : (
+                  <div className="whitespace-pre-wrap">{normalContent.join('\n')}</div>
+                )}
+
+                <button
+                  onClick={() => copyMessage(msg.content)}
+                  className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 text-xs px-2 py-1 bg-[#1a1a2e] rounded hover:bg-[#2a2a4a] transition-opacity"
+                  title="复制"
+                >
+                  复制
+                </button>
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
         {loading && (
           <div className="flex justify-start">
             <div className="bg-[#252545] px-4 py-2 rounded-lg text-[#8888a8]">正在思考...</div>

@@ -34,7 +34,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["*"],  # 允许所有来源（开发模式）
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
@@ -102,9 +102,17 @@ async def list_models(request: ModelsRequest):
     """从API获取可用模型列表"""
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=request.api_key, base_url=request.api_base)
+        import httpx
+        # 创建自定义 http_client，避免 proxies 参数问题
+        http_client = httpx.Client(timeout=30.0)
+        client = OpenAI(
+            api_key=request.api_key,
+            base_url=request.api_base,
+            http_client=http_client
+        )
         models = client.models.list()
         model_ids = [m.id for m in models.data]
+        http_client.close()
         return {"models": model_ids}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取模型列表失败: {str(e)}")
@@ -188,6 +196,20 @@ async def delete_project(project_name: str):
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
 
 
+@app.get("/api/projects/{project_name}/conversation")
+async def get_conversation(project_name: str):
+    """获取对话历史"""
+    project_path = skill_engine.get_project_path(project_name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    conv_file = project_path / "conversation.json"
+    if conv_file.exists():
+        import json
+        with open(conv_file, 'r', encoding='utf-8') as f:
+            messages = json.load(f)
+        return {"messages": messages}
+    return {"messages": []}
+
 @app.delete("/api/projects/{project_name}/conversation")
 async def clear_conversation(project_name: str):
     """清空对话历史"""
@@ -207,23 +229,9 @@ async def chat_stream(request: Request, chat_request: ChatRequest):
     async def generate():
         try:
             handler = get_chat_handler(chat_request.project_name)
-            result = await asyncio.to_thread(
-                handler.chat,
-                chat_request.project_name,
-                chat_request.message
-            )
-            # 分块发送内容
-            content = result["content"]
-            chunk_size = 50
-            for i in range(0, len(content), chunk_size):
-                chunk = content[i:i+chunk_size]
-                yield f"data: {json.dumps({'type': 'content', 'data': chunk}, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0.01)  # 小延迟让前端有时间渲染
-
-            # 发送token统计
-            if result.get("token_usage"):
-                yield f"data: {json.dumps({'type': 'usage', 'data': result['token_usage']}, ensure_ascii=False)}\n\n"
-
+            # 使用真正的流式方法
+            for chunk in handler.chat_stream(chat_request.project_name, chat_request.message):
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'data': str(e)}, ensure_ascii=False)}\n\n"

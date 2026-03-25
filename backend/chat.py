@@ -21,9 +21,13 @@ class ChatHandler:
     def __init__(self, settings: Settings, skill_engine: SkillEngine):
         self.settings = settings
         self.skill_engine = skill_engine
+        # 使用 httpx.Client 避免 proxies 参数问题
+        import httpx
+        http_client = httpx.Client(timeout=120.0)
         self.client = OpenAI(
             api_key=settings.api_key,
-            base_url=settings.api_base
+            base_url=settings.api_base,
+            http_client=http_client
         )
 
     def _estimate_tokens(self, messages: List[Dict]) -> int:
@@ -92,6 +96,136 @@ class ChatHandler:
             {"role": "assistant", "content": f"[对话摘要]\n{summary}"},
             *recent_msgs
         ]
+
+    def chat_stream(self, project_name: str, user_message: str, max_iterations: int = 10):
+        """流式处理对话，yield 每个 chunk"""
+        if len(user_message) > 10000:
+            yield {"type": "error", "data": "消息过长，请控制在10000字符以内。"}
+            return
+
+        conversation = self._load_conversation(project_name)
+        conversation.append({"role": "user", "content": user_message})
+
+        # 检查是否需要压缩
+        compressed = False
+        estimated = self._estimate_tokens(conversation)
+        if estimated > self.settings.compress_threshold:
+            conversation = self._compress_conversation(conversation)
+            compressed = True
+            estimated = self._estimate_tokens(conversation)
+
+        # 循环处理Function Calling
+        total_tokens = 0
+        iterations = 0
+        assistant_message = ""
+
+        while iterations < max_iterations:
+            for retry in range(2):
+                try:
+                    timeout = 120.0 if "v3.2" in self.settings.model.lower() else 30.0
+                    response = self.client.chat.completions.create(
+                        model=self.settings.model,
+                        messages=conversation,
+                        temperature=0.7,
+                        max_tokens=4096,
+                        tools=self._get_tools(),
+                        tool_choice="auto",
+                        timeout=timeout,
+                        stream=True  # 启用流式
+                    )
+                    break
+                except Exception as e:
+                    if retry < 1:
+                        time.sleep(2)
+                        continue
+                    yield {"type": "error", "data": f"API调用失败: {str(e)}"}
+                    return
+
+            # 处理流式响应
+            collected_message = {"role": "assistant", "content": "", "tool_calls": []}
+
+            for chunk in response:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+
+                # 流式输出内容
+                if delta.content:
+                    collected_message["content"] += delta.content
+                    yield {"type": "content", "data": delta.content}
+
+                # 收集 tool_calls
+                if delta.tool_calls:
+                    for tc_chunk in delta.tool_calls:
+                        if tc_chunk.index >= len(collected_message["tool_calls"]):
+                            collected_message["tool_calls"].append({
+                                "id": tc_chunk.id or "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""}
+                            })
+
+                        tc = collected_message["tool_calls"][tc_chunk.index]
+                        if tc_chunk.id:
+                            tc["id"] = tc_chunk.id
+                        if tc_chunk.function:
+                            if tc_chunk.function.name:
+                                tc["function"]["name"] = tc_chunk.function.name
+                            if tc_chunk.function.arguments:
+                                tc["function"]["arguments"] += tc_chunk.function.arguments
+
+            # 处理 tool_calls
+            if collected_message["tool_calls"]:
+                conversation.append(collected_message)
+                for tool_call in collected_message["tool_calls"]:
+                    # 通知前端工具调用
+                    func_name = tool_call["function"]["name"]
+                    func_args = tool_call["function"]["arguments"]
+                    yield {"type": "tool", "data": f"🔧 调用工具: {func_name}({func_args[:50]}...)"}
+
+                    # 转换为对象格式
+                    class ToolCall:
+                        def __init__(self, data):
+                            self.id = data["id"]
+                            self.function = type('obj', (object,), {
+                                'name': data["function"]["name"],
+                                'arguments': data["function"]["arguments"]
+                            })()
+
+                    result = self._execute_tool(project_name, ToolCall(tool_call))
+
+                    # 通知前端工具结果
+                    result_preview = str(result)[:100]
+                    yield {"type": "tool", "data": f"✅ 结果: {result_preview}..."}
+
+                    conversation.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps(result, ensure_ascii=False)
+                    })
+                iterations += 1
+            else:
+                assistant_message = collected_message["content"]
+                break
+        else:
+            assistant_message = "抱歉，处理超时，请简化您的请求。"
+            yield {"type": "content", "data": assistant_message}
+
+        conversation.append({"role": "assistant", "content": assistant_message})
+        self._save_conversation(project_name, conversation)
+
+        # 发送 token 统计
+        if total_tokens == 0:
+            total_tokens = self._estimate_tokens(conversation)
+
+        yield {
+            "type": "usage",
+            "data": {
+                "current_tokens": total_tokens,
+                "max_tokens": self.settings.context_window,
+                "compressed": compressed
+            }
+        }
 
     def chat(self, project_name: str, user_message: str, max_iterations: int = 5) -> dict:
         """处理对话，返回 {content, token_usage}"""
