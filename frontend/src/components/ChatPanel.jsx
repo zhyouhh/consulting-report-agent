@@ -2,14 +2,18 @@ import React, { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import ReactMarkdown from 'react-markdown'
 import { showError, showSuccess } from '../utils/toast'
+import { describeConnectionMode } from '../utils/connectionMode'
+import { summarizeWorkspace } from '../utils/workspaceSummary'
 
-export default function ChatPanel({ project, onTogglePreview }) {
+export default function ChatPanel({ project, settings, workspace, onProjectMutated, onTogglePreview }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [tokenUsage, setTokenUsage] = useState(null)
   const [abortController, setAbortController] = useState(null)
   const messagesEndRef = useRef(null)
+  const connection = describeConnectionMode(settings || {})
+  const workspaceSummary = summarizeWorkspace(workspace || {})
 
   useEffect(() => {
     if (project) {
@@ -62,6 +66,7 @@ export default function ChatPanel({ project, onTogglePreview }) {
         content: '对话已清空。请告诉我你想写什么类型的报告？'
       }])
       setTokenUsage(null)
+      onProjectMutated?.()
     } catch (error) {
       showError('清空失败: ' + (error.response?.data?.detail || error.message))
     }
@@ -160,12 +165,20 @@ export default function ChatPanel({ project, onTogglePreview }) {
     }
     setLoading(false)
     setAbortController(null)
+    onProjectMutated?.()
   }
 
   return (
     <div className="flex-1 flex flex-col bg-[#1a1a2e]">
       <div className="p-4 border-b border-[#2a2a4a] flex justify-between items-center">
-        <h2 className="font-semibold text-[#e2e2f0]">{project || '请选择或创建项目'}</h2>
+        <div>
+          <h2 className="font-semibold text-[#e2e2f0]">{project || '请选择或创建项目'}</h2>
+          {project && (
+            <p className="text-xs text-[#8888a8] mt-1">
+              {connection.title} · 当前阶段 {workspaceSummary.stageLabel}
+            </p>
+          )}
+        </div>
         <div className="flex gap-2">
           {project && (
             <button onClick={clearConversation} className="text-sm text-[#8888a8] hover:text-[#e2e2f0]">

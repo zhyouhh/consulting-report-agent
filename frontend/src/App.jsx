@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { Toaster } from 'react-hot-toast'
 import Sidebar from './components/Sidebar'
 import ChatPanel from './components/ChatPanel'
-import PreviewPanel from './components/PreviewPanel'
+import WorkspacePanel from './components/WorkspacePanel'
 import axios from 'axios'
+import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -25,12 +26,19 @@ function App() {
   const [projects, setProjects] = useState([])
   const [currentProject, setCurrentProject] = useState(null)
   const [settings, setSettings] = useState(null)
+  const [workspace, setWorkspace] = useState(null)
+  const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0)
   const [showPreview, setShowPreview] = useState(true)
   const [loading, setLoading] = useState(true)
+  const activeProjectRef = useRef(currentProject)
 
   useEffect(() => {
     initializeApp()
   }, [])
+
+  useEffect(() => {
+    activeProjectRef.current = currentProject
+  }, [currentProject])
 
   const initializeApp = async () => {
     await Promise.all([loadProjects(), loadSettings()])
@@ -58,11 +66,43 @@ function App() {
     }
   }
 
+  useEffect(() => {
+    loadWorkspace()
+  }, [currentProject, workspaceRefreshToken])
+
+  const loadWorkspace = async () => {
+    const requestProject = currentProject
+    if (!requestProject) {
+      setWorkspace(null)
+      return
+    }
+    try {
+      const res = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/workspace`)
+      if (!shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        return
+      }
+      setWorkspace(res.data)
+    } catch (error) {
+      if (!shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        return
+      }
+      console.error('加载工作区失败:', error)
+      setWorkspace(null)
+    }
+  }
+
   const createProject = async (info) => {
     try {
       await axios.post('/api/projects', info)
       await loadProjects()
       setCurrentProject(info.name)
+      setWorkspaceRefreshToken(prev => prev + 1)
       return true
     } catch (error) {
       console.error('创建项目失败:', error)
@@ -106,9 +146,18 @@ function App() {
         <ChatPanel
           project={currentProject}
           settings={settings}
+          workspace={workspace}
+          onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
           onTogglePreview={() => setShowPreview(!showPreview)}
         />
-        {showPreview && <PreviewPanel project={currentProject} />}
+        {showPreview && (
+          <WorkspacePanel
+            project={currentProject}
+            workspace={workspace}
+            refreshToken={workspaceRefreshToken}
+            onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
+          />
+        )}
       </div>
     </ErrorBoundary>
   )
