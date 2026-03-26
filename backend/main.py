@@ -3,7 +3,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Literal
 from pathlib import Path
 import uvicorn
 import threading
@@ -63,29 +63,40 @@ async def health():
 async def get_settings():
     data = settings.model_dump()
     data["api_key"] = "***" if data["api_key"] else ""  # 隐藏API Key
+    data["custom_api_key"] = "***" if data.get("custom_api_key") else ""
     return data
 
 
 class SettingsUpdate(BaseModel):
-    """前端提交的设置更新（只包含API相关字段）"""
-    api_provider: Optional[str] = None
-    api_key: Optional[str] = None
-    api_base: Optional[str] = None
-    model: Optional[str] = None
+    """前端提交的设置更新"""
+    mode: Literal["managed", "custom"]
+    managed_base_url: str
+    managed_model: str
+    custom_api_base: str = ""
+    custom_api_key: str = ""
+    custom_model: str = ""
 
 
 @app.post("/api/settings")
 async def update_settings(update: SettingsUpdate):
     global settings, _chat_handlers
     with _settings_lock:
-        if update.api_provider is not None:
-            settings.api_provider = update.api_provider
-        if update.api_key is not None and update.api_key != "***":
-            settings.api_key = update.api_key
-        if update.api_base is not None:
-            settings.api_base = update.api_base
-        if update.model is not None:
-            settings.model = update.model
+        settings.mode = update.mode
+        settings.managed_base_url = update.managed_base_url
+        settings.managed_model = update.managed_model
+        settings.custom_api_base = update.custom_api_base
+        settings.custom_api_key = update.custom_api_key
+        settings.custom_model = update.custom_model
+
+        if update.mode == "managed":
+            settings.api_base = update.managed_base_url
+            settings.model = update.managed_model
+            settings.api_key = "managed"
+        else:
+            settings.api_base = update.custom_api_base
+            settings.model = update.custom_model
+            settings.api_key = update.custom_api_key
+
         save_settings(settings)
         _chat_handlers.clear()  # 清空所有handler，下次使用时重新创建
     return {"status": "ok"}
