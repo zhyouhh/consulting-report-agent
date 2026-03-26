@@ -86,7 +86,8 @@ async def update_settings(update: SettingsUpdate):
         settings.managed_base_url = update.managed_base_url
         settings.managed_model = update.managed_model
         settings.custom_api_base = update.custom_api_base
-        settings.custom_api_key = update.custom_api_key
+        if update.custom_api_key != "***":
+            settings.custom_api_key = update.custom_api_key
         settings.custom_model = update.custom_model
 
         if update.mode == "managed":
@@ -96,7 +97,7 @@ async def update_settings(update: SettingsUpdate):
         else:
             settings.api_base = update.custom_api_base
             settings.model = update.custom_model
-            settings.api_key = update.custom_api_key
+            settings.api_key = settings.custom_api_key
 
         save_settings(settings)
         _chat_handlers.clear()  # 清空所有handler，下次使用时重新创建

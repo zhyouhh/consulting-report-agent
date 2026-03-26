@@ -24,12 +24,17 @@ class ErrorBoundary extends React.Component {
 function App() {
   const [projects, setProjects] = useState([])
   const [currentProject, setCurrentProject] = useState(null)
+  const [settings, setSettings] = useState(null)
   const [showPreview, setShowPreview] = useState(true)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    loadProjects()
+    initializeApp()
   }, [])
+
+  const initializeApp = async () => {
+    await Promise.all([loadProjects(), loadSettings()])
+  }
 
   const loadProjects = async () => {
     try {
@@ -41,6 +46,15 @@ function App() {
       alert('加载项目列表失败，请刷新页面重试')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadSettings = async () => {
+    try {
+      const res = await axios.get('/api/settings')
+      setSettings(res.data)
+    } catch (error) {
+      console.error('加载设置失败:', error)
     }
   }
 
@@ -83,12 +97,15 @@ function App() {
         <Sidebar
           projects={projects}
           currentProject={currentProject}
+          settings={settings}
           onSelectProject={setCurrentProject}
           onCreateProject={createProject}
           onDeleteProject={deleteProject}
+          onSettingsSaved={loadSettings}
         />
         <ChatPanel
           project={currentProject}
+          settings={settings}
           onTogglePreview={() => setShowPreview(!showPreview)}
         />
         {showPreview && <PreviewPanel project={currentProject} />}
