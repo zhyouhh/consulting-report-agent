@@ -62,7 +62,7 @@ async def health():
 
 @app.get("/api/settings")
 async def get_settings():
-    data = settings.model_dump()
+    data = settings.model_dump(exclude={"managed_client_token"})
     data["api_key"] = "***" if data["api_key"] else ""  # 隐藏API Key
     data["custom_api_key"] = "***" if data.get("custom_api_key") else ""
     return data
@@ -93,7 +93,7 @@ async def update_settings(update: SettingsUpdate):
         if update.mode == "managed":
             settings.api_base = update.managed_base_url
             settings.model = update.managed_model
-            settings.api_key = "managed"
+            settings.api_key = settings.managed_client_token
         else:
             settings.api_base = update.custom_api_base
             settings.model = update.custom_model

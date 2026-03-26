@@ -1,15 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
 
 block_cipher = None
+root = Path.cwd()
+datas = [
+    ('skill', 'skill'),
+    ('frontend/dist', 'frontend/dist'),
+]
+managed_client_token_file = root / 'managed_client_token.txt'
+if managed_client_token_file.exists():
+    datas.append((str(managed_client_token_file), '.'))
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('frontend/dist', 'frontend/dist'),
-        ('backend/skills', 'backend/skills'),
-    ],
+    datas=datas,
     hiddenimports=[
         'uvicorn.logging',
         'uvicorn.loops',
@@ -21,11 +27,25 @@ a = Analysis(
         'uvicorn.protocols.websockets.auto',
         'uvicorn.lifespan',
         'uvicorn.lifespan.on',
+        'webview.platforms.winforms',
+        'webview.platforms.edgechromium',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'webview.platforms.qt',
+        'webview.platforms.gtk',
+        'webview.platforms.cocoa',
+        'webview.platforms.android',
+        'webview.platforms.cef',
+        'PyQt5',
+        'PyQt6',
+        'PySide2',
+        'PySide6',
+        'qtpy',
+        'gi',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

@@ -1,10 +1,14 @@
 from pydantic_settings import BaseSettings
+from pydantic import Field
 from pathlib import Path
 import json
+import os
 import sys
 
 DEFAULT_MANAGED_BASE_URL = "https://newapi.z0y0h.work/client/v1"
 DEFAULT_MANAGED_MODEL = "gemini-3-flash"
+DEFAULT_MANAGED_CLIENT_TOKEN = "managed"
+MANAGED_CLIENT_TOKEN_FILENAME = "managed_client_token.txt"
 
 
 def get_base_path() -> Path:
@@ -21,6 +25,25 @@ def get_user_config_dir() -> Path:
     return config_dir
 
 
+def get_managed_client_token_path(base_path: Path | None = None) -> Path:
+    runtime_base = base_path or get_base_path()
+    return runtime_base / MANAGED_CLIENT_TOKEN_FILENAME
+
+
+def get_default_managed_client_token(base_path: Path | None = None) -> str:
+    env_token = os.getenv("CONSULTING_REPORT_MANAGED_CLIENT_TOKEN", "").strip()
+    if env_token:
+        return env_token
+
+    token_path = get_managed_client_token_path(base_path)
+    if token_path.exists():
+        token = token_path.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+
+    return DEFAULT_MANAGED_CLIENT_TOKEN
+
+
 class Settings(BaseSettings):
     """应用配置"""
 
@@ -30,6 +53,7 @@ class Settings(BaseSettings):
     # 默认托管通道
     managed_base_url: str = DEFAULT_MANAGED_BASE_URL
     managed_model: str = DEFAULT_MANAGED_MODEL
+    managed_client_token: str = Field(default_factory=get_default_managed_client_token)
 
     # 自定义API配置
     custom_api_key: str = ""
@@ -68,6 +92,7 @@ def normalize_settings_payload(data: dict) -> dict:
 
     normalized.setdefault("managed_base_url", DEFAULT_MANAGED_BASE_URL)
     normalized.setdefault("managed_model", DEFAULT_MANAGED_MODEL)
+    normalized.setdefault("managed_client_token", get_default_managed_client_token())
     normalized.setdefault("custom_api_base", normalized.get("api_base", ""))
     normalized.setdefault("custom_api_key", normalized.get("api_key", ""))
     normalized.setdefault("custom_model", normalized.get("model", ""))
@@ -75,7 +100,7 @@ def normalize_settings_payload(data: dict) -> dict:
     if normalized["mode"] == "managed":
         normalized["api_base"] = normalized["managed_base_url"]
         normalized["model"] = normalized["managed_model"]
-        normalized["api_key"] = "managed"
+        normalized["api_key"] = normalized["managed_client_token"]
     else:
         normalized["api_base"] = normalized["custom_api_base"]
         normalized["model"] = normalized["custom_model"]

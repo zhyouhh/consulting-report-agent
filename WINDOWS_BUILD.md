@@ -1,154 +1,143 @@
 # Windows 打包指南
 
+## 支持范围
+
+- 第一阶段只支持 Windows。
+- macOS 兼容不在当前正式交付范围内。
+- 当前定位是桌面客户端，不要求同事本地手动起前后端。
+
+## 运行模式
+
+### 默认通道
+
+- 面向普通同事，开箱即用。
+- 默认地址：`https://newapi.z0y0h.work/client/v1`
+- 默认模型：`gemini-3-flash`
+- 前提：服务端薄中转已经部署完成。
+
+### 自定义 API
+
+- 面向高级用户。
+- 通过设置页面自行填写 OpenAI 兼容接口参数。
+- 可用于兜底或个人私有模型接入。
+
 ## 环境准备
 
 ### 1. 安装 Python
 
-- 下载 Python 3.11 或 3.12（推荐 3.11）
-- 官网：https://www.python.org/downloads/
-- **重要**：安装时勾选 "Add Python to PATH"
+- 推荐 Python 3.11 或 3.12
+- 安装时勾选 `Add Python to PATH`
 
 ### 2. 安装 Node.js
 
-- 下载 Node.js 20.x LTS
-- 官网：https://nodejs.org/
-- 默认安装即可
+- 推荐 Node.js 20.x LTS
 
 ### 3. 验证环境
 
-打开命令提示符（cmd），运行：
 ```cmd
 python --version
 node --version
 npm --version
 ```
 
-确保都能正常显示版本号。
-
 ## 打包步骤
 
-### 方法一：一键打包（推荐）
+### 方法一：一键打包
 
-1. 双击运行 `build.bat`
-2. 等待打包完成（约 5-10 分钟）
-3. 打包完成后，可执行文件在 `dist\咨询报告助手\` 目录
+1. 双击运行 [build.bat](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/build.bat)
+2. 提前准备 `managed_client_token.txt`，或设置环境变量 `CONSULTING_REPORT_MANAGED_CLIENT_TOKEN`
+3. 等待脚本自动安装依赖、构建前端、执行 PyInstaller
+4. 打包产物位于 `dist\咨询报告助手\`
 
 ### 方法二：手动打包
 
-#### 步骤 1：安装 Python 依赖
-
 ```cmd
 pip install -r requirements.txt
-```
+pip install pyinstaller
 
-#### 步骤 2：构建前端
+set CONSULTING_REPORT_MANAGED_CLIENT_TOKEN=你的专用客户端令牌
 
-```cmd
 cd frontend
 npm install
 npm run build
 cd ..
-```
 
-#### 步骤 3：安装 PyInstaller
-
-```cmd
-pip install pyinstaller pywebview
-```
-
-#### 步骤 4：执行打包
-
-```cmd
 pyinstaller consulting_report.spec
 ```
 
 ## 打包产物
 
-打包完成后，目录结构：
-```
+```text
 dist/
 └── 咨询报告助手/
-    ├── 咨询报告助手.exe    # 主程序
-    ├── skill/              # Skill 定义文件
-    ├── frontend/           # 前端静态文件
-    └── _internal/          # 依赖库
+    ├── 咨询报告助手.exe
+    ├── skill/
+    ├── frontend/
+    └── _internal/
 ```
 
 ## 分发说明
 
-### 完整分发
+- 必须分发整个 `dist\咨询报告助手\` 文件夹。
+- 建议压缩为 zip 再发给同事。
+- 同事解压后直接双击 `咨询报告助手.exe`。
 
-将整个 `dist\咨询报告助手\` 文件夹打包成 zip，分发给用户。
+## 首次使用体验
 
-用户解压后，双击 `咨询报告助手.exe` 即可使用。
+1. 程序启动后默认显示 `默认通道`
+2. 如果托管代理在线，可直接新建项目并开始使用
+3. 若默认通道不可用，可在设置中切到 `自定义 API`
+4. 导出能力当前是 `可审草稿`，不是最终排版完成稿
 
-### 注意事项
+## 建议的打包后检查
 
-1. **不要单独分发 exe 文件**，必须包含整个文件夹
-2. 首次运行可能被杀毒软件拦截，添加信任即可
-3. 配置文件会自动创建在用户目录 `~\.consulting-report\`
+1. 运行 `dist\咨询报告助手\咨询报告助手.exe`
+2. 确认设置里默认显示 `默认通道`
+3. 新建一个测试项目，填写 V2 字段
+4. 发起一轮聊天，确认能正常响应
+5. 打开右侧工作区，确认阶段和文件预览正常
+6. 点击质量检查和导出，确认返回结果清晰
 
 ## 常见问题
 
-### Python 版本问题
+### 默认通道调用失败
 
-**问题**：打包时报错 "Python 3.14 不支持"
+先检查：
 
-**解决**：使用 Python 3.11 或 3.12，不要使用 3.14
-
-### 依赖安装失败
-
-**问题**：pip install 报错
-
-**解决**：
 ```cmd
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+curl https://newapi.z0y0h.work/client/v1/models -H "Authorization: Bearer managed"
 ```
+
+如果不通：
+
+- 先确认服务端薄中转在线
+- 再确认发布包里已经带上对应的 `managed_client_token.txt`
+- 临时切到 `自定义 API`
 
 ### 前端构建失败
 
-**问题**：npm run build 报错
-
-**解决**：
 ```cmd
 cd frontend
-rm -rf node_modules package-lock.json
+rmdir /s /q node_modules
+del package-lock.json
 npm install
 npm run build
 ```
 
 ### PyInstaller 打包失败
 
-**问题**：找不到模块
-
-**解决**：检查 `consulting_report.spec` 中的 `hiddenimports` 列表，添加缺失的模块。
-
-## 测试打包结果
-
-打包完成后，建议测试：
-
-1. 运行 `dist\咨询报告助手\咨询报告助手.exe`
-2. 创建一个测试项目
-3. 发送几条消息，确认 AI 响应正常
-4. 检查项目文件是否正确保存
-
-## 更新打包
-
-如果修改了代码，重新打包：
-
-1. 如果只改了 Python 代码：直接运行 `pyinstaller consulting_report.spec`
-2. 如果改了前端代码：先 `cd frontend && npm run build`，再打包
-3. 如果改了依赖：先 `pip install -r requirements.txt`，再打包
+- 优先使用 [consulting_report.spec](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/consulting_report.spec)
+- 确认 `frontend/dist` 和 `skill/` 已存在
 
 ## 技术说明
 
-- **PyInstaller**：将 Python 程序打包成 exe
-- **PyWebView**：创建桌面窗口，内嵌浏览器
-- **FastAPI**：后端 API 服务
-- **React**：前端界面
+- PyInstaller 负责打包 exe
+- PyWebView 负责桌面窗口
+- FastAPI 负责本地 API
+- React 负责界面
 
-打包后的程序本质是：
-1. 启动一个本地 FastAPI 服务（127.0.0.1:8080）
-2. 用 PyWebView 创建窗口访问这个服务
-3. 所有功能都在本地运行，无需联网（除了调用 LLM API）
+程序运行时本质上是：
+
+1. 本地启动一个 FastAPI 服务
+2. PyWebView 打开内嵌窗口
+3. LLM 请求默认走托管薄中转

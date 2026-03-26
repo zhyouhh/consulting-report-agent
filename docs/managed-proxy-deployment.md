@@ -32,7 +32,7 @@ Example runtime env:
 MANAGED_PROXY_UPSTREAM_BASE_URL=http://127.0.0.1:3000/v1
 MANAGED_PROXY_UPSTREAM_API_KEY=<dedicated-upstream-key>
 MANAGED_PROXY_ALLOWED_MODELS=gemini-3-flash
-MANAGED_PROXY_CLIENT_TOKEN=managed
+MANAGED_PROXY_CLIENT_TOKEN=<dedicated-client-token>
 ```
 
 ## Deploy Commands
@@ -66,7 +66,7 @@ nginx -s reload
 ## Verify
 
 ```bash
-curl -H "Authorization: Bearer managed" https://newapi.z0y0h.work/client/v1/models
+curl -H "Authorization: Bearer <dedicated-client-token>" https://newapi.z0y0h.work/client/v1/models
 ```
 
 Expected:
@@ -81,7 +81,7 @@ from openai import OpenAI
 import httpx
 
 client = OpenAI(
-    api_key="managed",
+    api_key="<dedicated-client-token>",
     base_url="https://newapi.z0y0h.work/client/v1",
     http_client=httpx.Client(timeout=60.0),
 )
@@ -103,7 +103,5 @@ PY
   - restart the proxy container
 - To change the client bearer later:
   - update `MANAGED_PROXY_CLIENT_TOKEN`
-  - rebuild or reconfigure the desktop client managed default to match
-- Current first-phase compatibility token is still `managed`.
-  - This keeps the desktop client working today.
-  - A later packaging pass can replace it with a less guessable build-time token.
+  - update the release package's `managed_client_token.txt`
+  - rebuild or redistribute the desktop client

@@ -3,7 +3,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from backend.config import Settings, load_settings, save_settings
+from backend.config import (
+    Settings,
+    get_default_managed_client_token,
+    load_settings,
+    normalize_settings_payload,
+    save_settings,
+)
 
 
 class SettingsPersistenceTests(unittest.TestCase):
@@ -38,6 +44,7 @@ class SettingsPersistenceTests(unittest.TestCase):
             mode="managed",
             managed_base_url="https://newapi.z0y0h.work/client/v1",
             managed_model="gemini-3-flash",
+            managed_client_token="desktop-managed-token",
             custom_api_base="https://custom.example/v1",
             custom_api_key="secret",
             custom_model="gpt-4.1-mini",
@@ -54,5 +61,24 @@ class SettingsPersistenceTests(unittest.TestCase):
 
         self.assertEqual(loaded.api_base, "https://newapi.z0y0h.work/client/v1")
         self.assertEqual(loaded.model, "gemini-3-flash")
-        self.assertEqual(loaded.api_key, "managed")
+        self.assertEqual(loaded.api_key, "desktop-managed-token")
         self.assertEqual(loaded.custom_api_key, "secret")
+
+    def test_managed_mode_can_read_dedicated_client_token_from_bundle_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            (base_dir / "managed_client_token.txt").write_text("dedicated-client-token", encoding="utf-8")
+
+            with mock.patch("backend.config.get_base_path", return_value=base_dir):
+                managed_token = get_default_managed_client_token()
+
+        settings = Settings(
+            mode="managed",
+            managed_base_url="https://newapi.z0y0h.work/client/v1",
+            managed_model="gemini-3-flash",
+            managed_client_token=managed_token,
+        )
+        normalized = normalize_settings_payload(settings.model_dump())
+
+        self.assertEqual(managed_token, "dedicated-client-token")
+        self.assertEqual(normalized["api_key"], "dedicated-client-token")
