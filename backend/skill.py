@@ -155,6 +155,9 @@ class SkillEngine:
         full_path.write_text(content, encoding="utf-8")
 
     def get_workspace_summary(self, project_name: str) -> dict:
+        if not self.get_project_path(project_name):
+            raise ValueError(f"项目 {project_name} 不存在")
+
         stage_gates_text = self._read_optional(project_name, "plan/stage-gates.md")
 
         return {
@@ -171,6 +174,50 @@ class SkillEngine:
             if content:
                 sections.append(f"## {title}\n{content}")
         return "\n\n".join(sections)
+
+    def get_script_path(self, script_name: str) -> str:
+        script_path = self.skill_dir / "scripts" / script_name
+        if not script_path.exists():
+            raise ValueError(f"脚本 {script_name} 不存在")
+        return str(script_path)
+
+    def ensure_output_dir(self, project_name: str) -> str:
+        project_path = self.get_project_path(project_name)
+        if not project_path:
+            raise ValueError(f"项目 {project_name} 不存在")
+
+        output_dir = project_path / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return str(output_dir)
+
+    def get_primary_report_path(self, project_name: str) -> str:
+        project_path = self.get_project_path(project_name)
+        if not project_path:
+            raise ValueError(f"项目 {project_name} 不存在")
+
+        output_report = project_path / "output" / "final-report.md"
+        if output_report.exists():
+            return str(output_report)
+
+        content_dir = project_path / "content"
+        preferred_names = ["final-report.md", "report.md", "draft.md"]
+        for name in preferred_names:
+            candidate = content_dir / name
+            if candidate.exists():
+                return str(candidate)
+
+        content_files = sorted(content_dir.glob("*.md"))
+        if len(content_files) == 1:
+            return str(content_files[0])
+
+        report_like_files = [path for path in content_files if "report" in path.stem.lower()]
+        if len(report_like_files) == 1:
+            return str(report_like_files[0])
+
+        if content_files:
+            raise ValueError("存在多个内容文件，无法确定主报告，请先生成 final-report.md")
+
+        raise ValueError("没有可检查或导出的报告草稿")
 
     def get_skill_prompt(self) -> str:
         """获取Skill定义"""

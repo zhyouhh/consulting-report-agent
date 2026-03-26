@@ -14,6 +14,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from .config import load_settings, save_settings, Settings
+from .report_tools import export_reviewable_draft, run_quality_check
 from .skill import SkillEngine
 from .chat import ChatHandler
 from .models import ChatRequest, ChatResponse, ProjectInfo
@@ -193,6 +194,35 @@ async def read_file(project_name: str, file_path: str):
     try:
         content = skill_engine.read_file(project_name, file_path)
         return {"content": content}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/projects/{project_name}/workspace")
+async def get_workspace(project_name: str):
+    try:
+        return skill_engine.get_workspace_summary(project_name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/projects/{project_name}/quality-check")
+async def quality_check(project_name: str):
+    try:
+        report_path = skill_engine.get_primary_report_path(project_name)
+        script_path = skill_engine.get_script_path("quality_check.ps1")
+        return run_quality_check(report_path, script_path)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/projects/{project_name}/export-draft")
+async def export_draft(project_name: str):
+    try:
+        report_path = skill_engine.get_primary_report_path(project_name)
+        output_dir = skill_engine.ensure_output_dir(project_name)
+        script_path = skill_engine.get_script_path("export_draft.ps1")
+        return export_reviewable_draft(report_path, output_dir, script_path)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

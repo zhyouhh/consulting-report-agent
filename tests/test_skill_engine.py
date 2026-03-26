@@ -74,3 +74,25 @@ class SkillEngineTests(unittest.TestCase):
             self.assertIn("项目备注", context)
             self.assertNotIn("当前项目信息", context)
             self.assertNotIn("当前大纲", context)
+
+    def test_workspace_summary_raises_for_missing_project(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+
+            with self.assertRaises(ValueError):
+                engine.get_workspace_summary("missing")
+
+    def test_primary_report_path_prefers_report_file_over_outline_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            content_dir = projects_dir / "demo" / "content"
+            content_dir.mkdir(parents=True)
+            (content_dir / "outline.md").write_text("# 大纲", encoding="utf-8")
+            (content_dir / "report.md").write_text("# 正文", encoding="utf-8")
+
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+
+            report_path = engine.get_primary_report_path("demo")
+
+            self.assertTrue(report_path.endswith("report.md"))
