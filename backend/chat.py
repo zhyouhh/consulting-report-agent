@@ -460,13 +460,5 @@ class ChatHandler:
     def _build_system_prompt(self, project_name: str) -> str:
         """构建系统提示"""
         skill_prompt = self.skill_engine.get_skill_prompt()
-        project_context = ""
-        project_path = self.skill_engine.get_project_path(project_name)
-        if project_path:
-            info_file = project_path / "plan" / "project-info.md"
-            if info_file.exists():
-                project_context += f"\n\n## 当前项目信息\n{info_file.read_text(encoding='utf-8')}"
-            outline_file = project_path / "plan" / "outline.md"
-            if outline_file.exists():
-                project_context += f"\n\n## 当前大纲\n{outline_file.read_text(encoding='utf-8')}"
+        project_context = self.skill_engine.build_project_context(project_name)
         return f"{skill_prompt}\n\n{project_context}"

@@ -1,0 +1,76 @@
+import tempfile
+import unittest
+from datetime import datetime
+from pathlib import Path
+
+from backend.skill import SkillEngine
+
+
+class SkillEngineTests(unittest.TestCase):
+    def setUp(self):
+        self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+
+    def test_create_project_uses_real_v2_templates(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            engine.create_project(
+                "demo",
+                "strategy-consulting",
+                "AI 战略规划",
+                "高层决策者",
+                "2026-04-01",
+                "3000字",
+                "已有访谈纪要",
+            )
+
+            overview_text = (projects_dir / "demo" / "plan" / "project-overview.md").read_text(encoding="utf-8")
+            self.assertIn("**项目名称**: demo", overview_text)
+            self.assertIn("**项目类型**: strategy-consulting", overview_text)
+            self.assertIn(f"**开始日期**: {today}", overview_text)
+            self.assertIn("**截止日期**: 2026-04-01", overview_text)
+
+    def test_workspace_summary_reads_stage_from_real_stage_gates_template(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            engine.create_project(
+                "demo",
+                "strategy-consulting",
+                "AI 战略规划",
+                "高层决策者",
+                "2026-04-01",
+                "3000字",
+                "已有访谈纪要",
+            )
+
+            summary = engine.get_workspace_summary("demo")
+
+            self.assertEqual(summary["stage_code"], "S0")
+            self.assertEqual(summary["status"], "进行中")
+            self.assertTrue(summary["next_actions"])
+            self.assertIn("需求访谈完成", summary["next_actions"][0])
+
+    def test_build_project_context_uses_v2_labels_not_legacy_labels(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            engine.create_project(
+                "demo",
+                "strategy-consulting",
+                "AI 战略规划",
+                "高层决策者",
+                "2026-04-01",
+                "3000字",
+                "已有访谈纪要",
+            )
+
+            context = engine.build_project_context("demo")
+
+            self.assertIn("当前项目概览", context)
+            self.assertIn("当前项目进度", context)
+            self.assertIn("阶段门禁", context)
+            self.assertIn("项目备注", context)
+            self.assertNotIn("当前项目信息", context)
+            self.assertNotIn("当前大纲", context)

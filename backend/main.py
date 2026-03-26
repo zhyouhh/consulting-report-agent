@@ -139,9 +139,12 @@ async def create_project(info: ProjectInfo):
     try:
         skill_engine.create_project(
             info.name,
-            info.report_type,
+            info.project_type,
             info.theme,
-            info.target_audience
+            info.target_audience,
+            info.deadline,
+            info.expected_length,
+            info.notes,
         )
         return {"status": "ok", "project_name": info.name}
     except ValueError as e:
