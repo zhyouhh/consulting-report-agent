@@ -12,6 +12,7 @@ test("describeConnectionMode returns managed label", () => {
     {
       title: "默认通道",
       subtitle: "推荐，开箱即用 · gemini-3-flash",
+      helper: "有自己的模型/API，可点击下方“连接设置”接入。",
     },
   );
 });
@@ -25,6 +26,7 @@ test("describeConnectionMode returns custom label", () => {
     {
       title: "自定义 API",
       subtitle: "gpt-4.1-mini",
+      helper: "",
     },
   );
 });
@@ -35,6 +37,17 @@ test("describeConnectionMode falls back to managed when settings are missing", (
     {
       title: "默认通道",
       subtitle: "推荐，开箱即用 · gemini-3-flash",
+      helper: "有自己的模型/API，可点击下方“连接设置”接入。",
     },
+  );
+});
+
+test("describeConnectionMode exposes helper text for managed mode", () => {
+  assert.equal(
+    describeConnectionMode({
+      mode: "managed",
+      managed_model: "gemini-3-flash",
+    }).helper,
+    "有自己的模型/API，可点击下方“连接设置”接入。",
   );
 });

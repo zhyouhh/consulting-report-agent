@@ -5,6 +5,8 @@ import ChatPanel from './components/ChatPanel'
 import WorkspacePanel from './components/WorkspacePanel'
 import axios from 'axios'
 import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
+import { mergeMaterials, removeMaterialById } from './utils/chatMaterials'
+import { getCurrentProject, reconcileCurrentProjectId } from './utils/projectSelection'
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -24,31 +26,44 @@ class ErrorBoundary extends React.Component {
 
 function App() {
   const [projects, setProjects] = useState([])
+  const [currentProjectId, setCurrentProjectId] = useState(null)
   const [currentProject, setCurrentProject] = useState(null)
   const [settings, setSettings] = useState(null)
   const [workspace, setWorkspace] = useState(null)
+  const [materials, setMaterials] = useState([])
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0)
   const [showPreview, setShowPreview] = useState(true)
   const [loading, setLoading] = useState(true)
-  const activeProjectRef = useRef(currentProject)
+  const activeProjectRef = useRef(currentProjectId)
 
   useEffect(() => {
     initializeApp()
   }, [])
 
   useEffect(() => {
-    activeProjectRef.current = currentProject
-  }, [currentProject])
+    activeProjectRef.current = currentProjectId
+  }, [currentProjectId])
 
   const initializeApp = async () => {
     await Promise.all([loadProjects(), loadSettings()])
   }
 
-  const loadProjects = async () => {
+  const applyProjectSelection = (nextProjects, preferredProjectId = null) => {
+    const nextProjectId = reconcileCurrentProjectId(
+      nextProjects,
+      preferredProjectId ?? activeProjectRef.current,
+    )
+
+    setProjects(nextProjects)
+    setCurrentProjectId(nextProjectId)
+    setCurrentProject(getCurrentProject(nextProjects, nextProjectId))
+  }
+
+  const loadProjects = async (preferredProjectId = null) => {
     try {
       setLoading(true)
       const res = await axios.get('/api/projects')
-      setProjects(res.data)
+      applyProjectSelection(res.data, preferredProjectId)
     } catch (error) {
       console.error('加载项目失败:', error)
       alert('加载项目列表失败，请刷新页面重试')
@@ -68,10 +83,11 @@ function App() {
 
   useEffect(() => {
     loadWorkspace()
-  }, [currentProject, workspaceRefreshToken])
+    loadMaterials()
+  }, [currentProjectId, workspaceRefreshToken])
 
   const loadWorkspace = async () => {
-    const requestProject = currentProject
+    const requestProject = currentProjectId
     if (!requestProject) {
       setWorkspace(null)
       return
@@ -97,11 +113,39 @@ function App() {
     }
   }
 
+  const loadMaterials = async () => {
+    const requestProject = currentProjectId
+    if (!requestProject) {
+      setMaterials([])
+      return
+    }
+    try {
+      const res = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/materials`)
+      if (!shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        return
+      }
+      setMaterials(res.data.materials || [])
+    } catch (error) {
+      if (!shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        return
+      }
+      console.error('加载材料失败:', error)
+      setMaterials([])
+    }
+  }
+
   const createProject = async (info) => {
     try {
-      await axios.post('/api/projects', info)
-      await loadProjects()
-      setCurrentProject(info.name)
+      const res = await axios.post('/api/projects', info)
+      const createdProject = res.data.project
+
+      await loadProjects(createdProject.id)
       setWorkspaceRefreshToken(prev => prev + 1)
       return true
     } catch (error) {
@@ -111,11 +155,14 @@ function App() {
     }
   }
 
-  const deleteProject = async (projectName) => {
+  const deleteProject = async (projectId) => {
     try {
-      await axios.delete(`/api/projects/${projectName}`)
-      if (currentProject === projectName) {
+      await axios.delete(`/api/projects/${encodeURIComponent(projectId)}`)
+      if (currentProjectId === projectId) {
+        setCurrentProjectId(null)
         setCurrentProject(null)
+        setWorkspace(null)
+        setMaterials([])
       }
       await loadProjects()
       return true
@@ -124,6 +171,39 @@ function App() {
       alert('删除项目失败，请重试')
       return false
     }
+  }
+
+  const handleSelectProject = (project) => {
+    setWorkspace(null)
+    setMaterials([])
+    setCurrentProjectId(project?.id || null)
+    setCurrentProject(project || null)
+  }
+
+  const handleMaterialsMerged = (incomingMaterials) => {
+    setMaterials(prev => mergeMaterials(prev, incomingMaterials))
+    setWorkspace(prev => {
+      if (!prev) {
+        return prev
+      }
+      return {
+        ...prev,
+        materials: mergeMaterials(prev.materials || [], incomingMaterials),
+      }
+    })
+  }
+
+  const handleMaterialDeleted = (materialId) => {
+    setMaterials(prev => removeMaterialById(prev, materialId))
+    setWorkspace(prev => {
+      if (!prev) {
+        return prev
+      }
+      return {
+        ...prev,
+        materials: removeMaterialById(prev.materials || [], materialId),
+      }
+    })
   }
 
   if (loading) {
@@ -136,25 +216,31 @@ function App() {
       <div className="flex h-screen bg-[#0f0f23]">
         <Sidebar
           projects={projects}
-          currentProject={currentProject}
+          currentProjectId={currentProjectId}
           settings={settings}
-          onSelectProject={setCurrentProject}
+          onSelectProject={handleSelectProject}
           onCreateProject={createProject}
           onDeleteProject={deleteProject}
           onSettingsSaved={loadSettings}
         />
         <ChatPanel
+          projectId={currentProjectId}
           project={currentProject}
           settings={settings}
           workspace={workspace}
+          materials={materials}
+          onMaterialsMerged={handleMaterialsMerged}
           onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
           onTogglePreview={() => setShowPreview(!showPreview)}
         />
         {showPreview && (
           <WorkspacePanel
+            projectId={currentProjectId}
             project={currentProject}
             workspace={workspace}
+            materials={materials}
             refreshToken={workspaceRefreshToken}
+            onMaterialDeleted={handleMaterialDeleted}
             onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
           />
         )}

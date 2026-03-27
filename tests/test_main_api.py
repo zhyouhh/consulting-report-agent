@@ -1,5 +1,6 @@
 import unittest
 from unittest import mock
+from io import BytesIO
 
 from fastapi.testclient import TestClient
 
@@ -9,6 +10,10 @@ import backend.main as main_module
 class WorkspaceApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main_module.app)
+        main_module.register_desktop_bridge(None)
+
+    def tearDown(self):
+        main_module.register_desktop_bridge(None)
 
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
     def test_workspace_endpoint_returns_stage_summary(self, mock_summary):
@@ -27,6 +32,97 @@ class WorkspaceApiTests(unittest.TestCase):
     def test_workspace_endpoint_returns_404_for_missing_project(self):
         response = self.client.get("/api/projects/definitely-missing-project/workspace")
         self.assertEqual(response.status_code, 404)
+
+    def test_select_workspace_folder_returns_bridge_value(self):
+        bridge = mock.Mock()
+        bridge.select_workspace_folder.return_value = "D:/Workspaces/demo"
+        main_module.register_desktop_bridge(bridge)
+
+        response = self.client.post("/api/system/select-workspace-folder")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["path"], "D:/Workspaces/demo")
+        bridge.select_workspace_folder.assert_called_once_with()
+
+    def test_select_workspace_files_returns_paths_from_bridge(self):
+        bridge = mock.Mock()
+        bridge.select_workspace_files.return_value = [
+            "D:/Workspaces/demo/资料/访谈纪要.txt",
+            "D:/Workspaces/demo/资料/市场图表.png",
+        ]
+        main_module.register_desktop_bridge(bridge)
+
+        response = self.client.post(
+            "/api/system/select-workspace-files",
+            json={"workspace_dir": "D:/Workspaces/demo"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["paths"],
+            [
+                "D:/Workspaces/demo/资料/访谈纪要.txt",
+                "D:/Workspaces/demo/资料/市场图表.png",
+            ],
+        )
+        bridge.select_workspace_files.assert_called_once_with("D:/Workspaces/demo")
+
+    @mock.patch("backend.main.skill_engine.add_materials")
+    @mock.patch("backend.main.skill_engine.get_project_record")
+    def test_select_materials_from_workspace_uses_bridge_and_imports_selection(
+        self,
+        mock_get_project_record,
+        mock_add_materials,
+    ):
+        mock_get_project_record.return_value = {
+            "id": "proj-demo",
+            "workspace_dir": "D:/Workspaces/demo",
+        }
+        mock_add_materials.return_value = [
+            {"id": "mat-1", "display_name": "访谈纪要.txt"},
+        ]
+        bridge = mock.Mock()
+        bridge.select_workspace_files.return_value = ["D:/Workspaces/demo/资料/访谈纪要.txt"]
+        main_module.register_desktop_bridge(bridge)
+
+        response = self.client.post("/api/projects/proj-demo/materials/select-from-workspace")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["materials"][0]["id"], "mat-1")
+        bridge.select_workspace_files.assert_called_once_with("D:/Workspaces/demo")
+        mock_add_materials.assert_called_once_with(
+            "proj-demo",
+            ["D:/Workspaces/demo/资料/访谈纪要.txt"],
+            added_via="workspace_select",
+        )
+
+    @mock.patch("backend.main.skill_engine.add_materials")
+    @mock.patch("backend.main.skill_engine.get_project_record")
+    def test_upload_materials_stages_files_before_importing(
+        self,
+        mock_get_project_record,
+        mock_add_materials,
+    ):
+        mock_get_project_record.return_value = {
+            "id": "proj-demo",
+            "workspace_dir": "D:/Workspaces/demo",
+        }
+        mock_add_materials.return_value = [
+            {"id": "mat-2", "display_name": "市场图表.png"},
+        ]
+
+        response = self.client.post(
+            "/api/projects/proj-demo/materials/upload",
+            files=[("files", ("市场图表.png", BytesIO(b"png-data"), "image/png"))],
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["materials"][0]["id"], "mat-2")
+        args, kwargs = mock_add_materials.call_args
+        self.assertEqual(args[0], "proj-demo")
+        self.assertEqual(kwargs["added_via"], "chat_upload")
+        self.assertEqual(len(args[1]), 1)
+        self.assertTrue(args[1][0].endswith("市场图表.png"))
 
     @mock.patch("backend.main.run_quality_check")
     @mock.patch("backend.main.skill_engine.get_script_path")
@@ -78,4 +174,34 @@ class WorkspaceApiTests(unittest.TestCase):
             "D:/tmp/report.md",
             "D:/tmp/output",
             "D:/skill/scripts/export_draft.ps1",
+        )
+
+    @mock.patch("backend.main.get_chat_handler")
+    def test_chat_endpoint_forwards_attached_material_ids(self, mock_get_chat_handler):
+        handler = mock.Mock()
+        handler.chat.return_value = {
+            "content": "已整理完毕",
+            "token_usage": {
+                "current_tokens": 1200,
+                "max_tokens": 128000,
+                "compressed": False,
+            },
+        }
+        mock_get_chat_handler.return_value = handler
+
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "project_id": "proj-demo",
+                "message_text": "请结合新增材料整理问题树",
+                "attached_material_ids": ["mat-1", "mat-2"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["content"], "已整理完毕")
+        handler.chat.assert_called_once_with(
+            "proj-demo",
+            "请结合新增材料整理问题树",
+            ["mat-1", "mat-2"],
         )

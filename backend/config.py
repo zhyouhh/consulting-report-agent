@@ -7,8 +7,10 @@ import sys
 
 DEFAULT_MANAGED_BASE_URL = "https://newapi.z0y0h.work/client/v1"
 DEFAULT_MANAGED_MODEL = "gemini-3-flash"
+DEFAULT_MANAGED_SEARCH_API_URL = "https://search.z0y0h.work/search"
 DEFAULT_MANAGED_CLIENT_TOKEN = "managed"
 MANAGED_CLIENT_TOKEN_FILENAME = "managed_client_token.txt"
+DESKTOP_CONFIG_VERSION = 4
 
 
 def get_base_path() -> Path:
@@ -47,12 +49,15 @@ def get_default_managed_client_token(base_path: Path | None = None) -> str:
 class Settings(BaseSettings):
     """应用配置"""
 
+    config_version: int = DESKTOP_CONFIG_VERSION
+
     # 连接模式
     mode: str = "managed"
 
     # 默认托管通道
     managed_base_url: str = DEFAULT_MANAGED_BASE_URL
     managed_model: str = DEFAULT_MANAGED_MODEL
+    managed_search_api_url: str = DEFAULT_MANAGED_SEARCH_API_URL
     managed_client_token: str = Field(default_factory=get_default_managed_client_token)
 
     # 自定义API配置
@@ -86,16 +91,33 @@ class Settings(BaseSettings):
 def normalize_settings_payload(data: dict) -> dict:
     """兼容旧配置，并同步当前模式对应的运行时字段。"""
     normalized = dict(data)
+    config_version = int(normalized.get("config_version", 0) or 0)
+    is_legacy_config = config_version < DESKTOP_CONFIG_VERSION
+    runtime_projects_dir = get_user_config_dir() / "projects"
+    runtime_skill_dir = get_base_path() / "skill"
+    runtime_managed_token = get_default_managed_client_token()
+
+    normalized["config_version"] = DESKTOP_CONFIG_VERSION
 
     if "mode" not in normalized:
-        normalized["mode"] = "custom" if normalized.get("api_key") else "managed"
+        normalized["mode"] = "managed"
 
     normalized.setdefault("managed_base_url", DEFAULT_MANAGED_BASE_URL)
     normalized.setdefault("managed_model", DEFAULT_MANAGED_MODEL)
-    normalized.setdefault("managed_client_token", get_default_managed_client_token())
+    normalized.setdefault("managed_search_api_url", DEFAULT_MANAGED_SEARCH_API_URL)
+    normalized["managed_client_token"] = runtime_managed_token
     normalized.setdefault("custom_api_base", normalized.get("api_base", ""))
     normalized.setdefault("custom_api_key", normalized.get("api_key", ""))
     normalized.setdefault("custom_model", normalized.get("model", ""))
+    normalized["projects_dir"] = runtime_projects_dir
+    normalized["skill_dir"] = runtime_skill_dir
+
+    # 桌面端始终以默认通道启动，保留自定义 API 信息供用户临时切换。
+    # 同时旧版本配置可能遗留开发环境路径和自定义模式，也在这里统一纠正。
+    if is_legacy_config:
+        normalized["mode"] = "managed"
+    else:
+        normalized["mode"] = "managed"
 
     if normalized["mode"] == "managed":
         normalized["api_base"] = normalized["managed_base_url"]
@@ -123,9 +145,15 @@ def save_settings(settings: Settings):
     """保存配置"""
     config_file = get_user_config_dir() / "config.json"
     data = normalize_settings_payload(settings.model_dump())
-    # 将Path对象转为字符串（兼容已经是字符串的情况）
-    for key in ["projects_dir", "skill_dir"]:
-        if isinstance(data[key], Path):
-            data[key] = str(data[key])
+    for key in [
+        "mode",
+        "api_key",
+        "api_base",
+        "model",
+        "projects_dir",
+        "skill_dir",
+        "managed_client_token",
+    ]:
+        data.pop(key, None)
     with open(config_file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)

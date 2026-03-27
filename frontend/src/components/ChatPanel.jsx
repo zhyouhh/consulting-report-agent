@@ -2,23 +2,50 @@ import React, { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import ReactMarkdown from 'react-markdown'
 import { showError, showSuccess } from '../utils/toast'
+import { buildChatRequest, toggleMaterialSelection } from '../utils/chatMaterials'
+import {
+  buildProjectWelcomeMessage,
+  shouldFlushStreamingQueueImmediately,
+  splitAssistantMessageBlocks,
+  takeStreamingTextSlice,
+} from '../utils/chatPresentation'
 import { describeConnectionMode } from '../utils/connectionMode'
+import { supportsImageAttachments } from '../utils/modelCapabilities'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 
-export default function ChatPanel({ project, settings, workspace, onProjectMutated, onTogglePreview }) {
+export default function ChatPanel({
+  projectId,
+  project,
+  settings,
+  workspace,
+  materials,
+  onMaterialsMerged,
+  onProjectMutated,
+  onTogglePreview,
+}) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
+  const [selectedMaterialIds, setSelectedMaterialIds] = useState([])
   const [tokenUsage, setTokenUsage] = useState(null)
   const [abortController, setAbortController] = useState(null)
   const messagesEndRef = useRef(null)
+  const uploadInputRef = useRef(null)
+  const pendingContentRef = useRef(new Map())
+  const contentFlushTimersRef = useRef(new Map())
   const connection = describeConnectionMode(settings || {})
   const workspaceSummary = summarizeWorkspace(workspace || {})
+  const selectedMaterials = materials.filter(material => selectedMaterialIds.includes(material.id))
+  const canSendImages = supportsImageAttachments(settings)
 
   useEffect(() => {
-    if (project) {
+    setSelectedMaterialIds([])
+
+    if (projectId) {
       // 加载历史对话
-      axios.get(`/api/projects/${project}/conversation`)
+      axios.get(`/api/projects/${encodeURIComponent(projectId)}/conversation`)
         .then(res => {
           const history = res.data.messages || []
           if (history.length > 0) {
@@ -28,7 +55,8 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
               .map((m, i) => ({
                 id: `${Date.now()}-${i}`,
                 role: m.role,
-                content: m.content
+                content: m.content,
+                attachedMaterialIds: m.attached_material_ids || [],
               }))
             setMessages(displayMessages)
           } else {
@@ -36,7 +64,7 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
             setMessages([{
               id: `${Date.now()}-${Math.random()}`,
               role: 'assistant',
-              content: '你好！请告诉我你想写什么类型的报告？报告的主题是什么？'
+              content: buildProjectWelcomeMessage(project || {})
             }])
           }
         })
@@ -45,25 +73,81 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
           setMessages([{
             id: `${Date.now()}-${Math.random()}`,
             role: 'assistant',
-            content: '你好！请告诉我你想写什么类型的报告？报告的主题是什么？'
+            content: buildProjectWelcomeMessage(project || {})
           }])
         })
       setTokenUsage(null)
+    } else {
+      setMessages([])
     }
-  }, [project])
+  }, [projectId])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  useEffect(() => () => {
+    contentFlushTimersRef.current.forEach(timerId => clearInterval(timerId))
+    contentFlushTimersRef.current.clear()
+    pendingContentRef.current.clear()
+  }, [])
+
+  const clearStreamingQueue = (assistantId) => {
+    const timerId = contentFlushTimersRef.current.get(assistantId)
+    if (timerId) {
+      clearInterval(timerId)
+      contentFlushTimersRef.current.delete(assistantId)
+    }
+    pendingContentRef.current.delete(assistantId)
+  }
+
+  const flushStreamingQueueImmediately = (assistantId) => {
+    const pending = pendingContentRef.current.get(assistantId) || ''
+    if (pending) {
+      setMessages(prev => prev.map(message =>
+        message.id === assistantId ? { ...message, content: message.content + pending } : message
+      ))
+    }
+    clearStreamingQueue(assistantId)
+  }
+
+  const enqueueAssistantContent = (assistantId, chunkText) => {
+    const currentPending = pendingContentRef.current.get(assistantId) || ''
+    pendingContentRef.current.set(assistantId, currentPending + chunkText)
+
+    if (contentFlushTimersRef.current.has(assistantId)) {
+      return
+    }
+
+    const timerId = window.setInterval(() => {
+      const pending = pendingContentRef.current.get(assistantId) || ''
+      if (!pending) {
+        clearStreamingQueue(assistantId)
+        return
+      }
+
+      const { emitted, remaining } = takeStreamingTextSlice(pending, 8)
+      pendingContentRef.current.set(assistantId, remaining)
+      setMessages(prev => prev.map(message =>
+        message.id === assistantId ? { ...message, content: message.content + emitted } : message
+      ))
+
+      if (!remaining) {
+        clearStreamingQueue(assistantId)
+      }
+    }, 24)
+
+    contentFlushTimersRef.current.set(assistantId, timerId)
+  }
+
   const clearConversation = async () => {
     if (!confirm('确定要清空对话历史吗？')) return
     try {
-      await axios.delete(`/api/projects/${project}/conversation`)
+      await axios.delete(`/api/projects/${encodeURIComponent(projectId)}/conversation`)
       setMessages([{
         id: `${Date.now()}-${Math.random()}`,
         role: 'assistant',
-        content: '对话已清空。请告诉我你想写什么类型的报告？'
+        content: buildProjectWelcomeMessage(project || {})
       }])
       setTokenUsage(null)
       onProjectMutated?.()
@@ -87,13 +171,57 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
     })
   }
 
-  const sendMessage = async () => {
-    if (!input.trim() || !project) return
+  const uploadFiles = async (files) => {
+    if (!files.length || !projectId) {
+      return
+    }
 
-    const userMsg = { id: `${Date.now()}-${Math.random()}`, role: 'user', content: input }
+    const formData = new FormData()
+    files.forEach(file => formData.append('files', file))
+
+    setUploading(true)
+    try {
+      const res = await axios.post(
+        `/api/projects/${encodeURIComponent(projectId)}/materials/upload`,
+        formData,
+      )
+      const uploadedMaterials = res.data.materials || []
+      if (uploadedMaterials.length > 0) {
+        onMaterialsMerged?.(uploadedMaterials)
+        setSelectedMaterialIds(prev => [
+          ...prev,
+          ...uploadedMaterials
+            .map(material => material.id)
+            .filter(materialId => !prev.includes(materialId)),
+        ])
+        showSuccess(`已导入 ${uploadedMaterials.length} 份材料`)
+        onProjectMutated?.()
+      }
+    } catch (error) {
+      showError('上传材料失败: ' + (error.response?.data?.detail || error.message))
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const sendMessage = async () => {
+    if (!input.trim() || !projectId || uploading) return
+    if (selectedMaterials.some(material => material.media_kind === 'image_like') && !canSendImages) {
+      showError('当前模型不支持图片输入，请切换模型或取消选择图片材料')
+      return
+    }
+
+    const userMsg = {
+      id: `${Date.now()}-${Math.random()}`,
+      role: 'user',
+      content: input.trim(),
+      attachedMaterialIds: selectedMaterialIds,
+    }
     setMessages(prev => [...prev, userMsg])
     const userInput = input
+    const attachedMaterialIds = selectedMaterialIds
     setInput('')
+    setSelectedMaterialIds([])
     setLoading(true)
 
     const controller = new AbortController()
@@ -101,13 +229,18 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
 
     // 创建助手消息占位
     const assistantId = `${Date.now()}-${Math.random()}`
+    clearStreamingQueue(assistantId)
     setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '' }])
 
     try {
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_name: project, message: userInput }),
+        body: JSON.stringify(buildChatRequest({
+          projectId,
+          messageText: userInput,
+          attachedMaterialIds,
+        })),
         signal: controller.signal
       })
 
@@ -131,10 +264,11 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
             try {
               const parsed = JSON.parse(data)
               if (parsed.type === 'content') {
-                setMessages(prev => prev.map(m =>
-                  m.id === assistantId ? { ...m, content: m.content + parsed.data } : m
-                ))
+                enqueueAssistantContent(assistantId, parsed.data)
               } else if (parsed.type === 'tool') {
+                if (shouldFlushStreamingQueueImmediately('tool')) {
+                  flushStreamingQueueImmediately(assistantId)
+                }
                 // 显示工具调用信息
                 setMessages(prev => prev.map(m =>
                   m.id === assistantId ? { ...m, content: m.content + '\n' + parsed.data } : m
@@ -142,6 +276,9 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
               } else if (parsed.type === 'usage') {
                 setTokenUsage(parsed.data)
               } else if (parsed.type === 'error') {
+                if (shouldFlushStreamingQueueImmediately('error')) {
+                  flushStreamingQueueImmediately(assistantId)
+                }
                 setMessages(prev => prev.map(m =>
                   m.id === assistantId ? { ...m, content: `错误: ${parsed.data}` } : m
                 ))
@@ -154,10 +291,16 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
       }
     } catch (error) {
       if (error.name === 'AbortError') {
+        if (shouldFlushStreamingQueueImmediately('abort')) {
+          flushStreamingQueueImmediately(assistantId)
+        }
         setMessages(prev => prev.map(m =>
           m.id === assistantId ? { ...m, content: m.content || '已停止生成' } : m
         ))
       } else {
+        if (shouldFlushStreamingQueueImmediately('error')) {
+          flushStreamingQueueImmediately(assistantId)
+        }
         setMessages(prev => prev.map(m =>
           m.id === assistantId ? { ...m, content: `API调用失败: ${error.message}` } : m
         ))
@@ -168,19 +311,44 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
     onProjectMutated?.()
   }
 
+  const handleSelectFiles = async (event) => {
+    const files = Array.from(event.target.files || [])
+    await uploadFiles(files)
+    event.target.value = ''
+  }
+
+  const handleDragOver = (event) => {
+    event.preventDefault()
+    if (projectId && !loading && !uploading) {
+      setDragActive(true)
+    }
+  }
+
+  const handleDragLeave = (event) => {
+    event.preventDefault()
+    setDragActive(false)
+  }
+
+  const handleDrop = async (event) => {
+    event.preventDefault()
+    setDragActive(false)
+    const files = Array.from(event.dataTransfer?.files || [])
+    await uploadFiles(files)
+  }
+
   return (
     <div className="flex-1 flex flex-col bg-[#1a1a2e]">
       <div className="p-4 border-b border-[#2a2a4a] flex justify-between items-center">
         <div>
-          <h2 className="font-semibold text-[#e2e2f0]">{project || '请选择或创建项目'}</h2>
-          {project && (
+          <h2 className="font-semibold text-[#e2e2f0]">{project?.name || '请选择或创建项目'}</h2>
+          {projectId && (
             <p className="text-xs text-[#8888a8] mt-1">
               {connection.title} · 当前阶段 {workspaceSummary.stageLabel}
             </p>
           )}
         </div>
         <div className="flex gap-2">
-          {project && (
+          {projectId && (
             <button onClick={clearConversation} className="text-sm text-[#8888a8] hover:text-[#e2e2f0]">
               清空对话
             </button>
@@ -193,42 +361,41 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((msg) => {
-          // 分离工具调用和普通内容
-          const lines = msg.content.split('\n')
-          const toolCalls = []
-          const normalContent = []
-
-          lines.forEach(line => {
-            if (line.startsWith('🔧 调用工具:') || line.startsWith('✅ 结果:')) {
-              toolCalls.push(line)
-            } else {
-              normalContent.push(line)
-            }
-          })
+          const assistantBlocks = msg.role === 'assistant'
+            ? splitAssistantMessageBlocks(msg.content)
+            : [{ type: 'text', content: msg.content }]
 
           return (
             <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-2xl px-4 py-2 rounded-lg relative group ${
                 msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-[#252545] text-[#e2e2f0]'
               }`}>
-                {/* 工具调用 */}
-                {toolCalls.length > 0 && (
-                  <div className="mb-2 space-y-1">
-                    {toolCalls.map((tool, i) => (
-                      <div key={i} className="text-xs bg-[#1a1a2e] px-2 py-1 rounded border border-[#3a3a5a] text-[#8888a8] font-mono">
-                        {tool}
-                      </div>
-                    ))}
+                {msg.attachedMaterialIds?.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    {msg.attachedMaterialIds.map(materialId => {
+                      const attachedMaterial = materials.find(material => material.id === materialId)
+                      return (
+                        <span key={materialId} className="text-[11px] px-2 py-1 rounded-full bg-[#1a1a2e] border border-[#3a3a5a] text-[#b8bbe8]">
+                          {attachedMaterial?.display_name || materialId}
+                        </span>
+                      )
+                    })}
                   </div>
                 )}
-
-                {/* 普通内容 - Markdown 渲染 */}
                 {msg.role === 'assistant' ? (
-                  <ReactMarkdown className="prose prose-invert prose-sm max-w-none">
-                    {normalContent.join('\n')}
-                  </ReactMarkdown>
+                  <div className="space-y-2">
+                    {assistantBlocks.map((block, index) => block.type === 'tool' ? (
+                      <div key={index} className="text-xs bg-[#1a1a2e] px-2 py-1 rounded border border-[#3a3a5a] text-[#8888a8] font-mono">
+                        {block.content}
+                      </div>
+                    ) : (
+                      <ReactMarkdown key={index} className="prose prose-invert prose-sm max-w-none">
+                        {block.content}
+                      </ReactMarkdown>
+                    ))}
+                  </div>
                 ) : (
-                  <div className="whitespace-pre-wrap">{normalContent.join('\n')}</div>
+                  <div className="whitespace-pre-wrap">{msg.content}</div>
                 )}
 
                 <button
@@ -263,8 +430,71 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
         </div>
       )}
 
-      <div className="p-4 border-t border-[#2a2a4a]">
+      <div
+        className={`p-4 border-t border-[#2a2a4a] ${dragActive ? 'bg-[#20284f]' : ''}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {selectedMaterials.length > 0 && (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {selectedMaterials.map(material => (
+              <button
+                key={material.id}
+                type="button"
+                onClick={() => setSelectedMaterialIds(prev => toggleMaterialSelection(prev, material.id))}
+                className="text-xs px-2 py-1 rounded-full bg-[#23234a] border border-[#3a3a5a] text-[#d6d8f6]"
+              >
+                {material.display_name} ×
+              </button>
+            ))}
+          </div>
+        )}
+        {materials.length > 0 && (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {materials.map(material => (
+              <button
+                key={material.id}
+                type="button"
+                onClick={() => setSelectedMaterialIds(prev => toggleMaterialSelection(prev, material.id))}
+                className={`text-xs px-2 py-1 rounded-full border ${
+                  selectedMaterialIds.includes(material.id)
+                    ? 'bg-blue-600 border-blue-500 text-white'
+                    : 'bg-[#15162d] border-[#2f3158] text-[#b6b8de]'
+                }`}
+              >
+                {material.display_name}
+              </button>
+            ))}
+          </div>
+        )}
+        {!canSendImages && materials.some(material => material.media_kind === 'image_like') && (
+          <div className="mb-3 text-xs text-[#f5b16a]">
+            当前自定义模型按保守规则视为不支持图片输入，选中图片材料时会阻止发送。
+          </div>
+        )}
+        {dragActive && (
+          <div className="mb-3 rounded border border-dashed border-[#6d8cff] px-3 py-2 text-sm text-[#d9e2ff]">
+            松开鼠标即可导入材料并附带到本轮消息
+          </div>
+        )}
         <div className="flex gap-2">
+          <input
+            ref={uploadInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={handleSelectFiles}
+          />
+          <button
+            type="button"
+            onClick={() => uploadInputRef.current?.click()}
+            disabled={!projectId || loading || uploading}
+            className="border border-[#3a3a5a] text-[#e2e2f0] px-4 py-2 rounded-lg hover:bg-[#222244] disabled:bg-[#20203a] disabled:text-[#77789a]"
+            title="导入新材料"
+          >
+            {uploading ? '上传中...' : '+'}
+          </button>
           <input
             value={input}
             onChange={e => setInput(e.target.value)}
@@ -275,7 +505,7 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
               }
             }}
             placeholder="输入消息..."
-            disabled={!project || loading}
+            disabled={!projectId || loading || uploading}
             className="flex-1 bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
           />
           {loading ? (
@@ -288,7 +518,7 @@ export default function ChatPanel({ project, settings, workspace, onProjectMutat
           ) : (
             <button
               onClick={sendMessage}
-              disabled={!project}
+              disabled={!projectId || uploading}
               className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 disabled:bg-[#3a3a5a]"
             >
               发送

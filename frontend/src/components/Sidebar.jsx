@@ -5,7 +5,7 @@ import { describeConnectionMode } from '../utils/connectionMode'
 
 export default function Sidebar({
   projects,
-  currentProject,
+  currentProjectId,
   settings,
   onSelectProject,
   onCreateProject,
@@ -16,8 +16,8 @@ export default function Sidebar({
   const [showSettings, setShowSettings] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState(null)
 
-  const handleDelete = async (projectName) => {
-    const success = await onDeleteProject(projectName)
+  const handleDelete = async (projectId) => {
+    const success = await onDeleteProject(projectId)
     if (success) {
       setDeleteConfirm(null)
     }
@@ -43,13 +43,13 @@ export default function Sidebar({
       <div className="flex-1 overflow-y-auto px-4">
         {projects.map((project) => (
           <div
-            key={project.name}
+            key={project.id}
             className={`p-3 mb-2 rounded-lg flex items-center justify-between ${
-              currentProject === project.name ? 'bg-[#1e1e4a] border border-[#3b5998]' : 'hover:bg-[#222244]'
+              currentProjectId === project.id ? 'bg-[#1e1e4a] border border-[#3b5998]' : 'hover:bg-[#222244]'
             }`}
           >
             <div
-              onClick={() => onSelectProject(project.name)}
+              onClick={() => onSelectProject(project)}
               className="flex-1 cursor-pointer font-medium text-sm text-[#e2e2f0]"
             >
               {project.name}
@@ -57,7 +57,7 @@ export default function Sidebar({
             <button
               onClick={(e) => {
                 e.stopPropagation()
-                setDeleteConfirm(project.name)
+                setDeleteConfirm(project.id)
               }}
               className="text-red-400 hover:text-red-300 ml-2"
             >
@@ -72,6 +72,11 @@ export default function Sidebar({
           <div className="text-xs text-[#64ffda] font-medium">{connection.title}</div>
           <div className="text-[11px] text-[#8f93c9] mt-1">{connection.subtitle}</div>
         </div>
+        {connection.helper && (
+          <div className="mb-2 text-[11px] leading-5 text-[#7f84b8]">
+            {connection.helper}
+          </div>
+        )}
         <button
           onClick={() => setShowSettings(true)}
           className="w-full text-[#8888a8] hover:text-[#e2e2f0] text-sm py-2 flex items-center justify-center gap-1"
@@ -86,7 +91,7 @@ export default function Sidebar({
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-[#1a1a2e] rounded-lg p-6 w-96">
             <h2 className="text-lg font-semibold mb-4 text-[#e2e2f0]">确认删除</h2>
-            <p className="text-[#8888a8] mb-6">确定要删除项目 "{deleteConfirm}" 吗？此操作无法撤销。</p>
+            <p className="text-[#8888a8] mb-6">确定要删除这个项目吗？此操作无法撤销。</p>
             <div className="flex gap-2">
               <button onClick={() => setDeleteConfirm(null)} className="flex-1 border border-[#3a3a5a] text-[#e2e2f0] px-4 py-2 rounded hover:bg-[#222244]">取消</button>
               <button onClick={() => handleDelete(deleteConfirm)} className="flex-1 bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">删除</button>

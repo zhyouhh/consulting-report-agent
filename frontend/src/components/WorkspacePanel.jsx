@@ -6,16 +6,24 @@ import { showError, showSuccess } from '../utils/toast'
 import { getNextQualityResult } from '../utils/workspacePanelState'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 
-export default function WorkspacePanel({ project, workspace, refreshToken, onProjectMutated }) {
+export default function WorkspacePanel({
+  projectId,
+  project,
+  workspace,
+  materials,
+  refreshToken,
+  onMaterialDeleted,
+  onProjectMutated,
+}) {
   const [activeTab, setActiveTab] = useState('stage')
   const [files, setFiles] = useState([])
   const [currentFile, setCurrentFile] = useState('plan/project-overview.md')
   const [content, setContent] = useState('')
   const [qualityResult, setQualityResult] = useState(null)
-  const previousProjectRef = useRef(project)
-  const activeProjectRef = useRef(project)
+  const previousProjectRef = useRef(projectId)
+  const activeProjectRef = useRef(projectId)
 
-  const loadFile = useCallback(async (path, requestProject = project) => {
+  const loadFile = useCallback(async (path, requestProject = projectId) => {
     if (!requestProject || !path) return
     try {
       const res = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/files/${path}`)
@@ -36,14 +44,14 @@ export default function WorkspacePanel({ project, workspace, refreshToken, onPro
       }
       setContent('文件不存在或无法读取')
     }
-  }, [project])
+  }, [projectId])
 
   useEffect(() => {
-    activeProjectRef.current = project
-  }, [project])
+    activeProjectRef.current = projectId
+  }, [projectId])
 
   const loadFiles = useCallback(async () => {
-    const requestProject = project
+    const requestProject = projectId
     if (!requestProject) return
     try {
       const res = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/files`)
@@ -77,30 +85,30 @@ export default function WorkspacePanel({ project, workspace, refreshToken, onPro
       }
       console.error('加载文件列表失败', error)
     }
-  }, [project, currentFile, loadFile])
+  }, [projectId, currentFile, loadFile])
 
   useEffect(() => {
-    if (project) {
+    if (projectId) {
       loadFiles()
     } else {
       setFiles([])
       setContent('')
     }
-  }, [project, refreshToken, loadFiles])
+  }, [projectId, refreshToken, loadFiles])
 
   useEffect(() => {
     setQualityResult(currentResult => getNextQualityResult({
       currentResult,
       previousProject: previousProjectRef.current,
-      nextProject: project,
+      nextProject: projectId,
     }))
-    previousProjectRef.current = project
-  }, [project])
+    previousProjectRef.current = projectId
+  }, [projectId])
 
   const runQualityCheck = async () => {
-    if (!project) return
+    if (!projectId) return
     try {
-      const res = await axios.post(`/api/projects/${encodeURIComponent(project)}/quality-check`)
+      const res = await axios.post(`/api/projects/${encodeURIComponent(projectId)}/quality-check`)
       setQualityResult(res.data)
       onProjectMutated?.()
     } catch (error) {
@@ -109,13 +117,25 @@ export default function WorkspacePanel({ project, workspace, refreshToken, onPro
   }
 
   const exportDraft = async () => {
-    if (!project) return
+    if (!projectId) return
     try {
-      const res = await axios.post(`/api/projects/${encodeURIComponent(project)}/export-draft`)
+      const res = await axios.post(`/api/projects/${encodeURIComponent(projectId)}/export-draft`)
       showSuccess(`已导出可审草稿：${res.data.output_path}`)
       onProjectMutated?.()
     } catch (error) {
       showError('导出失败: ' + (error.response?.data?.detail || error.message))
+    }
+  }
+
+  const deleteMaterial = async (materialId) => {
+    if (!projectId) return
+    try {
+      await axios.delete(`/api/projects/${encodeURIComponent(projectId)}/materials/${encodeURIComponent(materialId)}`)
+      onMaterialDeleted?.(materialId)
+      onProjectMutated?.()
+      showSuccess('材料已删除')
+    } catch (error) {
+      showError('删除材料失败: ' + (error.response?.data?.detail || error.message))
     }
   }
 
@@ -135,6 +155,12 @@ export default function WorkspacePanel({ project, workspace, refreshToken, onPro
           >
             文件
           </button>
+          <button
+            onClick={() => setActiveTab('materials')}
+            className={`px-3 py-2 rounded-lg text-sm ${activeTab === 'materials' ? 'bg-[#28366b] text-white' : 'bg-[#15162d] text-[#8f93c9]'}`}
+          >
+            材料
+          </button>
         </div>
       </div>
 
@@ -145,13 +171,44 @@ export default function WorkspacePanel({ project, workspace, refreshToken, onPro
           onRunQualityCheck={runQualityCheck}
           onExportDraft={exportDraft}
         />
-      ) : (
+      ) : activeTab === 'files' ? (
         <FilePreviewPanel
           files={files}
           currentFile={currentFile}
           content={content}
           onSelectFile={loadFile}
         />
+      ) : (
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          <div className="text-sm text-[#8f93c9]">
+            {project?.workspace_dir || workspace?.workspace_dir || '未设置工作目录'}
+          </div>
+          {materials.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-[#3a3a5a] p-4 text-sm text-[#8f93c9]">
+              暂无项目材料。可以在聊天输入框左侧通过加号上传新材料。
+            </div>
+          ) : (
+            materials.map(material => (
+              <div key={material.id} className="rounded-lg border border-[#2f3158] bg-[#15162d] p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-sm text-[#e2e2f0] break-all">{material.display_name}</div>
+                    <div className="mt-1 text-xs text-[#8f93c9]">
+                      {material.source_type} · {material.file_type || '未知类型'}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => deleteMaterial(material.id)}
+                    className="text-xs text-red-300 hover:text-red-200"
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
       )}
     </div>
   )

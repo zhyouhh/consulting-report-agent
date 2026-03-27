@@ -1,13 +1,16 @@
 import React, { useState } from 'react'
+import axios from 'axios'
 
 const initialForm = {
   name: '',
+  workspace_dir: '',
   project_type: 'strategy-consulting',
   theme: '',
   target_audience: '高层决策者',
   deadline: '',
   expected_length: '',
   notes: '',
+  initial_material_paths: [],
 }
 
 export default function ProjectCreateModal({ onClose, onCreate }) {
@@ -21,6 +24,10 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
     }
     if (!formData.theme.trim()) {
       alert('请输入报告主题')
+      return
+    }
+    if (!formData.workspace_dir.trim()) {
+      alert('请选择工作目录')
       return
     }
     if (!formData.deadline.trim()) {
@@ -41,9 +48,46 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
     }
   }
 
+  const handleSelectWorkspace = async () => {
+    try {
+      const res = await axios.post('/api/system/select-workspace-folder')
+      if (!res.data.path) {
+        return
+      }
+      setFormData(prev => ({
+        ...prev,
+        workspace_dir: res.data.path,
+        initial_material_paths: prev.workspace_dir === res.data.path ? prev.initial_material_paths : [],
+      }))
+    } catch (error) {
+      console.error('选择工作目录失败:', error)
+      alert('选择工作目录失败，请重试')
+    }
+  }
+
+  const handleSelectInitialMaterials = async () => {
+    if (!formData.workspace_dir) {
+      alert('请先选择工作目录')
+      return
+    }
+
+    try {
+      const res = await axios.post('/api/system/select-workspace-files', {
+        workspace_dir: formData.workspace_dir,
+      })
+      setFormData(prev => ({
+        ...prev,
+        initial_material_paths: res.data.paths || [],
+      }))
+    } catch (error) {
+      console.error('选择初始材料失败:', error)
+      alert('选择初始材料失败，请重试')
+    }
+  }
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-[#1a1a2e] rounded-lg p-6 w-[520px] border border-[#2f3158]">
+      <div className="bg-[#1a1a2e] rounded-lg p-6 w-[560px] border border-[#2f3158]">
         <h2 className="text-lg font-semibold mb-4 text-[#e2e2f0]">新建咨询项目</h2>
 
         <input
@@ -52,6 +96,25 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
           onChange={e => setFormData({ ...formData, name: e.target.value })}
           className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-3"
         />
+
+        <div className="mb-3">
+          <div className="text-sm text-[#c5c7ef] mb-2">工作目录</div>
+          <div className="flex gap-2">
+            <input
+              placeholder="请选择工作目录"
+              value={formData.workspace_dir}
+              readOnly
+              className="flex-1 bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2"
+            />
+            <button
+              type="button"
+              onClick={handleSelectWorkspace}
+              className="border border-[#3a3a5a] text-[#e2e2f0] px-4 py-2 rounded hover:bg-[#222244]"
+            >
+              选择目录
+            </button>
+          </div>
+        </div>
 
         <select
           value={formData.project_type}
@@ -103,8 +166,40 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
           value={formData.notes}
           onChange={e => setFormData({ ...formData, notes: e.target.value })}
           rows={4}
-          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-4 resize-none"
+          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-3 resize-none"
         />
+
+        <div className="mb-3 rounded border border-[#2f3158] bg-[#15162d] p-3">
+          <div className="text-sm text-[#e2e2f0] mb-2">初始材料</div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={handleSelectInitialMaterials}
+              className="border border-[#3a3a5a] text-[#e2e2f0] px-4 py-2 rounded hover:bg-[#222244]"
+            >
+              选择目录内材料
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormData(prev => ({ ...prev, initial_material_paths: [] }))}
+              disabled={formData.initial_material_paths.length === 0}
+              className="border border-[#3a3a5a] text-[#a9acd8] px-4 py-2 rounded hover:bg-[#222244] disabled:opacity-50"
+            >
+              清空
+            </button>
+          </div>
+          <div className="mt-3 rounded border border-dashed border-[#3a3a5a] p-3 text-sm text-[#b6b8de]">
+            {formData.initial_material_paths.length === 0 ? (
+              <div>可选。现在不提供材料也能直接创建，后面在聊天里再补也可以。</div>
+            ) : (
+              <div className="space-y-2">
+                {formData.initial_material_paths.map(path => (
+                  <div key={path} className="break-all">{path}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
 
         <div className="flex gap-2">
           <button onClick={onClose} className="flex-1 border border-[#3a3a5a] text-[#e2e2f0] px-4 py-2 rounded hover:bg-[#222244]">取消</button>
