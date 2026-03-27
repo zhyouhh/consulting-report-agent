@@ -11,6 +11,14 @@ test("summarizeWorkspace falls back safely when stage data is missing", () => {
   assert.deepEqual(summary.nextActions, []);
 });
 
+test("summarizeWorkspace falls back safely when api summary is null", () => {
+  const summary = summarizeWorkspace(null);
+  assert.equal(summary.stageLabel, "未开始");
+  assert.equal(summary.statusLabel, "待开始");
+  assert.deepEqual(summary.completedItems, []);
+  assert.deepEqual(summary.nextActions, []);
+});
+
 test("summarizeWorkspace preserves api summary values", () => {
   const summary = summarizeWorkspace({
     stage_code: "S4",
