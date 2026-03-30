@@ -11,7 +11,7 @@ test("describeConnectionMode returns managed label", () => {
     }),
     {
       title: "默认通道",
-      subtitle: "推荐，开箱即用 · gemini-3-flash",
+      subtitle: "开箱即用 · gemini-3-flash",
       helper: "有自己的模型/API，可点击下方“连接设置”接入。",
     },
   );
@@ -36,7 +36,7 @@ test("describeConnectionMode falls back to managed when settings are missing", (
     describeConnectionMode(),
     {
       title: "默认通道",
-      subtitle: "推荐，开箱即用 · gemini-3-flash",
+      subtitle: "开箱即用 · gemini-3-flash",
       helper: "有自己的模型/API，可点击下方“连接设置”接入。",
     },
   );
@@ -50,4 +50,13 @@ test("describeConnectionMode exposes helper text for managed mode", () => {
     }).helper,
     "有自己的模型/API，可点击下方“连接设置”接入。",
   );
+});
+
+test("describeConnectionMode managed copy stays neutral", () => {
+  const description = describeConnectionMode({
+    mode: "managed",
+    managed_model: "gemini-3-flash",
+  });
+
+  assert.equal(description.subtitle.includes("推荐"), false);
 });

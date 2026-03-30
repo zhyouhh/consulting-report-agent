@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from openai import OpenAI
 
 from .config import Settings
+from .context_policy import ResolvedContextPolicy, resolve_context_policy
 from .skill import SkillEngine
 
 try:
@@ -19,6 +20,10 @@ try:
     _encoding = tiktoken.get_encoding("cl100k_base")
 except Exception:
     _encoding = None
+
+
+IMAGE_TOKEN_COST = 1024
+MAX_BUDGET_FIT_ATTEMPTS = 6
 
 
 class ChatHandler:
@@ -36,6 +41,19 @@ class ChatHandler:
         "localhost",
         "host.docker.internal",
     }
+    FILE_UPDATE_VERBS = (
+        "已更新",
+        "已经更新",
+        "已同步",
+        "已经同步",
+        "已写入",
+        "已经写入",
+        "已记录",
+        "已经记录",
+        "已入档",
+        "已经入档",
+    )
+    MAX_MISSING_WRITE_RETRIES = 2
 
     NON_PLAN_WRITE_ALLOW_KEYWORDS = [
         "确认大纲",
@@ -67,21 +85,117 @@ class ChatHandler:
             http_client=http_client,
         )
 
+    def _get_active_model_name(self) -> str:
+        if self.settings.mode == "managed":
+            return (self.settings.managed_model or self.settings.model or "").strip()
+        if self.settings.mode == "custom":
+            return (self.settings.custom_model or self.settings.model or "").strip()
+        return (self.settings.model or self.settings.managed_model or self.settings.custom_model or "").strip()
+
+    def _resolve_context_policy(self) -> ResolvedContextPolicy:
+        custom_effective_limit = None
+        if self.settings.mode == "custom":
+            custom_effective_limit = self.settings.custom_context_limit_override
+        return resolve_context_policy(
+            self._get_active_model_name(),
+            custom_effective_limit=custom_effective_limit,
+        )
+
     def _estimate_tokens(self, messages: List[Dict]) -> int:
         """预估消息列表的token数"""
         total = 0
         for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total += self._estimate_text_tokens(content)
-            else:
-                total += self._estimate_text_tokens(json.dumps(content, ensure_ascii=False))
+            total += self._estimate_message_tokens(msg)
         return total
+
+    def _estimate_message_tokens(self, message: Dict) -> int:
+        total = self._estimate_content_tokens(message.get("content", ""))
+
+        tool_call_id = message.get("tool_call_id")
+        if tool_call_id:
+            total += self._estimate_text_tokens(str(tool_call_id))
+
+        for tool_call in message.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                total += self._estimate_text_tokens(json.dumps(tool_call, ensure_ascii=False))
+                continue
+            total += self._estimate_text_tokens(str(tool_call.get("id", "")))
+            total += self._estimate_text_tokens(str(tool_call.get("type", "")))
+            function = tool_call.get("function") or {}
+            total += self._estimate_text_tokens(str(function.get("name", "")))
+            total += self._estimate_text_tokens(str(function.get("arguments", "")))
+
+        return total
+
+    def _estimate_content_tokens(self, content) -> int:
+        if isinstance(content, str):
+            return self._estimate_text_tokens(content)
+        if isinstance(content, list):
+            total = 0
+            for item in content:
+                if not isinstance(item, dict):
+                    total += self._estimate_text_tokens(json.dumps(item, ensure_ascii=False))
+                    continue
+                item_type = item.get("type")
+                if item_type == "text":
+                    total += self._estimate_text_tokens(item.get("text", ""))
+                    continue
+                if item_type == "image_url":
+                    total += IMAGE_TOKEN_COST
+                    continue
+                total += self._estimate_text_tokens(json.dumps(item, ensure_ascii=False))
+            return total
+        return self._estimate_text_tokens(json.dumps(content, ensure_ascii=False))
 
     def _estimate_text_tokens(self, text: str) -> int:
         if _encoding:
             return len(_encoding.encode(text)) + 4
         return int(len(text) * 0.6)
+
+    def _fit_conversation_to_budget(
+        self,
+        conversation: List[Dict],
+    ) -> tuple[List[Dict], int, bool, ResolvedContextPolicy]:
+        policy = self._resolve_context_policy()
+        current_conversation = conversation
+        current_tokens = self._estimate_tokens(current_conversation)
+        compressed = False
+
+        if current_tokens <= policy.compress_threshold:
+            return current_conversation, current_tokens, compressed, policy
+
+        previous_tokens = current_tokens
+        for _ in range(MAX_BUDGET_FIT_ATTEMPTS):
+            next_conversation = self._compress_conversation(current_conversation)
+            compressed = True
+            next_tokens = self._estimate_tokens(next_conversation)
+            if next_tokens <= policy.compress_threshold:
+                return next_conversation, next_tokens, compressed, policy
+            if next_conversation == current_conversation or next_tokens >= previous_tokens:
+                break
+            current_conversation = next_conversation
+            previous_tokens = next_tokens
+
+        raise ValueError("当前消息或附带材料过大，超过模型上下文预算，请缩短输入或减少附件。")
+
+    def _build_usage_payload(
+        self,
+        current_tokens: int,
+        policy: ResolvedContextPolicy,
+        compressed: bool,
+        usage_mode: str,
+    ) -> Dict[str, int | bool | str]:
+        return {
+            "current_tokens": current_tokens,
+            "max_tokens": policy.effective_context_limit,
+            "effective_max_tokens": policy.effective_context_limit,
+            "provider_max_tokens": policy.provider_context_limit,
+            "compressed": compressed,
+            "usage_mode": usage_mode,
+        }
+
+    def _get_request_max_tokens(self, policy: ResolvedContextPolicy) -> int:
+        return policy.reserved_output_tokens
 
     def _compress_conversation(self, conversation: List[Dict]) -> List[Dict]:
         """压缩对话历史：保留system + LLM摘要 + 最近N条消息"""
@@ -90,8 +204,9 @@ class ChatHandler:
             return conversation
 
         system_msg = conversation[0]
-        recent_msgs = conversation[-keep_n:]
-        old_msgs = conversation[1:-keep_n]
+        recent_start = self._find_recent_start(conversation, keep_n)
+        recent_msgs = conversation[recent_start:]
+        old_msgs = conversation[1:recent_start]
 
         max_old_msgs = 50
         if len(old_msgs) > max_old_msgs:
@@ -112,7 +227,7 @@ class ChatHandler:
 
         try:
             resp = self.client.chat.completions.create(
-                model=self.settings.model,
+                model=self._get_active_model_name(),
                 messages=summary_prompt,
                 temperature=0.3,
                 max_tokens=2000,
@@ -127,6 +242,109 @@ class ChatHandler:
             {"role": "assistant", "content": f"[对话摘要]\n{summary}"},
             *recent_msgs,
         ]
+
+    def _find_recent_start(self, conversation: List[Dict], keep_n: int) -> int:
+        start = max(1, len(conversation) - keep_n)
+        while start < len(conversation) and conversation[start].get("role") == "tool":
+            assistant_index = self._find_tool_call_assistant_index(conversation, start)
+            if assistant_index is not None:
+                return assistant_index
+            start += 1
+        return start
+
+    def _find_tool_call_assistant_index(self, conversation: List[Dict], tool_index: int) -> int | None:
+        tool_call_id = conversation[tool_index].get("tool_call_id")
+        for index in range(tool_index - 1, 0, -1):
+            message = conversation[index]
+            role = message.get("role")
+            if role == "assistant":
+                if self._assistant_has_tool_call(message, tool_call_id):
+                    return index
+                return None
+            if role == "user":
+                return None
+        return None
+
+    def _assistant_has_tool_call(self, message: Dict, tool_call_id: str | None) -> bool:
+        tool_calls = message.get("tool_calls") or []
+        if not tool_calls:
+            return False
+        if not tool_call_id:
+            return True
+        return any(
+            isinstance(tool_call, dict) and tool_call.get("id") == tool_call_id
+            for tool_call in tool_calls
+        )
+
+    def _normalize_project_file_path(self, file_path: str) -> str:
+        return file_path.replace("\\", "/").lstrip("/").strip()
+
+    def _extract_successful_write_path(self, func_name: str, arguments: str, result: Dict) -> str | None:
+        if func_name != "write_file" or result.get("status") != "success":
+            return None
+        try:
+            payload = json.loads(arguments)
+        except Exception:
+            return None
+        file_path = payload.get("file_path")
+        if not isinstance(file_path, str) or not file_path.strip():
+            return None
+        return self._normalize_project_file_path(file_path)
+
+    def _looks_like_outline_draft(self, assistant_message: str) -> bool:
+        text = (assistant_message or "").strip()
+        if not text:
+            return False
+        if "大纲" not in text:
+            return False
+        chapter_hits = len(re.findall(r"第\s*[一二三四五六七八九十0-9]+\s*章", text))
+        heading_hits = len(re.findall(r"^\s*(?:[#*]|[-])", text, flags=re.MULTILINE))
+        return chapter_hits >= 2 or ("报告大纲" in text and heading_hits >= 3)
+
+    def _message_mentions_file_update(self, assistant_message: str, keywords: tuple[str, ...]) -> bool:
+        text = (assistant_message or "").strip()
+        if not text:
+            return False
+        if not any(verb in text for verb in self.FILE_UPDATE_VERBS):
+            return False
+        return any(keyword in text for keyword in keywords)
+
+    def _expected_plan_writes_for_message(self, assistant_message: str) -> set[str]:
+        text = (assistant_message or "").strip()
+        if not text:
+            return set()
+
+        expected: set[str] = set()
+        normalized_text = text.replace("**", "")
+
+        if any(verb in normalized_text for verb in self.FILE_UPDATE_VERBS):
+            for raw_path in re.findall(r"`([^`]+)`", normalized_text):
+                normalized_path = self._normalize_project_file_path(raw_path)
+                if normalized_path.startswith("plan/") and normalized_path.endswith(".md"):
+                    expected.add(normalized_path)
+
+        if self._looks_like_outline_draft(normalized_text):
+            expected.add("plan/outline.md")
+
+        if self._message_mentions_file_update(normalized_text, ("plan/progress.md", "progress.md", "当前任务", "项目进度")):
+            expected.add("plan/progress.md")
+
+        if self._message_mentions_file_update(normalized_text, ("plan/notes.md", "notes.md", "项目笔记", "核心技术共识", "备注")):
+            expected.add("plan/notes.md")
+
+        return expected
+
+    def _get_missing_expected_writes(self, assistant_message: str, successful_writes: set[str]) -> list[str]:
+        expected = self._expected_plan_writes_for_message(assistant_message)
+        return sorted(path for path in expected if path not in successful_writes)
+
+    def _build_missing_write_feedback(self, missing_files: list[str]) -> str:
+        joined = "、".join(f"`{path}`" for path in missing_files)
+        return (
+            f"你刚刚声称已更新或已经给出了需要入档的内容，但本轮并未成功调用 `write_file` 写入 {joined}。"
+            "不要口头汇报，也不要继续推进下一阶段。"
+            "请先用 `write_file` 完成这些文件落盘，再用一句话说明实际已写入哪些文件。"
+        )
 
     def chat_stream(
         self,
@@ -148,26 +366,33 @@ class ChatHandler:
         }
         self._turn_context = self._build_turn_context(project_id, user_message)
         conversation = self._build_provider_conversation(project_id, history, current_user_message)
-
-        compressed = False
-        estimated = self._estimate_tokens(conversation)
-        if estimated > self.settings.compress_threshold:
-            conversation = self._compress_conversation(conversation)
-            compressed = True
+        active_model = self._get_active_model_name()
 
         total_tokens = 0
         iterations = 0
+        missing_write_retries = 0
         assistant_message = ""
+        compressed = False
+        policy = self._resolve_context_policy()
+        successful_writes: set[str] = set()
 
         while iterations < max_iterations:
+            try:
+                conversation, _, iteration_compressed, policy = self._fit_conversation_to_budget(conversation)
+                compressed = compressed or iteration_compressed
+            except ValueError as exc:
+                self._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+                yield {"type": "error", "data": str(exc)}
+                return
+
             for retry in range(2):
                 try:
-                    timeout = 120.0 if "v3.2" in self.settings.model.lower() else 30.0
+                    timeout = 120.0 if "v3.2" in active_model.lower() else 30.0
                     response = self.client.chat.completions.create(
-                        model=self.settings.model,
+                        model=active_model,
                         messages=conversation,
                         temperature=0.7,
-                        max_tokens=4096,
+                        max_tokens=self._get_request_max_tokens(policy),
                         tools=self._get_tools(),
                         tool_choice="auto",
                         timeout=timeout,
@@ -226,6 +451,9 @@ class ChatHandler:
                             })()
 
                     result = self._execute_tool(project_id, ToolCall(tool_call))
+                    write_path = self._extract_successful_write_path(func_name, func_args, result)
+                    if write_path:
+                        successful_writes.add(write_path)
                     result_icon = "✅" if result.get("status") == "success" else "⚠️"
                     yield {"type": "tool", "data": f"{result_icon} 结果: {str(result)[:160]}..."}
                     conversation.append({
@@ -235,7 +463,21 @@ class ChatHandler:
                     })
                 iterations += 1
             else:
-                assistant_message = collected_message["content"]
+                candidate_message = collected_message["content"]
+                missing_writes = self._get_missing_expected_writes(candidate_message, successful_writes)
+                if missing_writes and missing_write_retries < self.MAX_MISSING_WRITE_RETRIES:
+                    missing_write_retries += 1
+                    yield {
+                        "type": "tool",
+                        "data": "⚠️ 检测到上条回复声称已更新文件但未实际写入，正在要求助手补做真实落盘。",
+                    }
+                    conversation.append({"role": "assistant", "content": candidate_message})
+                    conversation.append({
+                        "role": "user",
+                        "content": self._build_missing_write_feedback(missing_writes),
+                    })
+                    continue
+                assistant_message = candidate_message
                 break
         else:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
@@ -250,11 +492,12 @@ class ChatHandler:
 
         yield {
             "type": "usage",
-            "data": {
-                "current_tokens": total_tokens,
-                "max_tokens": self.settings.context_window,
-                "compressed": compressed,
-            },
+            "data": self._build_usage_payload(
+                total_tokens,
+                policy,
+                compressed,
+                usage_mode="estimated",
+            ),
         }
 
     def chat(
@@ -276,25 +519,32 @@ class ChatHandler:
         }
         self._turn_context = self._build_turn_context(project_id, user_message)
         conversation = self._build_provider_conversation(project_id, history, current_user_message)
-
-        compressed = False
-        estimated = self._estimate_tokens(conversation)
-        if estimated > self.settings.compress_threshold:
-            conversation = self._compress_conversation(conversation)
-            compressed = True
+        active_model = self._get_active_model_name()
 
         total_tokens = 0
         iterations = 0
+        missing_write_retries = 0
         assistant_message = ""
+        usage_mode = "estimated"
+        compressed = False
+        policy = self._resolve_context_policy()
+        successful_writes: set[str] = set()
         while iterations < max_iterations:
+            try:
+                conversation, _, iteration_compressed, policy = self._fit_conversation_to_budget(conversation)
+                compressed = compressed or iteration_compressed
+            except ValueError as exc:
+                self._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+                return {"content": str(exc), "token_usage": None}
+
             for retry in range(2):
                 try:
-                    timeout = 120.0 if "v3.2" in self.settings.model.lower() else 30.0
+                    timeout = 120.0 if "v3.2" in active_model.lower() else 30.0
                     response = self.client.chat.completions.create(
-                        model=self.settings.model,
+                        model=active_model,
                         messages=conversation,
                         temperature=0.7,
-                        max_tokens=4096,
+                        max_tokens=self._get_request_max_tokens(policy),
                         tools=self._get_tools(),
                         tool_choice="auto",
                         timeout=timeout,
@@ -308,6 +558,10 @@ class ChatHandler:
 
             if hasattr(response, "usage") and response.usage:
                 total_tokens = getattr(response.usage, "total_tokens", 0) or 0
+                usage_mode = "actual"
+            else:
+                total_tokens = 0
+                usage_mode = "estimated"
 
             message = response.choices[0].message
             if message.tool_calls:
@@ -329,6 +583,13 @@ class ChatHandler:
                 conversation.append(msg_dict)
                 for tool_call in message.tool_calls:
                     result = self._execute_tool(project_id, tool_call)
+                    write_path = self._extract_successful_write_path(
+                        tool_call.function.name,
+                        tool_call.function.arguments,
+                        result,
+                    )
+                    if write_path:
+                        successful_writes.add(write_path)
                     conversation.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -336,7 +597,17 @@ class ChatHandler:
                     })
                 iterations += 1
             else:
-                assistant_message = message.content
+                candidate_message = message.content or ""
+                missing_writes = self._get_missing_expected_writes(candidate_message, successful_writes)
+                if missing_writes and missing_write_retries < self.MAX_MISSING_WRITE_RETRIES:
+                    missing_write_retries += 1
+                    conversation.append({"role": "assistant", "content": candidate_message})
+                    conversation.append({
+                        "role": "user",
+                        "content": self._build_missing_write_feedback(missing_writes),
+                    })
+                    continue
+                assistant_message = candidate_message
                 break
         else:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
@@ -350,11 +621,12 @@ class ChatHandler:
 
         return {
             "content": assistant_message,
-            "token_usage": {
-                "current_tokens": total_tokens,
-                "max_tokens": self.settings.context_window,
-                "compressed": compressed,
-            },
+            "token_usage": self._build_usage_payload(
+                total_tokens,
+                policy,
+                compressed,
+                usage_mode=usage_mode,
+            ),
         }
 
     def _build_provider_conversation(self, project_id: str, history: List[Dict], current_user_message: Dict) -> List[Dict]:

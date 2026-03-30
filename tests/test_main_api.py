@@ -183,8 +183,11 @@ class WorkspaceApiTests(unittest.TestCase):
             "content": "已整理完毕",
             "token_usage": {
                 "current_tokens": 1200,
-                "max_tokens": 128000,
+                "max_tokens": 500000,
+                "effective_max_tokens": 500000,
+                "provider_max_tokens": 1000000,
                 "compressed": False,
+                "usage_mode": "actual",
             },
         }
         mock_get_chat_handler.return_value = handler
@@ -200,6 +203,10 @@ class WorkspaceApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["content"], "已整理完毕")
+        self.assertEqual(response.json()["token_usage"]["max_tokens"], 500000)
+        self.assertEqual(response.json()["token_usage"]["effective_max_tokens"], 500000)
+        self.assertEqual(response.json()["token_usage"]["provider_max_tokens"], 1000000)
+        self.assertEqual(response.json()["token_usage"]["usage_mode"], "actual")
         handler.chat.assert_called_once_with(
             "proj-demo",
             "请结合新增材料整理问题树",

@@ -5,6 +5,21 @@ export function takeStreamingTextSlice(text = "", size = 12) {
   };
 }
 
+export function extractSseDataPayload(line = "") {
+  if (!line.startsWith("data:")) {
+    return null;
+  }
+
+  return line.slice(5).trim();
+}
+
+export function shouldContinueSseStream({
+  readerDone = false,
+  streamCompleted = false,
+} = {}) {
+  return !readerDone && !streamCompleted;
+}
+
 export function shouldFlushStreamingQueueImmediately(reason = "") {
   return reason === "tool" || reason === "error" || reason === "abort";
 }

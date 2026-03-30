@@ -1,7 +1,9 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from types import SimpleNamespace
 
 from backend.chat import ChatHandler
 from backend.config import Settings
@@ -11,6 +13,376 @@ from backend.skill import SkillEngine
 class ChatRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+
+    def _make_chunk(self, *, content=None, tool_calls=None):
+        delta = SimpleNamespace(content=content, tool_calls=tool_calls)
+        return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+
+    def _make_stream_tool_call_chunk(self, index, *, id=None, name=None, arguments=None):
+        function = None
+        if name is not None or arguments is not None:
+            function = SimpleNamespace(name=name, arguments=arguments)
+        return SimpleNamespace(index=index, id=id, function=function)
+
+    def _make_settings(self, **overrides):
+        payload = {
+            "mode": "managed",
+            "managed_base_url": "https://newapi.z0y0h.work/client/v1",
+            "managed_model": "gemini-3-flash",
+            "projects_dir": Path(tempfile.gettempdir()) / "dummy-projects",
+            "skill_dir": self.repo_skill_dir,
+        }
+        payload.update(overrides)
+        return Settings(
+            **payload,
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_get_active_model_name_prefers_mode_specific_field(self, mock_openai):
+        managed_handler = ChatHandler(
+            self._make_settings(
+                mode="managed",
+                managed_model="gemini-3-flash",
+                model="legacy-managed-model",
+            ),
+            SkillEngine(Path(tempfile.gettempdir()) / "managed-projects", self.repo_skill_dir),
+        )
+        custom_handler = ChatHandler(
+            self._make_settings(
+                mode="custom",
+                custom_api_base="https://custom.example/v1",
+                custom_api_key="secret",
+                custom_model="gpt-5-mini",
+                model="legacy-custom-model",
+            ),
+            SkillEngine(Path(tempfile.gettempdir()) / "custom-projects", self.repo_skill_dir),
+        )
+
+        self.assertEqual(managed_handler._get_active_model_name(), "gemini-3-flash")
+        self.assertEqual(custom_handler._get_active_model_name(), "gpt-5-mini")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_managed_gemini_chat_usage_uses_dynamic_context_policy(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
+            usage=SimpleNamespace(total_tokens=4321),
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="完成",
+                        tool_calls=[],
+                    )
+                )
+            ],
+        )
+        handler = ChatHandler(
+            self._make_settings(
+                mode="managed",
+                managed_model="gemini-3-flash",
+                model="legacy-model-should-not-win",
+            ),
+            SkillEngine(Path(tempfile.gettempdir()) / "usage-projects", self.repo_skill_dir),
+        )
+
+        result = handler.chat("demo", "请继续")
+
+        self.assertEqual(result["token_usage"]["current_tokens"], 4321)
+        self.assertEqual(result["token_usage"]["max_tokens"], 500000)
+        self.assertEqual(result["token_usage"]["effective_max_tokens"], 500000)
+        self.assertEqual(result["token_usage"]["provider_max_tokens"], 1000000)
+        self.assertFalse(result["token_usage"]["compressed"])
+        self.assertEqual(result["token_usage"]["usage_mode"], "actual")
+        self.assertEqual(
+            mock_openai.return_value.chat.completions.create.call_args.kwargs["model"],
+            "gemini-3-flash",
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_image_token_estimate_does_not_scale_with_base64_length(self, mock_openai):
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "image-projects", self.repo_skill_dir),
+        )
+        small_image_message = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "看图"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                ],
+            }
+        ]
+        large_image_message = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "看图"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{('A' * 200000)}"}},
+                ],
+            }
+        ]
+
+        small_estimate = handler._estimate_tokens(small_image_message)
+        large_estimate = handler._estimate_tokens(large_image_message)
+
+        self.assertEqual(small_estimate, large_estimate)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_estimate_tokens_counts_assistant_tool_call_arguments(self, mock_openai):
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "tool-call-token-projects", self.repo_skill_dir),
+        )
+        long_arguments = json.dumps(
+            {
+                "file_path": "plan/outline.md",
+                "content": "段落" * 400,
+            },
+            ensure_ascii=False,
+        )
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": long_arguments,
+                        },
+                    }
+                ],
+            }
+        ]
+
+        estimate = handler._estimate_tokens(messages)
+
+        self.assertGreaterEqual(estimate, handler._estimate_text_tokens(long_arguments))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_compress_conversation_drops_orphan_tool_messages(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="压缩摘要",
+                    )
+                )
+            ],
+        )
+        handler = ChatHandler(
+            self._make_settings(keep_recent_messages=2),
+            SkillEngine(Path(tempfile.gettempdir()) / "compress-projects", self.repo_skill_dir),
+        )
+        conversation = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "旧问题"},
+            {"role": "assistant", "content": "旧回答"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tool-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"file_path":"plan/outline.md"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tool-1", "content": '{"status":"success"}'},
+            {"role": "user", "content": "继续"},
+        ]
+
+        compressed = handler._compress_conversation(conversation)
+
+        self.assertEqual(compressed[0]["role"], "system")
+        self.assertEqual(compressed[1]["role"], "assistant")
+        self.assertEqual(compressed[-1], {"role": "user", "content": "继续"})
+        tool_messages = [message for message in compressed if message.get("role") == "tool"]
+        self.assertEqual(len(tool_messages), 1)
+        tool_index = compressed.index(tool_messages[0])
+        paired_assistant = compressed[tool_index - 1]
+        self.assertEqual(paired_assistant.get("role"), "assistant")
+        self.assertEqual(paired_assistant.get("tool_calls", [])[0]["id"], tool_messages[0]["tool_call_id"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_fit_budget_hard_stops_when_current_turn_itself_cannot_fit(self, mock_openai):
+        handler = ChatHandler(
+            self._make_settings(
+                mode="custom",
+                custom_api_base="https://custom.example/v1",
+                custom_api_key="secret",
+                custom_model="gpt-5-mini",
+                custom_context_limit_override=4096,
+                keep_recent_messages=1,
+            ),
+            SkillEngine(Path(tempfile.gettempdir()) / "budget-projects", self.repo_skill_dir),
+        )
+        conversation = [
+            {"role": "system", "content": "规则"},
+            {"role": "user", "content": "X" * 20000},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "超过模型上下文预算"):
+            handler._fit_conversation_to_budget(conversation)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_reapplies_budget_fit_before_followup_completion_after_tool_result(self, mock_openai):
+        tool_call = SimpleNamespace(
+            id="tool-1",
+            function=SimpleNamespace(
+                name="read_file",
+                arguments='{"file_path":"plan/outline.md"}',
+            ),
+        )
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="",
+                            tool_calls=[tool_call],
+                        )
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                usage=SimpleNamespace(total_tokens=321),
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="最终答复",
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            ),
+        ]
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "refit-projects", self.repo_skill_dir),
+        )
+        policy = handler._resolve_context_policy()
+        fit_inputs = []
+        compressed_followup = [
+            {"role": "system", "content": "system"},
+            {"role": "assistant", "content": "[压缩摘要]"},
+            {"role": "tool", "tool_call_id": "tool-1", "content": '{"status":"success"}'},
+        ]
+
+        def fit_side_effect(conversation):
+            fit_inputs.append(conversation)
+            if len(fit_inputs) == 1:
+                return conversation, handler._estimate_tokens(conversation), False, policy
+            return compressed_followup, handler._estimate_tokens(compressed_followup), True, policy
+
+        with mock.patch.object(handler, "_fit_conversation_to_budget", side_effect=fit_side_effect) as fit_mock:
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "content": "工具结果" * 2000},
+            ):
+                result = handler.chat("demo", "继续", max_iterations=2)
+
+        self.assertEqual(result["content"], "最终答复")
+        self.assertEqual(fit_mock.call_count, 2)
+        self.assertTrue(any(message.get("role") == "tool" for message in fit_inputs[1]))
+        self.assertEqual(
+            mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"],
+            compressed_followup,
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_falls_back_to_estimated_usage_when_final_tool_round_has_no_provider_usage(self, mock_openai):
+        tool_call = SimpleNamespace(
+            id="tool-1",
+            function=SimpleNamespace(
+                name="read_file",
+                arguments='{"file_path":"plan/outline.md"}',
+            ),
+        )
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                usage=SimpleNamespace(total_tokens=777),
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="",
+                            tool_calls=[tool_call],
+                        )
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="最终答复",
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            ),
+        ]
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "usage-fallback-projects", self.repo_skill_dir),
+        )
+        policy = handler._resolve_context_policy()
+
+        with mock.patch.object(
+            handler,
+            "_fit_conversation_to_budget",
+            side_effect=lambda conversation: (conversation, 0, False, policy),
+        ):
+            with mock.patch.object(handler, "_estimate_tokens", return_value=1234):
+                with mock.patch.object(
+                    handler,
+                    "_execute_tool",
+                    return_value={"status": "success", "content": "工具结果"},
+                ):
+                    result = handler.chat("demo", "继续", max_iterations=2)
+
+        self.assertEqual(result["content"], "最终答复")
+        self.assertEqual(result["token_usage"]["usage_mode"], "estimated")
+        self.assertEqual(result["token_usage"]["current_tokens"], 1234)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_request_max_tokens_is_bounded_by_policy_reserved_budget(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
+            usage=SimpleNamespace(total_tokens=123),
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="完成",
+                        tool_calls=[],
+                    )
+                )
+            ],
+        )
+        handler = ChatHandler(
+            self._make_settings(
+                mode="custom",
+                custom_api_base="https://custom.example/v1",
+                custom_api_key="secret",
+                custom_model="gpt-5-mini",
+                custom_context_limit_override=4096,
+            ),
+            SkillEngine(Path(tempfile.gettempdir()) / "small-budget-projects", self.repo_skill_dir),
+        )
+
+        handler.chat("demo", "请继续")
+
+        self.assertEqual(
+            mock_openai.return_value.chat.completions.create.call_args.kwargs["max_tokens"],
+            2048,
+        )
 
     @mock.patch("backend.chat.OpenAI")
     @mock.patch("backend.chat.requests.get")
@@ -97,6 +469,162 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("先确认大纲", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_retries_when_assistant_claims_outline_written_without_actual_write(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="消费品牌战略研究",
+                target_audience="管理层",
+                deadline="2026-04-01",
+                expected_length="3000字",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            first_response = SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                "### 报告大纲\n"
+                                "第1章 执行摘要\n"
+                                "第2章 市场分析\n"
+                                "我已更新 `plan/outline.md`，你可以继续确认。"
+                            ),
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            )
+            tool_call = SimpleNamespace(
+                id="call-1",
+                function=SimpleNamespace(
+                    name="write_file",
+                    arguments='{"file_path":"plan/outline.md","content":"# 报告大纲\\n\\n## 第1章 执行摘要"}',
+                ),
+            )
+            second_response = SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="",
+                            tool_calls=[tool_call],
+                        )
+                    )
+                ],
+            )
+            final_response = SimpleNamespace(
+                usage=SimpleNamespace(total_tokens=256),
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="已实际写入 `plan/outline.md`，请确认大纲。",
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            )
+            mock_openai.return_value.chat.completions.create.side_effect = [
+                first_response,
+                second_response,
+                final_response,
+            ]
+
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "message": "已写入文件: plan/outline.md"},
+            ) as execute_tool:
+                result = handler.chat(project["id"], "先给我一版大纲", max_iterations=4)
+
+        self.assertEqual(result["content"], "已实际写入 `plan/outline.md`，请确认大纲。")
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+        self.assertEqual(execute_tool.call_count, 1)
+        second_call_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        self.assertTrue(
+            any(
+                message.get("role") == "user"
+                and "刚刚声称已更新" in message.get("content", "")
+                for message in second_call_messages
+            )
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_warns_and_retries_when_assistant_claims_file_update_without_write(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="消费品牌战略研究",
+                target_audience="管理层",
+                deadline="2026-04-01",
+                expected_length="3000字",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            first_stream = [
+                self._make_chunk(content="我已更新 "),
+                self._make_chunk(content="`plan/notes.md`。"),
+            ]
+            second_stream = [
+                self._make_chunk(
+                    tool_calls=[
+                        self._make_stream_tool_call_chunk(
+                            0,
+                            id="call-2",
+                            name="write_file",
+                            arguments='{"file_path":"plan/notes.md","content":"# 项目笔记"}',
+                        )
+                    ]
+                )
+            ]
+            final_stream = [
+                self._make_chunk(content="现在已经真实写入 notes。"),
+            ]
+            mock_openai.return_value.chat.completions.create.side_effect = [
+                iter(first_stream),
+                iter(second_stream),
+                iter(final_stream),
+            ]
+
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "message": "已写入文件: plan/notes.md"},
+            ):
+                events = list(handler.chat_stream(project["id"], "把备注记一下", max_iterations=4))
+
+        tool_messages = [event["data"] for event in events if event["type"] == "tool"]
+        content_messages = [event["data"] for event in events if event["type"] == "content"]
+        self.assertTrue(any("声称已更新文件但未实际写入" in message for message in tool_messages))
+        self.assertTrue(any("调用工具: write_file" in message for message in tool_messages))
+        self.assertIn("现在已经真实写入 notes。", "".join(content_messages))
 
     @mock.patch("backend.chat.OpenAI")
     @mock.patch("backend.chat.requests.get")

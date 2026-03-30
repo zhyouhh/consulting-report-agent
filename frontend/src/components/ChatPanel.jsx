@@ -5,12 +5,16 @@ import { showError, showSuccess } from '../utils/toast'
 import { buildChatRequest, toggleMaterialSelection } from '../utils/chatMaterials'
 import {
   buildProjectWelcomeMessage,
+  extractSseDataPayload,
+  shouldContinueSseStream,
   shouldFlushStreamingQueueImmediately,
   splitAssistantMessageBlocks,
   takeStreamingTextSlice,
 } from '../utils/chatPresentation'
 import { describeConnectionMode } from '../utils/connectionMode'
+import { formatContextUsage, getContextUsagePercent } from '../utils/contextUsage'
 import { supportsImageAttachments } from '../utils/modelCapabilities'
+import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 
 export default function ChatPanel({
@@ -33,20 +37,54 @@ export default function ChatPanel({
   const [abortController, setAbortController] = useState(null)
   const messagesEndRef = useRef(null)
   const uploadInputRef = useRef(null)
+  const activeProjectIdRef = useRef(projectId)
+  const previousProjectIdRef = useRef(projectId)
+  const abortControllerRef = useRef(null)
   const pendingContentRef = useRef(new Map())
   const contentFlushTimersRef = useRef(new Map())
   const connection = describeConnectionMode(settings || {})
   const workspaceSummary = summarizeWorkspace(workspace || {})
   const selectedMaterials = materials.filter(material => selectedMaterialIds.includes(material.id))
   const canSendImages = supportsImageAttachments(settings)
+  const contextUsage = tokenUsage ? formatContextUsage(tokenUsage) : null
+  const contextUsagePercent = tokenUsage ? getContextUsagePercent(tokenUsage) : 0
+  activeProjectIdRef.current = projectId
+
+  const isActiveProjectRequest = (requestProjectId) => shouldApplyProjectResponse({
+    requestProject: requestProjectId,
+    activeProject: activeProjectIdRef.current,
+  })
+
+  const clearAllStreamingQueues = () => {
+    contentFlushTimersRef.current.forEach(timerId => clearInterval(timerId))
+    contentFlushTimersRef.current.clear()
+    pendingContentRef.current.clear()
+  }
 
   useEffect(() => {
+    const previousProjectId = previousProjectIdRef.current
+    if (previousProjectId && previousProjectId !== projectId) {
+      abortControllerRef.current?.abort()
+      abortControllerRef.current = null
+      clearAllStreamingQueues()
+      setLoading(false)
+      setAbortController(null)
+    }
+    previousProjectIdRef.current = projectId
+
     setSelectedMaterialIds([])
 
     if (projectId) {
+      const requestProjectId = projectId
       // 加载历史对话
       axios.get(`/api/projects/${encodeURIComponent(projectId)}/conversation`)
         .then(res => {
+          if (!shouldApplyProjectResponse({
+            requestProject: requestProjectId,
+            activeProject: activeProjectIdRef.current,
+          })) {
+            return
+          }
           const history = res.data.messages || []
           if (history.length > 0) {
             // 过滤掉 system/tool 消息，只显示 user/assistant
@@ -69,6 +107,12 @@ export default function ChatPanel({
           }
         })
         .catch(() => {
+          if (!shouldApplyProjectResponse({
+            requestProject: requestProjectId,
+            activeProject: activeProjectIdRef.current,
+          })) {
+            return
+          }
           // 加载失败，显示欢迎消息
           setMessages([{
             id: `${Date.now()}-${Math.random()}`,
@@ -79,6 +123,8 @@ export default function ChatPanel({
       setTokenUsage(null)
     } else {
       setMessages([])
+      setTokenUsage(null)
+      setLoading(false)
     }
   }, [projectId])
 
@@ -87,9 +133,7 @@ export default function ChatPanel({
   }, [messages])
 
   useEffect(() => () => {
-    contentFlushTimersRef.current.forEach(timerId => clearInterval(timerId))
-    contentFlushTimersRef.current.clear()
-    pendingContentRef.current.clear()
+    clearAllStreamingQueues()
   }, [])
 
   const clearStreamingQueue = (assistantId) => {
@@ -101,7 +145,11 @@ export default function ChatPanel({
     pendingContentRef.current.delete(assistantId)
   }
 
-  const flushStreamingQueueImmediately = (assistantId) => {
+  const flushStreamingQueueImmediately = (assistantId, requestProjectId = activeProjectIdRef.current) => {
+    if (!isActiveProjectRequest(requestProjectId)) {
+      clearStreamingQueue(assistantId)
+      return
+    }
     const pending = pendingContentRef.current.get(assistantId) || ''
     if (pending) {
       setMessages(prev => prev.map(message =>
@@ -111,7 +159,12 @@ export default function ChatPanel({
     clearStreamingQueue(assistantId)
   }
 
-  const enqueueAssistantContent = (assistantId, chunkText) => {
+  const enqueueAssistantContent = (assistantId, chunkText, requestProjectId) => {
+    if (!isActiveProjectRequest(requestProjectId)) {
+      clearStreamingQueue(assistantId)
+      return
+    }
+
     const currentPending = pendingContentRef.current.get(assistantId) || ''
     pendingContentRef.current.set(assistantId, currentPending + chunkText)
 
@@ -120,6 +173,11 @@ export default function ChatPanel({
     }
 
     const timerId = window.setInterval(() => {
+      if (!isActiveProjectRequest(requestProjectId)) {
+        clearStreamingQueue(assistantId)
+        return
+      }
+
       const pending = pendingContentRef.current.get(assistantId) || ''
       if (!pending) {
         clearStreamingQueue(assistantId)
@@ -157,8 +215,8 @@ export default function ChatPanel({
   }
 
   const stopGeneration = () => {
-    if (abortController) {
-      abortController.abort()
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
       setLoading(false)
     }
   }
@@ -225,6 +283,8 @@ export default function ChatPanel({
     setLoading(true)
 
     const controller = new AbortController()
+    const requestProjectId = projectId
+    abortControllerRef.current = controller
     setAbortController(controller)
 
     // 创建助手消息占位
@@ -247,37 +307,68 @@ export default function ChatPanel({
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
+      let streamCompleted = false
+      let readerDone = false
 
-      while (true) {
+      while (shouldContinueSseStream({ readerDone, streamCompleted })) {
         const { done, value } = await reader.read()
-        if (done) break
+        readerDone = done
+        if (readerDone) break
+
+        if (!isActiveProjectRequest(requestProjectId)) {
+          clearStreamingQueue(assistantId)
+          streamCompleted = true
+          break
+        }
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6)
-            if (data === '[DONE]') break
+          if (!isActiveProjectRequest(requestProjectId)) {
+            clearStreamingQueue(assistantId)
+            streamCompleted = true
+            break
+          }
+
+          const data = extractSseDataPayload(line)
+          if (data !== null) {
+            if (data === '[DONE]') {
+              flushStreamingQueueImmediately(assistantId, requestProjectId)
+              streamCompleted = true
+              break
+            }
 
             try {
               const parsed = JSON.parse(data)
               if (parsed.type === 'content') {
-                enqueueAssistantContent(assistantId, parsed.data)
+                enqueueAssistantContent(assistantId, parsed.data, requestProjectId)
               } else if (parsed.type === 'tool') {
                 if (shouldFlushStreamingQueueImmediately('tool')) {
-                  flushStreamingQueueImmediately(assistantId)
+                  flushStreamingQueueImmediately(assistantId, requestProjectId)
+                }
+                if (!isActiveProjectRequest(requestProjectId)) {
+                  streamCompleted = true
+                  break
                 }
                 // 显示工具调用信息
                 setMessages(prev => prev.map(m =>
                   m.id === assistantId ? { ...m, content: m.content + '\n' + parsed.data } : m
                 ))
               } else if (parsed.type === 'usage') {
+                if (!isActiveProjectRequest(requestProjectId)) {
+                  streamCompleted = true
+                  break
+                }
                 setTokenUsage(parsed.data)
               } else if (parsed.type === 'error') {
                 if (shouldFlushStreamingQueueImmediately('error')) {
-                  flushStreamingQueueImmediately(assistantId)
+                  flushStreamingQueueImmediately(assistantId, requestProjectId)
+                }
+                if (!isActiveProjectRequest(requestProjectId)) {
+                  streamCompleted = true
+                  break
                 }
                 setMessages(prev => prev.map(m =>
                   m.id === assistantId ? { ...m, content: `错误: ${parsed.data}` } : m
@@ -290,25 +381,35 @@ export default function ChatPanel({
         }
       }
     } catch (error) {
+      const canApplyStreamResponse = isActiveProjectRequest(requestProjectId)
       if (error.name === 'AbortError') {
-        if (shouldFlushStreamingQueueImmediately('abort')) {
-          flushStreamingQueueImmediately(assistantId)
+        if (canApplyStreamResponse && shouldFlushStreamingQueueImmediately('abort')) {
+          flushStreamingQueueImmediately(assistantId, requestProjectId)
         }
-        setMessages(prev => prev.map(m =>
-          m.id === assistantId ? { ...m, content: m.content || '已停止生成' } : m
-        ))
+        if (canApplyStreamResponse) {
+          setMessages(prev => prev.map(m =>
+            m.id === assistantId ? { ...m, content: m.content || '已停止生成' } : m
+          ))
+        }
       } else {
-        if (shouldFlushStreamingQueueImmediately('error')) {
-          flushStreamingQueueImmediately(assistantId)
+        if (canApplyStreamResponse && shouldFlushStreamingQueueImmediately('error')) {
+          flushStreamingQueueImmediately(assistantId, requestProjectId)
         }
-        setMessages(prev => prev.map(m =>
-          m.id === assistantId ? { ...m, content: `API调用失败: ${error.message}` } : m
-        ))
+        if (canApplyStreamResponse) {
+          setMessages(prev => prev.map(m =>
+            m.id === assistantId ? { ...m, content: `API调用失败: ${error.message}` } : m
+          ))
+        }
       }
     }
-    setLoading(false)
-    setAbortController(null)
-    onProjectMutated?.()
+    if (abortControllerRef.current === controller) {
+      abortControllerRef.current = null
+    }
+    if (isActiveProjectRequest(requestProjectId)) {
+      setLoading(false)
+      setAbortController(current => (current === controller ? null : current))
+      onProjectMutated?.()
+    }
   }
 
   const handleSelectFiles = async (event) => {
@@ -419,14 +520,18 @@ export default function ChatPanel({
 
       {tokenUsage && (
         <div className="px-4 py-2 border-t border-[#2a2a4a] flex items-center gap-2 text-xs text-[#8888a8]">
+          <span>{contextUsage.label}</span>
           <div className="flex-1 h-1.5 bg-[#252545] rounded-full overflow-hidden">
             <div
               className="h-full bg-blue-500 rounded-full transition-all"
-              style={{ width: `${Math.min(100, (tokenUsage.current_tokens / tokenUsage.max_tokens) * 100)}%` }}
+              style={{ width: `${contextUsagePercent}%` }}
             />
           </div>
-          <span>{Math.round(tokenUsage.current_tokens / 1000)}k / {Math.round(tokenUsage.max_tokens / 1000)}k</span>
-          {tokenUsage.compressed && <span className="text-yellow-500">已压缩</span>}
+          <span>{contextUsage.detail}</span>
+          <span className="rounded-full border border-[#3a3a5a] px-2 py-0.5 text-[#c9cdf7]">
+            {contextUsage.modeTag}
+          </span>
+          {contextUsage.compressedTag && <span className="text-yellow-500">{contextUsage.compressedTag}</span>}
         </div>
       )}
 

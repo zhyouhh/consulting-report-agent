@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     custom_api_key: str = ""
     custom_api_base: str = ""
     custom_model: str = ""
+    custom_context_limit_override: int | None = None
 
     # 兼容旧代码的别名字段
     api_provider: str = "siliconflow"
@@ -109,6 +110,7 @@ def normalize_settings_payload(data: dict) -> dict:
     normalized.setdefault("custom_api_base", normalized.get("api_base", ""))
     normalized.setdefault("custom_api_key", normalized.get("api_key", ""))
     normalized.setdefault("custom_model", normalized.get("model", ""))
+    normalized.setdefault("custom_context_limit_override", None)
     normalized["projects_dir"] = runtime_projects_dir
     normalized["skill_dir"] = runtime_skill_dir
 

@@ -24,7 +24,17 @@ class ChatStreamApiTests(unittest.TestCase):
             events = [
                 {"type": "tool", "data": "🔧 调用工具: web_search({\"query\":\"q1\"})"},
                 {"type": "content", "data": "第一段"},
-                {"type": "usage", "data": {"current_tokens": 1, "max_tokens": 10, "compressed": False}},
+                {
+                    "type": "usage",
+                    "data": {
+                        "current_tokens": 1,
+                        "max_tokens": 500000,
+                        "effective_max_tokens": 500000,
+                        "provider_max_tokens": 1000000,
+                        "compressed": False,
+                        "usage_mode": "estimated",
+                    },
+                },
             ]
             for event in events:
                 time.sleep(0.35)
@@ -70,3 +80,7 @@ class ChatStreamApiTests(unittest.TestCase):
         self.assertIn('"type": "tool"', arrivals[0][1])
         self.assertIn('"type": "content"', arrivals[1][1])
         self.assertGreater(arrivals[1][0], arrivals[0][0])
+        self.assertIn('"max_tokens": 500000', arrivals[2][1])
+        self.assertIn('"effective_max_tokens": 500000', arrivals[2][1])
+        self.assertIn('"provider_max_tokens": 1000000', arrivals[2][1])
+        self.assertIn('"usage_mode": "estimated"', arrivals[2][1])

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   buildProjectWelcomeMessage,
+  extractSseDataPayload,
+  shouldContinueSseStream,
   splitAssistantMessageBlocks,
   shouldFlushStreamingQueueImmediately,
   takeStreamingTextSlice,
@@ -40,6 +42,30 @@ test("shouldFlushStreamingQueueImmediately only flushes for disruptive events", 
   assert.equal(shouldFlushStreamingQueueImmediately("abort"), true);
   assert.equal(shouldFlushStreamingQueueImmediately("usage"), false);
   assert.equal(shouldFlushStreamingQueueImmediately("complete"), false);
+});
+
+test("extractSseDataPayload tolerates optional spaces and CRLF", () => {
+  assert.equal(extractSseDataPayload("data:[DONE]\r"), "[DONE]");
+  assert.equal(
+    extractSseDataPayload("data:   {\"type\":\"usage\"}\r"),
+    "{\"type\":\"usage\"}",
+  );
+  assert.equal(extractSseDataPayload("event: done"), null);
+});
+
+test("shouldContinueSseStream stops immediately for explicit done or reader completion", () => {
+  assert.equal(
+    shouldContinueSseStream({ readerDone: false, streamCompleted: false }),
+    true,
+  );
+  assert.equal(
+    shouldContinueSseStream({ readerDone: false, streamCompleted: true }),
+    false,
+  );
+  assert.equal(
+    shouldContinueSseStream({ readerDone: true, streamCompleted: false }),
+    false,
+  );
 });
 
 test("splitAssistantMessageBlocks preserves tool and text ordering", () => {

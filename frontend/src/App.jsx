@@ -6,7 +6,7 @@ import WorkspacePanel from './components/WorkspacePanel'
 import axios from 'axios'
 import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
 import { mergeMaterials, removeMaterialById } from './utils/chatMaterials'
-import { getCurrentProject, reconcileCurrentProjectId } from './utils/projectSelection'
+import { getCurrentProject, isSameProjectSelection, reconcileCurrentProjectId } from './utils/projectSelection'
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -174,6 +174,9 @@ function App() {
   }
 
   const handleSelectProject = (project) => {
+    if (isSameProjectSelection(currentProjectId, project?.id || null)) {
+      return
+    }
     setWorkspace(null)
     setMaterials([])
     setCurrentProjectId(project?.id || null)

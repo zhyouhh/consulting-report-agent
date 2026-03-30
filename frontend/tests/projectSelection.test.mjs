@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   getCurrentProject,
   reconcileCurrentProjectId,
+  isSameProjectSelection,
 } from "../src/utils/projectSelection.js";
 
 const projects = [
@@ -25,4 +26,13 @@ test("reconcileCurrentProjectId keeps the current id when it still exists", () =
 
 test("reconcileCurrentProjectId clears the current id when the project disappears", () => {
   assert.equal(reconcileCurrentProjectId(projects, "missing"), null);
+});
+
+test("isSameProjectSelection returns true for repeated selection of the same project", () => {
+  assert.equal(isSameProjectSelection("proj-1", "proj-1"), true);
+});
+
+test("isSameProjectSelection returns false when the selection changes", () => {
+  assert.equal(isSameProjectSelection("proj-1", "proj-2"), false);
+  assert.equal(isSameProjectSelection("proj-1", null), false);
 });
