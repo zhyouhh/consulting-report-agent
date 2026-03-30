@@ -20,6 +20,13 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertTrue(settings.managed_base_url)
         self.assertIn("search.z0y0h.work", settings.managed_search_api_url)
 
+    def test_default_settings_populate_managed_runtime_aliases_on_first_launch(self):
+        settings = Settings()
+
+        self.assertEqual(settings.api_base, settings.managed_base_url)
+        self.assertEqual(settings.model, settings.managed_model)
+        self.assertEqual(settings.api_key, settings.managed_client_token)
+
     def test_save_and_load_preserves_custom_fields_but_starts_in_managed_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)

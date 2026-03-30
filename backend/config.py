@@ -87,6 +87,16 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
 
+    def model_post_init(self, __context) -> None:
+        if self.mode != "managed":
+            return
+        if not self.api_base:
+            self.api_base = self.managed_base_url
+        if not self.model:
+            self.model = self.managed_model
+        if not self.api_key:
+            self.api_key = self.managed_client_token
+
 
 def normalize_settings_payload(data: dict) -> dict:
     """兼容旧配置，并同步当前模式对应的运行时字段。"""
