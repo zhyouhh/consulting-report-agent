@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, model_validator
-from typing import Optional, List
+from typing import Literal, Optional, List
 from datetime import datetime
 
 
@@ -68,7 +68,27 @@ class TokenUsage(BaseModel):
     """Token使用统计"""
     current_tokens: int = 0
     max_tokens: int = 128000
+    effective_max_tokens: int = 128000
+    provider_max_tokens: int = 128000
     compressed: bool = False
+    usage_mode: Literal["actual", "estimated"] = "estimated"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_max_tokens(cls, data):
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        legacy_max_tokens = normalized.pop("max_tokens", None)
+        if legacy_max_tokens is not None:
+            normalized["max_tokens"] = legacy_max_tokens
+            normalized.setdefault("effective_max_tokens", legacy_max_tokens)
+            normalized.setdefault("provider_max_tokens", legacy_max_tokens)
+        else:
+            effective_max_tokens = normalized.get("effective_max_tokens")
+            if effective_max_tokens is not None:
+                normalized.setdefault("max_tokens", effective_max_tokens)
+        return normalized
 
 
 class ChatResponse(BaseModel):

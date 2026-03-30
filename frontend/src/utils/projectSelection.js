@@ -9,3 +9,11 @@ export function getCurrentProject(projects, currentProjectId) {
 export function reconcileCurrentProjectId(projects, currentProjectId) {
   return getCurrentProject(projects, currentProjectId)?.id || null;
 }
+
+export function isSameProjectSelection(currentProjectId, nextProjectId) {
+  if (!currentProjectId || !nextProjectId) {
+    return false;
+  }
+
+  return currentProjectId === nextProjectId;
+}

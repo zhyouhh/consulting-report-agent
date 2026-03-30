@@ -47,6 +47,19 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertEqual(loaded.custom_api_base, "https://custom.example/v1")
         self.assertEqual(loaded.custom_model, "gpt-4.1-mini")
 
+    def test_save_and_load_preserves_custom_context_limit_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            settings = Settings(
+                custom_context_limit_override=32000,
+            )
+
+            with mock.patch("backend.config.get_user_config_dir", return_value=config_dir):
+                save_settings(settings)
+                loaded = load_settings()
+
+        self.assertEqual(loaded.custom_context_limit_override, 32000)
+
     def test_managed_mode_uses_managed_runtime_aliases_even_if_custom_secret_exists(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
@@ -157,3 +170,26 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertNotIn('"api_key"', saved)
         self.assertNotIn('"api_base"', saved)
         self.assertNotIn('"model"', saved)
+
+    def test_load_old_config_without_custom_context_limit_override_uses_none(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            (config_dir / "config.json").write_text(
+                """
+                {
+                  "config_version": 4,
+                  "managed_base_url": "https://newapi.z0y0h.work/client/v1",
+                  "managed_model": "gemini-3-flash",
+                  "managed_search_api_url": "https://search.z0y0h.work/search",
+                  "custom_api_base": "https://custom.example/v1",
+                  "custom_api_key": "secret",
+                  "custom_model": "gpt-4.1-mini"
+                }
+                """.strip(),
+                encoding="utf-8",
+            )
+
+            with mock.patch("backend.config.get_user_config_dir", return_value=config_dir):
+                loaded = load_settings()
+
+        self.assertIsNone(loaded.custom_context_limit_override)

@@ -19,6 +19,7 @@ from slowapi.util import get_remote_address
 
 from .chat import ChatHandler
 from .config import Settings, get_base_path, load_settings, save_settings
+from .context_policy import clamp_custom_context_limit_override
 from .models import ChatRequest, ChatResponse, ProjectInfo
 from .report_tools import export_reviewable_draft, run_quality_check
 from .skill import SkillEngine
@@ -90,6 +91,7 @@ class SettingsUpdate(BaseModel):
     custom_api_base: str = ""
     custom_api_key: str = ""
     custom_model: str = ""
+    custom_context_limit_override: int | None = None
 
 
 @app.post("/api/settings")
@@ -103,6 +105,10 @@ async def update_settings(update: SettingsUpdate):
         if update.custom_api_key != "***":
             settings.custom_api_key = update.custom_api_key
         settings.custom_model = update.custom_model
+        if "custom_context_limit_override" in update.model_fields_set:
+            settings.custom_context_limit_override = clamp_custom_context_limit_override(
+                update.custom_context_limit_override
+            )
 
         if update.mode == "managed":
             settings.api_base = update.managed_base_url

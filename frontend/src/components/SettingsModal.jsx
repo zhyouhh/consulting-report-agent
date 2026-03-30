@@ -8,6 +8,7 @@ const defaultForm = {
   custom_api_base: '',
   custom_api_key: '',
   custom_model: '',
+  custom_context_limit_override: null,
 }
 
 export default function SettingsModal({ onClose, onSaved }) {
@@ -26,10 +27,15 @@ export default function SettingsModal({ onClose, onSaved }) {
         custom_api_base: res.data.custom_api_base || '',
         custom_api_key: res.data.custom_api_key || '',
         custom_model: res.data.custom_model || '',
+        custom_context_limit_override: res.data.custom_context_limit_override ?? null,
       })
       setLoaded(true)
     }).catch(() => setLoaded(true))
   }, [])
+
+  useEffect(() => {
+    setModels([])
+  }, [form.custom_api_base, form.custom_api_key])
 
   const fetchModels = async () => {
     if (!form.custom_api_key.trim() || form.custom_api_key === '***') {
@@ -105,7 +111,7 @@ export default function SettingsModal({ onClose, onSaved }) {
             }`}
           >
             <div className="text-sm font-semibold text-[#e2e2f0] mb-1">默认通道</div>
-            <div className="text-xs text-[#8f93c9]">推荐，开箱即用</div>
+            <div className="text-xs text-[#8f93c9]">开箱即用</div>
             <div className="text-xs text-[#64ffda] mt-2">{form.managed_model}</div>
           </button>
           <button
@@ -183,6 +189,20 @@ export default function SettingsModal({ onClose, onSaved }) {
                   {fetchingModels ? '获取中...' : '获取模型'}
                 </button>
               </div>
+              <label className="block text-sm text-[#8f93c9] mb-1">有效上下文上限（高级）</label>
+              <input
+                type="number"
+                min="4096"
+                step="1000"
+                value={form.custom_context_limit_override ?? ''}
+                onChange={e => setForm(prev => ({
+                  ...prev,
+                  custom_context_limit_override: e.target.value ? Number(e.target.value) : null,
+                }))}
+                placeholder="留空按模型自动识别"
+                className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-2"
+              />
+              <p className="text-xs text-[#6a6f9a] mb-3">留空表示自动识别；填写后会覆盖客户端采用的有效上下文上限。</p>
               <p className="text-xs text-[#6a6f9a]">支持 OpenAI 兼容接口。若 API Key 显示为 `***`，直接保存会保留原值。</p>
             </>
           )}
