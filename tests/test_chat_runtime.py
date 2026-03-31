@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest import mock
 from types import SimpleNamespace
 
+import httpx
+
 from backend.chat import ChatHandler
 from backend.config import Settings
 from backend.skill import SkillEngine
@@ -95,6 +97,53 @@ class ChatRuntimeTests(unittest.TestCase):
             mock_openai.return_value.chat.completions.create.call_args.kwargs["model"],
             "gemini-3-flash",
         )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_managed_stream_requests_use_extended_read_timeout(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="第一段"),
+        ])
+        handler = ChatHandler(
+            self._make_settings(
+                mode="managed",
+                managed_model="gemini-3-flash",
+            ),
+            SkillEngine(Path(tempfile.gettempdir()) / "managed-stream-projects", self.repo_skill_dir),
+        )
+
+        events = list(handler.chat_stream("demo", "继续"))
+        request_timeout = mock_openai.return_value.chat.completions.create.call_args.kwargs["timeout"]
+
+        self.assertTrue(any(event["type"] == "content" for event in events))
+        self.assertIsInstance(request_timeout, httpx.Timeout)
+        self.assertEqual(request_timeout.connect, 15.0)
+        self.assertEqual(request_timeout.read, 180.0)
+        self.assertEqual(request_timeout.write, 30.0)
+        self.assertEqual(request_timeout.pool, 30.0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_emits_friendly_error_when_provider_read_times_out_mid_stream(self, mock_openai):
+        def failing_stream():
+            yield self._make_chunk(content="第一段")
+            raise Exception("The read operation timed out")
+
+        mock_openai.return_value.chat.completions.create.return_value = failing_stream()
+        handler = ChatHandler(
+            self._make_settings(
+                mode="managed",
+                managed_model="gemini-3-flash",
+            ),
+            SkillEngine(Path(tempfile.gettempdir()) / "stream-timeout-projects", self.repo_skill_dir),
+        )
+
+        events = list(handler.chat_stream("demo", "继续"))
+
+        self.assertEqual(events[0], {"type": "content", "data": "第一段"})
+        error_events = [event for event in events if event["type"] == "error"]
+        self.assertEqual(len(error_events), 1)
+        self.assertIn("默认通道", error_events[0]["data"])
+        self.assertIn("超时", error_events[0]["data"])
+        self.assertNotIn("The read operation timed out", error_events[0]["data"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_image_token_estimate_does_not_scale_with_base64_length(self, mock_openai):

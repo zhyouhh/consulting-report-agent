@@ -24,6 +24,12 @@ except Exception:
 
 IMAGE_TOKEN_COST = 1024
 MAX_BUDGET_FIT_ATTEMPTS = 6
+STREAM_CONNECT_TIMEOUT_SECONDS = 15.0
+STREAM_WRITE_TIMEOUT_SECONDS = 30.0
+STREAM_POOL_TIMEOUT_SECONDS = 30.0
+MANAGED_STREAM_READ_TIMEOUT_SECONDS = 180.0
+CUSTOM_STREAM_READ_TIMEOUT_SECONDS = 90.0
+SLOW_MODEL_STREAM_READ_TIMEOUT_SECONDS = 180.0
 
 
 class ChatHandler:
@@ -84,6 +90,43 @@ class ChatHandler:
             base_url=settings.api_base,
             http_client=http_client,
         )
+
+    def _build_stream_timeout(self, active_model: str):
+        import httpx
+
+        read_timeout = (
+            MANAGED_STREAM_READ_TIMEOUT_SECONDS
+            if self.settings.mode == "managed"
+            else CUSTOM_STREAM_READ_TIMEOUT_SECONDS
+        )
+        if "v3.2" in active_model.lower():
+            read_timeout = max(read_timeout, SLOW_MODEL_STREAM_READ_TIMEOUT_SECONDS)
+
+        return httpx.Timeout(
+            connect=STREAM_CONNECT_TIMEOUT_SECONDS,
+            read=read_timeout,
+            write=STREAM_WRITE_TIMEOUT_SECONDS,
+            pool=STREAM_POOL_TIMEOUT_SECONDS,
+        )
+
+    def _format_provider_error(self, error: Exception, *, stream: bool) -> str:
+        raw_message = str(error or "").strip()
+        lowered = raw_message.lower()
+        timeout_markers = ("timed out", "timeout", "readtimeout")
+
+        if any(marker in lowered for marker in timeout_markers):
+            if stream and self.settings.mode == "managed":
+                return (
+                    "默认通道响应较慢，本轮在等待上游流式结果时超时了。"
+                    "请稍后重试，或把问题拆短一些后分步发送。"
+                )
+            if stream:
+                return "上游模型在返回流式结果时超时了，请稍后重试。"
+            return "上游模型响应超时，请稍后重试。"
+
+        if not raw_message:
+            return "API调用失败"
+        return f"API调用失败: {raw_message}"
 
     def _get_active_model_name(self) -> str:
         if self.settings.mode == "managed":
@@ -394,7 +437,6 @@ class ChatHandler:
 
             for retry in range(2):
                 try:
-                    timeout = 120.0 if "v3.2" in active_model.lower() else 30.0
                     response = self.client.chat.completions.create(
                         model=active_model,
                         messages=conversation,
@@ -402,7 +444,7 @@ class ChatHandler:
                         max_tokens=self._get_request_max_tokens(policy),
                         tools=self._get_tools(),
                         tool_choice="auto",
-                        timeout=timeout,
+                        timeout=self._build_stream_timeout(active_model),
                         stream=True,
                     )
                     break
@@ -410,37 +452,40 @@ class ChatHandler:
                     if retry < 1:
                         time.sleep(2)
                         continue
-                    yield {"type": "error", "data": f"API调用失败: {str(e)}"}
+                    yield {"type": "error", "data": self._format_provider_error(e, stream=True)}
                     return
 
             collected_message = {"role": "assistant", "content": "", "tool_calls": []}
+            try:
+                for chunk in response:
+                    if not chunk.choices:
+                        continue
 
-            for chunk in response:
-                if not chunk.choices:
-                    continue
+                    delta = chunk.choices[0].delta
+                    if delta.content:
+                        collected_message["content"] += delta.content
+                        yield {"type": "content", "data": delta.content}
 
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    collected_message["content"] += delta.content
-                    yield {"type": "content", "data": delta.content}
+                    if delta.tool_calls:
+                        for tc_chunk in delta.tool_calls:
+                            if tc_chunk.index >= len(collected_message["tool_calls"]):
+                                collected_message["tool_calls"].append({
+                                    "id": tc_chunk.id or "",
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                })
 
-                if delta.tool_calls:
-                    for tc_chunk in delta.tool_calls:
-                        if tc_chunk.index >= len(collected_message["tool_calls"]):
-                            collected_message["tool_calls"].append({
-                                "id": tc_chunk.id or "",
-                                "type": "function",
-                                "function": {"name": "", "arguments": ""},
-                            })
-
-                        tc = collected_message["tool_calls"][tc_chunk.index]
-                        if tc_chunk.id:
-                            tc["id"] = tc_chunk.id
-                        if tc_chunk.function:
-                            if tc_chunk.function.name:
-                                tc["function"]["name"] = tc_chunk.function.name
-                            if tc_chunk.function.arguments:
-                                tc["function"]["arguments"] += tc_chunk.function.arguments
+                            tc = collected_message["tool_calls"][tc_chunk.index]
+                            if tc_chunk.id:
+                                tc["id"] = tc_chunk.id
+                            if tc_chunk.function:
+                                if tc_chunk.function.name:
+                                    tc["function"]["name"] = tc_chunk.function.name
+                                if tc_chunk.function.arguments:
+                                    tc["function"]["arguments"] += tc_chunk.function.arguments
+            except Exception as e:
+                yield {"type": "error", "data": self._format_provider_error(e, stream=True)}
+                return
 
             if collected_message["tool_calls"]:
                 conversation.append(collected_message)
