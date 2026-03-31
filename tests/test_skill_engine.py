@@ -10,8 +10,7 @@ class SkillEngineTests(unittest.TestCase):
     def setUp(self):
         self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
 
-    def test_create_project_uses_real_v2_templates(self):
-        today = datetime.now().strftime("%Y-%m-%d")
+    def test_create_project_initializes_formal_plan_templates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
             engine = SkillEngine(projects_dir, self.repo_skill_dir)
@@ -25,11 +24,60 @@ class SkillEngineTests(unittest.TestCase):
                 "已有访谈纪要",
             )
 
-            overview_text = (projects_dir / "demo" / "plan" / "project-overview.md").read_text(encoding="utf-8")
-            self.assertIn("**项目名称**: demo", overview_text)
-            self.assertIn("**项目类型**: strategy-consulting", overview_text)
-            self.assertIn(f"**开始日期**: {today}", overview_text)
-            self.assertIn("**截止日期**: 2026-04-01", overview_text)
+            created_file_names = {path.name for path in (projects_dir / "demo" / "plan").glob("*.md")}
+            expected_files = {
+                "project-overview.md",
+                "progress.md",
+                "stage-gates.md",
+                "notes.md",
+                "outline.md",
+                "research-plan.md",
+                "references.md",
+                "tasks.md",
+                "review.md",
+                "data-log.md",
+                "analysis-notes.md",
+                "review-checklist.md",
+                "presentation-plan.md",
+                "delivery-log.md",
+            }
+
+            self.assertTrue(expected_files.issubset(created_file_names))
+            self.assertNotIn("project-info.md", created_file_names)
+
+    def test_project_overview_template_contains_aligned_metadata_fields(self):
+        template_text = (self.repo_skill_dir / "plan-template" / "project-overview.md").read_text(encoding="utf-8")
+
+        self.assertIn("**项目名称**:", template_text)
+        self.assertIn("**报告类型**:", template_text)
+        self.assertIn("**报告主题**:", template_text)
+        self.assertIn("## 项目背景", template_text)
+        self.assertIn("**目标读者**:", template_text)
+        self.assertIn("**预期篇幅**:", template_text)
+        self.assertIn("**交付时间**:", template_text)
+        self.assertIn("## 特殊要求", template_text)
+        self.assertIn("**交付形式**: 仅报告", template_text)
+        self.assertIn("## 成功标准", template_text)
+
+    def test_stage_gates_template_aligns_stage_evidence_and_conditional_s6(self):
+        template_text = (self.repo_skill_dir / "plan-template" / "stage-gates.md").read_text(encoding="utf-8")
+
+        self.assertIn("project-overview.md 创建", template_text)
+        self.assertIn("notes.md 更新", template_text)
+        self.assertIn("references.md 更新", template_text)
+        self.assertIn("outline.md 完成", template_text)
+        self.assertIn("research-plan.md 完成", template_text)
+        self.assertIn("data-log.md 更新", template_text)
+        self.assertIn("analysis-notes.md 创建/更新", template_text)
+        self.assertIn("review-checklist.md 完成", template_text)
+        self.assertIn("report_draft_v1.md", template_text)
+        self.assertIn("content/report.md", template_text)
+        self.assertIn("content/draft.md", template_text)
+        self.assertIn("output/final-report.md", template_text)
+        self.assertIn("交付形式 = 报告+演示", template_text)
+        self.assertIn("presentation-plan.md 完成", template_text)
+        self.assertIn("仅报告", template_text)
+        self.assertIn("delivery-log.md 更新", template_text)
 
     def test_workspace_summary_reads_stage_from_real_stage_gates_template(self):
         with tempfile.TemporaryDirectory() as tmpdir:
