@@ -18,6 +18,22 @@ class SkillEngine:
         ("项目备注", "plan/notes.md"),
     ]
 
+    FORMAL_PLAN_FILES = {
+        "project-overview.md",
+        "progress.md",
+        "stage-gates.md",
+        "notes.md",
+        "outline.md",
+        "research-plan.md",
+        "references.md",
+        "tasks.md",
+        "review.md",
+        "data-log.md",
+        "analysis-notes.md",
+        "review-checklist.md",
+        "presentation-plan.md",
+        "delivery-log.md",
+    }
     IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
     TEXT_SUFFIXES = {".md", ".txt", ".csv"}
 
@@ -158,8 +174,10 @@ class SkillEngine:
         imported_materials_path.mkdir(parents=True, exist_ok=True)
 
         template_dir = self.skill_dir / "plan-template"
-        for template_file in template_dir.glob("*.md"):
-            shutil.copy(template_file, plan_path / template_file.name)
+        for template_name in sorted(self.FORMAL_PLAN_FILES):
+            template_file = template_dir / template_name
+            if template_file.exists():
+                shutil.copy(template_file, plan_path / template_name)
 
     def _populate_v2_plan_files(
         self,

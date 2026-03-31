@@ -24,6 +24,8 @@ class ChatContextTests(unittest.TestCase):
             (plan_dir / "stage-gates.md").write_text("门禁内容", encoding="utf-8")
             (plan_dir / "notes.md").write_text("备注内容", encoding="utf-8")
 
+            (plan_dir / "project-info.md").write_text("legacy project info", encoding="utf-8")
+
             settings = Settings(
                 mode="managed",
                 managed_base_url="https://newapi.z0y0h.work/client/v1",
@@ -35,6 +37,7 @@ class ChatContextTests(unittest.TestCase):
             handler = ChatHandler(settings, engine)
 
             prompt = handler._build_system_prompt("demo")
+            self.assertNotIn("legacy project info", prompt)
 
         self.assertIn("系统提示", prompt)
         self.assertIn("当前项目概览", prompt)

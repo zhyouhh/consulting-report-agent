@@ -1,3 +1,4 @@
+import shutil
 import tempfile
 import unittest
 from datetime import datetime
@@ -44,6 +45,31 @@ class SkillEngineTests(unittest.TestCase):
 
             self.assertTrue(expected_files.issubset(created_file_names))
             self.assertNotIn("project-info.md", created_file_names)
+
+    def test_create_project_initializes_only_registered_formal_plan_templates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            skill_dir = Path(tmpdir) / "skill"
+            template_dir = skill_dir / "plan-template"
+            shutil.copytree(self.repo_skill_dir / "plan-template", template_dir)
+            (template_dir / "project-info.md").write_text("# legacy", encoding="utf-8")
+            (template_dir / "scratchpad.md").write_text("# ad hoc", encoding="utf-8")
+
+            engine = SkillEngine(projects_dir, skill_dir)
+            engine.create_project(
+                "demo",
+                "strategy-consulting",
+                "theme",
+                "executive audience",
+                "2026-04-01",
+                "3000 words",
+                "existing notes",
+            )
+
+            created_file_names = {path.name for path in (projects_dir / "demo" / "plan").glob("*.md")}
+
+            self.assertNotIn("project-info.md", created_file_names)
+            self.assertNotIn("scratchpad.md", created_file_names)
 
     def test_project_overview_template_contains_aligned_metadata_fields(self):
         template_text = (self.repo_skill_dir / "plan-template" / "project-overview.md").read_text(encoding="utf-8")
@@ -114,7 +140,12 @@ class SkillEngineTests(unittest.TestCase):
                 "已有访谈纪要",
             )
 
+            (projects_dir / "demo" / "plan" / "project-info.md").write_text(
+                "legacy project info should stay out of core context",
+                encoding="utf-8",
+            )
             context = engine.build_project_context("demo")
+            self.assertNotIn("legacy project info should stay out of core context", context)
 
             self.assertIn("当前项目概览", context)
             self.assertIn("当前项目进度", context)
