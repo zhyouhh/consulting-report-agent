@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildProjectWelcomeMessage,
   extractSseDataPayload,
+  getStreamResponseError,
   shouldContinueSseStream,
   splitAssistantMessageBlocks,
   shouldFlushStreamingQueueImmediately,
@@ -82,5 +83,26 @@ test("splitAssistantMessageBlocks preserves tool and text ordering", () => {
       { type: "tool", content: "✅ 结果: {'status':'success'}" },
       { type: "text", content: "再继续第二句正文" },
     ],
+  );
+});
+
+test("getStreamResponseError returns null for successful SSE responses", async () => {
+  const response = new Response("data: [DONE]\n\n", {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+
+  assert.equal(await getStreamResponseError(response), null);
+});
+
+test("getStreamResponseError extracts json error detail for non-ok responses", async () => {
+  const response = new Response(JSON.stringify({ detail: "transient_attachments 只允许图片类型" }), {
+    status: 422,
+    headers: { "content-type": "application/json" },
+  });
+
+  assert.equal(
+    await getStreamResponseError(response),
+    "transient_attachments 只允许图片类型",
   );
 });

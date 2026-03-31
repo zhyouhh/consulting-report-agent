@@ -39,7 +39,7 @@ def get_default_managed_client_token(base_path: Path | None = None) -> str:
 
     token_path = get_managed_client_token_path(base_path)
     if token_path.exists():
-        token = token_path.read_text(encoding="utf-8").strip()
+        token = token_path.read_text(encoding="utf-8").strip().lstrip("\ufeff")
         if token:
             return token
 

@@ -24,6 +24,29 @@ export function shouldFlushStreamingQueueImmediately(reason = "") {
   return reason === "tool" || reason === "error" || reason === "abort";
 }
 
+export async function getStreamResponseError(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (response.ok && contentType.includes("text/event-stream")) {
+    return null;
+  }
+
+  if (contentType.includes("application/json")) {
+    try {
+      const payload = await response.json();
+      return payload?.detail || payload?.data || payload?.message || `HTTP ${response.status}`;
+    } catch {
+      return `HTTP ${response.status}`;
+    }
+  }
+
+  try {
+    const text = (await response.text()).trim();
+    return text || `HTTP ${response.status}`;
+  } catch {
+    return `HTTP ${response.status}`;
+  }
+}
+
 export function splitAssistantMessageBlocks(content = "") {
   const lines = content.split("\n");
   const blocks = [];

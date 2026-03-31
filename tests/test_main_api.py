@@ -211,4 +211,45 @@ class WorkspaceApiTests(unittest.TestCase):
             "proj-demo",
             "请结合新增材料整理问题树",
             ["mat-1", "mat-2"],
+            [],
+        )
+
+    @mock.patch("backend.main.get_chat_handler")
+    def test_chat_endpoint_forwards_transient_attachments(self, mock_get_chat_handler):
+        handler = mock.Mock()
+        handler.chat.return_value = {
+            "content": "已看到截图",
+            "token_usage": None,
+        }
+        mock_get_chat_handler.return_value = handler
+
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "project_id": "proj-demo",
+                "message_text": "请看这张截图",
+                "attached_material_ids": [],
+                "transient_attachments": [
+                    {
+                        "name": "bug.png",
+                        "mime_type": "image/png",
+                        "data_url": "data:image/png;base64,AAAA",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["content"], "已看到截图")
+        handler.chat.assert_called_once_with(
+            "proj-demo",
+            "请看这张截图",
+            [],
+            [
+                {
+                    "name": "bug.png",
+                    "mime_type": "image/png",
+                    "data_url": "data:image/png;base64,AAAA",
+                }
+            ],
         )

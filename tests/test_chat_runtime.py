@@ -127,6 +127,58 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(small_estimate, large_estimate)
 
     @mock.patch("backend.chat.OpenAI")
+    def test_to_provider_message_includes_transient_images(self, mock_openai):
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "transient-image-projects", self.repo_skill_dir),
+        )
+        provider_message = handler._to_provider_message(
+            "demo",
+            {
+                "role": "user",
+                "content": "请看这张截图",
+                "attached_material_ids": [],
+                "transient_attachments": [
+                    {
+                        "name": "bug.png",
+                        "mime_type": "image/png",
+                        "data_url": "data:image/png;base64,AAAA",
+                    }
+                ],
+            },
+            include_images=True,
+        )
+
+        self.assertEqual(provider_message["role"], "user")
+        self.assertEqual(provider_message["content"][0]["type"], "text")
+        self.assertEqual(provider_message["content"][1]["type"], "image_url")
+        self.assertEqual(
+            provider_message["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA",
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_persisted_user_message_omits_transient_attachments(self, mock_openai):
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "persisted-message-projects", self.repo_skill_dir),
+        )
+
+        persisted = handler._build_persisted_user_message(
+            user_message="请看这张截图",
+            attached_material_ids=["mat-1"],
+        )
+
+        self.assertEqual(
+            persisted,
+            {
+                "role": "user",
+                "content": "请看这张截图",
+                "attached_material_ids": ["mat-1"],
+            },
+        )
+
+    @mock.patch("backend.chat.OpenAI")
     def test_estimate_tokens_counts_assistant_tool_call_arguments(self, mock_openai):
         handler = ChatHandler(
             self._make_settings(),

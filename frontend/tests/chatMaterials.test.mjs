@@ -46,3 +46,32 @@ test("buildChatRequest trims message text and preserves selected materials", () 
     },
   );
 });
+
+test("buildChatRequest includes transient attachments when provided", () => {
+  assert.deepEqual(
+    buildChatRequest({
+      projectId: "proj-1",
+      messageText: "  请看截图  ",
+      attachedMaterialIds: ["mat-1"],
+      transientAttachments: [
+        {
+          name: "bug.png",
+          mime_type: "image/png",
+          data_url: "data:image/png;base64,AAAA",
+        },
+      ],
+    }),
+    {
+      project_id: "proj-1",
+      message_text: "请看截图",
+      attached_material_ids: ["mat-1"],
+      transient_attachments: [
+        {
+          name: "bug.png",
+          mime_type: "image/png",
+          data_url: "data:image/png;base64,AAAA",
+        },
+      ],
+    },
+  );
+});

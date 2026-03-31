@@ -351,6 +351,7 @@ class ChatHandler:
         project_id: str,
         user_message: str,
         attached_material_ids: List[str] | None = None,
+        transient_attachments: List[Dict] | None = None,
         max_iterations: int = 10,
     ):
         """流式处理对话，yield 每个 chunk"""
@@ -359,13 +360,19 @@ class ChatHandler:
             return
 
         history = self._load_conversation(project_id)
-        current_user_message = {
-            "role": "user",
-            "content": user_message,
-            "attached_material_ids": attached_material_ids or [],
-        }
+        current_user_message = self._build_persisted_user_message(
+            user_message=user_message,
+            attached_material_ids=attached_material_ids or [],
+        )
         self._turn_context = self._build_turn_context(project_id, user_message)
-        conversation = self._build_provider_conversation(project_id, history, current_user_message)
+        conversation = self._build_provider_conversation(
+            project_id,
+            history,
+            {
+                **current_user_message,
+                "transient_attachments": transient_attachments or [],
+            },
+        )
         active_model = self._get_active_model_name()
 
         total_tokens = 0
@@ -505,6 +512,7 @@ class ChatHandler:
         project_id: str,
         user_message: str,
         attached_material_ids: List[str] | None = None,
+        transient_attachments: List[Dict] | None = None,
         max_iterations: int = 5,
     ) -> dict:
         """处理对话，返回 {content, token_usage}"""
@@ -512,13 +520,19 @@ class ChatHandler:
             return {"content": "消息过长，请控制在10000字符以内。", "token_usage": None}
 
         history = self._load_conversation(project_id)
-        current_user_message = {
-            "role": "user",
-            "content": user_message,
-            "attached_material_ids": attached_material_ids or [],
-        }
+        current_user_message = self._build_persisted_user_message(
+            user_message=user_message,
+            attached_material_ids=attached_material_ids or [],
+        )
         self._turn_context = self._build_turn_context(project_id, user_message)
-        conversation = self._build_provider_conversation(project_id, history, current_user_message)
+        conversation = self._build_provider_conversation(
+            project_id,
+            history,
+            {
+                **current_user_message,
+                "transient_attachments": transient_attachments or [],
+            },
+        )
         active_model = self._get_active_model_name()
 
         total_tokens = 0
@@ -638,6 +652,13 @@ class ChatHandler:
         conversation.append(self._to_provider_message(project_id, current_user_message, include_images=True))
         return conversation
 
+    def _build_persisted_user_message(self, user_message: str, attached_material_ids: List[str] | None = None) -> Dict:
+        return {
+            "role": "user",
+            "content": user_message,
+            "attached_material_ids": attached_material_ids or [],
+        }
+
     def _to_provider_message(self, project_id: str, message: Dict, include_images: bool) -> Dict | None:
         role = message.get("role")
         if role not in {"user", "assistant"}:
@@ -646,13 +667,15 @@ class ChatHandler:
             return {"role": "assistant", "content": message.get("content", "")}
 
         attached_material_ids = message.get("attached_material_ids") or []
-        if attached_material_ids:
+        transient_attachments = message.get("transient_attachments") or []
+        if attached_material_ids or transient_attachments:
             return {
                 "role": "user",
                 "content": self._build_user_content(
                     project_id,
                     message.get("content", ""),
                     attached_material_ids,
+                    transient_attachments=transient_attachments,
                     include_images=include_images,
                 ),
             }
@@ -663,6 +686,7 @@ class ChatHandler:
         project_id: str,
         user_message: str,
         attached_material_ids: List[str],
+        transient_attachments: List[Dict] | None = None,
         include_images: bool = True,
     ) -> List[Dict]:
         materials = [self.skill_engine.get_material(project_id, material_id) for material_id in attached_material_ids]
@@ -684,6 +708,13 @@ class ChatHandler:
                     "type": "image_url",
                     "image_url": {
                         "url": self._build_material_data_url(project_id, material["id"]),
+                    },
+                })
+            for attachment in transient_attachments or []:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": attachment["data_url"],
                     },
                 })
         return content

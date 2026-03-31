@@ -59,3 +59,41 @@ class ModelsSchemaTests(unittest.TestCase):
         self.assertEqual(payload.project_id, "proj-demo")
         self.assertEqual(payload.message_text, "请结合新增材料整理问题树")
         self.assertEqual(payload.attached_material_ids, ["mat-1", "mat-2"])
+
+    def test_chat_request_accepts_transient_image_attachments(self):
+        payload = ChatRequest(
+            project_id="proj-demo",
+            message_text="请看这张截图",
+            transient_attachments=[
+                {
+                    "name": "bug.png",
+                    "mime_type": "image/png",
+                    "data_url": "data:image/png;base64,AAAA",
+                }
+            ],
+        )
+
+        self.assertEqual(len(payload.transient_attachments), 1)
+        self.assertEqual(payload.transient_attachments[0].mime_type, "image/png")
+
+    def test_chat_request_defaults_transient_attachments_to_empty_list(self):
+        payload = ChatRequest(
+            project_id="proj-demo",
+            message_text="请看这张截图",
+        )
+
+        self.assertEqual(payload.transient_attachments, [])
+
+    def test_chat_request_rejects_non_image_transient_attachments(self):
+        with self.assertRaises(Exception):
+            ChatRequest(
+                project_id="proj-demo",
+                message_text="请看这份文件",
+                transient_attachments=[
+                    {
+                        "name": "memo.pdf",
+                        "mime_type": "application/pdf",
+                        "data_url": "data:application/pdf;base64,AAAA",
+                    }
+                ],
+            )

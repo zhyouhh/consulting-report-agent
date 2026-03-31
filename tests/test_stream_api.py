@@ -20,7 +20,7 @@ class ChatStreamApiTests(unittest.TestCase):
     def test_stream_endpoint_emits_events_incrementally(self):
         handler = mock.Mock()
 
-        def fake_stream(project_id, message_text, attached_material_ids):
+        def fake_stream(project_id, message_text, attached_material_ids, transient_attachments):
             events = [
                 {"type": "tool", "data": "🔧 调用工具: web_search({\"query\":\"q1\"})"},
                 {"type": "content", "data": "第一段"},
@@ -54,7 +54,12 @@ class ChatStreamApiTests(unittest.TestCase):
             start = time.time()
             response = requests.post(
                 f"http://127.0.0.1:{port}/api/chat/stream",
-                json={"project_id": "demo", "message_text": "test", "attached_material_ids": []},
+                json={
+                    "project_id": "demo",
+                    "message_text": "test",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
                 stream=True,
                 timeout=30,
             )
@@ -84,3 +89,58 @@ class ChatStreamApiTests(unittest.TestCase):
         self.assertIn('"effective_max_tokens": 500000', arrivals[2][1])
         self.assertIn('"provider_max_tokens": 1000000', arrivals[2][1])
         self.assertIn('"usage_mode": "estimated"', arrivals[2][1])
+
+    def test_stream_endpoint_forwards_transient_attachments(self):
+        handler = mock.Mock()
+
+        def fake_stream(project_id, message_text, attached_material_ids, transient_attachments):
+            self.assertEqual(project_id, "demo")
+            self.assertEqual(message_text, "请看截图")
+            self.assertEqual(attached_material_ids, [])
+            self.assertEqual(
+                transient_attachments,
+                [
+                    {
+                        "name": "bug.png",
+                        "mime_type": "image/png",
+                        "data_url": "data:image/png;base64,AAAA",
+                    }
+                ],
+            )
+            yield {"type": "content", "data": "已看到截图"}
+
+        handler.chat_stream.side_effect = fake_stream
+        original_get_chat_handler = main_module.get_chat_handler
+        main_module.get_chat_handler = lambda project_id: handler
+        port = _pick_free_port()
+        config = uvicorn.Config(main_module.app, host="127.0.0.1", port=port, log_level="error")
+        server = uvicorn.Server(config)
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+
+        try:
+            time.sleep(1.0)
+            response = requests.post(
+                f"http://127.0.0.1:{port}/api/chat/stream",
+                json={
+                    "project_id": "demo",
+                    "message_text": "请看截图",
+                    "attached_material_ids": [],
+                    "transient_attachments": [
+                        {
+                            "name": "bug.png",
+                            "mime_type": "image/png",
+                            "data_url": "data:image/png;base64,AAAA",
+                        }
+                    ],
+                },
+                stream=True,
+                timeout=30,
+            )
+            payload = "".join(response.iter_content(chunk_size=1024, decode_unicode=True))
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+            main_module.get_chat_handler = original_get_chat_handler
+
+        self.assertIn("已看到截图", payload)

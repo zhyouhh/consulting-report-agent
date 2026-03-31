@@ -33,10 +33,15 @@ export function buildChatRequest({
   projectId,
   messageText,
   attachedMaterialIds = [],
+  transientAttachments = [],
 }) {
-  return {
+  const payload = {
     project_id: projectId,
     message_text: messageText.trim(),
     attached_material_ids: attachedMaterialIds,
   };
+  if (transientAttachments.length > 0) {
+    payload.transient_attachments = transientAttachments;
+  }
+  return payload;
 }

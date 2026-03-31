@@ -251,8 +251,10 @@ async def chat(request: Request, chat_request: ChatRequest):
             chat_request.project_id,
             chat_request.message_text,
             chat_request.attached_material_ids,
+            [item.model_dump() for item in chat_request.transient_attachments],
         )
-        logger.info(f"Chat completed, tokens: {result.get('token_usage', {}).get('current_tokens', 0)}")
+        token_usage = result.get("token_usage") or {}
+        logger.info(f"Chat completed, tokens: {token_usage.get('current_tokens', 0)}")
         return ChatResponse(content=result["content"], token_usage=result.get("token_usage"))
     except Exception as e:
         logger.error(f"Chat error: {str(e)}", exc_info=True)
@@ -356,6 +358,7 @@ def chat_stream(request: Request, chat_request: ChatRequest):
                 chat_request.project_id,
                 chat_request.message_text,
                 chat_request.attached_material_ids,
+                [item.model_dump() for item in chat_request.transient_attachments],
             ):
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"

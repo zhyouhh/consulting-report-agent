@@ -1,15 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+import sys
+
+root = Path.cwd()
+sys.path.insert(0, str(root))
+
+from build_support import require_non_empty_bundle_text_file
 
 block_cipher = None
-root = Path.cwd()
 datas = [
     ('skill', 'skill'),
     ('frontend/dist', 'frontend/dist'),
 ]
-managed_client_token_file = root / 'managed_client_token.txt'
-if managed_client_token_file.exists():
-    datas.append((str(managed_client_token_file), '.'))
+managed_client_token_file = require_non_empty_bundle_text_file(
+    root,
+    'managed_client_token.txt',
+)
+datas.append((str(managed_client_token_file), '.'))
 
 a = Analysis(
     ['app.py'],

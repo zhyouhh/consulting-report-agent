@@ -108,6 +108,18 @@ class SettingsPersistenceTests(unittest.TestCase):
             self.assertEqual(managed_token, "dedicated-client-token")
             self.assertEqual(normalized["api_key"], "dedicated-client-token")
 
+    def test_managed_mode_strips_utf8_bom_from_bundle_token_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            (base_dir / "managed_client_token.txt").write_bytes(
+                b"\xef\xbb\xbfdedicated-client-token"
+            )
+
+            with mock.patch("backend.config.get_base_path", return_value=base_dir):
+                managed_token = get_default_managed_client_token()
+
+        self.assertEqual(managed_token, "dedicated-client-token")
+
     def test_old_desktop_config_uses_runtime_paths_runtime_token_and_resets_mode_to_managed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir) / "config-home"

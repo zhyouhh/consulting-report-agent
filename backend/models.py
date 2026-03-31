@@ -36,11 +36,25 @@ class Message(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now())
 
 
+class TransientAttachment(BaseModel):
+    """仅服务当前轮次的临时附件。当前只支持图片。"""
+    name: str = Field(..., min_length=1, max_length=255)
+    mime_type: str = Field(..., min_length=1, max_length=100)
+    data_url: str = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _ensure_image_only(self):
+        if not self.mime_type.startswith("image/"):
+            raise ValueError("transient_attachments 只允许图片类型")
+        return self
+
+
 class ChatRequest(BaseModel):
     """对话请求"""
     project_id: str = Field(..., min_length=1, max_length=100)
     message_text: str = Field(..., min_length=1, max_length=10000)
     attached_material_ids: List[str] = Field(default_factory=list)
+    transient_attachments: List[TransientAttachment] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -52,6 +66,7 @@ class ChatRequest(BaseModel):
             if "message_text" not in normalized and "message" in normalized:
                 normalized["message_text"] = normalized["message"]
             normalized.setdefault("attached_material_ids", [])
+            normalized.setdefault("transient_attachments", [])
             return normalized
         return data
 

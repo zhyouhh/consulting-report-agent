@@ -1,19 +1,28 @@
 import React, { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import ReactMarkdown from 'react-markdown'
-import { showError, showSuccess } from '../utils/toast'
+import { showError, showInfo, showSuccess } from '../utils/toast'
 import { buildChatRequest, toggleMaterialSelection } from '../utils/chatMaterials'
 import {
   buildProjectWelcomeMessage,
   extractSseDataPayload,
+  getStreamResponseError,
   shouldContinueSseStream,
   shouldFlushStreamingQueueImmediately,
   splitAssistantMessageBlocks,
   takeStreamingTextSlice,
 } from '../utils/chatPresentation'
+import { shouldSubmitComposerKeydown } from '../utils/composerInputBehavior'
 import { describeConnectionMode } from '../utils/connectionMode'
 import { formatContextUsage, getContextUsagePercent } from '../utils/contextUsage'
 import { supportsImageAttachments } from '../utils/modelCapabilities'
+import {
+  buildPendingAttachment,
+  fileToDataUrl,
+  mergePendingAttachments,
+  removePendingAttachment,
+  splitPendingAttachments,
+} from '../utils/pendingAttachments'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 
@@ -32,23 +41,29 @@ export default function ChatPanel({
   const [loading, setLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [dragActive, setDragActive] = useState(false)
+  const [isComposing, setIsComposing] = useState(false)
+  const [pendingAttachments, setPendingAttachments] = useState([])
   const [selectedMaterialIds, setSelectedMaterialIds] = useState([])
   const [tokenUsage, setTokenUsage] = useState(null)
   const [abortController, setAbortController] = useState(null)
   const messagesEndRef = useRef(null)
   const uploadInputRef = useRef(null)
+  const composerInputRef = useRef(null)
   const activeProjectIdRef = useRef(projectId)
   const previousProjectIdRef = useRef(projectId)
   const abortControllerRef = useRef(null)
+  const pendingAttachmentsRef = useRef([])
   const pendingContentRef = useRef(new Map())
   const contentFlushTimersRef = useRef(new Map())
   const connection = describeConnectionMode(settings || {})
   const workspaceSummary = summarizeWorkspace(workspace || {})
   const selectedMaterials = materials.filter(material => selectedMaterialIds.includes(material.id))
   const canSendImages = supportsImageAttachments(settings)
+  const { transientImages: pendingImageAttachments, persistentDocuments: pendingDocumentAttachments } = splitPendingAttachments(pendingAttachments)
   const contextUsage = tokenUsage ? formatContextUsage(tokenUsage) : null
   const contextUsagePercent = tokenUsage ? getContextUsagePercent(tokenUsage) : 0
   activeProjectIdRef.current = projectId
+  pendingAttachmentsRef.current = pendingAttachments
 
   const isActiveProjectRequest = (requestProjectId) => shouldApplyProjectResponse({
     requestProject: requestProjectId,
@@ -72,6 +87,12 @@ export default function ChatPanel({
     }
     previousProjectIdRef.current = projectId
 
+    pendingAttachments.forEach(attachment => {
+      if (attachment.previewUrl) {
+        URL.revokeObjectURL(attachment.previewUrl)
+      }
+    })
+    setPendingAttachments([])
     setSelectedMaterialIds([])
 
     if (projectId) {
@@ -134,7 +155,32 @@ export default function ChatPanel({
 
   useEffect(() => () => {
     clearAllStreamingQueues()
+    pendingAttachmentsRef.current.forEach(attachment => {
+      if (attachment.previewUrl) {
+        URL.revokeObjectURL(attachment.previewUrl)
+      }
+    })
   }, [])
+
+  useEffect(() => {
+    const textarea = composerInputRef.current
+    if (!textarea) {
+      return
+    }
+
+    textarea.style.height = 'auto'
+    const computedStyle = window.getComputedStyle(textarea)
+    const lineHeight = parseFloat(computedStyle.lineHeight || '24')
+    const paddingTop = parseFloat(computedStyle.paddingTop || '0')
+    const paddingBottom = parseFloat(computedStyle.paddingBottom || '0')
+    const borderTop = parseFloat(computedStyle.borderTopWidth || '0')
+    const borderBottom = parseFloat(computedStyle.borderBottomWidth || '0')
+    const maxHeight = (lineHeight * 6) + paddingTop + paddingBottom + borderTop + borderBottom
+    const nextHeight = Math.min(textarea.scrollHeight, maxHeight)
+
+    textarea.style.height = `${nextHeight}px`
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden'
+  }, [input])
 
   const clearStreamingQueue = (assistantId) => {
     const timerId = contentFlushTimersRef.current.get(assistantId)
@@ -229,63 +275,153 @@ export default function ChatPanel({
     })
   }
 
-  const uploadFiles = async (files) => {
-    if (!files.length || !projectId) {
+  const revokeAttachmentPreview = (attachment) => {
+    if (attachment?.previewUrl) {
+      URL.revokeObjectURL(attachment.previewUrl)
+    }
+  }
+
+  const removePendingAttachmentById = (attachmentId) => {
+    setPendingAttachments(prev => {
+      const target = prev.find(attachment => attachment.id === attachmentId)
+      if (target) {
+        revokeAttachmentPreview(target)
+      }
+      return removePendingAttachment(prev, attachmentId)
+    })
+  }
+
+  const clearPendingAttachmentQueue = () => {
+    setPendingAttachments(prev => {
+      prev.forEach(revokeAttachmentPreview)
+      return []
+    })
+  }
+
+  const queuePendingFiles = (files) => {
+    if (!files.length || !projectId || loading || uploading) {
       return
+    }
+
+    const nextPendingAttachments = files.map(file => {
+      const attachment = buildPendingAttachment(file)
+      if (attachment.kind === 'image') {
+        return {
+          ...attachment,
+          previewUrl: URL.createObjectURL(file),
+        }
+      }
+      return attachment
+    })
+
+    setPendingAttachments(prev => mergePendingAttachments(prev, nextPendingAttachments))
+  }
+
+  const uploadDocumentFiles = async (files) => {
+    if (!files.length || !projectId) {
+      return []
     }
 
     const formData = new FormData()
     files.forEach(file => formData.append('files', file))
 
-    setUploading(true)
-    try {
-      const res = await axios.post(
-        `/api/projects/${encodeURIComponent(projectId)}/materials/upload`,
-        formData,
-      )
-      const uploadedMaterials = res.data.materials || []
-      if (uploadedMaterials.length > 0) {
-        onMaterialsMerged?.(uploadedMaterials)
-        setSelectedMaterialIds(prev => [
-          ...prev,
-          ...uploadedMaterials
-            .map(material => material.id)
-            .filter(materialId => !prev.includes(materialId)),
-        ])
-        showSuccess(`已导入 ${uploadedMaterials.length} 份材料`)
-        onProjectMutated?.()
-      }
-    } catch (error) {
-      showError('上传材料失败: ' + (error.response?.data?.detail || error.message))
-    } finally {
-      setUploading(false)
+    const res = await axios.post(
+      `/api/projects/${encodeURIComponent(projectId)}/materials/upload`,
+      formData,
+    )
+    const uploadedMaterials = res.data.materials || []
+    if (uploadedMaterials.length > 0) {
+      onMaterialsMerged?.(uploadedMaterials)
+      onProjectMutated?.()
     }
+    return uploadedMaterials
+  }
+
+  const mergeMaterialIds = (existingIds = [], newMaterials = []) => {
+    const merged = [...existingIds]
+    const seen = new Set(existingIds)
+
+    for (const material of newMaterials) {
+      if (!material?.id || seen.has(material.id)) {
+        continue
+      }
+      merged.push(material.id)
+      seen.add(material.id)
+    }
+
+    return merged
+  }
+
+  const buildTransientAttachmentsPayload = async (attachments = []) => {
+    const payload = []
+
+    for (const attachment of attachments) {
+      payload.push({
+        name: attachment.displayName,
+        mime_type: attachment.mimeType,
+        data_url: await fileToDataUrl(attachment.file),
+      })
+    }
+
+    return payload
   }
 
   const sendMessage = async () => {
-    if (!input.trim() || !projectId || uploading) return
-    if (selectedMaterials.some(material => material.media_kind === 'image_like') && !canSendImages) {
+    const trimmedInput = input.trim()
+    if (!trimmedInput || !projectId || uploading) return
+    if ((selectedMaterials.some(material => material.media_kind === 'image_like') || pendingImageAttachments.length > 0) && !canSendImages) {
       showError('当前模型不支持图片输入，请切换模型或取消选择图片材料')
       return
+    }
+
+    const persistentDocumentFiles = pendingDocumentAttachments.map(attachment => attachment.file)
+    let requestAttachedMaterialIds = selectedMaterialIds
+    let transientAttachmentsPayload = []
+    let preparationStage = 'documents'
+
+    if (pendingDocumentAttachments.length > 0 || pendingImageAttachments.length > 0) {
+      setUploading(true)
+      try {
+        if (persistentDocumentFiles.length > 0) {
+          const uploadedMaterials = await uploadDocumentFiles(persistentDocumentFiles)
+          if (uploadedMaterials.length > 0) {
+            requestAttachedMaterialIds = mergeMaterialIds(selectedMaterialIds, uploadedMaterials)
+            setSelectedMaterialIds(requestAttachedMaterialIds)
+            setPendingAttachments(pendingImageAttachments)
+            showSuccess(`已导入 ${uploadedMaterials.length} 份材料`)
+          }
+        }
+
+        if (pendingImageAttachments.length > 0) {
+          preparationStage = 'images'
+          transientAttachmentsPayload = await buildTransientAttachmentsPayload(pendingImageAttachments)
+        }
+      } catch (error) {
+        const detail = error?.response?.data?.detail || error?.message || '未知错误'
+        const prefix = preparationStage === 'images' ? '处理图片失败: ' : '上传材料失败: '
+        showError(prefix + detail)
+        setUploading(false)
+        return
+      }
+      setUploading(false)
     }
 
     const userMsg = {
       id: `${Date.now()}-${Math.random()}`,
       role: 'user',
-      content: input.trim(),
-      attachedMaterialIds: selectedMaterialIds,
+      content: trimmedInput,
+      attachedMaterialIds: requestAttachedMaterialIds,
     }
     setMessages(prev => [...prev, userMsg])
-    const userInput = input
-    const attachedMaterialIds = selectedMaterialIds
-    setInput('')
-    setSelectedMaterialIds([])
+    const userInput = trimmedInput
+    const attachedMaterialIds = requestAttachedMaterialIds
     setLoading(true)
 
     const controller = new AbortController()
     const requestProjectId = projectId
     abortControllerRef.current = controller
     setAbortController(controller)
+    let streamFailed = false
 
     // 创建助手消息占位
     const assistantId = `${Date.now()}-${Math.random()}`
@@ -300,9 +436,14 @@ export default function ChatPanel({
           projectId,
           messageText: userInput,
           attachedMaterialIds,
+          transientAttachments: transientAttachmentsPayload,
         })),
         signal: controller.signal
       })
+      const responseError = await getStreamResponseError(response)
+      if (responseError) {
+        throw new Error(responseError)
+      }
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
@@ -363,6 +504,7 @@ export default function ChatPanel({
                 }
                 setTokenUsage(parsed.data)
               } else if (parsed.type === 'error') {
+                streamFailed = true
                 if (shouldFlushStreamingQueueImmediately('error')) {
                   flushStreamingQueueImmediately(assistantId, requestProjectId)
                 }
@@ -383,6 +525,7 @@ export default function ChatPanel({
     } catch (error) {
       const canApplyStreamResponse = isActiveProjectRequest(requestProjectId)
       if (error.name === 'AbortError') {
+        streamFailed = true
         if (canApplyStreamResponse && shouldFlushStreamingQueueImmediately('abort')) {
           flushStreamingQueueImmediately(assistantId, requestProjectId)
         }
@@ -392,6 +535,7 @@ export default function ChatPanel({
           ))
         }
       } else {
+        streamFailed = true
         if (canApplyStreamResponse && shouldFlushStreamingQueueImmediately('error')) {
           flushStreamingQueueImmediately(assistantId, requestProjectId)
         }
@@ -408,13 +552,20 @@ export default function ChatPanel({
     if (isActiveProjectRequest(requestProjectId)) {
       setLoading(false)
       setAbortController(current => (current === controller ? null : current))
+      if (!streamFailed) {
+        setInput('')
+        setSelectedMaterialIds([])
+        clearPendingAttachmentQueue()
+      } else {
+        setSelectedMaterialIds(requestAttachedMaterialIds)
+      }
       onProjectMutated?.()
     }
   }
 
-  const handleSelectFiles = async (event) => {
+  const handleSelectFiles = (event) => {
     const files = Array.from(event.target.files || [])
-    await uploadFiles(files)
+    queuePendingFiles(files)
     event.target.value = ''
   }
 
@@ -433,8 +584,38 @@ export default function ChatPanel({
   const handleDrop = async (event) => {
     event.preventDefault()
     setDragActive(false)
+    if (!projectId || loading || uploading) {
+      return
+    }
     const files = Array.from(event.dataTransfer?.files || [])
-    await uploadFiles(files)
+    queuePendingFiles(files)
+  }
+
+  const handleComposerPaste = (event) => {
+    const clipboardItems = Array.from(event.clipboardData?.items || [])
+    const files = clipboardItems
+      .filter(item => item.kind === 'file')
+      .map(item => item.getAsFile())
+      .filter(Boolean)
+
+    if (files.length === 0) {
+      return
+    }
+
+    if (!projectId) {
+      showInfo('请先选择或创建项目后再附加附件')
+      return
+    }
+
+    queuePendingFiles(files)
+  }
+
+  const getDocumentExtension = (name = '') => {
+    const segments = name.split('.')
+    if (segments.length < 2) {
+      return 'FILE'
+    }
+    return segments.pop().slice(0, 4).toUpperCase()
   }
 
   return (
@@ -541,6 +722,60 @@ export default function ChatPanel({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        {pendingAttachments.length > 0 && (
+          <div className="mb-3">
+            <div className="mb-2 text-xs uppercase tracking-[0.2em] text-[#8f93c9]">待发送附件</div>
+            <div className="flex flex-wrap gap-3">
+              {pendingAttachments.map(attachment => attachment.kind === 'image' ? (
+                <div key={attachment.id} className="relative w-28 rounded-xl border border-[#3a3a5a] bg-[#12142a] p-2">
+                  <button
+                    type="button"
+                    onClick={() => removePendingAttachmentById(attachment.id)}
+                    className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#0d0f20] text-[11px] text-[#e2e2f0] hover:bg-[#232852]"
+                    title="移除附件"
+                  >
+                    ×
+                  </button>
+                  <div className="mb-2 h-16 overflow-hidden rounded-lg bg-[#0f1226]">
+                    {attachment.previewUrl ? (
+                      <img
+                        src={attachment.previewUrl}
+                        alt={attachment.displayName}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-xs text-[#8f93c9]">IMAGE</div>
+                    )}
+                  </div>
+                  <div className="truncate text-xs text-[#e2e2f0]">{attachment.displayName}</div>
+                  <div className="mt-1 inline-flex rounded-full bg-[#253464] px-2 py-0.5 text-[10px] text-[#dce5ff]">
+                    本轮临时
+                  </div>
+                </div>
+              ) : (
+                <div key={attachment.id} className="relative flex min-w-[220px] items-center gap-3 rounded-xl border border-[#3a3a5a] bg-[#12142a] px-3 py-2">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#243057] text-[11px] font-semibold text-[#dce5ff]">
+                    {getDocumentExtension(attachment.displayName)}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm text-[#e2e2f0]">{attachment.displayName}</div>
+                    <div className="mt-1 inline-flex rounded-full bg-[#1f3c2f] px-2 py-0.5 text-[10px] text-[#dff7e7]">
+                      发送前入库
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removePendingAttachmentById(attachment.id)}
+                    className="flex h-6 w-6 items-center justify-center rounded-full bg-[#0d0f20] text-xs text-[#e2e2f0] hover:bg-[#232852]"
+                    title="移除附件"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {selectedMaterials.length > 0 && (
           <div className="mb-3 flex flex-wrap gap-2">
             {selectedMaterials.map(material => (
@@ -573,14 +808,14 @@ export default function ChatPanel({
             ))}
           </div>
         )}
-        {!canSendImages && materials.some(material => material.media_kind === 'image_like') && (
+        {!canSendImages && (selectedMaterials.some(material => material.media_kind === 'image_like') || pendingImageAttachments.length > 0) && (
           <div className="mb-3 text-xs text-[#f5b16a]">
-            当前自定义模型按保守规则视为不支持图片输入，选中图片材料时会阻止发送。
+            当前自定义模型按保守规则视为不支持图片输入，选中图片材料或待发送图片时会阻止发送。
           </div>
         )}
         {dragActive && (
           <div className="mb-3 rounded border border-dashed border-[#6d8cff] px-3 py-2 text-sm text-[#d9e2ff]">
-            松开鼠标即可导入材料并附带到本轮消息
+            松开鼠标即可加入待发送附件
           </div>
         )}
         <div className="flex gap-2">
@@ -596,22 +831,31 @@ export default function ChatPanel({
             onClick={() => uploadInputRef.current?.click()}
             disabled={!projectId || loading || uploading}
             className="border border-[#3a3a5a] text-[#e2e2f0] px-4 py-2 rounded-lg hover:bg-[#222244] disabled:bg-[#20203a] disabled:text-[#77789a]"
-            title="导入新材料"
+            title="添加待发送附件"
           >
-            {uploading ? '上传中...' : '+'}
+            {uploading ? '处理中...' : '+'}
           </button>
-          <input
+          <textarea
+            ref={composerInputRef}
             value={input}
             onChange={e => setInput(e.target.value)}
+            onPaste={handleComposerPaste}
+            onCompositionStart={() => setIsComposing(true)}
+            onCompositionEnd={() => setIsComposing(false)}
             onKeyDown={e => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+              if (shouldSubmitComposerKeydown({
+                key: e.key,
+                shiftKey: e.shiftKey,
+                isComposing: e.nativeEvent?.isComposing || isComposing,
+              })) {
                 e.preventDefault()
                 sendMessage()
               }
             }}
-            placeholder="输入消息..."
-            disabled={!projectId || loading || uploading}
-            className="flex-1 bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
+            rows={1}
+            placeholder="输入消息...（Enter 发送，Shift+Enter 换行）"
+            disabled={loading || uploading}
+            className="flex-1 resize-none bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
           />
           {loading ? (
             <button
