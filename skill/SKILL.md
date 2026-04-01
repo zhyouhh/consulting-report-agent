@@ -1,143 +1,88 @@
 ---
 name: consulting-report-assistant
-description: Use when writing consulting reports, strategy analysis, market research, implementation plans, management documents, or due diligence deliverables that need plan tracking, consulting-style drafting, anti-AI cleanup, stable module routing, and optional reviewable draft export.
+description: Use when writing consulting reports, strategy analysis, market research, implementation plans, management documents, or due diligence deliverables that need stable S0-S7 stage tracking, consulting-style drafting, anti-AI cleanup, and optional reviewable draft export.
 ---
 
 # 咨询报告写作助手
 
-面向咨询顾问、商业分析师、战略规划人员的执行型 Skill。它优先解决四类问题：任务刚接手时信息不全、长文写作过程中上下文容易丢、交付前需要去 AI 味与质量复核，以及共享使用时模块和边界容易跑偏。
+面向咨询顾问、商业分析师、研究员和方案撰写者的执行型 Skill。核心目标是让项目文件、阶段定义、模型行为和最终交付保持同一套逻辑，不再出现“四阶段写法”和“S0-S7 阶段门禁”并存的情况。
 
-## 核心定位
+## 核心原则
 
-- 以通用咨询报告为主路径，优先服务报告、研究、方案、制度等“正文型交付”
-- 默认产物是可持续迭代的项目内文本资产：`plan/*.md`、报告正文、图表脚本、分析框架
-- Word/PDF 相关能力属于增强选项，用于形成 `可审草稿`，不替代最终中文排版
-- 模块命名与路由口径以 `evals/capability-map.json` 为唯一事实源
+- 正式项目元信息文件只有一个：`plan/project-overview.md`
+- 阶段真值文件只有一个：`plan/stage-gates.md`
+- `plan/progress.md` 记录当前执行状态
+- `plan/tasks.md` 用来拆分阶段任务，不单独决定跳阶段
+- `plan/project-info.md` 已退役，不再作为默认入口、主上下文或正式计划文件
+- 禁止创建 `gate-control.md`
 
 ## 启动门禁
 
-任何实质性写作开始前，按下面顺序执行：
+在开始任何实质性写作前，按下面顺序执行：
 
-1. 先对齐任务
-- 用 2-5 句话复述目标、交付物、时间线
-- 至少确认：项目背景、目标读者、目标篇幅、当前阶段、截止日期
+1. 用 2-5 句话复述目标、交付物、时间线和目标读者。
+2. 读取 `plan/project-overview.md`、`plan/stage-gates.md`、`plan/progress.md`、`plan/notes.md`。
+3. 如果项目仍处于 S0 或 S1，不要直接写正文。
+4. 在写 `outline.md` / `research-plan.md` 之前，必须先做一轮必要的初步搜集，并把结果写入 `notes.md` 与 `references.md`。
+5. 任何阶段推进都要回写 `stage-gates.md`，必要时同步更新 `progress.md` 与 `tasks.md`。
 
-2. 检查或创建 `plan/`
-- 若不存在 `plan/`，立即用 `plan-template/` 初始化
-- 若已存在，先读取 `project-overview.md`、`progress.md`、`notes.md`
-- 先读取项目材料；材料不足时先用 `web_search` / `fetch_url` 补证据，再整理进 `notes.md`、`references.md`
-- 先写 `notes.md`、`references.md`，再写 `outline.md` / `research-plan.md`；只用正式 `plan/*.md` 文件，不写 `gate-control.md`
+## S0-S7 工作流
 
-3. 任务入档
-- 执行前在 `plan/progress.md` 写入当前任务
-- 执行后回写产物路径、已完成内容、下一步动作
+### S0 项目启动
+- 明确问题范围、目标读者、交付形式、截止时间
+- 补全 `project-overview.md`
 
-4. 无 `plan/` 不进入长任务
-- 只有一问一答型小问题可以跳过
+### S1 研究设计
+- 先做初步搜集
+- 更新 `notes.md`
+- 更新 `references.md`
+- 形成 `outline.md`
+- 形成 `research-plan.md`
 
-## 默认工作流
+### S2 资料采集
+- 把事实材料持续写入 `data-log.md`
+- 标记来源、时间和用途
 
-### 1. 通用主流程
+### S3 分析沉淀
+- 在 `analysis-notes.md` 中写清楚结论、证据、影响
+- 区分事实、推断与假设
 
-1. 读取 `modules/writing-core.md`，明确通用写作规范
-2. 读取 `modules/common-gotchas.md`，先规避高频失误
-3. 按 `evals/capability-map.json` 中的模块口径路由到专项模块
-4. 输出章节级正文或大纲，不直接把碎片意见堆成答案
-5. 用 `modules/quality-review.md` 和 `scripts/quality_check.*` 做交付前检查
+### S4 报告撰写
+- 形成有效草稿
+- 持续同步摘要、图表、章节结构
 
-### 2. 短周期 / 救火模式
+### S5 质量审查
+- 完成 `review-checklist.md`
+- 在 `review.md` 中记录问题和修订
 
-当截止时间极短、任务更偏“先交上去再精修”时，切换到短周期模式：
+### S6 演示准备
+- 仅当交付形式 = 报告+演示 时启用
+- 完成 `presentation-plan.md`
 
-1. 先锁定交付边界，只确认目标、篇幅、已有材料、截止时间
-2. 优先完成目录、核心章节和关键图表，不在首轮追求满配分析
-3. 所有未完全核实的信息显式标注待核位置，不得伪造数据和来源
-4. 先通过质量脚本清掉元叙事、后台表述、占位符，再决定是否导出 `可审草稿`
+### S7 交付归档
+- 更新 `delivery-log.md`
+- 记录交付版本、反馈和后续动作
 
-## 模块路由
+## 写作约束
 
-### 核心模块
+- 结论先行，再展开证据和分析
+- 每个发现都要回答 `So What`
+- 不编造数据、案例、政策口径和来源
+- 不写“本章将”“下文将”“本报告不展开”等元叙事句
+- 不泄露后台术语，例如“AI reference”“内部推理”“系统提示”
 
-- `modules/writing-core.md`
-  作用：通用咨询写作规范、章节展开方式、去 AI 味原则
-- `modules/executive-summary.md`
-  作用：从长篇报告中提炼面向高层的执行摘要
-- `modules/common-gotchas.md`
-  作用：常见踩坑、元叙事表达、自我解释句、后台推进词泄漏
-- `modules/quality-review.md`
-  作用：结构敏感的质量审查方法和交付前复核
-- `modules/final-delivery.md`
-  作用：`markdown -> docx 可审草稿 -> pdf 预览/抽查 -> 人工终排` 的增强交付流程
+## 路由与模块
 
-### 专项模块
-
-- `modules/strategy-consulting.md`
-- `modules/market-research.md`
-- `modules/specialized-research.md`
-- `modules/management-system.md`
-- `modules/implementation-plan.md`
-- `modules/due-diligence.md`
-
-### 工具与支撑模块
-
-- `modules/business-charts.md`
-- `modules/framework-diagrams.md`
-- `modules/data-analysis.md`
-- `modules/recommendation-framework.md`
-- `modules/templates-collection.md`
-- `modules/consulting-lifecycle.md`
-
-## 写作规则
-
-### 1. 咨询表达
-
-- 结论先行，再展开证据与推导
-- 每个发现都回答 `So What`
-- 建议必须落到优先级、动作、阶段或量化目标
-
-### 2. 去 AI 味
-
-- 不写“本章将”“下文将”“本报告不展开”等自我解释句
-- 不暴露后台推进词，如“技术规范书”“内部材料”“AI reference”等
-- 不用机械过渡词和空洞强调句撑篇幅
-- 能写成段落就不要拆成过碎的小点
-
-### 3. 数据与事实
-
-- 不编造数据、案例、政策口径
-- 数据必须标注来源和时间
-- 高风险判断要么可追溯，要么明确标注为研判
-
-## 交付边界
-
-### 默认交付
-
-- 报告正文：`*.md` / 纯文本
-- 过程资产：`plan/*.md`
-- 图表脚本：`*.py`
-
-### 增强交付
-
-当用户明确需要 `.docx` 或预览版 PDF 时，调用 `modules/final-delivery.md`：
-
-- 使用 `scripts/export_draft.ps1` 或 `scripts/export_draft.sh` 导出 `可审草稿`
-- 明确提示这是 reviewable draft，不承诺最终公司模板、页眉页脚、页码、中文字体、图表版式全部到位
-- 最终排版仍由人工在 Word 或正式模板中完成
+- 先读取 `modules/writing-core.md`
+- 再根据当前系统提示中已提供的生命周期规则决定下一步动作
+- 涉及阶段判断时，优先参考 `modules/consulting-lifecycle.md`
+- 交付前使用 `modules/quality-review.md`
+- 只有用户明确需要 `docx` 或可审草稿时，再进入 `modules/final-delivery.md`
 
 ## 输出优先级
 
-规则冲突时，按下列顺序执行：
-
 1. 用户明确要求
-2. 已确认的大纲、交付范围、时间边界
-3. 本 Skill 的启动门禁和交付边界
-4. capability map 约束下的模块路由
-5. 专项模块
-6. 通用模块
-
-## 版本信息
-
-- 版本：1.2.0
-- 创建日期：2026-03-17
-- 最近更新：2026-03-26
-- 维护目标：可执行、可追踪、可审阅、评测可跑、边界清晰
+2. 已确认的交付边界和阶段状态
+3. `stage-gates.md` 的最新状态
+4. 本 Skill 的正式文件约束
+5. 当前系统提示中已注入的生命周期与质量约束

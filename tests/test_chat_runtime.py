@@ -530,9 +530,11 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_chat_request_max_tokens_is_bounded_by_policy_reserved_budget_with_real_project(self, mock_openai):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
             engine = SkillEngine(projects_dir, self.repo_skill_dir)
             engine.create_project(
                 name="demo",
+                workspace_dir=str(workspace_dir),
                 project_type="strategy-consulting",
                 theme="AI strategy review",
                 target_audience="executive audience",
@@ -981,6 +983,21 @@ class ChatRuntimeTests(unittest.TestCase):
                 for message in second_call_messages
             )
         )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_expected_plan_writes_include_stage_gates_and_tasks_when_assistant_claims_updates(self, mock_openai):
+        del mock_openai
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "expected-write-projects", self.repo_skill_dir),
+        )
+
+        expected = handler._expected_plan_writes_for_message(
+            "我已更新 `plan/stage-gates.md`、`plan/tasks.md`，并同步了当前阶段与任务清单。"
+        )
+
+        self.assertIn("plan/stage-gates.md", expected)
+        self.assertIn("plan/tasks.md", expected)
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_warns_and_retries_when_assistant_claims_file_update_without_write(self, mock_openai):

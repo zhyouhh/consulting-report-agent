@@ -32,7 +32,7 @@ function App() {
   const [workspace, setWorkspace] = useState(null)
   const [materials, setMaterials] = useState([])
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0)
-  const [showPreview, setShowPreview] = useState(true)
+  const [showWorkspacePanel, setShowWorkspacePanel] = useState(true)
   const [loading, setLoading] = useState(true)
   const activeProjectRef = useRef(currentProjectId)
 
@@ -234,9 +234,9 @@ function App() {
           materials={materials}
           onMaterialsMerged={handleMaterialsMerged}
           onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
-          onTogglePreview={() => setShowPreview(!showPreview)}
+          onToggleWorkspacePanel={() => setShowWorkspacePanel(!showWorkspacePanel)}
         />
-        {showPreview && (
+        {showWorkspacePanel && (
           <WorkspacePanel
             projectId={currentProjectId}
             project={currentProject}

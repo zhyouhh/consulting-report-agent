@@ -6,7 +6,7 @@ import {
   orderPreviewFiles,
 } from "../src/utils/workspaceFiles.js";
 
-test("getDefaultPreviewFile prefers project-overview over legacy project-info", () => {
+test("getDefaultPreviewFile prefers project-overview", () => {
   const paths = [
     "plan/project-info.md",
     "notes/context.md",
@@ -19,7 +19,7 @@ test("getDefaultPreviewFile prefers project-overview over legacy project-info", 
   );
 });
 
-test("getDefaultPreviewFile falls back to legacy project-info when overview is missing", () => {
+test("getDefaultPreviewFile ignores retired project-info when overview is missing", () => {
   const paths = [
     "notes/context.md",
     "plan/project-info.md",
@@ -27,11 +27,18 @@ test("getDefaultPreviewFile falls back to legacy project-info when overview is m
 
   assert.equal(
     getDefaultPreviewFile(paths),
-    "plan/project-info.md",
+    "notes/context.md",
   );
 });
 
-test("orderPreviewFiles pushes legacy project-info to the end", () => {
+test("getDefaultPreviewFile returns empty when only retired project-info exists", () => {
+  assert.equal(
+    getDefaultPreviewFile(["plan/project-info.md"]),
+    "",
+  );
+});
+
+test("orderPreviewFiles removes retired project-info from the file list", () => {
   const paths = [
     "plan/project-info.md",
     "draft/report.md",
@@ -41,7 +48,6 @@ test("orderPreviewFiles pushes legacy project-info to the end", () => {
   assert.deepEqual(orderPreviewFiles(paths), [
     "plan/project-overview.md",
     "draft/report.md",
-    "plan/project-info.md",
   ]);
 });
 
@@ -57,6 +63,5 @@ test("orderPreviewFiles keeps ordering deterministic for unsorted backend paths"
     "analysis/a-findings.md",
     "content/report.md",
     "notes/z-notes.md",
-    "plan/project-info.md",
   ]);
 });

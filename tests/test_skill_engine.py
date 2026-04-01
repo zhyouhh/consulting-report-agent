@@ -1,3 +1,4 @@
+import json
 import shutil
 import tempfile
 import unittest
@@ -11,19 +12,26 @@ class SkillEngineTests(unittest.TestCase):
     def setUp(self):
         self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
 
+    def _project_payload(self, workspace_dir: Path, **overrides):
+        payload = {
+            "name": "demo",
+            "workspace_dir": str(workspace_dir),
+            "project_type": "strategy-consulting",
+            "theme": "AI strategy review",
+            "target_audience": "executive audience",
+            "deadline": "2026-04-01",
+            "expected_length": "3000 words",
+            "notes": "existing interview notes",
+        }
+        payload.update(overrides)
+        return payload
+
     def _create_engine_and_project(self, tmpdir: str):
         projects_dir = Path(tmpdir) / "projects"
+        workspace_dir = Path(tmpdir) / "workspace"
         engine = SkillEngine(projects_dir, self.repo_skill_dir)
-        engine.create_project(
-            "demo",
-            "strategy-consulting",
-            "AI strategy review",
-            "executive audience",
-            "2026-04-01",
-            "3000 words",
-            "existing interview notes",
-        )
-        return engine, projects_dir / "demo"
+        project = engine.create_project(self._project_payload(workspace_dir))
+        return engine, Path(project["project_dir"])
 
     def _write_stage_two_prerequisites(
         self,
@@ -118,6 +126,7 @@ class SkillEngineTests(unittest.TestCase):
     def test_create_project_initializes_formal_plan_templates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = projects_dir / "demo"
             engine = SkillEngine(projects_dir, self.repo_skill_dir)
             engine.create_project(
                 "demo",
@@ -129,7 +138,9 @@ class SkillEngineTests(unittest.TestCase):
                 "已有访谈纪要",
             )
 
-            created_file_names = {path.name for path in (projects_dir / "demo" / "plan").glob("*.md")}
+            created_file_names = {
+                path.name for path in (workspace_dir / ".consulting-report" / "plan").glob("*.md")
+            }
             expected_files = {
                 "project-overview.md",
                 "progress.md",
@@ -153,6 +164,7 @@ class SkillEngineTests(unittest.TestCase):
     def test_create_project_initializes_only_registered_formal_plan_templates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = projects_dir / "demo"
             skill_dir = Path(tmpdir) / "skill"
             template_dir = skill_dir / "plan-template"
             shutil.copytree(self.repo_skill_dir / "plan-template", template_dir)
@@ -170,10 +182,91 @@ class SkillEngineTests(unittest.TestCase):
                 "existing notes",
             )
 
-            created_file_names = {path.name for path in (projects_dir / "demo" / "plan").glob("*.md")}
+            created_file_names = {
+                path.name for path in (workspace_dir / ".consulting-report" / "plan").glob("*.md")
+            }
 
             self.assertNotIn("project-info.md", created_file_names)
             self.assertNotIn("scratchpad.md", created_file_names)
+
+    def test_create_project_defaults_to_managed_workspace_under_projects_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+
+            project = engine.create_project(
+                "demo",
+                "strategy-consulting",
+                "theme",
+                "executive audience",
+                "2026-04-01",
+                "3000 words",
+                "existing notes",
+            )
+
+            expected_workspace_dir = projects_dir / "demo"
+            expected_project_dir = expected_workspace_dir / ".consulting-report"
+
+            self.assertEqual(Path(project["workspace_dir"]), expected_workspace_dir)
+            self.assertEqual(Path(project["project_dir"]), expected_project_dir)
+            self.assertTrue((expected_project_dir / "plan" / "project-overview.md").exists())
+
+    def test_get_project_path_ignores_unregistered_legacy_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            legacy_dir = projects_dir / "legacy-demo"
+            legacy_dir.mkdir(parents=True)
+
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+
+            self.assertIsNone(engine.get_project_path("legacy-demo"))
+
+    def test_tasks_template_uses_s0_to_s7_instead_of_legacy_phase_buckets(self):
+        template_text = (self.repo_skill_dir / "plan-template" / "tasks.md").read_text(encoding="utf-8")
+
+        for stage_code in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"):
+            self.assertIn(stage_code, template_text)
+
+        self.assertNotIn("阶段0：项目初始化", template_text)
+        self.assertNotIn("阶段1：大纲设计", template_text)
+        self.assertNotIn("阶段2：分段撰写", template_text)
+        self.assertNotIn("阶段3：质量审查", template_text)
+        self.assertNotIn("阶段4：整合导出", template_text)
+
+    def test_progress_template_uses_stage_codes_in_milestones(self):
+        template_text = (self.repo_skill_dir / "plan-template" / "progress.md").read_text(encoding="utf-8")
+
+        for stage_code in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"):
+            self.assertIn(stage_code, template_text)
+
+        self.assertNotIn("| 项目启动 |", template_text)
+        self.assertNotIn("| 研究完成 |", template_text)
+        self.assertNotIn("| 初稿完成 |", template_text)
+        self.assertNotIn("| 终稿交付 |", template_text)
+
+    def test_consulting_lifecycle_module_aligns_stage_files_and_optional_s6(self):
+        lifecycle_text = (self.repo_skill_dir / "modules" / "consulting-lifecycle.md").read_text(encoding="utf-8")
+
+        self.assertIn("stage-gates.md", lifecycle_text)
+        self.assertIn("project-overview.md", lifecycle_text)
+        self.assertIn("notes.md", lifecycle_text)
+        self.assertIn("references.md", lifecycle_text)
+        self.assertIn("outline.md", lifecycle_text)
+        self.assertIn("research-plan.md", lifecycle_text)
+        self.assertIn("仅当交付形式 = 报告+演示", lifecycle_text)
+
+    def test_capability_map_routes_lifecycle_to_stage_artifacts(self):
+        capability_map = json.loads(
+            (self.repo_skill_dir / "evals" / "capability-map.json").read_text(encoding="utf-8")
+        )
+        lifecycle = next(
+            item for item in capability_map["capabilities"] if item["module"] == "consulting-lifecycle"
+        )
+
+        self.assertIn("stage-gates", lifecycle["outputs"])
+        self.assertIn("progress", lifecycle["outputs"])
+        self.assertIn("tasks", lifecycle["outputs"])
+        self.assertNotIn("progress-notes", lifecycle["outputs"])
 
     def test_project_overview_template_contains_aligned_metadata_fields(self):
         template_text = (self.repo_skill_dir / "plan-template" / "project-overview.md").read_text(encoding="utf-8")
@@ -244,8 +337,12 @@ class SkillEngineTests(unittest.TestCase):
                 "已有访谈纪要",
             )
 
-            (projects_dir / "demo" / "plan" / "project-info.md").write_text(
+            (projects_dir / "demo" / ".consulting-report" / "plan" / "project-info.md").write_text(
                 "legacy project info should stay out of core context",
+                encoding="utf-8",
+            )
+            (projects_dir / "demo" / ".consulting-report" / "plan" / "tasks.md").write_text(
+                "# 任务清单\n\n## 当前阶段\n**阶段**: S1\n\n### S1 研究设计\n- [ ] 更新 references.md\n",
                 encoding="utf-8",
             )
             context = engine.build_project_context("demo")
@@ -255,6 +352,8 @@ class SkillEngineTests(unittest.TestCase):
             self.assertIn("当前项目进度", context)
             self.assertIn("阶段门禁", context)
             self.assertIn("项目备注", context)
+            self.assertIn("当前阶段任务", context)
+            self.assertIn("更新 references.md", context)
             self.assertNotIn("当前项目信息", context)
             self.assertNotIn("当前大纲", context)
 
@@ -269,13 +368,20 @@ class SkillEngineTests(unittest.TestCase):
     def test_primary_report_path_prefers_report_file_over_outline_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
-            content_dir = projects_dir / "demo" / "content"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            engine.create_project(
+                "demo",
+                "strategy-consulting",
+                "theme",
+                "executive audience",
+                "2026-04-01",
+                "3000 words",
+                "existing notes",
+            )
+            content_dir = projects_dir / "demo" / ".consulting-report" / "content"
             content_dir.mkdir(parents=True)
             (content_dir / "outline.md").write_text("# 大纲", encoding="utf-8")
             (content_dir / "report.md").write_text("# 正文", encoding="utf-8")
-
-            engine = SkillEngine(projects_dir, self.repo_skill_dir)
-
             report_path = engine.get_primary_report_path("demo")
 
             self.assertTrue(report_path.endswith("report.md"))

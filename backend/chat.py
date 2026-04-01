@@ -375,6 +375,12 @@ class ChatHandler:
         if self._message_mentions_file_update(normalized_text, ("plan/notes.md", "notes.md", "项目笔记", "核心技术共识", "备注")):
             expected.add("plan/notes.md")
 
+        if self._message_mentions_file_update(normalized_text, ("plan/stage-gates.md", "stage-gates.md", "阶段门禁", "当前阶段")):
+            expected.add("plan/stage-gates.md")
+
+        if self._message_mentions_file_update(normalized_text, ("plan/tasks.md", "tasks.md", "任务清单", "阶段任务")):
+            expected.add("plan/tasks.md")
+
         return expected
 
     def _get_missing_expected_writes(self, assistant_message: str, successful_writes: set[str]) -> list[str]:

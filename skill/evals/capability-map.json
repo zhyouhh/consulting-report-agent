@@ -22,15 +22,15 @@
   "capabilities": [
     {
       "module": "consulting-lifecycle",
-      "summary": "负责 plan 初始化、项目阶段管理与持续回写。",
+      "summary": "负责 S0-S7 阶段管理、stage-gates 对齐，以及 progress/tasks 的持续回写。",
       "task_types": ["general-report", "quick-delivery"],
-      "trigger_phrases": ["继续项目", "项目推进", "plan", "阶段门禁"],
-      "outputs": ["plan", "progress-notes"],
+      "trigger_phrases": ["继续项目", "项目推进", "plan", "stage-gates", "阶段门禁"],
+      "outputs": ["plan", "stage-gates", "progress", "tasks"],
       "aliases": ["lifecycle", "plan-management"]
     },
     {
       "module": "writing-core",
-      "summary": "提供通用咨询写作规范、段落展开方式与 So What 约束。",
+      "summary": "提供通用咨询写作规范、段落展开方式和 So What 约束。",
       "task_types": ["general-report", "management-document", "implementation-plan"],
       "trigger_phrases": ["写报告", "咨询报告", "研究报告", "写正文"],
       "outputs": ["markdown", "outline"],
@@ -46,7 +46,7 @@
     },
     {
       "module": "common-gotchas",
-      "summary": "约束元叙事、自我解释句、后台推进词与结构类常见失误。",
+      "summary": "约束元叙事、自我解释句、后台推进词和常见结构问题。",
       "task_types": ["anti-ai-regression", "general-report"],
       "trigger_phrases": ["去AI味", "常见错误", "自我解释", "后台词"],
       "outputs": ["guardrails", "cleanup-notes"],
@@ -54,7 +54,7 @@
     },
     {
       "module": "quality-review",
-      "summary": "负责内容可信性、结构匹配性和表达呈现的质量审查。",
+      "summary": "负责内容可信性、结构匹配性和表达质量审查。",
       "task_types": ["general-report", "reviewable-draft", "anti-ai-regression", "management-document", "implementation-plan"],
       "trigger_phrases": ["质量审查", "review", "检查", "复核"],
       "outputs": ["review-notes", "risk-summary"],
@@ -62,7 +62,7 @@
     },
     {
       "module": "final-delivery",
-      "summary": "管理可审草稿导出、预审抽查和终排边界说明。",
+      "summary": "管理可审草稿导出、预览抽查和最终排版边界说明。",
       "task_types": ["reviewable-draft"],
       "trigger_phrases": ["导出Word", "可审草稿", "docx", "预审版"],
       "outputs": ["docx-draft", "delivery-notes"],
@@ -86,7 +86,7 @@
     },
     {
       "module": "specialized-research",
-      "summary": "用于专题诊断、能力评估、问题识别与改进方向研究。",
+      "summary": "用于专题诊断、能力评估和问题识别研究。",
       "task_types": ["specialized-research"],
       "trigger_phrases": ["专项研究", "能力提升", "现状评估", "专题分析"],
       "outputs": ["research-report", "diagnosis"],
@@ -94,7 +94,7 @@
     },
     {
       "module": "management-system",
-      "summary": "用于管理制度、管理办法与制度类文件写作。",
+      "summary": "用于制度文件、管理办法与管理体系文档写作。",
       "task_types": ["management-document"],
       "trigger_phrases": ["管理制度", "制度文件", "管理办法", "制度编写"],
       "outputs": ["policy-document", "system-doc"],
@@ -102,7 +102,7 @@
     },
     {
       "module": "implementation-plan",
-      "summary": "用于实施方案、路线图、里程碑与资源安排设计。",
+      "summary": "用于实施方案、路线图和资源安排设计。",
       "task_types": ["implementation-plan"],
       "trigger_phrases": ["实施方案", "路线图", "实施计划", "落地方案"],
       "outputs": ["implementation-plan", "roadmap"],
@@ -134,7 +134,7 @@
     },
     {
       "module": "data-analysis",
-      "summary": "用于数据整理、指标计算和分析支持。",
+      "summary": "用于数据整理、指标计算和分析支撑。",
       "task_types": ["specialized-research", "general-report"],
       "trigger_phrases": ["数据分析", "指标测算", "数据整理", "分析模型"],
       "outputs": ["analysis-notes", "data-summary"],
@@ -142,7 +142,7 @@
     },
     {
       "module": "recommendation-framework",
-      "summary": "用于建议体系、举措设计与优先级拆解。",
+      "summary": "用于建议体系、举措设计和优先级拆解。",
       "task_types": ["general-report", "implementation-plan"],
       "trigger_phrases": ["建议框架", "行动建议", "举措设计", "优先级"],
       "outputs": ["recommendations", "action-framework"],

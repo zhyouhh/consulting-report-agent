@@ -270,7 +270,10 @@ async def list_files(project_id: str):
     files = []
     for md_file in project_path.rglob("*.md"):
         rel_path = md_file.relative_to(project_path)
-        files.append(str(rel_path))
+        normalized_path = str(rel_path).replace("\\", "/")
+        if normalized_path == "plan/project-info.md":
+            continue
+        files.append(normalized_path)
     return {"files": files}
 
 

@@ -34,7 +34,7 @@ export default function ChatPanel({
   materials,
   onMaterialsMerged,
   onProjectMutated,
-  onTogglePreview,
+  onToggleWorkspacePanel,
 }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
@@ -635,8 +635,8 @@ export default function ChatPanel({
               清空对话
             </button>
           )}
-          <button onClick={onTogglePreview} className="text-sm text-[#8888a8] hover:text-[#e2e2f0]">
-            切换预览
+          <button onClick={onToggleWorkspacePanel} className="text-sm text-[#8888a8] hover:text-[#e2e2f0]">
+            切换工作区
           </button>
         </div>
       </div>

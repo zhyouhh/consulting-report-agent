@@ -123,9 +123,14 @@ class SkillEngine:
             **extra_kwargs,
         )
 
-        if payload["workspace_dir"]:
-            return self._create_workspace_project(payload)
-        return self._create_legacy_project(payload)
+        payload = dict(payload)
+        payload["workspace_dir"] = payload.get("workspace_dir") or str(
+            self._default_workspace_dir(payload["name"])
+        )
+        return self._create_workspace_project(payload)
+
+    def _default_workspace_dir(self, project_name: str) -> Path:
+        return (self.projects_dir / project_name).resolve()
 
     def _create_workspace_project(self, payload: dict) -> dict:
         registry = self._load_registry()
@@ -184,36 +189,6 @@ class SkillEngine:
             )
 
         return project_record
-
-    def _create_legacy_project(self, payload: dict) -> dict:
-        """兼容旧测试和旧调用。"""
-        project_path = self.projects_dir / payload["name"]
-        if project_path.exists():
-            raise ValueError(f"项目 {payload['name']} 已存在")
-
-        self._initialize_project_structure(project_path)
-        self._populate_v2_plan_files(
-            project_path=project_path,
-            name=payload["name"],
-            project_type=payload["project_type"],
-            theme=payload["theme"],
-            target_audience=payload["target_audience"],
-            deadline=payload["deadline"],
-            expected_length=payload["expected_length"],
-            notes=payload["notes"],
-        )
-        return {
-            "id": payload["name"],
-            "name": payload["name"],
-            "project_type": payload["project_type"],
-            "theme": payload["theme"],
-            "target_audience": payload["target_audience"],
-            "deadline": payload["deadline"],
-            "expected_length": payload["expected_length"],
-            "notes": payload["notes"],
-            "workspace_dir": str(project_path),
-            "project_dir": str(project_path),
-        }
 
     def _initialize_project_structure(self, project_path: Path):
         plan_path = project_path / "plan"
@@ -298,9 +273,7 @@ class SkillEngine:
         if project_record:
             project_path = Path(project_record["project_dir"])
             return project_path if project_path.exists() else None
-
-        legacy_path = self.projects_dir / project_ref
-        return legacy_path if legacy_path.exists() else None
+        return None
 
     def list_projects(self) -> list:
         registry = self._load_registry()
@@ -405,10 +378,6 @@ class SkillEngine:
             self._save_registry(registry)
             return
 
-        legacy_path = self.get_project_path(project_ref)
-        if legacy_path and legacy_path.exists():
-            shutil.rmtree(legacy_path)
-            return
 
         raise ValueError(f"项目 {project_ref} 不存在")
 
@@ -519,11 +488,10 @@ class SkillEngine:
 
     def get_workspace_summary(self, project_ref: str) -> dict:
         project_record = self.get_project_record(project_ref)
-        if not project_record and not self.get_project_path(project_ref):
+        if not project_record:
             raise ValueError(f"项目 {project_ref} 不存在")
-
-        project_path = self.get_project_path(project_ref)
-        if not project_path:
+        project_path = Path(project_record["project_dir"])
+        if not project_path.exists():
             raise ValueError(f"项目 {project_ref} 不存在")
 
         stage_gates_text = self._ensure_stage_gates_state(project_path)
@@ -536,8 +504,8 @@ class SkillEngine:
             "status": status,
             "completed_items": self._extract_checked_items(stage_gates_text),
             "next_actions": self._extract_open_items(stage_gates_text)[:3],
-            "workspace_dir": project_record["workspace_dir"] if project_record else "",
-            "project_dir": project_record["project_dir"] if project_record else str(self.get_project_path(project_ref)),
+            "workspace_dir": project_record["workspace_dir"],
+            "project_dir": project_record["project_dir"],
             "materials": [
                 {
                     "id": material["id"],
@@ -551,11 +519,20 @@ class SkillEngine:
         }
 
     def build_project_context(self, project_ref: str) -> str:
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            raise ValueError(f"项目 {project_ref} 不存在")
+
         sections = []
         for title, relative_path in self.CORE_CONTEXT_FILES:
             content = self._read_optional(project_ref, relative_path)
             if content:
                 sections.append(f"## {title}\n{content}")
+
+        if self._is_effective_plan_file(project_path, "tasks.md"):
+            tasks_content = self._read_plan_file(project_path, "tasks.md")
+            if tasks_content:
+                sections.append(f"## 当前阶段任务\n{tasks_content}")
 
         materials = self.list_materials(project_ref)
         if materials:
@@ -1047,11 +1024,17 @@ class SkillEngine:
     def get_skill_prompt(self) -> str:
         """获取Skill定义"""
         skill_file = self.skill_dir / "SKILL.md"
-        return skill_file.read_text(encoding="utf-8")
+        sections = [skill_file.read_text(encoding="utf-8")]
 
-    def get_template(self, report_type: str) -> str:
+        lifecycle_file = self.skill_dir / "modules" / "consulting-lifecycle.md"
+        if lifecycle_file.exists():
+            sections.append("## Consulting Lifecycle Guidance\n" + lifecycle_file.read_text(encoding="utf-8"))
+
+        return "\n\n".join(sections)
+
+    def get_template(self, project_type: str) -> str:
         """获取报告模板"""
-        template_file = self.skill_dir / "templates" / f"{report_type}.md"
+        template_file = self.skill_dir / "templates" / f"{project_type}.md"
         if template_file.exists():
             return template_file.read_text(encoding="utf-8")
         return ""
