@@ -19,6 +19,73 @@ class WorkspaceMaterialTests(unittest.TestCase):
     def setUp(self):
         self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
 
+    def _write_stage_two_prerequisites(self, project_dir: Path):
+        (project_dir / "plan" / "notes.md").write_text(
+            "# Notes\n\n"
+            "## Boundaries\n"
+            "- Focus on enterprise AI adoption decisions.\n"
+            "## Assumptions\n"
+            "- Budget remains flat through FY26.\n",
+            encoding="utf-8",
+        )
+        (project_dir / "plan" / "references.md").write_text(
+            "# References\n\n"
+            "## Sources\n"
+            "- Internal interview transcript: operations lead workshop\n"
+            "- External benchmark: https://example.com/ai-benchmark\n",
+            encoding="utf-8",
+        )
+        (project_dir / "plan" / "outline.md").write_text(
+            "# Report outline\n\n"
+            "### Executive summary\n"
+            "- Key finding\n"
+            "### Market context\n"
+            "- Market signal\n"
+            "### Recommendations\n"
+            "- Next step\n",
+            encoding="utf-8",
+        )
+        (project_dir / "plan" / "research-plan.md").write_text(
+            "# Research plan\n\n"
+            "## Research methods\n"
+            "- Expert interviews\n"
+            "## Data sources\n"
+            "- CRM export\n",
+            encoding="utf-8",
+        )
+        (project_dir / "plan" / "data-log.md").write_text(
+            "# Data log\n\n"
+            "| Date | Type | Source | Fact |\n"
+            "| --- | --- | --- | --- |\n"
+            "| 2026-04-01 | Interview | Operations lead | Renewal rate down 8 percent |\n",
+            encoding="utf-8",
+        )
+        (project_dir / "plan" / "analysis-notes.md").write_text(
+            "# Analysis notes\n\n"
+            "## Insight 1\n"
+            "Conclusion: onboarding friction is driving renewal loss.\n"
+            "Evidence: interview transcript and retention export.\n"
+            "Impact: prioritize onboarding redesign.\n",
+            encoding="utf-8",
+        )
+        (project_dir / "report_draft_v1.md").write_text(
+            "# Draft\n\n## Executive summary\nA concrete report section.\n",
+            encoding="utf-8",
+        )
+        (project_dir / "plan" / "review-checklist.md").write_text(
+            "# Review checklist\n\n"
+            "## Review cycle\n"
+            "**Cycle**: 1\n"
+            "- [x] Facts cross-checked against sources.\n",
+            encoding="utf-8",
+        )
+
+    def _set_delivery_mode(self, project_dir: Path, delivery_mode: str):
+        overview_path = project_dir / "plan" / "project-overview.md"
+        content = overview_path.read_text(encoding="utf-8")
+        updated = content.replace("**交付形式**: 仅报告", f"**交付形式**: {delivery_mode}")
+        overview_path.write_text(updated, encoding="utf-8")
+
     def test_create_project_stores_workspace_metadata_and_initial_materials(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_projects_dir = Path(tmpdir) / "config-projects"
@@ -60,7 +127,7 @@ class WorkspaceMaterialTests(unittest.TestCase):
             self.assertEqual(materials[0]["stored_rel_path"], "资料/访谈纪要.txt")
             self.assertFalse((project_dir / "materials" / "imported" / "访谈纪要.txt").exists())
 
-    def test_workspace_summary_backfills_stage_file_and_advances_when_report_exists(self):
+    def test_workspace_summary_backfills_stage_file_without_skipping_to_report_stage(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_projects_dir = Path(tmpdir) / "config-projects"
             workspace_dir = Path(tmpdir) / "客户项目"
@@ -77,14 +144,150 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             (project_dir / "plan" / "stage-gates.md").unlink()
-            (project_dir / "plan" / "outline.md").write_text("# 大纲\n- 执行摘要", encoding="utf-8")
-            (project_dir / "report_draft_v1.md").write_text("# 第一章", encoding="utf-8")
+            (project_dir / "plan" / "outline.md").write_text(
+                "# 大纲\n\n## 执行摘要\n- 结论\n## 建议\n- 下一步\n",
+                encoding="utf-8",
+            )
+            (project_dir / "report_draft_v1.md").write_text(
+                "# 第一章\n\n## 执行摘要\n形成了可交付的正文段落。\n",
+                encoding="utf-8",
+            )
 
             summary = engine.get_workspace_summary(project["id"])
 
-            self.assertEqual(summary["stage_code"], "S4")
+            self.assertEqual(summary["stage_code"], "S1")
             self.assertEqual(summary["status"], "进行中")
             self.assertTrue((project_dir / "plan" / "stage-gates.md").exists())
+
+    def test_workspace_summary_keeps_report_only_delivery_log_from_skipping_past_s4_without_review(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_projects_dir = Path(tmpdir) / "config-projects"
+            workspace_dir = Path(tmpdir) / "客户项目"
+            engine = SkillEngine(config_projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+                notes="",
+            )
+
+            project_dir = workspace_dir / ".consulting-report"
+            self._write_stage_two_prerequisites(project_dir)
+            (project_dir / "plan" / "review-checklist.md").unlink()
+            (project_dir / "report_draft_v1.md").write_text(
+                "# Draft\n\n## Executive summary\nA concrete report section.\n",
+                encoding="utf-8",
+            )
+            (project_dir / "plan" / "delivery-log.md").write_text(
+                "# Delivery log\n\n"
+                "**Delivery date**: 2026-04-01\n"
+                "**Delivery version**: final\n"
+                "- Final report shared with client.\n",
+                encoding="utf-8",
+            )
+
+            summary = engine.get_workspace_summary(project["id"])
+            stage_gates_text = (project_dir / "plan" / "stage-gates.md").read_text(encoding="utf-8")
+
+            self.assertEqual(summary["stage_code"], "S5")
+            self.assertIn("review-checklist.md 完成", summary["next_actions"])
+            self.assertNotIn("delivery-log.md 更新", summary["completed_items"])
+            self.assertNotIn("- [/] presentation-plan.md 完成", stage_gates_text)
+
+    def test_workspace_summary_advances_report_only_projects_to_s7_after_review_checklist_without_delivery_log(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_projects_dir = Path(tmpdir) / "config-projects"
+            workspace_dir = Path(tmpdir) / "客户项目"
+            engine = SkillEngine(config_projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+                notes="",
+            )
+
+            project_dir = workspace_dir / ".consulting-report"
+            self._write_stage_two_prerequisites(project_dir)
+
+            summary = engine.get_workspace_summary(project["id"])
+            stage_gates_text = (project_dir / "plan" / "stage-gates.md").read_text(encoding="utf-8")
+
+            self.assertEqual(summary["stage_code"], "S7")
+            self.assertIn("delivery-log.md 更新", summary["next_actions"])
+            self.assertNotIn("presentation-plan.md 完成", summary["next_actions"])
+            self.assertIn("- [/] presentation-plan.md 完成", stage_gates_text)
+
+    def test_workspace_summary_skips_s6_for_report_only_projects_when_delivery_log_exists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_projects_dir = Path(tmpdir) / "config-projects"
+            workspace_dir = Path(tmpdir) / "客户项目"
+            engine = SkillEngine(config_projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+                notes="",
+            )
+
+            project_dir = workspace_dir / ".consulting-report"
+            self._write_stage_two_prerequisites(project_dir)
+            (project_dir / "plan" / "delivery-log.md").write_text(
+                "# Delivery log\n\n"
+                "**Delivery date**: 2026-04-01\n"
+                "**Delivery version**: final\n"
+                "- Final report shared with client.\n",
+                encoding="utf-8",
+            )
+
+            summary = engine.get_workspace_summary(project["id"])
+
+            self.assertEqual(summary["stage_code"], "S7")
+            self.assertNotIn("presentation-plan.md 完成", summary["next_actions"])
+
+    def test_workspace_summary_requires_presentation_plan_for_report_and_presentation_projects(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_projects_dir = Path(tmpdir) / "config-projects"
+            workspace_dir = Path(tmpdir) / "客户项目"
+            engine = SkillEngine(config_projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+                notes="",
+            )
+
+            project_dir = workspace_dir / ".consulting-report"
+            self._set_delivery_mode(project_dir, "报告+演示")
+            self._write_stage_two_prerequisites(project_dir)
+            (project_dir / "plan" / "delivery-log.md").write_text(
+                "# Delivery log\n\n"
+                "**Delivery date**: 2026-04-01\n"
+                "**Delivery version**: briefing\n"
+                "- Draft sent ahead of readout.\n",
+                encoding="utf-8",
+            )
+
+            summary = engine.get_workspace_summary(project["id"])
+
+            self.assertEqual(summary["stage_code"], "S6")
+            self.assertIn("presentation-plan.md 完成", summary["next_actions"])
+            self.assertNotIn("delivery-log.md 更新", summary["completed_items"])
 
     def test_import_material_copies_external_file_into_project(self):
         with tempfile.TemporaryDirectory() as tmpdir:

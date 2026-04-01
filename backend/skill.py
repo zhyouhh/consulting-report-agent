@@ -36,6 +36,59 @@ class SkillEngine:
     }
     IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
     TEXT_SUFFIXES = {".md", ".txt", ".csv"}
+    STAGE_CHECKLIST_ITEMS = {
+        "S0": [
+            "\u9700\u6c42\u8bbf\u8c08\u5b8c\u6210",
+            "\u8303\u56f4\u754c\u5b9a\u660e\u786e",
+            "project-overview.md \u521b\u5efa",
+            "\u4ea4\u4ed8\u5f62\u5f0f\u786e\u8ba4",
+        ],
+        "S1": [
+            "notes.md \u66f4\u65b0",
+            "references.md \u66f4\u65b0",
+            "\u5206\u6790\u6846\u67b6\u786e\u5b9a",
+            "outline.md \u5b8c\u6210",
+            "research-plan.md \u5b8c\u6210",
+        ],
+        "S2": [
+            "data-log.md \u66f4\u65b0",
+            "\u4e00\u624b/\u4e8c\u624b\u8d44\u6599\u6761\u76ee\u5f55\u5165",
+            "\u8bbf\u8c08\u6216\u8c03\u7814\u8bb0\u5f55\u6c89\u6dc0",
+        ],
+        "S3": [
+            "analysis-notes.md \u521b\u5efa/\u66f4\u65b0",
+            "\u5173\u952e\u53d1\u73b0\u63d0\u70bc",
+            "\u7ed3\u8bba\u4e0e\u5047\u8bbe\u533a\u5206\u6e05\u695a",
+        ],
+        "S4": [
+            "\u62a5\u544a\u7ed3\u6784\u786e\u5b9a",
+            "report_draft_v1.md / content/report.md / content/draft.md / output/final-report.md \u4efb\u4e00\u5f62\u6210\u6709\u6548\u8349\u7a3f",
+            "\u5404\u7ae0\u8282\u5185\u5bb9\u6301\u7eed\u5b8c\u5584",
+            "\u6267\u884c\u6458\u8981\u4e0e\u56fe\u8868\u540c\u6b65\u66f4\u65b0",
+        ],
+        "S5": [
+            "review-checklist.md \u5b8c\u6210",
+            "review.md \u8bb0\u5f55\u4fee\u8ba2\u610f\u89c1",
+            "\u4e8b\u5b9e\u3001\u903b\u8f91\u4e0e\u8bed\u8a00\u8d28\u91cf\u5ba1\u67e5\u5b8c\u6210",
+        ],
+        "S6": [
+            "\u4ec5\u5f53 project-overview.md \u4e2d\u4ea4\u4ed8\u5f62\u5f0f = \u62a5\u544a+\u6f14\u793a \u65f6\u542f\u7528",
+            "presentation-plan.md \u5b8c\u6210",
+            "PPT / \u8bb2\u7a3f / Q&A \u51c6\u5907",
+        ],
+        "S7": [
+            "delivery-log.md \u66f4\u65b0",
+            "\u5ba2\u6237\u53cd\u9988\u6536\u96c6",
+            "\u540e\u7eed\u52a8\u4f5c\u4e0e\u5f52\u6863\u8bb0\u5f55",
+        ],
+    }
+    STAGE_ORDER = ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7")
+    REPORT_DRAFT_CANDIDATES = (
+        "report_draft_v1.md",
+        "content/report.md",
+        "content/draft.md",
+        "output/final-report.md",
+    )
 
     def __init__(self, projects_dir: Path, skill_dir: Path):
         self.projects_dir = projects_dir
@@ -526,11 +579,13 @@ class SkillEngine:
             else:
                 return ""
 
-        stage_code, completed_keys = self._infer_stage_progress(project_path)
+        stage_state = self._infer_stage_state(project_path)
+        stage_code = stage_state["stage_code"]
         if not stage_code:
             return stage_gates_path.read_text(encoding="utf-8")
 
-        content = stage_gates_path.read_text(encoding="utf-8")
+        original_content = stage_gates_path.read_text(encoding="utf-8")
+        content = original_content
         content = re.sub(r"\*\*阶段\*\*:\s*[^\n]+", f"**阶段**: {stage_code}", content)
         content = re.sub(r"\*\*状态\*\*:\s*[^\n]+", "**状态**: 进行中", content)
         content = re.sub(
@@ -538,47 +593,338 @@ class SkillEngine:
             f"**更新日期**: {datetime.now().strftime('%Y-%m-%d')}",
             content,
         )
-        for task in completed_keys:
-            content = content.replace(f"- [ ] {task}", f"- [x] {task}")
-            content = content.replace(f"- [/] {task}", f"- [x] {task}")
+        for task in self._tracked_stage_items():
+            content = self._set_stage_gate_item_state(content, task, " ")
+        for task in stage_state["completed_items"]:
+            content = self._set_stage_gate_item_state(content, task, "x")
+        for task in stage_state["skipped_items"]:
+            content = self._set_stage_gate_item_state(content, task, "/")
 
-        stage_gates_path.write_text(content, encoding="utf-8")
+        if content != original_content:
+            stage_gates_path.write_text(content, encoding="utf-8")
         return content
 
     def _infer_stage_progress(self, project_path: Path) -> tuple[str, list[str]]:
-        completed = ["project-overview.md 创建"]
-        report_candidates = [
-            project_path / "report_draft_v1.md",
-            project_path / "content" / "report.md",
-            project_path / "content" / "draft.md",
-            project_path / "output" / "final-report.md",
-        ]
-
-        if any(path.exists() for path in report_candidates):
-            completed.extend(["报告结构确定"])
-            return "S4", completed
-
-        if self._has_meaningful_outline(project_path):
-            completed.extend(["分析框架确定"])
-            return "S1", completed
-
-        return "S0", completed
+        stage_state = self._infer_stage_state(project_path)
+        return stage_state["stage_code"], stage_state["completed_items"]
 
     def _has_meaningful_outline(self, project_path: Path) -> bool:
-        outline_path = project_path / "plan" / "outline.md"
-        if not outline_path.exists():
-            return False
+        return self._has_effective_outline(project_path)
 
-        outline_text = outline_path.read_text(encoding="utf-8").strip()
-        if not outline_text:
-            return False
+    def _infer_stage_state(self, project_path: Path) -> dict:
+        project_overview_ready = self._is_effective_plan_file(project_path, "project-overview.md")
+        notes_ready = self._has_effective_notes(project_path)
+        references_ready = self._has_effective_references(project_path)
+        outline_ready = self._has_effective_outline(project_path)
+        research_plan_ready = self._has_effective_research_plan(project_path)
+        data_log_ready = self._has_effective_data_log(project_path)
+        analysis_ready = self._has_effective_analysis_notes(project_path)
+        report_ready = self._has_effective_report_draft(project_path)
+        review_ready = self._has_effective_review_checklist(project_path)
+        presentation_ready = self._has_effective_presentation_plan(project_path)
+        delivery_ready = self._has_effective_delivery_log(project_path)
+        presentation_required = self._delivery_mode_requires_presentation(project_path)
+        post_init_started = any(
+            [
+                notes_ready,
+                references_ready,
+                outline_ready,
+                research_plan_ready,
+                data_log_ready,
+                analysis_ready,
+                report_ready,
+                review_ready,
+                presentation_ready,
+                delivery_ready,
+            ]
+        )
+        stage_zero_complete = project_overview_ready
+        stage_one_complete = stage_zero_complete and all(
+            [notes_ready, references_ready, outline_ready, research_plan_ready]
+        )
+        stage_two_complete = stage_one_complete and data_log_ready
+        stage_three_complete = stage_two_complete and analysis_ready
+        stage_four_complete = stage_three_complete and report_ready
+        stage_five_complete = stage_four_complete and review_ready
+        stage_six_complete = stage_five_complete and (
+            presentation_ready if presentation_required else True
+        )
+        stage_seven_complete = stage_six_complete and delivery_ready
 
-        template_path = self.skill_dir / "plan-template" / "outline.md"
+        if not stage_zero_complete:
+            stage_code = "S0"
+        elif not post_init_started:
+            stage_code = "S0"
+        elif not stage_one_complete:
+            stage_code = "S1"
+        elif not stage_two_complete:
+            stage_code = "S2"
+        elif not stage_three_complete:
+            stage_code = "S3"
+        elif not stage_four_complete:
+            stage_code = "S4"
+        elif not stage_five_complete:
+            stage_code = "S5"
+        elif presentation_required and not stage_six_complete:
+            stage_code = "S6"
+        elif not stage_seven_complete:
+            stage_code = "S7"
+        else:
+            stage_code = "S7"
+
+        flags = {
+            "project_overview_ready": project_overview_ready,
+            "notes_ready": notes_ready,
+            "references_ready": references_ready,
+            "outline_ready": outline_ready,
+            "research_plan_ready": research_plan_ready,
+            "data_log_ready": data_log_ready,
+            "analysis_ready": analysis_ready,
+            "report_ready": report_ready,
+            "review_ready": review_ready,
+            "presentation_ready": presentation_ready,
+            "delivery_ready": delivery_ready,
+            "presentation_required": presentation_required,
+        }
+        return {
+            "stage_code": stage_code,
+            "completed_items": self._build_completed_items(stage_code, flags),
+            "skipped_items": self._build_skipped_items(stage_code, flags),
+        }
+
+    def _build_completed_items(self, stage_code: str, flags: dict) -> list[str]:
+        completed: list[str] = []
+        stage_index = self._stage_index(stage_code)
+        for stage in self.STAGE_ORDER[:stage_index]:
+            if stage == "S6" and not flags["presentation_required"]:
+                continue
+            completed.extend(self.STAGE_CHECKLIST_ITEMS[stage])
+
+        if stage_code == "S0":
+            if flags["project_overview_ready"]:
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S0"][2])
+        elif stage_code == "S1":
+            if flags["notes_ready"]:
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][0])
+            if flags["references_ready"]:
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][1])
+            if flags["outline_ready"] or flags["research_plan_ready"]:
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][2])
+            if flags["outline_ready"]:
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][3])
+            if flags["research_plan_ready"]:
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][4])
+        elif stage_code == "S3" and flags["analysis_ready"]:
+            completed.extend(self.STAGE_CHECKLIST_ITEMS["S3"])
+        elif stage_code == "S4" and flags["report_ready"]:
+            completed.extend(self.STAGE_CHECKLIST_ITEMS["S4"])
+        elif stage_code == "S5" and flags["review_ready"]:
+            completed.extend(self.STAGE_CHECKLIST_ITEMS["S5"])
+        elif stage_code == "S6":
+            completed.append(self.STAGE_CHECKLIST_ITEMS["S6"][0])
+            if flags["presentation_ready"]:
+                completed.extend(self.STAGE_CHECKLIST_ITEMS["S6"][1:])
+        elif stage_code == "S7" and flags["delivery_ready"]:
+            if flags["presentation_required"] and flags["presentation_ready"]:
+                completed.extend(self.STAGE_CHECKLIST_ITEMS["S6"])
+            completed.extend(self.STAGE_CHECKLIST_ITEMS["S7"])
+
+        return list(dict.fromkeys(completed))
+
+    def _build_skipped_items(self, stage_code: str, flags: dict) -> list[str]:
+        if not flags["presentation_required"] and stage_code == "S7":
+            return list(self.STAGE_CHECKLIST_ITEMS["S6"])
+        return []
+
+    def _stage_index(self, stage_code: str) -> int:
+        return self.STAGE_ORDER.index(stage_code)
+
+    def _tracked_stage_items(self) -> list[str]:
+        tracked_items: list[str] = []
+        for stage in self.STAGE_ORDER:
+            tracked_items.extend(self.STAGE_CHECKLIST_ITEMS[stage])
+        return tracked_items
+
+    def _set_stage_gate_item_state(self, content: str, task: str, state: str) -> str:
+        pattern = rf"- \[(?: |x|X|/)\] {re.escape(task)}"
+        return re.sub(pattern, f"- [{state}] {task}", content)
+
+    def _is_effective_plan_file(self, project_path: Path, file_name: str) -> bool:
+        text = self._read_plan_file(project_path, file_name)
+        if not text:
+            return False
+        if self._is_template_content(text, file_name):
+            return False
+        return self._has_substantive_body(text)
+
+    def _read_plan_file(self, project_path: Path, file_name: str) -> str:
+        file_path = project_path / "plan" / file_name
+        if not file_path.exists():
+            return ""
+        return file_path.read_text(encoding="utf-8").strip()
+
+    def _read_project_file(self, project_path: Path, relative_path: str) -> str:
+        file_path = project_path / relative_path
+        if not file_path.exists():
+            return ""
+        return file_path.read_text(encoding="utf-8").strip()
+
+    def _is_template_content(self, text: str, file_name: str) -> bool:
+        template_path = self.skill_dir / "plan-template" / file_name
         if not template_path.exists():
-            return True
-
+            return False
         template_text = template_path.read_text(encoding="utf-8").strip()
-        return self._normalize_text(outline_text) != self._normalize_text(template_text)
+        return self._normalize_text(text) == self._normalize_text(template_text)
+
+    def _has_substantive_body(self, text: str) -> bool:
+        for raw_line in text.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped == "---":
+                continue
+            if stripped.startswith("#"):
+                continue
+            if stripped.startswith("<!--") and stripped.endswith("-->"):
+                continue
+            candidate = stripped[2:].strip() if stripped.startswith("- ") else stripped
+            candidate = re.sub(r"\*\*[^*]+\*\*:\s*", "", candidate).strip()
+            if not candidate or candidate in {"-", "|"}:
+                continue
+            if candidate.startswith("[") and candidate.endswith("]"):
+                continue
+            if re.fullmatch(r"[|\-:\s]+", candidate):
+                continue
+            return True
+        return False
+
+    def _has_effective_notes(self, project_path: Path) -> bool:
+        notes_text = self._read_plan_file(project_path, "notes.md")
+        if not notes_text or self._is_template_content(notes_text, "notes.md"):
+            return False
+        groups = [
+            (r"\bboundar(?:y|ies)\b", r"边界"),
+            (r"\bout of scope\b", r"排除|不做"),
+            (r"\bassumption", r"假设"),
+            (r"\bjudg(?:e|ment)", r"判断"),
+        ]
+        matched_groups = 0
+        for patterns in groups:
+            if any(re.search(pattern, notes_text, flags=re.IGNORECASE) for pattern in patterns):
+                matched_groups += 1
+        return matched_groups >= 2 and self._has_substantive_body(notes_text)
+
+    def _has_effective_references(self, project_path: Path) -> bool:
+        references_text = self._read_plan_file(project_path, "references.md")
+        if not references_text or self._is_template_content(references_text, "references.md"):
+            return False
+        return self._count_reference_evidence(references_text) >= 2
+
+    def _count_reference_evidence(self, references_text: str) -> int:
+        count = 0
+        for raw_line in references_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line == "---":
+                continue
+            if line.startswith("- "):
+                entry = line[2:].strip()
+                if entry and entry != "-" and "[" not in entry:
+                    count += 1
+                    continue
+            if line.startswith("**") and ":" in line:
+                _, value = line.split(":", 1)
+                value = value.strip()
+                if value and "[" not in value:
+                    count += 1
+                    continue
+            if "http://" in line or "https://" in line:
+                count += 1
+        return count
+
+    def _has_effective_outline(self, project_path: Path) -> bool:
+        outline_text = self._read_plan_file(project_path, "outline.md")
+        if not outline_text or self._is_template_content(outline_text, "outline.md"):
+            return False
+        section_count = len(re.findall(r"^(?:##+\s+|[0-9]+\.\s+)", outline_text, flags=re.MULTILINE))
+        return section_count >= 2 and self._has_substantive_body(outline_text)
+
+    def _has_effective_research_plan(self, project_path: Path) -> bool:
+        research_plan_text = self._read_plan_file(project_path, "research-plan.md")
+        if not research_plan_text or self._is_template_content(research_plan_text, "research-plan.md"):
+            return False
+        required_patterns = [
+            r"research methods?",
+            r"data sources?",
+            r"execution steps?",
+            r"研究方法",
+            r"数据来源",
+            r"执行步骤",
+        ]
+        return (
+            any(re.search(pattern, research_plan_text, flags=re.IGNORECASE) for pattern in required_patterns)
+            and self._has_substantive_body(research_plan_text)
+        )
+
+    def _has_effective_data_log(self, project_path: Path) -> bool:
+        data_log_text = self._read_plan_file(project_path, "data-log.md")
+        if not data_log_text or self._is_template_content(data_log_text, "data-log.md"):
+            return False
+        if re.search(r"^\|[^|\n]+\|[^|\n]+\|[^|\n]+\|[^|\n]+\|", data_log_text, flags=re.MULTILINE):
+            return True
+        return bool(re.search(r"^- .+\S", data_log_text, flags=re.MULTILINE))
+
+    def _has_effective_analysis_notes(self, project_path: Path) -> bool:
+        analysis_text = self._read_plan_file(project_path, "analysis-notes.md")
+        if not analysis_text or self._is_template_content(analysis_text, "analysis-notes.md"):
+            return False
+        required_patterns = [r"\binsight\b", r"\bconclusion\b", r"\bevidence\b", r"\bimpact\b", r"洞察", r"结论"]
+        return (
+            any(re.search(pattern, analysis_text, flags=re.IGNORECASE) for pattern in required_patterns)
+            and self._has_substantive_body(analysis_text)
+        )
+
+    def _has_effective_review_checklist(self, project_path: Path) -> bool:
+        review_text = self._read_plan_file(project_path, "review-checklist.md")
+        if not review_text or self._is_template_content(review_text, "review-checklist.md"):
+            return False
+        return bool(re.search(r"- \[[xX]\] .+\S", review_text))
+
+    def _has_effective_presentation_plan(self, project_path: Path) -> bool:
+        presentation_text = self._read_plan_file(project_path, "presentation-plan.md")
+        if not presentation_text or self._is_template_content(presentation_text, "presentation-plan.md"):
+            return False
+        required_patterns = [r"\bppt\b", r"\bq&a\b", r"\bnarrative\b", r"演示", r"讲稿"]
+        return (
+            any(re.search(pattern, presentation_text, flags=re.IGNORECASE) for pattern in required_patterns)
+            and self._has_substantive_body(presentation_text)
+        )
+
+    def _has_effective_delivery_log(self, project_path: Path) -> bool:
+        delivery_text = self._read_plan_file(project_path, "delivery-log.md")
+        if not delivery_text or self._is_template_content(delivery_text, "delivery-log.md"):
+            return False
+        required_patterns = [r"\bdelivery date\b", r"\bshared\b", r"\bsent\b", r"\bfeedback\b", r"交付", r"反馈"]
+        return (
+            any(re.search(pattern, delivery_text, flags=re.IGNORECASE) for pattern in required_patterns)
+            and self._has_substantive_body(delivery_text)
+        )
+
+    def _has_effective_report_draft(self, project_path: Path) -> bool:
+        for candidate in self.REPORT_DRAFT_CANDIDATES:
+            draft_text = self._read_project_file(project_path, candidate)
+            if draft_text and self._has_substantive_body(draft_text):
+                return True
+        return False
+
+    def _delivery_mode_requires_presentation(self, project_path: Path) -> bool:
+        overview_text = self._read_plan_file(project_path, "project-overview.md")
+        if not overview_text:
+            return False
+        match = re.search(r"\*\*.*交付形式.*\*\*:\s*([^\n]+)", overview_text)
+        if not match:
+            return False
+        delivery_mode = match.group(1).strip().lower()
+        if "report+presentation" in delivery_mode:
+            return True
+        return "报告+演示" in delivery_mode
 
     def get_skill_prompt(self) -> str:
         """获取Skill定义"""
