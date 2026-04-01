@@ -880,18 +880,48 @@ class SkillEngine:
                 continue
             if line.startswith("- "):
                 entry = line[2:].strip()
-                if entry and entry != "-" and "[" not in entry:
+                if self._looks_like_reference_evidence(entry):
                     count += 1
                     continue
             if line.startswith("**") and ":" in line:
                 _, value = line.split(":", 1)
                 value = value.strip()
-                if value and "[" not in value:
+                if self._looks_like_reference_evidence(value):
                     count += 1
                     continue
             if "http://" in line or "https://" in line:
                 count += 1
         return count
+
+    def _normalize_reference_evidence_value(self, value: str) -> str:
+        candidate = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 \2", (value or "").strip())
+        return re.sub(r"^\[[^\]]+\]\s*", "", candidate).strip()
+
+    def _looks_like_reference_evidence(self, value: str) -> bool:
+        candidate = self._normalize_reference_evidence_value(value)
+        if not self._is_substantive_field_value(candidate):
+            return False
+
+        lowered = candidate.lower()
+        placeholder_tokens = (
+            "tbd",
+            "todo",
+            "placeholder",
+            "source name",
+            "待补",
+            "待确认",
+            "来源名称",
+            "示例来源",
+        )
+        if any(token in lowered for token in placeholder_tokens):
+            return False
+
+        return (
+            "http://" in candidate
+            or "https://" in candidate
+            or bool(re.search(r"\b(?:19|20)\d{2}\b", candidate))
+            or any(separator in candidate for separator in (":", "：", ". ", "。", " - "))
+        )
 
     def _has_effective_outline(self, project_path: Path) -> bool:
         outline_text = self._read_plan_file(project_path, "outline.md")
@@ -904,6 +934,9 @@ class SkillEngine:
         research_plan_text = self._read_plan_file(project_path, "research-plan.md")
         if not research_plan_text or self._is_template_content(research_plan_text, "research-plan.md"):
             return False
+        section_count = len(
+            re.findall(r"^(?:##+\s+|[0-9]+\.\s+)", research_plan_text, flags=re.MULTILINE)
+        )
         required_patterns = [
             r"research methods?",
             r"data sources?",
@@ -912,9 +945,27 @@ class SkillEngine:
             r"数据来源",
             r"执行步骤",
         ]
-        return (
-            any(re.search(pattern, research_plan_text, flags=re.IGNORECASE) for pattern in required_patterns)
-            and self._has_substantive_body(research_plan_text)
+        structural_patterns = [
+            r"research objectives?",
+            r"research questions?",
+            r"phase plan",
+            r"key assumptions?",
+            r"研究目标",
+            r"研究问题",
+            r"核心研究议题",
+            r"阶段安排",
+            r"关键假设",
+        ]
+        has_named_sections = any(
+            re.search(pattern, research_plan_text, flags=re.IGNORECASE)
+            for pattern in required_patterns
+        )
+        has_plan_structure = any(
+            re.search(pattern, research_plan_text, flags=re.IGNORECASE)
+            for pattern in structural_patterns
+        )
+        return (has_named_sections or (section_count >= 2 and has_plan_structure)) and self._has_substantive_body(
+            research_plan_text
         )
 
     def _has_effective_data_log(self, project_path: Path) -> bool:

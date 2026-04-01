@@ -239,10 +239,9 @@ class SkillEngineTests(unittest.TestCase):
         for stage_code in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"):
             self.assertIn(stage_code, template_text)
 
-        self.assertNotIn("| 项目启动 |", template_text)
-        self.assertNotIn("| 研究完成 |", template_text)
-        self.assertNotIn("| 初稿完成 |", template_text)
-        self.assertNotIn("| 终稿交付 |", template_text)
+        self.assertIn("| S0 | 项目启动 |", template_text)
+        self.assertIn("| S4 | 报告撰写 |", template_text)
+        self.assertIn("| S7 | 交付归档 |", template_text)
 
     def test_consulting_lifecycle_module_aligns_stage_files_and_optional_s6(self):
         lifecycle_text = (self.repo_skill_dir / "modules" / "consulting-lifecycle.md").read_text(encoding="utf-8")
@@ -379,7 +378,7 @@ class SkillEngineTests(unittest.TestCase):
                 "existing notes",
             )
             content_dir = projects_dir / "demo" / ".consulting-report" / "content"
-            content_dir.mkdir(parents=True)
+            content_dir.mkdir(parents=True, exist_ok=True)
             (content_dir / "outline.md").write_text("# 大纲", encoding="utf-8")
             (content_dir / "report.md").write_text("# 正文", encoding="utf-8")
             report_path = engine.get_primary_report_path("demo")
@@ -499,6 +498,44 @@ class SkillEngineTests(unittest.TestCase):
             self.assertNotIn("references.md 更新", summary["completed_items"])
             self.assertIn("references.md 更新", summary["next_actions"])
 
+    def test_workspace_summary_keeps_stage_at_s1_when_bracketed_references_are_still_placeholders(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            self._write_stage_two_prerequisites(
+                project_dir,
+                references_text=(
+                    "# References\n\n"
+                    "## Sources\n"
+                    "- [TBD] 待补来源\n"
+                    "- [Source name] 待确认\n"
+                ),
+            )
+
+            summary = engine.get_workspace_summary("demo")
+
+            self.assertEqual(summary["stage_code"], "S1")
+            self.assertNotIn("references.md 更新", summary["completed_items"])
+            self.assertIn("references.md 更新", summary["next_actions"])
+
+    def test_workspace_summary_keeps_stage_at_s1_when_reference_lines_still_embed_placeholder_brackets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            self._write_stage_two_prerequisites(
+                project_dir,
+                references_text=(
+                    "# References\n\n"
+                    "## Sources\n"
+                    "- 案例引用：参考[公司/项目名称]案例\n"
+                    "- 数据引用：数据来源于[来源名称]\n"
+                ),
+            )
+
+            summary = engine.get_workspace_summary("demo")
+
+            self.assertEqual(summary["stage_code"], "S1")
+            self.assertNotIn("references.md 更新", summary["completed_items"])
+            self.assertIn("references.md 更新", summary["next_actions"])
+
     def test_workspace_summary_advances_to_s2_when_research_design_files_meet_evidence_gate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
@@ -509,6 +546,25 @@ class SkillEngineTests(unittest.TestCase):
             self.assertEqual(summary["stage_code"], "S2")
             self.assertIn("research-plan.md 完成", summary["completed_items"])
             self.assertIn("data-log.md 更新", summary["next_actions"])
+
+    def test_workspace_summary_keeps_stage_at_s1_when_research_plan_has_two_generic_sections_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            self._write_stage_two_prerequisites(project_dir, include_research_plan=False)
+            (project_dir / "plan" / "research-plan.md").write_text(
+                "# Research plan\n\n"
+                "## Background\n"
+                "This note summarizes why the topic matters.\n\n"
+                "## Risks\n"
+                "This note lists open risks and caveats.\n",
+                encoding="utf-8",
+            )
+
+            summary = engine.get_workspace_summary("demo")
+
+            self.assertEqual(summary["stage_code"], "S1")
+            self.assertNotIn("research-plan.md 完成", summary["completed_items"])
+            self.assertIn("research-plan.md 完成", summary["next_actions"])
 
     def test_workspace_summary_accepts_template_aligned_notes_sections_for_stage_one_completion(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -721,6 +777,59 @@ class SkillEngineTests(unittest.TestCase):
                 "report_draft_v1.md / content/report.md / content/draft.md / output/final-report.md 任一形成有效草稿",
                 summary["next_actions"],
             )
+
+    def test_workspace_summary_advances_to_s4_with_bracketed_references_and_structured_research_plan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            (project_dir / "plan" / "notes.md").write_text(
+                "# Notes\n\n"
+                "## Boundaries\n"
+                "- Focus on flight mechanics and strategic necessity.\n"
+                "## Assumptions\n"
+                "- Treat the fictional energy source as internally consistent.\n",
+                encoding="utf-8",
+            )
+            (project_dir / "plan" / "references.md").write_text(
+                "# References\n\n"
+                "## Sources\n"
+                "- [1] Official series bible. (2024). Flight parameters appendix.\n"
+                "- [2] Physics explainer blog. (2023). Warp-drive thought experiment.\n",
+                encoding="utf-8",
+            )
+            (project_dir / "plan" / "outline.md").write_text(
+                "# Outline\n\n"
+                "## Executive summary\n"
+                "- Core conclusion\n"
+                "## Mechanism\n"
+                "- Energy conversion model\n"
+                "## Constraints\n"
+                "- Atmospheric heating tradeoff\n",
+                encoding="utf-8",
+            )
+            (project_dir / "plan" / "research-plan.md").write_text(
+                "# Research plan\n\n"
+                "## Research objective\n"
+                "Clarify the mechanism, necessity, and operational constraints of flight.\n\n"
+                "## Core research questions\n"
+                "- How lift is generated without conventional wings.\n"
+                "- How energy output maps to acceleration.\n\n"
+                "## Phase plan\n"
+                "### Phase 1\n"
+                "- Gather source facts and parameter claims.\n"
+                "### Phase 2\n"
+                "- Build a lightweight physics model and test assumptions.\n\n"
+                "## Key assumptions\n"
+                "- Fictional anti-gravity can be modeled as a local field effect.\n",
+                encoding="utf-8",
+            )
+            self._write_data_log(project_dir)
+            self._write_analysis_notes(project_dir)
+
+            summary = engine.get_workspace_summary("demo")
+            stage_gates_text = (project_dir / "plan" / "stage-gates.md").read_text(encoding="utf-8")
+
+            self.assertEqual(summary["stage_code"], "S4")
+            self.assertIn("S4", stage_gates_text)
 
     def test_workspace_summary_keeps_stage_at_s3_when_analysis_notes_are_only_keyword_headings(self):
         with tempfile.TemporaryDirectory() as tmpdir:

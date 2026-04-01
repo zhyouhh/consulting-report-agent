@@ -1,15 +1,14 @@
 import React, { useState } from 'react'
 import axios from 'axios'
+import { prepareProjectCreatePayload } from '../utils/projectCreatePayload'
 
 const initialForm = {
-  name: '',
   workspace_dir: '',
   project_type: 'strategy-consulting',
   theme: '',
   target_audience: '高层决策者',
   deadline: '',
   expected_length: '',
-  notes: '',
   initial_material_paths: [],
 }
 
@@ -18,10 +17,6 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
   const [saving, setSaving] = useState(false)
 
   const handleCreate = async () => {
-    if (!formData.name.trim()) {
-      alert('请输入项目名称')
-      return
-    }
     if (!formData.theme.trim()) {
       alert('请输入报告主题')
       return
@@ -40,7 +35,12 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
     }
 
     setSaving(true)
-    const success = await onCreate(formData)
+    let success = false
+    try {
+      success = await onCreate(prepareProjectCreatePayload(formData))
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '请输入有效的报告主题')
+    }
     setSaving(false)
 
     if (success) {
@@ -88,15 +88,6 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-[#1a1a2e] rounded-lg p-6 w-[560px] border border-[#2f3158]">
-        <h2 className="text-lg font-semibold mb-4 text-[#e2e2f0]">新建咨询项目</h2>
-
-        <input
-          placeholder="项目名称"
-          value={formData.name}
-          onChange={e => setFormData({ ...formData, name: e.target.value })}
-          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-3"
-        />
-
         <div className="mb-3">
           <div className="text-sm text-[#c5c7ef] mb-2">工作目录</div>
           <div className="flex gap-2">
@@ -137,18 +128,24 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
         />
 
         <div className="grid grid-cols-2 gap-3 mb-3">
-          <input
-            placeholder="截止日期，例如 2026-04-01"
-            value={formData.deadline}
-            onChange={e => setFormData({ ...formData, deadline: e.target.value })}
-            className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2"
-          />
-          <input
-            placeholder="预期篇幅，例如 3000字"
-            value={formData.expected_length}
-            onChange={e => setFormData({ ...formData, expected_length: e.target.value })}
-            className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2"
-          />
+          <div>
+            <div className="text-sm text-[#c5c7ef] mb-2">截止日期</div>
+            <input
+              type="date"
+              value={formData.deadline}
+              onChange={e => setFormData({ ...formData, deadline: e.target.value })}
+              className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2"
+            />
+          </div>
+          <div>
+            <div className="text-sm text-[#c5c7ef] mb-2">预期篇幅</div>
+            <input
+              placeholder="例如 3000字"
+              value={formData.expected_length}
+              onChange={e => setFormData({ ...formData, expected_length: e.target.value })}
+              className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2"
+            />
+          </div>
         </div>
 
         <select
@@ -160,14 +157,6 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
           <option value="中层管理者">中层管理者</option>
           <option value="执行团队">执行团队</option>
         </select>
-
-        <textarea
-          placeholder="已有材料或备注"
-          value={formData.notes}
-          onChange={e => setFormData({ ...formData, notes: e.target.value })}
-          rows={4}
-          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-3 resize-none"
-        />
 
         <div className="mb-3 rounded border border-[#2f3158] bg-[#15162d] p-3">
           <div className="text-sm text-[#e2e2f0] mb-2">初始材料</div>

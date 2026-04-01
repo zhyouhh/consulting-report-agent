@@ -462,6 +462,8 @@ class ChatHandler:
                     return
 
             collected_message = {"role": "assistant", "content": "", "tool_calls": []}
+            known_tool_names = {tool["function"]["name"] for tool in self._get_tools()}
+            announced_tool_call_indexes: set[int] = set()
             try:
                 for chunk in response:
                     if not chunk.choices:
@@ -486,19 +488,28 @@ class ChatHandler:
                                 tc["id"] = tc_chunk.id
                             if tc_chunk.function:
                                 if tc_chunk.function.name:
-                                    tc["function"]["name"] = tc_chunk.function.name
+                                    tc["function"]["name"] += tc_chunk.function.name
                                 if tc_chunk.function.arguments:
                                     tc["function"]["arguments"] += tc_chunk.function.arguments
+                            if (
+                                tc_chunk.index not in announced_tool_call_indexes
+                                and tc["function"]["name"] in known_tool_names
+                            ):
+                                announced_tool_call_indexes.add(tc_chunk.index)
+                                yield {"type": "tool", "data": f"🔧 准备调用工具: {tc['function']['name']}"}
             except Exception as e:
                 yield {"type": "error", "data": self._format_provider_error(e, stream=True)}
                 return
 
             if collected_message["tool_calls"]:
                 conversation.append(collected_message)
-                for tool_call in collected_message["tool_calls"]:
+                for index, tool_call in enumerate(collected_message["tool_calls"]):
                     func_name = tool_call["function"]["name"]
                     func_args = tool_call["function"]["arguments"]
-                    yield {"type": "tool", "data": f"🔧 调用工具: {func_name}({func_args[:50]}...)"}
+                    tool_preview = f"🔧 调用工具: {func_name}"
+                    if func_args:
+                        tool_preview = f"{tool_preview}({func_args[:50]}...)"
+                    yield {"type": "tool", "data": tool_preview}
 
                     class ToolCall:
                         def __init__(self, data):

@@ -116,16 +116,30 @@ class ChatRuntimeTests(unittest.TestCase):
                 )
             ],
         )
-        handler = ChatHandler(
-            self._make_settings(
-                mode="managed",
-                managed_model="gemini-3-flash",
-                model="legacy-model-should-not-win",
-            ),
-            SkillEngine(Path(tempfile.gettempdir()) / "usage-projects", self.repo_skill_dir),
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    model="legacy-model-should-not-win",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
 
-        result = handler.chat("demo", "请继续")
+            result = handler.chat(project["id"], "请继续")
 
         self.assertEqual(result["token_usage"]["current_tokens"], 4321)
         self.assertEqual(result["token_usage"]["max_tokens"], 500000)
@@ -143,15 +157,29 @@ class ChatRuntimeTests(unittest.TestCase):
         mock_openai.return_value.chat.completions.create.return_value = iter([
             self._make_chunk(content="第一段"),
         ])
-        handler = ChatHandler(
-            self._make_settings(
-                mode="managed",
-                managed_model="gemini-3-flash",
-            ),
-            SkillEngine(Path(tempfile.gettempdir()) / "managed-stream-projects", self.repo_skill_dir),
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
 
-        events = list(handler.chat_stream("demo", "继续"))
+            events = list(handler.chat_stream(project["id"], "继续"))
         request_timeout = mock_openai.return_value.chat.completions.create.call_args.kwargs["timeout"]
 
         self.assertTrue(any(event["type"] == "content" for event in events))
@@ -168,15 +196,29 @@ class ChatRuntimeTests(unittest.TestCase):
             raise Exception("The read operation timed out")
 
         mock_openai.return_value.chat.completions.create.return_value = failing_stream()
-        handler = ChatHandler(
-            self._make_settings(
-                mode="managed",
-                managed_model="gemini-3-flash",
-            ),
-            SkillEngine(Path(tempfile.gettempdir()) / "stream-timeout-projects", self.repo_skill_dir),
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
 
-        events = list(handler.chat_stream("demo", "继续"))
+            events = list(handler.chat_stream(project["id"], "继续"))
 
         self.assertEqual(events[0], {"type": "content", "data": "第一段"})
         error_events = [event for event in events if event["type"] == "error"]
@@ -184,6 +226,156 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("默认通道", error_events[0]["data"])
         self.assertIn("超时", error_events[0]["data"])
         self.assertNotIn("The read operation timed out", error_events[0]["data"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_emits_tool_start_as_soon_as_tool_name_arrives(self, mock_openai):
+        consumed_chunks = []
+
+        def tool_only_stream():
+            consumed_chunks.append("chunk-1")
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-1",
+                        name="web_search",
+                        arguments='{"query":"',
+                    )
+                ]
+            )
+            consumed_chunks.append("chunk-2")
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        arguments='ultraman flight"}',
+                    )
+                ]
+            )
+
+        mock_openai.return_value.chat.completions.create.return_value = tool_only_stream()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "results": "ok"},
+            ) as execute_tool:
+                stream = handler.chat_stream(project["id"], "继续")
+                first_event = next(stream)
+                self.assertEqual(consumed_chunks, ["chunk-1"])
+                remaining_events = list(stream)
+
+        tool_events = [first_event, *[event for event in remaining_events if event["type"] == "tool"]]
+        self.assertGreaterEqual(len(tool_events), 2)
+        self.assertEqual(tool_events[0]["data"], "🔧 准备调用工具: web_search")
+        self.assertEqual(
+            sum(event["data"].startswith("🔧 调用工具: web_search(") for event in tool_events),
+            1,
+        )
+        execute_tool.assert_called_once()
+        self.assertEqual(execute_tool.call_args.args[1].function.name, "web_search")
+        self.assertEqual(
+            execute_tool.call_args.args[1].function.arguments,
+            '{"query":"ultraman flight"}',
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_waits_for_complete_tool_name_before_emitting_start_event(self, mock_openai):
+        consumed_chunks = []
+
+        def fragmented_tool_name_stream():
+            consumed_chunks.append("chunk-1")
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-1",
+                        name="web_",
+                    )
+                ]
+            )
+            consumed_chunks.append("chunk-2")
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        name="search",
+                        arguments='{"query":"',
+                    )
+                ]
+            )
+            consumed_chunks.append("chunk-3")
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        arguments='ultraman flight"}',
+                    )
+                ]
+            )
+
+        mock_openai.return_value.chat.completions.create.return_value = fragmented_tool_name_stream()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "results": "ok"},
+            ) as execute_tool:
+                stream = handler.chat_stream(project["id"], "继续")
+                first_event = next(stream)
+                self.assertEqual(consumed_chunks, ["chunk-1", "chunk-2"])
+                remaining_events = list(stream)
+
+        tool_events = [first_event, *[event for event in remaining_events if event["type"] == "tool"]]
+        self.assertEqual(tool_events[0]["data"], "🔧 准备调用工具: web_search")
+        execute_tool.assert_called_once()
+        self.assertEqual(execute_tool.call_args.args[1].function.name, "web_search")
+        self.assertEqual(
+            execute_tool.call_args.args[1].function.arguments,
+            '{"query":"ultraman flight"}',
+        )
 
     @mock.patch("backend.chat.OpenAI")
     def test_image_token_estimate_does_not_scale_with_base64_length(self, mock_openai):
@@ -404,31 +596,46 @@ class ChatRuntimeTests(unittest.TestCase):
                 ],
             ),
         ]
-        handler = ChatHandler(
-            self._make_settings(),
-            SkillEngine(Path(tempfile.gettempdir()) / "refit-projects", self.repo_skill_dir),
-        )
-        policy = handler._resolve_context_policy()
-        fit_inputs = []
-        compressed_followup = [
-            {"role": "system", "content": "system"},
-            {"role": "assistant", "content": "[压缩摘要]"},
-            {"role": "tool", "tool_call_id": "tool-1", "content": '{"status":"success"}'},
-        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            policy = handler._resolve_context_policy()
+            fit_inputs = []
+            compressed_followup = [
+                {"role": "system", "content": "system"},
+                {"role": "assistant", "content": "[压缩摘要]"},
+                {"role": "tool", "tool_call_id": "tool-1", "content": '{"status":"success"}'},
+            ]
 
-        def fit_side_effect(conversation):
-            fit_inputs.append(conversation)
-            if len(fit_inputs) == 1:
-                return conversation, handler._estimate_tokens(conversation), False, policy
-            return compressed_followup, handler._estimate_tokens(compressed_followup), True, policy
+            def fit_side_effect(conversation):
+                fit_inputs.append(conversation)
+                if len(fit_inputs) == 1:
+                    return conversation, handler._estimate_tokens(conversation), False, policy
+                return compressed_followup, handler._estimate_tokens(compressed_followup), True, policy
 
-        with mock.patch.object(handler, "_fit_conversation_to_budget", side_effect=fit_side_effect) as fit_mock:
-            with mock.patch.object(
-                handler,
-                "_execute_tool",
-                return_value={"status": "success", "content": "工具结果" * 2000},
-            ):
-                result = handler.chat("demo", "继续", max_iterations=2)
+            with mock.patch.object(handler, "_fit_conversation_to_budget", side_effect=fit_side_effect) as fit_mock:
+                with mock.patch.object(
+                    handler,
+                    "_execute_tool",
+                    return_value={"status": "success", "content": "工具结果" * 2000},
+                ):
+                    result = handler.chat(project["id"], "继续", max_iterations=2)
 
         self.assertEqual(result["content"], "最终答复")
         self.assertEqual(fit_mock.call_count, 2)
@@ -471,24 +678,39 @@ class ChatRuntimeTests(unittest.TestCase):
                 ],
             ),
         ]
-        handler = ChatHandler(
-            self._make_settings(),
-            SkillEngine(Path(tempfile.gettempdir()) / "usage-fallback-projects", self.repo_skill_dir),
-        )
-        policy = handler._resolve_context_policy()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            policy = handler._resolve_context_policy()
 
-        with mock.patch.object(
-            handler,
-            "_fit_conversation_to_budget",
-            side_effect=lambda conversation: (conversation, 0, False, policy),
-        ):
-            with mock.patch.object(handler, "_estimate_tokens", return_value=1234):
-                with mock.patch.object(
-                    handler,
-                    "_execute_tool",
-                    return_value={"status": "success", "content": "工具结果"},
-                ):
-                    result = handler.chat("demo", "继续", max_iterations=2)
+            with mock.patch.object(
+                handler,
+                "_fit_conversation_to_budget",
+                side_effect=lambda conversation: (conversation, 0, False, policy),
+            ):
+                with mock.patch.object(handler, "_estimate_tokens", return_value=1234):
+                    with mock.patch.object(
+                        handler,
+                        "_execute_tool",
+                        return_value={"status": "success", "content": "工具结果"},
+                    ):
+                        result = handler.chat(project["id"], "继续", max_iterations=2)
 
         self.assertEqual(result["content"], "最终答复")
         self.assertEqual(result["token_usage"]["usage_mode"], "estimated")
