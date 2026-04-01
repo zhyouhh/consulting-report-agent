@@ -287,12 +287,25 @@ class SkillEngineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "gate-control.md"):
                 engine.write_file("demo", "plan/gate-control.md", "# Gate control")
 
+    def test_is_formal_plan_file_accepts_uppercase_plan_markdown_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, _project_dir = self._create_engine_and_project(tmpdir)
+
+            self.assertTrue(engine.is_formal_plan_file("plan/OUTLINE.MD"))
+
     def test_write_file_rejects_outline_before_evidence_gate_is_satisfied(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, _project_dir = self._create_engine_and_project(tmpdir)
 
             with self.assertRaisesRegex(ValueError, "notes.md"):
                 engine.write_file("demo", "plan/outline.md", "# Report outline")
+
+    def test_write_file_rejects_uppercase_outline_path_before_evidence_gate_is_satisfied(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, _project_dir = self._create_engine_and_project(tmpdir)
+
+            with self.assertRaisesRegex(ValueError, "notes.md"):
+                engine.write_file("demo", "plan/OUTLINE.MD", "# Report outline")
 
     def test_write_file_rejects_outline_when_references_have_only_one_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -324,7 +337,7 @@ class SkillEngineTests(unittest.TestCase):
 
             engine.write_file(
                 "demo",
-                "plan/outline.md",
+                "plan/OUTLINE.MD",
                 "# Report outline\n\n## Executive summary\n- Key finding\n## Recommendations\n- Next step\n",
             )
 

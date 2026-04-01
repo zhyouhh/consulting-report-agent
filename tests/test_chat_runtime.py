@@ -821,17 +821,22 @@ class ChatRuntimeTests(unittest.TestCase):
                 skill_dir=self.repo_skill_dir,
             )
             handler = ChatHandler(settings, engine)
-            handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+            handler._turn_context = {"can_write_non_plan": False, "web_search_disabled": False}
 
             result = handler._execute_tool(
                 project["id"],
                 self._make_tool_call(
                     "write_file",
-                    '{"file_path":"plan/outline.md","content":"# Report outline\\n\\n## Executive summary\\n- Key finding\\n## Recommendations\\n- Next step"}',
+                    '{"file_path":"./plan/OUTLINE.MD","content":"# Report outline\\n\\n## Executive summary\\n- Key finding\\n## Recommendations\\n- Next step"}',
                 ),
             )
 
-        self.assertEqual(result["status"], "success")
+            self.assertEqual(result["status"], "success")
+            self.assertIn("plan/outline.md", result["message"])
+            self.assertIn(
+                "Executive summary",
+                (Path(project["project_dir"]) / "plan" / "outline.md").read_text(encoding="utf-8"),
+            )
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_retries_when_assistant_claims_outline_written_without_actual_write(self, mock_openai):

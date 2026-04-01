@@ -856,7 +856,7 @@ class ChatHandler:
             args = json.loads(tool_call.function.arguments)
 
             if func_name == "write_file":
-                if self._should_block_non_plan_write(args["file_path"]):
+                if self._should_block_non_plan_write(project_id, args["file_path"]):
                     return {
                         "status": "error",
                         "message": "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。",
@@ -1213,6 +1213,9 @@ class ChatHandler:
 
         return False
 
-    def _should_block_non_plan_write(self, file_path: str) -> bool:
-        normalized = file_path.replace("\\", "/").lstrip("/")
+    def _should_block_non_plan_write(self, project_id: str, file_path: str) -> bool:
+        try:
+            normalized = self.skill_engine.normalize_file_path(project_id, file_path)
+        except ValueError:
+            return False
         return not normalized.startswith("plan/") and not self._turn_context.get("can_write_non_plan", True)
