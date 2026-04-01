@@ -79,6 +79,13 @@ class WorkspaceMaterialTests(unittest.TestCase):
             "- [x] Facts cross-checked against sources.\n",
             encoding="utf-8",
         )
+        (project_dir / "plan" / "review.md").write_text(
+            "# Review log\n\n"
+            "## Cycle 1\n"
+            "- Facts cross-checked against interview notes and references.\n"
+            "- Language tightened for executive readability.\n",
+            encoding="utf-8",
+        )
 
     def _set_delivery_mode(self, project_dir: Path, delivery_mode: str):
         overview_path = project_dir / "plan" / "project-overview.md"
@@ -198,7 +205,7 @@ class WorkspaceMaterialTests(unittest.TestCase):
             self.assertNotIn("delivery-log.md 更新", summary["completed_items"])
             self.assertNotIn("- [/] presentation-plan.md 完成", stage_gates_text)
 
-    def test_workspace_summary_advances_report_only_projects_to_s7_after_review_checklist_without_delivery_log(self):
+    def test_workspace_summary_advances_report_only_projects_to_s7_after_review_artifacts_without_delivery_log(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_projects_dir = Path(tmpdir) / "config-projects"
             workspace_dir = Path(tmpdir) / "客户项目"
@@ -224,6 +231,130 @@ class WorkspaceMaterialTests(unittest.TestCase):
             self.assertIn("delivery-log.md 更新", summary["next_actions"])
             self.assertNotIn("presentation-plan.md 完成", summary["next_actions"])
             self.assertIn("- [/] presentation-plan.md 完成", stage_gates_text)
+
+    def test_workspace_summary_accepts_review_notes_with_labeled_results(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_projects_dir = Path(tmpdir) / "config-projects"
+            workspace_dir = Path(tmpdir) / "瀹㈡埛椤圭洰"
+            engine = SkillEngine(config_projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+                notes="",
+            )
+
+            project_dir = workspace_dir / ".consulting-report"
+            self._write_stage_two_prerequisites(project_dir)
+            (project_dir / "plan" / "review.md").write_text(
+                "# Review log\n\n"
+                "## Review cycle 1\n"
+                "**Review time**: 2026-04-01\n"
+                "**Check result**: Facts cross-checked and chart labels corrected.\n"
+                "**Handling result**: Revised wording and footnotes synced.\n",
+                encoding="utf-8",
+            )
+
+            summary = engine.get_workspace_summary(project["id"])
+
+            self.assertEqual(summary["stage_code"], "S7")
+            self.assertTrue(any("delivery-log.md" in item for item in summary["next_actions"]))
+
+    def test_workspace_summary_keeps_report_only_projects_at_s5_when_review_notes_only_have_metadata_labels(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_projects_dir = Path(tmpdir) / "config-projects"
+            workspace_dir = Path(tmpdir) / "瀹㈡埛椤圭洰"
+            engine = SkillEngine(config_projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+                notes="",
+            )
+
+            project_dir = workspace_dir / ".consulting-report"
+            self._write_stage_two_prerequisites(project_dir)
+            (project_dir / "plan" / "review.md").write_text(
+                "# Review log\n\n"
+                "## Review cycle 1\n"
+                "**Review time**: 2026-04-01\n",
+                encoding="utf-8",
+            )
+
+            summary = engine.get_workspace_summary(project["id"])
+
+            self.assertEqual(summary["stage_code"], "S5")
+            self.assertTrue(any("review.md" in item for item in summary["next_actions"]))
+
+    def test_workspace_summary_keeps_report_only_projects_at_s5_without_review_notes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_projects_dir = Path(tmpdir) / "config-projects"
+            workspace_dir = Path(tmpdir) / "瀹㈡埛椤圭洰"
+            engine = SkillEngine(config_projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+                notes="",
+            )
+
+            project_dir = workspace_dir / ".consulting-report"
+            self._write_stage_two_prerequisites(project_dir)
+            (project_dir / "plan" / "review.md").unlink()
+
+            summary = engine.get_workspace_summary(project["id"])
+
+            self.assertEqual(summary["stage_code"], "S5")
+            self.assertTrue(any("review.md" in item for item in summary["next_actions"]))
+            self.assertNotIn("delivery-log.md 鏇存柊", summary["completed_items"])
+
+    def test_workspace_summary_keeps_report_only_projects_at_s5_when_review_notes_only_rephrase_template_checklists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_projects_dir = Path(tmpdir) / "config-projects"
+            workspace_dir = Path(tmpdir) / "瀹㈡埛椤圭洰"
+            engine = SkillEngine(config_projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+                notes="",
+            )
+
+            project_dir = workspace_dir / ".consulting-report"
+            self._write_stage_two_prerequisites(project_dir)
+            (project_dir / "plan" / "review.md").write_text(
+                "# Review log\n\n"
+                "## Content quality\n"
+                "- [ ] Every key claim has support.\n"
+                "- [ ] Logic chain is complete.\n"
+                "## Review cycle\n"
+                "**Review time**:\n"
+                "**Problems found**:\n"
+                "1.\n"
+                "2.\n",
+                encoding="utf-8",
+            )
+
+            summary = engine.get_workspace_summary(project["id"])
+
+            self.assertEqual(summary["stage_code"], "S5")
+            self.assertTrue(any("review.md" in item for item in summary["next_actions"]))
 
     def test_workspace_summary_skips_s6_for_report_only_projects_when_delivery_log_exists(self):
         with tempfile.TemporaryDirectory() as tmpdir:

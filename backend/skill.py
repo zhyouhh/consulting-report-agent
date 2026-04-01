@@ -661,7 +661,9 @@ class SkillEngine:
         data_log_ready = self._has_effective_data_log(project_path)
         analysis_ready = self._has_effective_analysis_notes(project_path)
         report_ready = self._has_effective_report_draft(project_path)
-        review_ready = self._has_effective_review_checklist(project_path)
+        review_checklist_ready = self._has_effective_review_checklist(project_path)
+        review_notes_ready = self._has_effective_review_notes(project_path)
+        review_ready = review_checklist_ready and review_notes_ready
         presentation_ready = self._has_effective_presentation_plan(project_path)
         delivery_ready = self._has_effective_delivery_log(project_path)
         presentation_required = self._delivery_mode_requires_presentation(project_path)
@@ -674,7 +676,8 @@ class SkillEngine:
                 data_log_ready,
                 analysis_ready,
                 report_ready,
-                review_ready,
+                review_checklist_ready,
+                review_notes_ready,
                 presentation_ready,
                 delivery_ready,
             ]
@@ -722,6 +725,8 @@ class SkillEngine:
             "data_log_ready": data_log_ready,
             "analysis_ready": analysis_ready,
             "report_ready": report_ready,
+            "review_checklist_ready": review_checklist_ready,
+            "review_notes_ready": review_notes_ready,
             "review_ready": review_ready,
             "presentation_ready": presentation_ready,
             "delivery_ready": delivery_ready,
@@ -759,8 +764,13 @@ class SkillEngine:
             completed.extend(self.STAGE_CHECKLIST_ITEMS["S3"])
         elif stage_code == "S4" and flags["report_ready"]:
             completed.extend(self.STAGE_CHECKLIST_ITEMS["S4"])
-        elif stage_code == "S5" and flags["review_ready"]:
-            completed.extend(self.STAGE_CHECKLIST_ITEMS["S5"])
+        elif stage_code == "S5":
+            if flags["review_checklist_ready"]:
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][0])
+            if flags["review_notes_ready"]:
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
+            if flags["review_ready"]:
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][2])
         elif stage_code == "S6":
             completed.append(self.STAGE_CHECKLIST_ITEMS["S6"][0])
             if flags["presentation_ready"]:
@@ -834,6 +844,10 @@ class SkillEngine:
         return self._normalize_text(text) == self._normalize_text(template_text)
 
     def _has_substantive_body(self, text: str) -> bool:
+        return self._count_substantive_body_lines(text) > 0
+
+    def _count_substantive_body_lines(self, text: str) -> int:
+        count = 0
         for raw_line in text.splitlines():
             stripped = raw_line.strip()
             if not stripped or stripped == "---":
@@ -842,32 +856,36 @@ class SkillEngine:
                 continue
             if stripped.startswith("<!--") and stripped.endswith("-->"):
                 continue
+            if stripped.startswith("|"):
+                continue
             candidate = stripped[2:].strip() if stripped.startswith("- ") else stripped
-            candidate = re.sub(r"\*\*[^*]+\*\*:\s*", "", candidate).strip()
-            if not candidate or candidate in {"-", "|"}:
-                continue
-            if candidate.startswith("[") and candidate.endswith("]"):
-                continue
-            if re.fullmatch(r"[|\-:\s]+", candidate):
-                continue
-            return True
-        return False
+            candidate = re.sub(r"\*\*([^*]+)\*\*\s*[:：]\s*", "", candidate).strip()
+            if self._is_substantive_field_value(candidate):
+                count += 1
+        return count
+
+    def _is_substantive_field_value(self, value: str) -> bool:
+        candidate = re.sub(r"\*\*", "", (value or "").strip())
+        if not candidate or candidate in {"-", "|"}:
+            return False
+        if candidate.startswith("[") and candidate.endswith("]"):
+            return False
+        if re.fullmatch(r"\d+\.", candidate):
+            return False
+        if re.fullmatch(r"[|\-:\s]+", candidate):
+            return False
+        if candidate.endswith(":") or candidate.endswith("："):
+            return False
+        return True
 
     def _has_effective_notes(self, project_path: Path) -> bool:
         notes_text = self._read_plan_file(project_path, "notes.md")
         if not notes_text or self._is_template_content(notes_text, "notes.md"):
             return False
-        groups = [
-            (r"\bboundar(?:y|ies)\b", r"边界"),
-            (r"\bout of scope\b", r"排除|不做"),
-            (r"\bassumption", r"假设"),
-            (r"\bjudg(?:e|ment)", r"判断"),
-        ]
-        matched_groups = 0
-        for patterns in groups:
-            if any(re.search(pattern, notes_text, flags=re.IGNORECASE) for pattern in patterns):
-                matched_groups += 1
-        return matched_groups >= 2 and self._has_substantive_body(notes_text)
+        heading_count = len(re.findall(r"^(?:##+|###)\s+", notes_text, flags=re.MULTILINE))
+        labeled_line_count = self._count_substantive_labeled_lines(notes_text)
+        substantive_line_count = self._count_substantive_body_lines(notes_text)
+        return substantive_line_count >= 2 and (heading_count >= 2 or labeled_line_count >= 2)
 
     def _has_effective_references(self, project_path: Path) -> bool:
         references_text = self._read_plan_file(project_path, "references.md")
@@ -924,25 +942,66 @@ class SkillEngine:
         data_log_text = self._read_plan_file(project_path, "data-log.md")
         if not data_log_text or self._is_template_content(data_log_text, "data-log.md"):
             return False
-        if re.search(r"^\|[^|\n]+\|[^|\n]+\|[^|\n]+\|[^|\n]+\|", data_log_text, flags=re.MULTILINE):
-            return True
-        return bool(re.search(r"^- .+\S", data_log_text, flags=re.MULTILINE))
+        seen_table_separator = False
+        for raw_line in data_log_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("|"):
+                cells = [cell.strip() for cell in line.strip("|").split("|")]
+                if len(cells) < 4:
+                    continue
+                if re.fullmatch(r"[-:\s]+", "".join(cells)):
+                    seen_table_separator = True
+                    continue
+                if not seen_table_separator:
+                    continue
+                if self._is_substantive_field_value(cells[3]) and any(
+                    self._is_substantive_field_value(cell) for cell in cells[:3]
+                ):
+                    return True
+                continue
+            if line.startswith("- ") and self._is_substantive_field_value(line[2:].strip()):
+                return True
+        return False
 
     def _has_effective_analysis_notes(self, project_path: Path) -> bool:
         analysis_text = self._read_plan_file(project_path, "analysis-notes.md")
         if not analysis_text or self._is_template_content(analysis_text, "analysis-notes.md"):
             return False
-        required_patterns = [r"\binsight\b", r"\bconclusion\b", r"\bevidence\b", r"\bimpact\b", r"洞察", r"结论"]
-        return (
-            any(re.search(pattern, analysis_text, flags=re.IGNORECASE) for pattern in required_patterns)
-            and self._has_substantive_body(analysis_text)
-        )
+        insight_heading_count = len(re.findall(r"^(?:##+)\s+", analysis_text, flags=re.MULTILINE))
+        labeled_line_count = self._count_substantive_labeled_lines(analysis_text)
+        return insight_heading_count >= 1 and labeled_line_count >= 3 and self._has_substantive_body(analysis_text)
 
     def _has_effective_review_checklist(self, project_path: Path) -> bool:
         review_text = self._read_plan_file(project_path, "review-checklist.md")
         if not review_text or self._is_template_content(review_text, "review-checklist.md"):
             return False
         return bool(re.search(r"- \[[xX]\] .+\S", review_text))
+
+    def _has_effective_review_notes(self, project_path: Path) -> bool:
+        review_text = self._read_plan_file(project_path, "review.md")
+        if not review_text or self._is_template_content(review_text, "review.md"):
+            return False
+        substantive_review_item = re.search(
+            r"^\s*(?:-\s+(?!\[[ xX/]\])[^\s].*|\d+\.[ \t]+[^\s].*)$",
+            review_text,
+            flags=re.MULTILINE,
+        )
+        substantive_labeled_line = self._count_substantive_labeled_lines(review_text) >= 2
+        return bool(substantive_review_item or substantive_labeled_line) and self._has_substantive_body(review_text)
+
+    def _count_substantive_labeled_lines(self, text: str) -> int:
+        count = 0
+        plain_text = text.replace("**", "")
+        for raw_line in plain_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = re.search(r"^[^:：]+[:：]\s*(.+)$", line)
+            if match and self._is_substantive_field_value(match.group(1)):
+                count += 1
+        return count
 
     def _has_effective_presentation_plan(self, project_path: Path) -> bool:
         presentation_text = self._read_plan_file(project_path, "presentation-plan.md")
