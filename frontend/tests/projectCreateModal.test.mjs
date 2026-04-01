@@ -36,7 +36,7 @@ test("prepareProjectCreatePayload derives the project name from the theme and ke
   assert.deepEqual(payload.initial_material_paths, ["D:\\workspace\\brief.md"]);
 });
 
-test("prepareProjectCreatePayload sanitizes the derived project name for backend validation", () => {
+test("prepareProjectCreatePayload preserves a meaningful theme as the project display name", () => {
   const payload = prepareProjectCreatePayload({
     workspace_dir: "D:\\workspace",
     project_type: "strategy-consulting",
@@ -48,7 +48,7 @@ test("prepareProjectCreatePayload sanitizes the derived project name for backend
     initial_material_paths: [],
   });
 
-  assert.equal(payload.name, "AI-战略-2026");
+  assert.equal(payload.name, "AI 战略 / 2026!");
   assert.equal(payload.theme, "AI 战略 / 2026!");
 });
 

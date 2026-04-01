@@ -9,7 +9,7 @@ class ProjectInfo(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(..., min_length=1, max_length=50, pattern=r"^[a-zA-Z0-9_\u4e00-\u9fa5-]+$")
+    name: str = Field(..., min_length=1, max_length=200)
     workspace_dir: str = Field(..., min_length=1, max_length=500)
     project_type: str = Field(..., min_length=1, max_length=100)
     theme: str = Field(..., min_length=1, max_length=200)

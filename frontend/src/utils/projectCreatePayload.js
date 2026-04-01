@@ -1,18 +1,17 @@
 export function prepareProjectCreatePayload(formData = {}) {
   const theme = (formData.theme || "").trim();
-  const name = theme
+  const meaningfulToken = theme
     .replace(/\s+/g, "-")
     .replace(/[^\w\u4e00-\u9fa5-]+/g, "-")
     .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 50);
+    .replace(/^-+|-+$/g, "");
 
-  if (!name) {
+  if (!meaningfulToken) {
     throw new Error("请输入有效的报告主题");
   }
 
   return {
-    name,
+    name: theme,
     workspace_dir: (formData.workspace_dir || "").trim(),
     project_type: formData.project_type || "strategy-consulting",
     theme,

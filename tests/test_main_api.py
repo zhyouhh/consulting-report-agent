@@ -33,6 +33,31 @@ class WorkspaceApiTests(unittest.TestCase):
         response = self.client.get("/api/projects/definitely-missing-project/workspace")
         self.assertEqual(response.status_code, 404)
 
+    @mock.patch("backend.main.skill_engine.create_project")
+    def test_create_project_accepts_theme_like_display_name_without_slugging(self, mock_create_project):
+        mock_create_project.return_value = {
+            "id": "proj-demo",
+            "name": "AI 战略 / 2026!",
+        }
+
+        response = self.client.post(
+            "/api/projects",
+            json={
+                "name": "AI 战略 / 2026!",
+                "workspace_dir": "D:/Workspaces/demo",
+                "project_type": "strategy-consulting",
+                "theme": "AI 战略 / 2026!",
+                "target_audience": "高层决策者",
+                "deadline": "2026-04-02",
+                "expected_length": "5000字",
+                "notes": "",
+                "initial_material_paths": [],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["project"]["name"], "AI 战略 / 2026!")
+
     def test_select_workspace_folder_returns_bridge_value(self):
         bridge = mock.Mock()
         bridge.select_workspace_folder.return_value = "D:/Workspaces/demo"

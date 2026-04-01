@@ -916,12 +916,10 @@ class SkillEngine:
         if any(token in lowered for token in placeholder_tokens):
             return False
 
-        return (
-            "http://" in candidate
-            or "https://" in candidate
-            or bool(re.search(r"\b(?:19|20)\d{2}\b", candidate))
-            or any(separator in candidate for separator in (":", "：", ". ", "。", " - "))
-        )
+        if "[" in candidate or "]" in candidate:
+            return False
+
+        return True
 
     def _has_effective_outline(self, project_path: Path) -> bool:
         outline_text = self._read_plan_file(project_path, "outline.md")

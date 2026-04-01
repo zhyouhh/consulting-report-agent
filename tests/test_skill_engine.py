@@ -547,6 +547,24 @@ class SkillEngineTests(unittest.TestCase):
             self.assertIn("research-plan.md 完成", summary["completed_items"])
             self.assertIn("data-log.md 更新", summary["next_actions"])
 
+    def test_workspace_summary_accepts_two_project_material_titles_as_reference_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            self._write_stage_two_prerequisites(
+                project_dir,
+                references_text=(
+                    "# References\n\n"
+                    "## Sources\n"
+                    "- 客户访谈纪要\n"
+                    "- CRM留存导出\n"
+                ),
+            )
+
+            summary = engine.get_workspace_summary("demo")
+
+            self.assertEqual(summary["stage_code"], "S2")
+            self.assertIn("references.md 更新", summary["completed_items"])
+
     def test_workspace_summary_keeps_stage_at_s1_when_research_plan_has_two_generic_sections_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
