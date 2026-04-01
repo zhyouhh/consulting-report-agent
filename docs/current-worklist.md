@@ -98,3 +98,15 @@
 - 每完成一项，更新对应状态与结论。
 - 若中途新增本周事项，直接追加到本文件。
 - 稳定事实记到根目录 `AGENTS.md`，短期推进项记在本文件。
+## 2026-04-01 Stage Workflow Alignment Update
+
+- 状态：`已完成`
+- 设计稿：`docs/superpowers/specs/2026-04-01-stage-facts-and-phase-alignment-design.md`
+- 计划：`docs/superpowers/plans/2026-04-01-stage-facts-and-phase-alignment.md`
+- 结论：
+  - `project-info.md` 已退出正式工作流，新项目只初始化 `project-overview.md`
+  - 后端已阻止未登记的 `plan/*.md` 写入，`plan/gate-control.md` 不再允许落盘
+  - `outline.md` / `research-plan.md` 必须先满足证据门槛：有效 `notes.md` + `references.md`，且来源不少于 2 个
+  - 阶段推断已对齐为完整 `S0 -> S7` 顺序，不再只看粗粒度 `S0/S1/S4`
+  - `S6` 对“仅报告”项目为可跳过阶段；对“报告+演示”项目仍为必经阶段
+  - 工作区文件预览已默认优先 `plan/project-overview.md`，并把旧的 `plan/project-info.md` 放到末位
