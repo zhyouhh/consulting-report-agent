@@ -868,6 +868,8 @@ class SkillEngine:
         candidate = re.sub(r"\*\*", "", (value or "").strip())
         if not candidate or candidate in {"-", "|"}:
             return False
+        if re.search(r"\[[ xX/]\]", candidate):
+            return False
         if candidate.startswith("[") and candidate.endswith("]"):
             return False
         if re.fullmatch(r"\d+\.", candidate):

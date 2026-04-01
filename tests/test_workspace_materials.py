@@ -294,6 +294,37 @@ class WorkspaceMaterialTests(unittest.TestCase):
             self.assertEqual(summary["stage_code"], "S5")
             self.assertTrue(any("review.md" in item for item in summary["next_actions"]))
 
+    def test_workspace_summary_keeps_report_only_projects_at_s5_when_review_notes_only_have_checkbox_status_values(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_projects_dir = Path(tmpdir) / "config-projects"
+            workspace_dir = Path(tmpdir) / "瀹㈡埛椤圭洰"
+            engine = SkillEngine(config_projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+                notes="",
+            )
+
+            project_dir = workspace_dir / ".consulting-report"
+            self._write_stage_two_prerequisites(project_dir)
+            (project_dir / "plan" / "review.md").write_text(
+                "# Review log\n\n"
+                "## Review cycle 1\n"
+                "**Revision status**: [ ] Pending | [ ] Done\n"
+                "**Approval**: [ ] Yes | [ ] No, continue revising\n",
+                encoding="utf-8",
+            )
+
+            summary = engine.get_workspace_summary(project["id"])
+
+            self.assertEqual(summary["stage_code"], "S5")
+            self.assertTrue(any("review.md" in item for item in summary["next_actions"]))
+
     def test_workspace_summary_keeps_report_only_projects_at_s5_without_review_notes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_projects_dir = Path(tmpdir) / "config-projects"
