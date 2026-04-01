@@ -5,6 +5,7 @@ import FilePreviewPanel from './FilePreviewPanel'
 import { showError, showSuccess } from '../utils/toast'
 import { getNextQualityResult } from '../utils/workspacePanelState'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
+import { getDefaultPreviewFile, orderPreviewFiles } from '../utils/workspaceFiles'
 
 export default function WorkspacePanel({
   projectId,
@@ -61,15 +62,15 @@ export default function WorkspacePanel({
       })) {
         return
       }
-      const fileList = res.data.files.map(path => ({
+      const orderedPaths = orderPreviewFiles(res.data.files)
+      const fileList = orderedPaths.map(path => ({
         name: path.split('/').pop().replace('.md', ''),
         path,
       }))
       setFiles(fileList)
 
       const nextDefault = fileList.find(file => file.path === currentFile)?.path
-        || fileList.find(file => file.path === 'plan/project-overview.md')?.path
-        || fileList[0]?.path
+        || getDefaultPreviewFile(orderedPaths)
 
       if (nextDefault) {
         await loadFile(nextDefault, requestProject)
