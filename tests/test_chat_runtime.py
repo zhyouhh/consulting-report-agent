@@ -494,6 +494,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(result["token_usage"]["usage_mode"], "estimated")
         self.assertEqual(result["token_usage"]["current_tokens"], 1234)
 
+    @unittest.skip("replaced by tempdir-backed variant below")
     @mock.patch("backend.chat.OpenAI")
     def test_chat_request_max_tokens_is_bounded_by_policy_reserved_budget(self, mock_openai):
         mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
@@ -524,6 +525,55 @@ class ChatRuntimeTests(unittest.TestCase):
             mock_openai.return_value.chat.completions.create.call_args.kwargs["max_tokens"],
             2048,
         )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_request_max_tokens_is_bounded_by_policy_reserved_budget_with_real_project(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            engine.create_project(
+                name="demo",
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
+                usage=SimpleNamespace(total_tokens=123),
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="瀹屾垚",
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="custom",
+                    custom_api_base="https://custom.example/v1",
+                    custom_api_key="secret",
+                    custom_model="gpt-5-mini",
+                    custom_context_limit_override=4096,
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            policy = handler._resolve_context_policy()
+
+            with mock.patch.object(
+                handler,
+                "_fit_conversation_to_budget",
+                side_effect=lambda conversation: (conversation, 0, False, policy),
+            ):
+                handler.chat("demo", "璇风户缁?")
+
+            self.assertEqual(
+                mock_openai.return_value.chat.completions.create.call_args.kwargs["max_tokens"],
+                2048,
+            )
 
     @mock.patch("backend.chat.OpenAI")
     @mock.patch("backend.chat.requests.get")
