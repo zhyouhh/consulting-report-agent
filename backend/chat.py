@@ -861,8 +861,9 @@ class ChatHandler:
                         "status": "error",
                         "message": "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。",
                     }
-                self.skill_engine.write_file(project_id, args["file_path"], args["content"])
-                return {"status": "success", "message": f"已写入文件: {args['file_path']}"}
+                normalized_path = self.skill_engine.validate_plan_write(project_id, args["file_path"])
+                self.skill_engine.write_file(project_id, normalized_path, args["content"])
+                return {"status": "success", "message": f"已写入文件: {normalized_path}"}
             if func_name == "read_file":
                 content = self.skill_engine.read_file(project_id, args["file_path"])
                 return {"status": "success", "content": content}

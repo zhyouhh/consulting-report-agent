@@ -16,6 +16,46 @@ class ChatRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
 
+    def _make_tool_call(self, name: str, arguments: str):
+        return type(
+            "ToolCall",
+            (),
+            {
+                "function": type(
+                    "Function",
+                    (),
+                    {
+                        "name": name,
+                        "arguments": arguments,
+                    },
+                )(),
+            },
+        )()
+
+    def _write_evidence_gate_prerequisites(self, project_dir: Path, *, source_count: int = 2):
+        (project_dir / "plan" / "notes.md").write_text(
+            "# Notes\n\n"
+            "## Boundaries\n"
+            "- Focus on enterprise AI adoption decisions.\n"
+            "## Out of scope\n"
+            "- Do not cover vendor procurement.\n"
+            "## Assumptions\n"
+            "- Budget remains flat through FY26.\n",
+            encoding="utf-8",
+        )
+        reference_lines = [
+            "# References",
+            "",
+            "## Sources",
+            "- Internal interview transcript: operations lead workshop",
+        ]
+        if source_count >= 2:
+            reference_lines.append("- External benchmark: https://example.com/ai-benchmark")
+        (project_dir / "plan" / "references.md").write_text(
+            "\n".join(reference_lines) + "\n",
+            encoding="utf-8",
+        )
+
     def _make_chunk(self, *, content=None, tool_calls=None):
         delta = SimpleNamespace(content=content, tool_calls=tool_calls)
         return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
@@ -570,6 +610,228 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("先确认大纲", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_handler_write_file_rejects_unregistered_plan_file(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            settings = Settings(
+                mode="managed",
+                managed_base_url="https://newapi.z0y0h.work/client/v1",
+                managed_model="gemini-3-flash",
+                projects_dir=projects_dir,
+                skill_dir=self.repo_skill_dir,
+            )
+            handler = ChatHandler(settings, engine)
+            handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    '{"file_path":"plan/gate-control.md","content":"# Gate control"}',
+                ),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("gate-control.md", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_handler_write_file_rejects_outline_before_evidence_gate_is_satisfied(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            settings = Settings(
+                mode="managed",
+                managed_base_url="https://newapi.z0y0h.work/client/v1",
+                managed_model="gemini-3-flash",
+                projects_dir=projects_dir,
+                skill_dir=self.repo_skill_dir,
+            )
+            handler = ChatHandler(settings, engine)
+            handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    '{"file_path":"plan/outline.md","content":"# Report outline"}',
+                ),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("notes.md", result["message"])
+        self.assertIn("references.md", result["message"])
+        self.assertIn("2-source", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_handler_write_file_rejects_outline_when_references_have_only_one_source(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            self._write_evidence_gate_prerequisites(Path(project["project_dir"]), source_count=1)
+            settings = Settings(
+                mode="managed",
+                managed_base_url="https://newapi.z0y0h.work/client/v1",
+                managed_model="gemini-3-flash",
+                projects_dir=projects_dir,
+                skill_dir=self.repo_skill_dir,
+            )
+            handler = ChatHandler(settings, engine)
+            handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    '{"file_path":"plan/outline.md","content":"# Report outline"}',
+                ),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("2-source", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_handler_write_file_rejects_research_plan_before_evidence_gate_is_satisfied(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            settings = Settings(
+                mode="managed",
+                managed_base_url="https://newapi.z0y0h.work/client/v1",
+                managed_model="gemini-3-flash",
+                projects_dir=projects_dir,
+                skill_dir=self.repo_skill_dir,
+            )
+            handler = ChatHandler(settings, engine)
+            handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    '{"file_path":"plan/research-plan.md","content":"# Research plan"}',
+                ),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("notes.md", result["message"])
+        self.assertIn("references.md", result["message"])
+        self.assertIn("2-source", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_handler_write_file_rejects_research_plan_when_references_have_only_one_source(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            self._write_evidence_gate_prerequisites(Path(project["project_dir"]), source_count=1)
+            settings = Settings(
+                mode="managed",
+                managed_base_url="https://newapi.z0y0h.work/client/v1",
+                managed_model="gemini-3-flash",
+                projects_dir=projects_dir,
+                skill_dir=self.repo_skill_dir,
+            )
+            handler = ChatHandler(settings, engine)
+            handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    '{"file_path":"plan/research-plan.md","content":"# Research plan"}',
+                ),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("2-source", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_handler_write_file_allows_outline_after_evidence_gate_is_satisfied(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            self._write_evidence_gate_prerequisites(Path(project["project_dir"]))
+            settings = Settings(
+                mode="managed",
+                managed_base_url="https://newapi.z0y0h.work/client/v1",
+                managed_model="gemini-3-flash",
+                projects_dir=projects_dir,
+                skill_dir=self.repo_skill_dir,
+            )
+            handler = ChatHandler(settings, engine)
+            handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    '{"file_path":"plan/outline.md","content":"# Report outline\\n\\n## Executive summary\\n- Key finding\\n## Recommendations\\n- Next step"}',
+                ),
+            )
+
+        self.assertEqual(result["status"], "success")
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_retries_when_assistant_claims_outline_written_without_actual_write(self, mock_openai):

@@ -430,9 +430,46 @@ class SkillEngine:
         if not project_path:
             raise ValueError(f"项目 {project_ref} 不存在")
 
-        full_path = self._resolve_project_path(project_path, file_path)
+        normalized_path = self.validate_plan_write(project_ref, file_path)
+        full_path = self._resolve_project_path(project_path.resolve(), normalized_path)
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
+
+    def is_formal_plan_file(self, file_path: str) -> bool:
+        normalized_path = self._to_posix(file_path).lstrip("/")
+        if not self._is_plan_markdown_path(normalized_path):
+            return False
+        return normalized_path.split("/", 1)[1] in self.FORMAL_PLAN_FILES
+
+    def evidence_gate_satisfied(self, project_ref: str) -> bool:
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            raise ValueError(f"项目 {project_ref} 不存在")
+        return self._has_effective_notes(project_path) and self._has_effective_references(project_path)
+
+    def validate_plan_write(self, project_ref: str, file_path: str) -> str:
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            raise ValueError(f"项目 {project_ref} 不存在")
+
+        project_root = project_path.resolve()
+        full_path = self._resolve_project_path(project_root, file_path)
+        normalized_path = self._to_posix(full_path.relative_to(project_root))
+
+        if not self._is_plan_markdown_path(normalized_path):
+            return normalized_path
+
+        if not self.is_formal_plan_file(normalized_path):
+            raise ValueError(
+                f"`{normalized_path}` is not an official plan file. Use only the registered `plan/*.md` files and never invent unofficial files such as `plan/gate-control.md`."
+            )
+
+        if self._requires_pre_outline_evidence(normalized_path) and not self.evidence_gate_satisfied(project_ref):
+            raise ValueError(
+                "Before writing `plan/outline.md` or `plan/research-plan.md`, update `notes.md` and `references.md` and satisfy the minimum 2-source rule."
+            )
+
+        return normalized_path
 
     def read_material_file(self, project_ref: str, material_id: str) -> str:
         project_record = self.get_project_record(project_ref)
@@ -748,6 +785,12 @@ class SkillEngine:
     def _set_stage_gate_item_state(self, content: str, task: str, state: str) -> str:
         pattern = rf"- \[(?: |x|X|/)\] {re.escape(task)}"
         return re.sub(pattern, f"- [{state}] {task}", content)
+
+    def _is_plan_markdown_path(self, normalized_path: str) -> bool:
+        return normalized_path.startswith("plan/") and normalized_path.endswith(".md")
+
+    def _requires_pre_outline_evidence(self, normalized_path: str) -> bool:
+        return normalized_path in {"plan/outline.md", "plan/research-plan.md"}
 
     def _is_effective_plan_file(self, project_path: Path, file_name: str) -> bool:
         text = self._read_plan_file(project_path, file_name)

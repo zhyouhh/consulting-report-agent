@@ -25,6 +25,8 @@ description: Use when writing consulting reports, strategy analysis, market rese
 2. 检查或创建 `plan/`
 - 若不存在 `plan/`，立即用 `plan-template/` 初始化
 - 若已存在，先读取 `project-overview.md`、`progress.md`、`notes.md`
+- 先读取项目材料；材料不足时先用 `web_search` / `fetch_url` 补证据，再整理进 `notes.md`、`references.md`
+- 先写 `notes.md`、`references.md`，再写 `outline.md` / `research-plan.md`；只用正式 `plan/*.md` 文件，不写 `gate-control.md`
 
 3. 任务入档
 - 执行前在 `plan/progress.md` 写入当前任务

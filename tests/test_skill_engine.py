@@ -72,6 +72,30 @@ class SkillEngineTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+    def _write_evidence_gate_prerequisites(self, project_dir: Path, *, source_count: int = 2):
+        (project_dir / "plan" / "notes.md").write_text(
+            "# Notes\n\n"
+            "## Boundaries\n"
+            "- Focus on enterprise AI adoption decisions.\n"
+            "## Out of scope\n"
+            "- Do not cover vendor procurement.\n"
+            "## Assumptions\n"
+            "- Budget remains flat through FY26.\n",
+            encoding="utf-8",
+        )
+        reference_lines = [
+            "# References",
+            "",
+            "## Sources",
+            "- Internal interview transcript: operations lead workshop",
+        ]
+        if source_count >= 2:
+            reference_lines.append("- External benchmark: https://example.com/ai-benchmark")
+        (project_dir / "plan" / "references.md").write_text(
+            "\n".join(reference_lines) + "\n",
+            encoding="utf-8",
+        )
+
     def _write_data_log(self, project_dir: Path):
         (project_dir / "plan" / "data-log.md").write_text(
             "# Data log\n\n"
@@ -255,6 +279,59 @@ class SkillEngineTests(unittest.TestCase):
             report_path = engine.get_primary_report_path("demo")
 
             self.assertTrue(report_path.endswith("report.md"))
+
+    def test_write_file_rejects_unregistered_plan_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, _project_dir = self._create_engine_and_project(tmpdir)
+
+            with self.assertRaisesRegex(ValueError, "gate-control.md"):
+                engine.write_file("demo", "plan/gate-control.md", "# Gate control")
+
+    def test_write_file_rejects_outline_before_evidence_gate_is_satisfied(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, _project_dir = self._create_engine_and_project(tmpdir)
+
+            with self.assertRaisesRegex(ValueError, "notes.md"):
+                engine.write_file("demo", "plan/outline.md", "# Report outline")
+
+    def test_write_file_rejects_outline_when_references_have_only_one_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            self._write_evidence_gate_prerequisites(project_dir, source_count=1)
+
+            with self.assertRaisesRegex(ValueError, "2-source"):
+                engine.write_file("demo", "plan/outline.md", "# Report outline")
+
+    def test_write_file_rejects_research_plan_before_evidence_gate_is_satisfied(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, _project_dir = self._create_engine_and_project(tmpdir)
+
+            with self.assertRaisesRegex(ValueError, "references.md"):
+                engine.write_file("demo", "plan/research-plan.md", "# Research plan")
+
+    def test_write_file_rejects_research_plan_when_references_have_only_one_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            self._write_evidence_gate_prerequisites(project_dir, source_count=1)
+
+            with self.assertRaisesRegex(ValueError, "2-source"):
+                engine.write_file("demo", "plan/research-plan.md", "# Research plan")
+
+    def test_write_file_allows_outline_after_evidence_gate_is_satisfied(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            self._write_evidence_gate_prerequisites(project_dir)
+
+            engine.write_file(
+                "demo",
+                "plan/outline.md",
+                "# Report outline\n\n## Executive summary\n- Key finding\n## Recommendations\n- Next step\n",
+            )
+
+            self.assertIn(
+                "Executive summary",
+                (project_dir / "plan" / "outline.md").read_text(encoding="utf-8"),
+            )
 
     def test_workspace_summary_keeps_stage_at_s1_when_outline_is_effective_without_research_plan(self):
         with tempfile.TemporaryDirectory() as tmpdir:
