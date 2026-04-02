@@ -11,6 +11,7 @@ class PackagingDocsTests(unittest.TestCase):
         self.assertIn(">nul", content.lower())
         self.assertIn("pyinstaller consulting_report.spec", content)
         self.assertNotIn("/dev/null", content)
+        self.assertIn("/client/v1/models", content)
         self.assertTrue(
             "CONSULTING_REPORT_MANAGED_CLIENT_TOKEN" in content
             or "managed_client_token.txt" in content
@@ -23,6 +24,8 @@ class PackagingDocsTests(unittest.TestCase):
             self.assertIn("默认通道", content)
             self.assertIn("自定义 API", content)
             self.assertIn("可审草稿", content)
+            self.assertIn("/client/v1/models", content)
+            self.assertIn("client token", content)
 
     def test_readme_describes_managed_mode_without_claiming_word_pdf_export(self):
         content = (ROOT / "README.md").read_text(encoding="utf-8")

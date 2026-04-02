@@ -46,6 +46,7 @@ npm --version
 
 1. 双击运行 [build.bat](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/build.bat)
 2. 提前准备 `managed_client_token.txt`，或设置环境变量 `CONSULTING_REPORT_MANAGED_CLIENT_TOKEN`
+   这个文件必须是 `/client` 使用的 client token，不是上游 API key
 3. 等待脚本自动安装依赖、构建前端、执行 PyInstaller
 4. 打包产物位于 `dist\咨询报告助手\`
 
@@ -64,6 +65,9 @@ cd ..
 
 pyinstaller consulting_report.spec
 ```
+
+打包脚本会先请求 `https://newapi.z0y0h.work/client/v1/models` 预检 token；
+如果这一步不通过，会直接拒绝继续打包。
 
 ## 打包产物
 
@@ -105,13 +109,14 @@ dist/
 先检查：
 
 ```cmd
-curl https://newapi.z0y0h.work/client/v1/models -H "Authorization: Bearer managed"
+curl https://newapi.z0y0h.work/client/v1/models -H "Authorization: Bearer 你的_client_token"
 ```
 
 如果不通：
 
 - 先确认服务端薄中转在线
 - 再确认发布包里已经带上对应的 `managed_client_token.txt`
+- 再确认这个 token 是 client token，不是上游 API key
 - 临时切到 `自定义 API`
 
 ### 前端构建失败

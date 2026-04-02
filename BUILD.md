@@ -31,6 +31,8 @@ cd ..
 - 或设置环境变量 `CONSULTING_REPORT_MANAGED_CLIENT_TOKEN`
 
 `build.bat` 会在缺少这两者时直接失败，避免打出一个表面成功、实际不能开箱即用的包。
+它还会在打包前请求 `https://newapi.z0y0h.work/client/v1/models` 做预检。
+`managed_client_token.txt` 必须放的是 `/client` 使用的 client token，不是上游 API key。
 
 ```bash
 pyinstaller consulting_report.spec
@@ -64,6 +66,7 @@ dist/咨询报告助手/
 - 默认地址：`https://newapi.z0y0h.work/client/v1`
 - 客户端不保存真实上游 key，真实凭证只存在服务端薄中转。
 - 发布包需要注入单独的客户端令牌文件 `managed_client_token.txt`。
+- 打包前应先确认该 client token 能通过 `/client/v1/models` 验证。
 
 ### 自定义 API
 
@@ -83,7 +86,7 @@ dist/咨询报告助手/
 A: 不需要。分发的是打包后的完整文件夹，直接双击 `exe` 即可。
 
 **Q: 默认通道不能用怎么办？**  
-A: 先检查 `https://newapi.z0y0h.work/client/v1/models` 是否可访问；不通时可临时切到 `自定义 API`。
+A: 先检查 `https://newapi.z0y0h.work/client/v1/models` 是否可访问；再确认 `managed_client_token.txt` 放的是 client token，而不是上游 API key；仍不通时可临时切到 `自定义 API`。
 
 **Q: 现在导出是不是最终 Word/PDF？**  
 A: 不是。当前是 `可审草稿` 导出，用于内部审阅和继续修改。
