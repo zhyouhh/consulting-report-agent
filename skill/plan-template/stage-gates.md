@@ -33,7 +33,7 @@
 
 ### S4 报告撰写 ⬜
 - [ ] 报告结构确定
-- [ ] report_draft_v1.md / content/report.md / content/draft.md / output/final-report.md 任一形成有效草稿
+- [ ] report_draft_v1.md / content/report.md / content/draft.md / content/final-report.md / output/final-report.md 任一形成有效草稿
 - [ ] 各章节内容持续完善
 - [ ] 执行摘要与图表同步更新
 

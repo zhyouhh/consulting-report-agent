@@ -365,6 +365,14 @@ class ChatHandler:
                 normalized_path = self._normalize_project_file_path(raw_path)
                 if normalized_path.startswith("plan/") and normalized_path.endswith(".md"):
                     expected.add(normalized_path)
+                if normalized_path in {
+                    "report_draft_v1.md",
+                    "content/report.md",
+                    "content/draft.md",
+                    "content/final-report.md",
+                    "output/final-report.md",
+                }:
+                    expected.add(normalized_path)
 
         if self._looks_like_outline_draft(normalized_text):
             expected.add("plan/outline.md")
@@ -1213,6 +1221,11 @@ class ChatHandler:
         if any(keyword in normalized for keyword in self.NON_PLAN_WRITE_ALLOW_KEYWORDS):
             return True
 
+        if self._looks_like_follow_up_non_plan_request(normalized):
+            history_permission = self._recent_history_allows_non_plan_write(project_id)
+            if history_permission is not None:
+                return history_permission
+
         project_path = self.skill_engine.get_project_path(project_id)
         if not project_path:
             return False
@@ -1221,6 +1234,7 @@ class ChatHandler:
             project_path / "report_draft_v1.md",
             project_path / "content" / "report.md",
             project_path / "content" / "draft.md",
+            project_path / "content" / "final-report.md",
             project_path / "output" / "final-report.md",
         ]
         if any(path.exists() for path in report_candidates) and any(
@@ -1229,6 +1243,50 @@ class ChatHandler:
             return True
 
         return False
+
+    def _looks_like_follow_up_non_plan_request(self, user_message: str) -> bool:
+        normalized = (user_message or "").strip()
+        return any(keyword in normalized for keyword in ["继续", "补充", "完善", "修改", "调整", "接着"])
+
+    def _recent_history_allows_non_plan_write(self, project_id: str) -> bool | None:
+        history = self._load_conversation(project_id)
+        for message in reversed(history):
+            if message.get("role") != "user":
+                continue
+            content = self._extract_message_text(message.get("content", "")).strip()
+            if not content:
+                continue
+            if self._is_non_plan_write_blocking_message(content):
+                return False
+            if self._is_non_plan_write_approval_message(content):
+                return True
+        return None
+
+    def _is_non_plan_write_approval_message(self, user_message: str) -> bool:
+        normalized = (user_message or "").strip()
+        approval_keywords = [
+            *self.NON_PLAN_WRITE_ALLOW_KEYWORDS,
+            "继续吧",
+            "继续哈",
+            "继续写正文",
+            "继续写报告",
+            "继续正文",
+            "大纲没问题",
+        ]
+        return any(keyword in normalized for keyword in approval_keywords)
+
+    def _is_non_plan_write_blocking_message(self, user_message: str) -> bool:
+        normalized = (user_message or "").strip()
+        blocking_keywords = [
+            "先别写正文",
+            "不要写正文",
+            "先不写正文",
+            "别写正文",
+            "先补计划",
+            "先补大纲",
+            "先别继续正文",
+        ]
+        return any(keyword in normalized for keyword in blocking_keywords)
 
     def _should_block_non_plan_write(self, project_id: str, file_path: str) -> bool:
         try:

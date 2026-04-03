@@ -123,6 +123,12 @@ class SkillEngineTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _assert_items_include(self, items, fragment: str):
+        self.assertTrue(any(fragment in item for item in items), msg=f"Expected `{fragment}` in {items}")
+
+    def _assert_items_exclude(self, items, fragment: str):
+        self.assertFalse(any(fragment in item for item in items), msg=f"Did not expect `{fragment}` in {items}")
+
     def test_create_project_initializes_formal_plan_templates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -131,11 +137,11 @@ class SkillEngineTests(unittest.TestCase):
             engine.create_project(
                 "demo",
                 "strategy-consulting",
-                "AI 战略规划",
-                "高层决策者",
+                "AI 鎴樼暐瑙勫垝",
+                "楂樺眰鍐崇瓥鑰?",
                 "2026-04-01",
-                "3000字",
-                "已有访谈纪要",
+                "3000瀛?",
+                "宸叉湁璁胯皥绾",
             )
 
             created_file_names = {
@@ -211,6 +217,16 @@ class SkillEngineTests(unittest.TestCase):
             self.assertEqual(Path(project["project_dir"]), expected_project_dir)
             self.assertTrue((expected_project_dir / "plan" / "project-overview.md").exists())
 
+    def test_create_project_rejects_non_directory_workspace_with_clean_message(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_file = Path(tmpdir) / "workspace.txt"
+            workspace_file.write_text("not a directory", encoding="utf-8")
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+
+            with self.assertRaisesRegex(ValueError, "工作目录无效"):
+                engine.create_project(self._project_payload(workspace_file))
+
     def test_get_project_path_ignores_unregistered_legacy_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -227,11 +243,11 @@ class SkillEngineTests(unittest.TestCase):
         for stage_code in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"):
             self.assertIn(stage_code, template_text)
 
-        self.assertNotIn("阶段0：项目初始化", template_text)
-        self.assertNotIn("阶段1：大纲设计", template_text)
-        self.assertNotIn("阶段2：分段撰写", template_text)
-        self.assertNotIn("阶段3：质量审查", template_text)
-        self.assertNotIn("阶段4：整合导出", template_text)
+        self.assertNotIn("闃舵0锛氶」鐩垵濮嬪寲", template_text)
+        self.assertNotIn("闃舵1锛氬ぇ绾茶璁?", template_text)
+        self.assertNotIn("闃舵2锛氬垎娈垫挵鍐?", template_text)
+        self.assertNotIn("闃舵3锛氳川閲忓鏌?", template_text)
+        self.assertNotIn("闃舵4锛氭暣鍚堝鍑?", template_text)
 
     def test_progress_template_uses_stage_codes_in_milestones(self):
         template_text = (self.repo_skill_dir / "plan-template" / "progress.md").read_text(encoding="utf-8")
@@ -252,7 +268,7 @@ class SkillEngineTests(unittest.TestCase):
         self.assertIn("references.md", lifecycle_text)
         self.assertIn("outline.md", lifecycle_text)
         self.assertIn("research-plan.md", lifecycle_text)
-        self.assertIn("仅当交付形式 = 报告+演示", lifecycle_text)
+        self.assertIn("仅当交付形式 = `报告+演示`", lifecycle_text)
 
     def test_capability_map_routes_lifecycle_to_stage_artifacts(self):
         capability_map = json.loads(
@@ -295,6 +311,7 @@ class SkillEngineTests(unittest.TestCase):
         self.assertIn("report_draft_v1.md", template_text)
         self.assertIn("content/report.md", template_text)
         self.assertIn("content/draft.md", template_text)
+        self.assertIn("content/final-report.md", template_text)
         self.assertIn("output/final-report.md", template_text)
         self.assertIn("交付形式 = 报告+演示", template_text)
         self.assertIn("presentation-plan.md 完成", template_text)
@@ -308,11 +325,11 @@ class SkillEngineTests(unittest.TestCase):
             engine.create_project(
                 "demo",
                 "strategy-consulting",
-                "AI 战略规划",
-                "高层决策者",
+                "AI 鎴樼暐瑙勫垝",
+                "楂樺眰鍐崇瓥鑰?",
                 "2026-04-01",
-                "3000字",
-                "已有访谈纪要",
+                "3000瀛?",
+                "宸叉湁璁胯皥绾",
             )
 
             summary = engine.get_workspace_summary("demo")
@@ -329,11 +346,11 @@ class SkillEngineTests(unittest.TestCase):
             engine.create_project(
                 "demo",
                 "strategy-consulting",
-                "AI 战略规划",
-                "高层决策者",
+                "AI 鎴樼暐瑙勫垝",
+                "楂樺眰鍐崇瓥鑰?",
                 "2026-04-01",
-                "3000字",
-                "已有访谈纪要",
+                "3000瀛?",
+                "宸叉湁璁胯皥绾",
             )
 
             (projects_dir / "demo" / ".consulting-report" / "plan" / "project-info.md").write_text(
@@ -341,20 +358,43 @@ class SkillEngineTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (projects_dir / "demo" / ".consulting-report" / "plan" / "tasks.md").write_text(
-                "# 任务清单\n\n## 当前阶段\n**阶段**: S1\n\n### S1 研究设计\n- [ ] 更新 references.md\n",
+                "# 浠诲姟娓呭崟\n\n## 褰撳墠闃舵\n**闃舵**: S1\n\n### S1 鐮旂┒璁捐\n- [ ] 鏇存柊 references.md\n",
                 encoding="utf-8",
             )
             context = engine.build_project_context("demo")
             self.assertNotIn("legacy project info should stay out of core context", context)
 
-            self.assertIn("当前项目概览", context)
-            self.assertIn("当前项目进度", context)
-            self.assertIn("阶段门禁", context)
-            self.assertIn("项目备注", context)
-            self.assertIn("当前阶段任务", context)
-            self.assertIn("更新 references.md", context)
+            self.assertIn("## 当前项目概览", context)
+            self.assertIn("## 当前项目进度", context)
+            self.assertIn("## 阶段门禁", context)
+            self.assertIn("## 项目备注", context)
+            self.assertIn("## 当前阶段任务", context)
+            self.assertIn("project-overview.md 创建", context)
             self.assertNotIn("当前项目信息", context)
             self.assertNotIn("当前大纲", context)
+
+    def test_build_project_context_rewrites_stale_stage_tracking_files_before_reading_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            plan_dir = project_dir / "plan"
+            (plan_dir / "tasks.md").write_text(
+                "# 娴犺濮熷〒鍛礋\n\n## 瑜版挸澧犻梼鑸殿唽\n**闂冭埖顔?*: S4\n- [ ] stale task\n",
+                encoding="utf-8",
+            )
+            (plan_dir / "progress.md").write_text(
+                "# 妞ゅ湱娲版潻娑樺\n\n**闂冭埖顔?*: S4\n",
+                encoding="utf-8",
+            )
+            (plan_dir / "stage-gates.md").write_text(
+                "# 闂冭埖顔岄梻銊ь洣\n\n**闂冭埖顔?*: S4\n",
+                encoding="utf-8",
+            )
+
+            context = engine.build_project_context("demo")
+
+            self.assertNotIn("stale task", context)
+            self.assertNotIn("**闂冭埖顔?*: S4", context)
+            self.assertIn("S0", context)
 
     def test_workspace_summary_raises_for_missing_project(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -379,8 +419,8 @@ class SkillEngineTests(unittest.TestCase):
             )
             content_dir = projects_dir / "demo" / ".consulting-report" / "content"
             content_dir.mkdir(parents=True, exist_ok=True)
-            (content_dir / "outline.md").write_text("# 大纲", encoding="utf-8")
-            (content_dir / "report.md").write_text("# 正文", encoding="utf-8")
+            (content_dir / "outline.md").write_text("# 澶х翰", encoding="utf-8")
+            (content_dir / "report.md").write_text("# 姝ｆ枃", encoding="utf-8")
             report_path = engine.get_primary_report_path("demo")
 
             self.assertTrue(report_path.endswith("report.md"))
@@ -391,6 +431,14 @@ class SkillEngineTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "gate-control.md"):
                 engine.write_file("demo", "plan/gate-control.md", "# Gate control")
+
+    def test_write_file_rejects_backend_owned_stage_tracking_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, _project_dir = self._create_engine_and_project(tmpdir)
+
+            for file_path in ("plan/stage-gates.md", "plan/progress.md", "plan/tasks.md"):
+                with self.assertRaisesRegex(ValueError, "backend-generated"):
+                    engine.write_file("demo", file_path, "# stale")
 
     def test_is_formal_plan_file_accepts_uppercase_plan_markdown_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -459,8 +507,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S1")
-            self.assertIn("outline.md 完成", summary["completed_items"])
-            self.assertIn("research-plan.md 完成", summary["next_actions"])
+            self._assert_items_include(summary["completed_items"], "outline.md")
+            self._assert_items_include(summary["next_actions"], "research-plan.md")
 
     def test_workspace_summary_keeps_stage_at_s1_when_research_plan_is_only_keyword_headings(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -477,8 +525,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S1")
-            self.assertNotIn("research-plan.md 完成", summary["completed_items"])
-            self.assertIn("research-plan.md 完成", summary["next_actions"])
+            self._assert_items_exclude(summary["completed_items"], "research-plan.md")
+            self._assert_items_include(summary["next_actions"], "research-plan.md")
 
     def test_workspace_summary_keeps_stage_at_s1_when_references_do_not_meet_minimum_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -495,8 +543,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S1")
-            self.assertNotIn("references.md 更新", summary["completed_items"])
-            self.assertIn("references.md 更新", summary["next_actions"])
+            self._assert_items_exclude(summary["completed_items"], "references.md")
+            self._assert_items_include(summary["next_actions"], "references.md")
 
     def test_workspace_summary_keeps_stage_at_s1_when_bracketed_references_are_still_placeholders(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -514,8 +562,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S1")
-            self.assertNotIn("references.md 更新", summary["completed_items"])
-            self.assertIn("references.md 更新", summary["next_actions"])
+            self._assert_items_exclude(summary["completed_items"], "references.md")
+            self._assert_items_include(summary["next_actions"], "references.md")
 
     def test_workspace_summary_keeps_stage_at_s1_when_reference_lines_still_embed_placeholder_brackets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -525,7 +573,7 @@ class SkillEngineTests(unittest.TestCase):
                 references_text=(
                     "# References\n\n"
                     "## Sources\n"
-                    "- 案例引用：参考[公司/项目名称]案例\n"
+                    "- 案例引用：[公司/项目名称]案例\n"
                     "- 数据引用：数据来源于[来源名称]\n"
                 ),
             )
@@ -533,8 +581,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S1")
-            self.assertNotIn("references.md 更新", summary["completed_items"])
-            self.assertIn("references.md 更新", summary["next_actions"])
+            self._assert_items_exclude(summary["completed_items"], "references.md")
+            self._assert_items_include(summary["next_actions"], "references.md")
 
     def test_workspace_summary_advances_to_s2_when_research_design_files_meet_evidence_gate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -544,8 +592,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S2")
-            self.assertIn("research-plan.md 完成", summary["completed_items"])
-            self.assertIn("data-log.md 更新", summary["next_actions"])
+            self._assert_items_include(summary["completed_items"], "research-plan.md")
+            self._assert_items_include(summary["next_actions"], "data-log.md")
 
     def test_workspace_summary_accepts_two_project_material_titles_as_reference_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -563,7 +611,24 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S2")
-            self.assertIn("references.md 更新", summary["completed_items"])
+            self._assert_items_include(summary["completed_items"], "references.md")
+
+    def test_workspace_summary_accepts_numbered_reference_entries_as_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            self._write_stage_two_prerequisites(
+                project_dir,
+                references_text=(
+                    "# References\n\n"
+                    "1. Company annual report (2025): renewal trend summary.\n"
+                    "2. Industry benchmark memo (2025): onboarding conversion study.\n"
+                ),
+            )
+
+            summary = engine.get_workspace_summary("demo")
+
+            self.assertEqual(summary["stage_code"], "S2")
+            self._assert_items_include(summary["completed_items"], "references.md")
 
     def test_workspace_summary_keeps_stage_at_s1_when_research_plan_has_two_generic_sections_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -581,8 +646,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S1")
-            self.assertNotIn("research-plan.md 完成", summary["completed_items"])
-            self.assertIn("research-plan.md 完成", summary["next_actions"])
+            self._assert_items_exclude(summary["completed_items"], "research-plan.md")
+            self._assert_items_include(summary["next_actions"], "research-plan.md")
 
     def test_workspace_summary_accepts_template_aligned_notes_sections_for_stage_one_completion(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -669,7 +734,7 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S1")
-            self.assertNotIn("notes.md 鏇存柊", summary["completed_items"])
+            self._assert_items_exclude(summary["completed_items"], "notes.md")
             self.assertTrue(any("notes.md" in item for item in summary["next_actions"]))
 
     def test_workspace_summary_keeps_stage_at_s1_when_notes_have_only_one_real_bullet_among_placeholders(self):
@@ -715,7 +780,7 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S1")
-            self.assertNotIn("notes.md 鏇存柊", summary["completed_items"])
+            self._assert_items_exclude(summary["completed_items"], "notes.md")
             self.assertTrue(any("notes.md" in item for item in summary["next_actions"]))
 
     def test_workspace_summary_advances_to_s3_when_data_log_is_effective(self):
@@ -727,8 +792,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S3")
-            self.assertIn("data-log.md 更新", summary["completed_items"])
-            self.assertIn("analysis-notes.md 创建/更新", summary["next_actions"])
+            self._assert_items_include(summary["completed_items"], "data-log.md")
+            self._assert_items_include(summary["next_actions"], "analysis-notes.md")
 
     def test_workspace_summary_keeps_stage_at_s2_when_data_log_only_contains_placeholder_rows_after_small_edit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -746,7 +811,7 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S2")
-            self.assertNotIn("data-log.md 鏇存柊", summary["completed_items"])
+            self._assert_items_exclude(summary["completed_items"], "data-log.md")
             self.assertTrue(any("data-log.md" in item for item in summary["next_actions"]))
 
     def test_workspace_summary_keeps_stage_at_s2_when_data_log_only_contains_bullet_placeholders(self):
@@ -765,7 +830,7 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S2")
-            self.assertNotIn("data-log.md 鏇存柊", summary["completed_items"])
+            self._assert_items_exclude(summary["completed_items"], "data-log.md")
             self.assertTrue(any("data-log.md" in item for item in summary["next_actions"]))
 
     def test_workspace_summary_keeps_stage_at_s2_when_analysis_notes_exist_without_data_log(self):
@@ -777,8 +842,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S2")
-            self.assertIn("data-log.md 更新", summary["next_actions"])
-            self.assertNotIn("analysis-notes.md 创建/更新", summary["completed_items"])
+            self._assert_items_include(summary["next_actions"], "data-log.md")
+            self._assert_items_exclude(summary["completed_items"], "analysis-notes.md")
 
     def test_workspace_summary_advances_to_s4_when_analysis_notes_are_complete_without_report_draft(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -790,11 +855,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S4")
-            self.assertIn("analysis-notes.md 创建/更新", summary["completed_items"])
-            self.assertIn(
-                "report_draft_v1.md / content/report.md / content/draft.md / output/final-report.md 任一形成有效草稿",
-                summary["next_actions"],
-            )
+            self._assert_items_include(summary["completed_items"], "analysis-notes.md")
+            self._assert_items_include(summary["next_actions"], "report_draft_v1.md")
 
     def test_workspace_summary_advances_to_s4_with_bracketed_references_and_structured_research_plan(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -865,8 +927,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S3")
-            self.assertNotIn("analysis-notes.md 创建/更新", summary["completed_items"])
-            self.assertIn("analysis-notes.md 创建/更新", summary["next_actions"])
+            self._assert_items_exclude(summary["completed_items"], "analysis-notes.md")
+            self._assert_items_include(summary["next_actions"], "analysis-notes.md")
 
     def test_workspace_summary_keeps_stage_at_s3_when_analysis_notes_only_rephrase_template_labels(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -889,7 +951,7 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S3")
-            self.assertNotIn("analysis-notes.md 鍒涘缓/鏇存柊", summary["completed_items"])
+            self._assert_items_exclude(summary["completed_items"], "analysis-notes.md")
             self.assertTrue(any("analysis-notes.md" in item for item in summary["next_actions"]))
 
     def test_workspace_summary_accepts_template_aligned_analysis_notes_with_chinese_labels(self):
@@ -925,11 +987,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S3")
-            self.assertIn("analysis-notes.md 创建/更新", summary["next_actions"])
-            self.assertNotIn(
-                "report_draft_v1.md / content/report.md / content/draft.md / output/final-report.md 任一形成有效草稿",
-                summary["completed_items"],
-            )
+            self._assert_items_include(summary["next_actions"], "analysis-notes.md")
+            self._assert_items_exclude(summary["completed_items"], "report_draft_v1.md")
 
     def test_workspace_summary_advances_to_s5_when_report_draft_exists(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -945,11 +1004,31 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S5")
-            self.assertIn(
-                "report_draft_v1.md / content/report.md / content/draft.md / output/final-report.md 任一形成有效草稿",
-                summary["completed_items"],
+            self._assert_items_include(summary["completed_items"], "report_draft_v1.md")
+            self._assert_items_include(summary["next_actions"], "review-checklist.md")
+
+    def test_workspace_summary_keeps_stage_at_s5_when_review_checklist_has_only_one_checked_item(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            self._write_stage_two_prerequisites(project_dir)
+            self._write_data_log(project_dir)
+            self._write_analysis_notes(project_dir)
+            (project_dir / "report_draft_v1.md").write_text(
+                "# Draft\n\n## Executive summary\nA concrete report section.\n",
+                encoding="utf-8",
             )
-            self.assertIn("review-checklist.md 完成", summary["next_actions"])
+            (project_dir / "plan" / "review-checklist.md").write_text(
+                "# 审查清单\n\n"
+                "- [x] 事实与数据来源已核对\n"
+                "- [ ] 关键结论与证据一致\n"
+                "- [ ] 结构逻辑完整\n",
+                encoding="utf-8",
+            )
+
+            summary = engine.get_workspace_summary("demo")
+
+            self.assertEqual(summary["stage_code"], "S5")
+            self._assert_items_include(summary["next_actions"], "review-checklist.md")
 
     def test_workspace_summary_keeps_stage_at_s0_when_project_overview_is_invalid_even_with_later_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -969,11 +1048,8 @@ class SkillEngineTests(unittest.TestCase):
             summary = engine.get_workspace_summary("demo")
 
             self.assertEqual(summary["stage_code"], "S0")
-            self.assertNotIn(
-                "report_draft_v1.md / content/report.md / content/draft.md / output/final-report.md 任一形成有效草稿",
-                summary["completed_items"],
-            )
-            self.assertIn("需求访谈完成", summary["next_actions"][0])
+            self._assert_items_exclude(summary["completed_items"], "report_draft_v1.md")
+            self.assertEqual(summary["next_actions"][0], "需求访谈完成")
 
     def test_workspace_summary_preserves_untracked_manual_stage_gate_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:

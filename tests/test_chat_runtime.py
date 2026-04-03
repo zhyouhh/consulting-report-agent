@@ -922,6 +922,123 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("gate-control.md", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
+    def test_handler_write_file_rejects_backend_owned_stage_tracking_files(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            settings = Settings(
+                mode="managed",
+                managed_base_url="https://newapi.z0y0h.work/client/v1",
+                managed_model="gemini-3-flash",
+                projects_dir=projects_dir,
+                skill_dir=self.repo_skill_dir,
+            )
+            handler = ChatHandler(settings, engine)
+            handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    '{"file_path":"plan/tasks.md","content":"# stale"}',
+                ),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("backend-generated", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_should_allow_non_plan_write_uses_recent_conversation_history_after_outline_confirmation(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
+            handler._save_conversation(
+                project["id"],
+                [
+                    {"role": "user", "content": "大纲没问题，继续写正文吧"},
+                    {"role": "assistant", "content": "收到，我继续推进正文草稿。"},
+                ],
+            )
+
+            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "继续"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_should_allow_non_plan_write_respects_newer_blocking_instruction(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
+            handler._save_conversation(
+                project["id"],
+                [
+                    {"role": "user", "content": "大纲没问题，继续写正文吧"},
+                    {"role": "assistant", "content": "收到。"},
+                    {"role": "user", "content": "先别写正文，先补计划"},
+                ],
+            )
+
+            self.assertFalse(handler._should_allow_non_plan_write(project["id"], "继续"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_should_allow_non_plan_write_when_content_final_report_exists_and_user_asks_to_continue(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            project_dir = Path(project["project_dir"])
+            (project_dir / "content").mkdir(exist_ok=True)
+            (project_dir / "content" / "final-report.md").write_text(
+                "# Final report\n\n## Executive summary\nA concrete section.\n",
+                encoding="utf-8",
+            )
+            handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
+
+            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "继续完善"))
+
+    @mock.patch("backend.chat.OpenAI")
     def test_handler_write_file_rejects_outline_before_evidence_gate_is_satisfied(self, mock_openai):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -1220,6 +1337,21 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertIn("plan/stage-gates.md", expected)
         self.assertIn("plan/tasks.md", expected)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_expected_plan_writes_include_report_draft_targets_when_assistant_claims_report_saved(self, mock_openai):
+        del mock_openai
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "expected-report-write-projects", self.repo_skill_dir),
+        )
+
+        expected = handler._expected_plan_writes_for_message(
+            "我已写入 `report_draft_v1.md` 和 `content/final-report.md`，并完成正文初稿。"
+        )
+
+        self.assertIn("report_draft_v1.md", expected)
+        self.assertIn("content/final-report.md", expected)
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_warns_and_retries_when_assistant_claims_file_update_without_write(self, mock_openai):

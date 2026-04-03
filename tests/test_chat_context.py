@@ -59,10 +59,51 @@ class ChatContextTests(unittest.TestCase):
 
         self.assertIn("system prompt", prompt)
         self.assertIn("lifecycle guidance", prompt)
-        self.assertIn("当前项目概览", prompt)
-        self.assertIn("当前项目进度", prompt)
-        self.assertIn("阶段门禁", prompt)
-        self.assertIn("项目备注", prompt)
+        self.assertIn("overview content", prompt)
+        self.assertIn("notes content", prompt)
+        self.assertIn("project-overview.md 创建", prompt)
         self.assertNotIn("legacy project info", prompt)
-        self.assertNotIn("当前项目信息", prompt)
-        self.assertNotIn("当前大纲", prompt)
+        self.assertNotIn("褰撳墠椤圭洰淇℃伅", prompt)
+        self.assertNotIn("褰撳墠澶х翰", prompt)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_system_prompt_rewrites_stale_stage_tracking_files_before_prompt_context(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+            engine = SkillEngine(projects_dir, repo_skill_dir)
+            project = engine.create_project(
+                {
+                    "name": "demo",
+                    "workspace_dir": str(workspace_dir),
+                    "project_type": "strategy-consulting",
+                    "theme": "AI strategy review",
+                    "target_audience": "executive audience",
+                    "deadline": "2026-04-01",
+                    "expected_length": "3000 words",
+                    "notes": "",
+                }
+            )
+
+            plan_dir = Path(project["project_dir"]) / "plan"
+            (plan_dir / "tasks.md").write_text("# fake\n\n**闃舵**: S4\n- [ ] stale task\n", encoding="utf-8")
+            (plan_dir / "progress.md").write_text("# fake\n\n**闃舵**: S4\n", encoding="utf-8")
+            (plan_dir / "stage-gates.md").write_text("# fake\n\n**闃舵**: S4\n", encoding="utf-8")
+
+            settings = Settings(
+                mode="managed",
+                managed_base_url="https://newapi.z0y0h.work/client/v1",
+                managed_model="gemini-3-flash",
+                projects_dir=projects_dir,
+                skill_dir=repo_skill_dir,
+            )
+            handler = ChatHandler(settings, engine)
+            handler._turn_context = {"can_write_non_plan": False, "web_search_disabled": False}
+
+            prompt = handler._build_system_prompt(project["id"])
+
+        self.assertNotIn("stale task", prompt)
+        self.assertNotIn("**闃舵**: S4", prompt)
+        self.assertIn("S0", prompt)

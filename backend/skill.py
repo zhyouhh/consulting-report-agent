@@ -9,7 +9,7 @@ from typing import Iterable, Optional
 
 
 class SkillEngine:
-    """Skill流程引擎"""
+    """咨询技能工作流引擎"""
 
     CORE_CONTEXT_FILES = [
         ("当前项目概览", "plan/project-overview.md"),
@@ -62,7 +62,7 @@ class SkillEngine:
         ],
         "S4": [
             "\u62a5\u544a\u7ed3\u6784\u786e\u5b9a",
-            "report_draft_v1.md / content/report.md / content/draft.md / output/final-report.md \u4efb\u4e00\u5f62\u6210\u6709\u6548\u8349\u7a3f",
+            "report_draft_v1.md / content/report.md / content/draft.md / content/final-report.md / output/final-report.md \u4efb\u4e00\u5f62\u6210\u6709\u6548\u8349\u7a3f",
             "\u5404\u7ae0\u8282\u5185\u5bb9\u6301\u7eed\u5b8c\u5584",
             "\u6267\u884c\u6458\u8981\u4e0e\u56fe\u8868\u540c\u6b65\u66f4\u65b0",
         ],
@@ -83,10 +83,21 @@ class SkillEngine:
         ],
     }
     STAGE_ORDER = ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7")
+    STAGE_TITLES = {
+        "S0": "项目启动",
+        "S1": "研究设计",
+        "S2": "资料采集",
+        "S3": "分析沉淀",
+        "S4": "报告撰写",
+        "S5": "质量审查",
+        "S6": "演示准备",
+        "S7": "交付归档",
+    }
     REPORT_DRAFT_CANDIDATES = (
         "report_draft_v1.md",
         "content/report.md",
         "content/draft.md",
+        "content/final-report.md",
         "output/final-report.md",
     )
 
@@ -109,7 +120,7 @@ class SkillEngine:
         initial_material_paths: list[str] | None = None,
         **extra_kwargs,
     ) -> dict:
-        """创建新项目。"""
+        """Create new project."""
         payload = self._normalize_create_payload(
             project_info_or_name,
             project_type=project_type,
@@ -139,14 +150,16 @@ class SkillEngine:
             workspace_path.mkdir(parents=True)
         if not workspace_path.is_dir():
             raise ValueError("工作目录无效")
+            raise ValueError("宸ヤ綔鐩綍鏃犳晥")
 
         project_dir = workspace_path / ".consulting-report"
         if project_dir.exists():
             raise ValueError("该工作目录已经初始化过项目")
+            raise ValueError("工作目录无效")
 
         for project in registry["projects"]:
             if Path(project["workspace_dir"]).resolve() == workspace_path:
-                raise ValueError("该工作目录已被其他项目占用")
+                raise ValueError("该工作目录已经初始化过项目")
 
         project_dir.mkdir(parents=True)
         self._initialize_project_structure(project_dir)
@@ -224,6 +237,11 @@ class SkillEngine:
             "[战略咨询/市场研究/尽职调查/运营优化]": project_type,
             "[描述客户背景、行业环境、当前面临的挑战]": theme,
             "[具体、可衡量的项目目标]": f"面向{target_audience}形成{expected_length}规模的咨询报告初稿",
+            "[填写目标读者]": target_audience,
+            "[例如：3000字 / 5000-8000字]": expected_length,
+            "[填写负责人]": "",
+            "[填写报告主题]": theme,
+            "[填写客户名称]": "",
         }
 
         overview_path = project_path / "plan" / "project-overview.md"
@@ -231,6 +249,7 @@ class SkillEngine:
             content = overview_path.read_text(encoding="utf-8")
             for source, target in replacements.items():
                 content = content.replace(source, target)
+            content = content.replace("**交付时间**: [YYYY-MM-DD]", f"**交付时间**: {deadline}")
             content = content.replace("**开始日期**: [YYYY-MM-DD]", f"**开始日期**: {today}")
             content = content.replace("**截止日期**: [YYYY-MM-DD]", f"**截止日期**: {deadline}")
             if target_audience and "目标读者" not in content:
@@ -243,7 +262,7 @@ class SkillEngine:
         if progress_path.exists():
             content = progress_path.read_text(encoding="utf-8")
             content = content.replace("[S0/S1/S2/S3/S4/S5/S6/S7]", "S0")
-            content = content.replace("[进行中/已完成/待开始]", "进行中")
+            content = content.replace("[进行中/已完成/待开始/阻塞]", "进行中")
             content = content.replace("[YYYY-MM-DD]", datetime.now().strftime("%Y-%m-%d"), 1)
             progress_path.write_text(content, encoding="utf-8")
 
@@ -251,7 +270,7 @@ class SkillEngine:
         if stage_gates_path.exists():
             content = stage_gates_path.read_text(encoding="utf-8")
             content = content.replace("**阶段**: [S0/S1/S2/S3/S4/S5/S6/S7]", "**阶段**: S0")
-            content = content.replace("**状态**: [进行中/已完成/待开始]", "**状态**: 进行中")
+            content = content.replace("**状态**: [进行中/已完成/待开始/阻塞]", "**状态**: 进行中")
             content = content.replace("**更新日期**: [YYYY-MM-DD]", f"**更新日期**: {today}")
             stage_gates_path.write_text(content, encoding="utf-8")
 
@@ -305,6 +324,7 @@ class SkillEngine:
             source_path = Path(raw_path).expanduser().resolve()
             if not source_path.exists() or not source_path.is_file():
                 raise ValueError(f"材料不存在: {raw_path}")
+                raise ValueError(f"鏉愭枡涓嶅瓨鍦? {raw_path}")
 
             workspace_relative = self._workspace_relative_path(source_path, workspace_root)
             if workspace_relative is not None:
@@ -382,7 +402,7 @@ class SkillEngine:
         raise ValueError(f"项目 {project_ref} 不存在")
 
     def read_file(self, project_ref: str, file_path: str) -> str:
-        """读取项目文件"""
+        """璇诲彇椤圭洰鏂囦欢"""
         project_path = self.get_project_path(project_ref)
         if not project_path:
             raise ValueError(f"项目 {project_ref} 不存在")
@@ -394,7 +414,7 @@ class SkillEngine:
         return full_path.read_text(encoding="utf-8")
 
     def write_file(self, project_ref: str, file_path: str, content: str):
-        """写入项目文件"""
+        """鍐欏叆椤圭洰鏂囦欢"""
         project_path = self.get_project_path(project_ref)
         if not project_path:
             raise ValueError(f"项目 {project_ref} 不存在")
@@ -432,6 +452,11 @@ class SkillEngine:
         if not self._is_plan_markdown_path(normalized_path):
             return normalized_path
 
+        if self._is_backend_owned_stage_tracking_file(normalized_path):
+            raise ValueError(
+                f"`{normalized_path}` is backend-generated. Update the substantive project files instead of writing stage tracking files directly."
+            )
+
         if not self.is_formal_plan_file(normalized_path):
             raise ValueError(
                 f"`{normalized_path}` is not an official plan file. Use only the registered `plan/*.md` files and never invent unofficial files such as `plan/gate-control.md`."
@@ -451,7 +476,7 @@ class SkillEngine:
 
         material = self.get_material(project_ref, material_id)
         if material["media_kind"] == "image_like":
-            raise ValueError("图片材料不支持文本提取，请在聊天时直接附带给模型。")
+            raise ValueError("当前暂不支持读取该材料")
 
         material_path = self.get_material_path(project_ref, material_id)
         suffix = material_path.suffix.lower()
@@ -494,16 +519,14 @@ class SkillEngine:
         if not project_path.exists():
             raise ValueError(f"项目 {project_ref} 不存在")
 
-        stage_gates_text = self._ensure_stage_gates_state(project_path)
-        stage_code = self._extract_stage_code(stage_gates_text)
-        status = self._extract_stage_status(stage_gates_text)
+        tracking_state = self._sync_stage_tracking_files(project_path)
         materials = self.list_materials(project_ref)
 
         return {
-            "stage_code": stage_code,
-            "status": status,
-            "completed_items": self._extract_checked_items(stage_gates_text),
-            "next_actions": self._extract_open_items(stage_gates_text)[:3],
+            "stage_code": tracking_state["stage_code"],
+            "status": tracking_state["status"],
+            "completed_items": tracking_state["completed_items"],
+            "next_actions": tracking_state["next_actions"][:3],
             "workspace_dir": project_record["workspace_dir"],
             "project_dir": project_record["project_dir"],
             "materials": [
@@ -523,6 +546,7 @@ class SkillEngine:
         if not project_path:
             raise ValueError(f"项目 {project_ref} 不存在")
 
+        self._sync_stage_tracking_files(project_path)
         sections = []
         for title, relative_path in self.CORE_CONTEXT_FILES:
             content = self._read_optional(project_ref, relative_path)
@@ -589,6 +613,7 @@ class SkillEngine:
         raise ValueError("没有可检查或导出的报告草稿")
 
     def _ensure_stage_gates_state(self, project_path: Path) -> str:
+        return self._sync_stage_tracking_files(project_path)["stage_gates_text"]
         stage_gates_path = project_path / "plan" / "stage-gates.md"
         if not stage_gates_path.exists():
             template_path = self.skill_dir / "plan-template" / "stage-gates.md"
@@ -604,11 +629,11 @@ class SkillEngine:
 
         original_content = stage_gates_path.read_text(encoding="utf-8")
         content = original_content
-        content = re.sub(r"\*\*阶段\*\*:\s*[^\n]+", f"**阶段**: {stage_code}", content)
+        content = re.sub(r"\*\*闃舵\*\*:\s*[^\n]+", f"**闃舵**: {stage_code}", content)
         content = re.sub(r"\*\*状态\*\*:\s*[^\n]+", "**状态**: 进行中", content)
         content = re.sub(
-            r"\*\*更新日期\*\*:\s*[^\n]+",
-            f"**更新日期**: {datetime.now().strftime('%Y-%m-%d')}",
+            r"\*\*鏇存柊鏃ユ湡\*\*:\s*[^\n]+",
+            f"**鏇存柊鏃ユ湡**: {datetime.now().strftime('%Y-%m-%d')}",
             content,
         )
         for task in self._tracked_stage_items():
@@ -621,6 +646,138 @@ class SkillEngine:
         if content != original_content:
             stage_gates_path.write_text(content, encoding="utf-8")
         return content
+
+    def _sync_stage_tracking_files(self, project_path: Path) -> dict:
+        stage_state = self._infer_stage_state(project_path)
+        stage_code = stage_state["stage_code"] or "S0"
+        completed_items = list(stage_state["completed_items"])
+        skipped_items = list(stage_state["skipped_items"])
+        next_actions = [
+            item
+            for item in self.STAGE_CHECKLIST_ITEMS.get(stage_code, [])
+            if item not in completed_items and item not in skipped_items
+        ]
+        status = "进行中"
+        stage_gates_path = project_path / "plan" / "stage-gates.md"
+        existing_stage_gates = stage_gates_path.read_text(encoding="utf-8") if stage_gates_path.exists() else ""
+        manual_lines = self._extract_manual_stage_gate_lines(existing_stage_gates)
+        stage_gates_text = self._render_stage_gates_markdown(
+            stage_code,
+            status,
+            completed_items,
+            skipped_items,
+            manual_lines,
+        )
+        progress_text = self._render_progress_markdown(stage_code, status, next_actions, completed_items)
+        tasks_text = self._render_tasks_markdown(stage_code, next_actions)
+
+        self._write_tracking_file(stage_gates_path, stage_gates_text)
+        self._write_tracking_file(project_path / "plan" / "progress.md", progress_text)
+        self._write_tracking_file(project_path / "plan" / "tasks.md", tasks_text)
+
+        return {
+            "stage_code": stage_code,
+            "status": status,
+            "completed_items": completed_items,
+            "skipped_items": skipped_items,
+            "next_actions": next_actions,
+            "stage_gates_text": stage_gates_text,
+        }
+
+    def _write_tracking_file(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        if existing != content:
+            path.write_text(content, encoding="utf-8")
+
+    def _extract_manual_stage_gate_lines(self, markdown_text: str) -> list[str]:
+        manual_lines: list[str] = []
+        tracked_items = set(self._tracked_stage_items())
+        for raw_line in markdown_text.splitlines():
+            stripped = raw_line.strip()
+            match = re.match(r"^- \[(?: |x|X|/)\] (.+)$", stripped)
+            if not match:
+                continue
+            task = match.group(1).strip()
+            if task in tracked_items:
+                continue
+            manual_lines.append(stripped)
+        return manual_lines
+
+    def _render_stage_gates_markdown(
+        self,
+        stage_code: str,
+        status: str,
+        completed_items: list[str],
+        skipped_items: list[str],
+        manual_lines: list[str] | None = None,
+    ) -> str:
+        lines = [
+            "# 项目阶段与门禁",
+            "",
+            "## 当前阶段",
+            "",
+            f"**阶段**: {stage_code}",
+            f"**状态**: {status}",
+            f"**更新日期**: {datetime.now().strftime('%Y-%m-%d')}",
+            "",
+            "## 阶段进度",
+            "",
+        ]
+        for stage in self.STAGE_ORDER:
+            lines.append(f"### {stage} {self.STAGE_TITLES.get(stage, stage)}")
+            for item in self.STAGE_CHECKLIST_ITEMS[stage]:
+                state = "x" if item in completed_items else "/" if item in skipped_items else " "
+                lines.append(f"- [{state}] {item}")
+            lines.append("")
+        if manual_lines:
+            lines.append("## 手工补充记录")
+            lines.append("")
+            lines.extend(manual_lines)
+            lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
+    def _render_progress_markdown(
+        self,
+        stage_code: str,
+        status: str,
+        next_actions: list[str],
+        completed_items: list[str],
+    ) -> str:
+        current_task = next_actions[0] if next_actions else "当前阶段任务已完成，等待推进下一阶段。"
+        completed_summary = " / ".join(completed_items[-3:]) if completed_items else "-"
+        next_summary = " / ".join(next_actions[:3]) if next_actions else "-"
+        lines = [
+            "# 项目进度追踪",
+            "",
+            "## 当前状态",
+            f"**阶段**: {stage_code}",
+            f"**状态**: {status}",
+            f"**当前任务**: {current_task}",
+            f"**更新日期**: {datetime.now().strftime('%Y-%m-%d')}",
+            "",
+            "## 执行摘要",
+            f"- 已完成: {completed_summary}",
+            f"- 下一步: {next_summary}",
+        ]
+        return "\n".join(lines).strip() + "\n"
+
+    def _render_tasks_markdown(self, stage_code: str, next_actions: list[str]) -> str:
+        lines = [
+            "# 任务清单",
+            "",
+            "## 当前阶段",
+            "",
+            f"**阶段**: {stage_code}",
+            f"**阶段目标**: {self.STAGE_TITLES.get(stage_code, stage_code)}",
+            "",
+            "## 当前阶段待办",
+        ]
+        if next_actions:
+            lines.extend(f"- [ ] {item}" for item in next_actions)
+        else:
+            lines.append("- [x] 当前阶段待办已清空，可推进下一阶段。")
+        return "\n".join(lines).strip() + "\n"
 
     def _infer_stage_progress(self, project_path: Path) -> tuple[str, list[str]]:
         stage_state = self._infer_stage_state(project_path)
@@ -640,7 +797,7 @@ class SkillEngine:
         report_ready = self._has_effective_report_draft(project_path)
         review_checklist_ready = self._has_effective_review_checklist(project_path)
         review_notes_ready = self._has_effective_review_notes(project_path)
-        review_ready = review_checklist_ready and review_notes_ready
+        review_ready = review_checklist_ready
         presentation_ready = self._has_effective_presentation_plan(project_path)
         delivery_ready = self._has_effective_delivery_log(project_path)
         presentation_required = self._delivery_mode_requires_presentation(project_path)
@@ -721,6 +878,12 @@ class SkillEngine:
         for stage in self.STAGE_ORDER[:stage_index]:
             if stage == "S6" and not flags["presentation_required"]:
                 continue
+            if stage == "S5":
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][0])
+                if flags["review_notes_ready"]:
+                    completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][2])
+                continue
             completed.extend(self.STAGE_CHECKLIST_ITEMS[stage])
 
         if stage_code == "S0":
@@ -746,7 +909,7 @@ class SkillEngine:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][0])
             if flags["review_notes_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
-            if flags["review_ready"]:
+            if flags["review_checklist_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][2])
         elif stage_code == "S6":
             completed.append(self.STAGE_CHECKLIST_ITEMS["S6"][0])
@@ -785,6 +948,13 @@ class SkillEngine:
         return self._canonicalize_plan_markdown_path(normalized_path) in {
             "plan/outline.md",
             "plan/research-plan.md",
+        }
+
+    def _is_backend_owned_stage_tracking_file(self, normalized_path: str) -> bool:
+        return self._canonicalize_plan_markdown_path(normalized_path) in {
+            "plan/stage-gates.md",
+            "plan/progress.md",
+            "plan/tasks.md",
         }
 
     def _canonicalize_plan_markdown_path(self, normalized_path: str) -> str:
@@ -883,6 +1053,12 @@ class SkillEngine:
                 if self._looks_like_reference_evidence(entry):
                     count += 1
                     continue
+            numbered_match = re.match(r"^\d+\.\s+(.+)$", line)
+            if numbered_match:
+                entry = numbered_match.group(1).strip()
+                if self._looks_like_reference_evidence(entry):
+                    count += 1
+                    continue
             if line.startswith("**") and ":" in line:
                 _, value = line.split(":", 1)
                 value = value.strip()
@@ -950,7 +1126,7 @@ class SkillEngine:
             r"key assumptions?",
             r"研究目标",
             r"研究问题",
-            r"核心研究议题",
+            r"核心研究问题",
             r"阶段安排",
             r"关键假设",
         ]
@@ -1005,7 +1181,9 @@ class SkillEngine:
         review_text = self._read_plan_file(project_path, "review-checklist.md")
         if not review_text or self._is_template_content(review_text, "review-checklist.md"):
             return False
-        return bool(re.search(r"- \[[xX]\] .+\S", review_text))
+        total_items = re.findall(r"^\s*-\s+\[[ xX/]\]\s+.+\S$", review_text, flags=re.MULTILINE)
+        checked_items = re.findall(r"^\s*-\s+\[[xX]\]\s+.+\S$", review_text, flags=re.MULTILINE)
+        return len(total_items) >= 3 and len(checked_items) == len(total_items)
 
     def _has_effective_review_notes(self, project_path: Path) -> bool:
         review_text = self._read_plan_file(project_path, "review.md")
@@ -1062,16 +1240,16 @@ class SkillEngine:
         overview_text = self._read_plan_file(project_path, "project-overview.md")
         if not overview_text:
             return False
-        match = re.search(r"\*\*.*交付形式.*\*\*:\s*([^\n]+)", overview_text)
+        match = re.search(r"\*\*.*(?:交付形式|交付方式|浜や粯褰㈠紡).*\*\*:\s*([^\n]+)", overview_text)
         if not match:
             return False
         delivery_mode = match.group(1).strip().lower()
         if "report+presentation" in delivery_mode:
             return True
-        return "报告+演示" in delivery_mode
+        return "报告+演示" in delivery_mode or "鎶ュ憡+婕旂ず" in delivery_mode
 
     def get_skill_prompt(self) -> str:
-        """获取Skill定义"""
+        """鑾峰彇Skill瀹氫箟"""
         skill_file = self.skill_dir / "SKILL.md"
         sections = [skill_file.read_text(encoding="utf-8")]
 
@@ -1082,7 +1260,7 @@ class SkillEngine:
         return "\n\n".join(sections)
 
     def get_template(self, project_type: str) -> str:
-        """获取报告模板"""
+        """鑾峰彇鎶ュ憡妯℃澘"""
         template_file = self.skill_dir / "templates" / f"{project_type}.md"
         if template_file.exists():
             return template_file.read_text(encoding="utf-8")
