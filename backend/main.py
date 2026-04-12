@@ -254,7 +254,7 @@ async def chat(request: Request, chat_request: ChatRequest):
             [item.model_dump() for item in chat_request.transient_attachments],
         )
         token_usage = result.get("token_usage") or {}
-        logger.info(f"Chat completed, tokens: {token_usage.get('current_tokens', 0)}")
+        logger.info(f"Chat completed, tokens: {token_usage.get('context_used_tokens', 0)}")
         return ChatResponse(content=result["content"], token_usage=result.get("token_usage"))
     except Exception as e:
         logger.error(f"Chat error: {str(e)}", exc_info=True)
@@ -348,6 +348,9 @@ async def clear_conversation(project_id: str):
     conv_file = project_path / "conversation.json"
     if conv_file.exists():
         conv_file.unlink()
+    compact_state = project_path / "conversation_compact_state.json"
+    if compact_state.exists():
+        compact_state.unlink()
     return {"status": "ok"}
 
 

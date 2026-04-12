@@ -17,7 +17,7 @@ def _pick_free_port() -> int:
 
 
 class ChatStreamApiTests(unittest.TestCase):
-    def test_stream_endpoint_emits_events_incrementally(self):
+    def test_stream_endpoint_emits_provider_usage_shape_incrementally(self):
         handler = mock.Mock()
 
         def fake_stream(project_id, message_text, attached_material_ids, transient_attachments):
@@ -27,12 +27,17 @@ class ChatStreamApiTests(unittest.TestCase):
                 {
                     "type": "usage",
                     "data": {
-                        "current_tokens": 1,
-                        "max_tokens": 500000,
-                        "effective_max_tokens": 500000,
+                        "usage_source": "provider",
+                        "context_used_tokens": 180000,
+                        "input_tokens": 180000,
+                        "output_tokens": 1200,
+                        "total_tokens": 181200,
+                        "max_tokens": 200000,
+                        "effective_max_tokens": 200000,
                         "provider_max_tokens": 1000000,
+                        "preflight_compaction_used": False,
+                        "post_turn_compaction_status": "completed",
                         "compressed": False,
-                        "usage_mode": "estimated",
                     },
                 },
             ]
@@ -85,10 +90,12 @@ class ChatStreamApiTests(unittest.TestCase):
         self.assertIn('"type": "tool"', arrivals[0][1])
         self.assertIn('"type": "content"', arrivals[1][1])
         self.assertGreater(arrivals[1][0], arrivals[0][0])
-        self.assertIn('"max_tokens": 500000', arrivals[2][1])
-        self.assertIn('"effective_max_tokens": 500000', arrivals[2][1])
+        self.assertIn('"usage_source": "provider"', arrivals[2][1])
+        self.assertIn('"context_used_tokens": 180000', arrivals[2][1])
+        self.assertIn('"max_tokens": 200000', arrivals[2][1])
+        self.assertIn('"effective_max_tokens": 200000', arrivals[2][1])
         self.assertIn('"provider_max_tokens": 1000000', arrivals[2][1])
-        self.assertIn('"usage_mode": "estimated"', arrivals[2][1])
+        self.assertIn('"post_turn_compaction_status": "completed"', arrivals[2][1])
 
     def test_stream_endpoint_forwards_transient_attachments(self):
         handler = mock.Mock()
@@ -144,3 +151,59 @@ class ChatStreamApiTests(unittest.TestCase):
             main_module.get_chat_handler = original_get_chat_handler
 
         self.assertIn("已看到截图", payload)
+
+    def test_stream_endpoint_keeps_usage_event_last_before_done(self):
+        handler = mock.Mock()
+
+        def fake_stream(project_id, message_text, attached_material_ids, transient_attachments):
+            yield {"type": "content", "data": "第一段"}
+            yield {
+                "type": "usage",
+                "data": {
+                    "usage_source": "provider",
+                    "context_used_tokens": 180000,
+                    "effective_max_tokens": 200000,
+                    "provider_max_tokens": 1000000,
+                    "max_tokens": 200000,
+                    "preflight_compaction_used": False,
+                    "post_turn_compaction_status": "completed",
+                },
+            }
+
+        handler.chat_stream.side_effect = fake_stream
+        original_get_chat_handler = main_module.get_chat_handler
+        main_module.get_chat_handler = lambda project_id: handler
+        port = _pick_free_port()
+        config = uvicorn.Config(main_module.app, host="127.0.0.1", port=port, log_level="error")
+        server = uvicorn.Server(config)
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+
+        try:
+            time.sleep(1.0)
+            response = requests.post(
+                f"http://127.0.0.1:{port}/api/chat/stream",
+                json={
+                    "project_id": "demo",
+                    "message_text": "test",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
+                stream=True,
+                timeout=30,
+            )
+            events = [
+                chunk.strip()
+                for chunk in response.iter_content(chunk_size=1024, decode_unicode=True)
+                if chunk.strip()
+            ]
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+            main_module.get_chat_handler = original_get_chat_handler
+
+        content_event_index = next(index for index, item in enumerate(events) if '"type": "content"' in item)
+        usage_event_index = next(index for index, item in enumerate(events) if '"type": "usage"' in item)
+        done_event_index = next(index for index, item in enumerate(events) if item == "data: [DONE]")
+        self.assertLess(content_event_index, usage_event_index)
+        self.assertLess(usage_event_index, done_event_index)

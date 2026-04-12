@@ -61,7 +61,7 @@ export default function ChatPanel({
   const canSendImages = supportsImageAttachments(settings)
   const { transientImages: pendingImageAttachments, persistentDocuments: pendingDocumentAttachments } = splitPendingAttachments(pendingAttachments)
   const contextUsage = tokenUsage ? formatContextUsage(tokenUsage) : null
-  const contextUsagePercent = tokenUsage ? getContextUsagePercent(tokenUsage) : 0
+  const contextUsagePercent = tokenUsage ? getContextUsagePercent(tokenUsage) : null
   activeProjectIdRef.current = projectId
   pendingAttachmentsRef.current = pendingAttachments
 
@@ -700,19 +700,40 @@ export default function ChatPanel({
       </div>
 
       {tokenUsage && (
-        <div className="px-4 py-2 border-t border-[#2a2a4a] flex items-center gap-2 text-xs text-[#8888a8]">
-          <span>{contextUsage.label}</span>
-          <div className="flex-1 h-1.5 bg-[#252545] rounded-full overflow-hidden">
-            <div
-              className="h-full bg-blue-500 rounded-full transition-all"
-              style={{ width: `${contextUsagePercent}%` }}
-            />
+        <div className="border-t border-[#2a2a4a] px-4 py-3 text-xs text-[#8888a8]">
+          <div className="flex flex-wrap items-center gap-2">
+            <span>{contextUsage.label}</span>
+            <div className="h-1.5 min-w-[160px] flex-1 rounded-full bg-[#252545] overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${contextUsagePercent == null ? 'bg-[#545d8d]/55' : 'bg-blue-500'}`}
+                style={{ width: contextUsagePercent == null ? '100%' : `${contextUsagePercent}%` }}
+              />
+            </div>
+            <span>{contextUsage.detail}</span>
+            <span className="rounded-full border border-[#3a3a5a] px-2 py-0.5 text-[#c9cdf7]">
+              {contextUsage.modeTag}
+            </span>
+            {contextUsage.compressedTag && (
+              <span className="rounded-full border border-[#5a4d28] px-2 py-0.5 text-yellow-400">
+                {contextUsage.compressedTag}
+              </span>
+            )}
           </div>
-          <span>{contextUsage.detail}</span>
-          <span className="rounded-full border border-[#3a3a5a] px-2 py-0.5 text-[#c9cdf7]">
-            {contextUsage.modeTag}
-          </span>
-          {contextUsage.compressedTag && <span className="text-yellow-500">{contextUsage.compressedTag}</span>}
+          {contextUsage.compactedStatus && (
+            <div className="mt-2 text-[#9da3d9]">{contextUsage.compactedStatus}</div>
+          )}
+          {contextUsage.fields?.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+              {contextUsage.fields.map(field => (
+                <span
+                  key={field.label}
+                  className="rounded-full border border-[#31355e] bg-[#171a33] px-2 py-1 text-[#b8bee9]"
+                >
+                  {field.label}: {field.value}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

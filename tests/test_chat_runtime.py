@@ -64,6 +64,9 @@ class ChatRuntimeTests(unittest.TestCase):
         delta = SimpleNamespace(content=content, tool_calls=tool_calls)
         return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
 
+    def _make_usage_chunk(self, **usage_fields):
+        return SimpleNamespace(choices=[], usage=SimpleNamespace(**usage_fields))
+
     def _make_stream_tool_call_chunk(self, index, *, id=None, name=None, arguments=None):
         function = None
         if name is not None or arguments is not None:
@@ -133,9 +136,15 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(custom_handler._get_active_model_name(), "gpt-5-mini")
 
     @mock.patch("backend.chat.OpenAI")
-    def test_managed_gemini_chat_usage_uses_dynamic_context_policy(self, mock_openai):
+    def test_chat_returns_provider_real_usage_fields(self, mock_openai):
         mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
-            usage=SimpleNamespace(total_tokens=4321),
+            usage=SimpleNamespace(
+                prompt_tokens=175000,
+                completion_tokens=1200,
+                total_tokens=176200,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=4000),
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
+            ),
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(
@@ -170,16 +179,68 @@ class ChatRuntimeTests(unittest.TestCase):
 
             result = handler.chat(project["id"], "请继续")
 
-        self.assertEqual(result["token_usage"]["current_tokens"], 4321)
-        self.assertEqual(result["token_usage"]["max_tokens"], 500000)
-        self.assertEqual(result["token_usage"]["effective_max_tokens"], 500000)
+        self.assertEqual(result["token_usage"]["usage_source"], "provider")
+        self.assertEqual(result["token_usage"]["context_used_tokens"], 175000)
+        self.assertEqual(result["token_usage"]["input_tokens"], 175000)
+        self.assertEqual(result["token_usage"]["output_tokens"], 1200)
+        self.assertEqual(result["token_usage"]["total_tokens"], 176200)
+        self.assertEqual(result["token_usage"]["cache_read_tokens"], 4000)
+        self.assertEqual(result["token_usage"]["reasoning_tokens"], 0)
+        self.assertEqual(result["token_usage"]["max_tokens"], 200000)
+        self.assertEqual(result["token_usage"]["effective_max_tokens"], 200000)
         self.assertEqual(result["token_usage"]["provider_max_tokens"], 1000000)
+        self.assertFalse(result["token_usage"]["preflight_compaction_used"])
+        self.assertEqual(result["token_usage"]["post_turn_compaction_status"], "not_needed")
         self.assertFalse(result["token_usage"]["compressed"])
-        self.assertEqual(result["token_usage"]["usage_mode"], "actual")
         self.assertEqual(
             mock_openai.return_value.chat.completions.create.call_args.kwargs["model"],
             "gemini-3-flash",
         )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_marks_usage_unavailable_without_provider_fields(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="完成",
+                        tool_calls=[],
+                    )
+                )
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            result = handler.chat(project["id"], "请继续")
+
+        self.assertEqual(result["token_usage"]["usage_source"], "unavailable")
+        self.assertIsNone(result["token_usage"]["context_used_tokens"])
+        self.assertIsNone(result["token_usage"]["input_tokens"])
+        self.assertIsNone(result["token_usage"]["output_tokens"])
+        self.assertEqual(result["token_usage"]["max_tokens"], 200000)
+        self.assertEqual(result["token_usage"]["effective_max_tokens"], 200000)
+        self.assertEqual(result["token_usage"]["provider_max_tokens"], 1000000)
 
     @mock.patch("backend.chat.OpenAI")
     def test_managed_stream_requests_use_extended_read_timeout(self, mock_openai):
@@ -328,6 +389,439 @@ class ChatRuntimeTests(unittest.TestCase):
             execute_tool.call_args.args[1].function.arguments,
             '{"query":"ultraman flight"}',
         )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_normalize_usage_prefers_prompt_tokens_for_context_used(self, mock_openai):
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "normalize-projects", self.repo_skill_dir),
+        )
+        policy = handler._resolve_context_policy()
+
+        normalized = handler._normalize_provider_usage(
+            SimpleNamespace(prompt_tokens=180000, completion_tokens=800, total_tokens=180800),
+            policy,
+            preflight_compaction_used=False,
+        )
+
+        self.assertEqual(normalized["context_used_tokens"], 180000)
+        self.assertEqual(normalized["usage_source"], "provider")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_normalize_usage_falls_back_to_total_tokens_without_guessing(self, mock_openai):
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "normalize-projects", self.repo_skill_dir),
+        )
+        policy = handler._resolve_context_policy()
+
+        normalized = handler._normalize_provider_usage(
+            SimpleNamespace(total_tokens=140000),
+            policy,
+            preflight_compaction_used=False,
+        )
+
+        self.assertEqual(normalized["context_used_tokens"], 140000)
+        self.assertEqual(normalized["usage_source"], "provider_partial")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_normalize_usage_accepts_input_and_output_token_shapes(self, mock_openai):
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "normalize-projects", self.repo_skill_dir),
+        )
+        policy = handler._resolve_context_policy()
+
+        normalized = handler._normalize_provider_usage(
+            SimpleNamespace(input_tokens=91000, output_tokens=1200, total_tokens=92200),
+            policy,
+            preflight_compaction_used=False,
+        )
+
+        self.assertEqual(normalized["input_tokens"], 91000)
+        self.assertEqual(normalized["output_tokens"], 1200)
+        self.assertEqual(normalized["context_used_tokens"], 91000)
+        self.assertEqual(normalized["usage_source"], "provider")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_emits_provider_real_usage_payload_when_final_usage_chunk_arrives(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="第一段"),
+            self._make_usage_chunk(prompt_tokens=175000, completion_tokens=900, total_tokens=175900),
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            events = list(handler.chat_stream(project["id"], "继续"))
+
+        usage_event = next(event for event in events if event["type"] == "usage")
+        self.assertEqual(usage_event["data"]["usage_source"], "provider")
+        self.assertEqual(usage_event["data"]["context_used_tokens"], 175000)
+        self.assertEqual(usage_event["data"]["input_tokens"], 175000)
+        self.assertEqual(usage_event["data"]["output_tokens"], 900)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_auto_compact_persists_sidecar_and_skips_compacted_history_next_turn(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=195000, completion_tokens=500, total_tokens=195500),
+                choices=[SimpleNamespace(message=SimpleNamespace(content="第一轮完成", tool_calls=[]))],
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="紧凑摘要", tool_calls=[]))],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            result = handler.chat(project["id"], "请继续")
+
+            compact_state_path = Path(project["project_dir"]) / "conversation_compact_state.json"
+            payload = json.loads(compact_state_path.read_text(encoding="utf-8"))
+            next_conversation = handler._build_provider_conversation(
+                project["id"],
+                handler._load_conversation(project["id"]),
+                {
+                    "role": "user",
+                    "content": "第二轮继续",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
+            )
+
+        self.assertEqual(result["token_usage"]["post_turn_compaction_status"], "completed")
+        self.assertEqual(payload["source_message_count"], 2)
+        self.assertIn("紧凑摘要", payload["summary_text"])
+        serialized = json.dumps(next_conversation, ensure_ascii=False)
+        self.assertIn("紧凑摘要", serialized)
+        self.assertNotIn("第一轮完成", serialized)
+        self.assertNotIn("请继续", serialized)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_discards_compact_sidecar_when_history_becomes_shorter_than_source_count(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            compact_state_path = project_dir / "conversation_compact_state.json"
+            conversation_path = project_dir / "conversation.json"
+            compact_state_path.write_text(
+                json.dumps(
+                    {
+                        "summary_text": "旧摘要",
+                        "source_message_count": 8,
+                        "last_compacted_at": "2026-04-13T12:00:00",
+                        "trigger_usage": {"context_used_tokens": 190000},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            conversation_path.write_text(
+                json.dumps([{"role": "user", "content": "只剩一条"}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            provider_conversation = handler._build_provider_conversation(
+                project["id"],
+                handler._load_conversation(project["id"]),
+                {
+                    "role": "user",
+                    "content": "下一轮",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
+            )
+
+        self.assertFalse(compact_state_path.exists())
+        self.assertNotIn("旧摘要", json.dumps(provider_conversation, ensure_ascii=False))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_marks_post_turn_compaction_completed_when_threshold_is_hit(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=195000, completion_tokens=500, total_tokens=195500),
+                choices=[SimpleNamespace(message=SimpleNamespace(content="第一轮完成", tool_calls=[]))],
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="紧凑摘要", tool_calls=[]))],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            result = handler.chat(project["id"], "请继续")
+
+        self.assertEqual(result["token_usage"]["post_turn_compaction_status"], "completed")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_marks_post_turn_compaction_skipped_when_usage_is_unavailable(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
+            usage=None,
+            choices=[SimpleNamespace(message=SimpleNamespace(content="完成", tool_calls=[]))],
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            result = handler.chat(project["id"], "请继续")
+
+        self.assertEqual(result["token_usage"]["post_turn_compaction_status"], "skipped_unavailable")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_marks_post_turn_compaction_failed_when_sidecar_write_raises(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=195000, completion_tokens=500, total_tokens=195500),
+                choices=[SimpleNamespace(message=SimpleNamespace(content="第一轮完成", tool_calls=[]))],
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="紧凑摘要", tool_calls=[]))],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            with mock.patch.object(handler, "_save_compact_state_atomically", side_effect=OSError("disk full")):
+                result = handler.chat(project["id"], "请继续")
+
+        self.assertEqual(result["content"], "第一轮完成")
+        self.assertEqual(result["token_usage"]["post_turn_compaction_status"], "failed")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_reports_failed_compaction_when_sidecar_write_raises(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="第一段"),
+            self._make_usage_chunk(prompt_tokens=195000, completion_tokens=500, total_tokens=195500),
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            with mock.patch.object(handler, "_summarize_messages", return_value="紧凑摘要"):
+                with mock.patch.object(handler, "_save_compact_state_atomically", side_effect=OSError("disk full")):
+                    events = list(handler.chat_stream(project["id"], "继续"))
+
+        self.assertEqual(events[0], {"type": "content", "data": "第一段"})
+        self.assertFalse(any(event["type"] == "error" for event in events))
+        usage_event = next(event for event in events if event["type"] == "usage")
+        self.assertEqual(usage_event["data"]["post_turn_compaction_status"], "failed")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_retry_keeps_include_usage_after_transient_error(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            Exception("temporary network hiccup"),
+            iter([
+                self._make_chunk(content="第一段"),
+                self._make_usage_chunk(prompt_tokens=175000, completion_tokens=900, total_tokens=175900),
+            ]),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            events = list(handler.chat_stream(project["id"], "继续"))
+
+        self.assertTrue(any(event["type"] == "usage" for event in events))
+        self.assertEqual(
+            mock_openai.return_value.chat.completions.create.call_args_list[0].kwargs.get("stream_options"),
+            {"include_usage": True},
+        )
+        self.assertEqual(
+            mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs.get("stream_options"),
+            {"include_usage": True},
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_post_turn_compaction_summarizes_provider_history_with_material_metadata(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=195000, completion_tokens=500, total_tokens=195500),
+                choices=[SimpleNamespace(message=SimpleNamespace(content="第一轮完成", tool_calls=[]))],
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="紧凑摘要", tool_calls=[]))],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            material_path = workspace_dir / "访谈纪要.txt"
+            material_path.write_text("这里是访谈纪要正文", encoding="utf-8")
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            material = engine.add_materials(project["id"], [str(material_path)], added_via="workspace_select")[0]
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            handler.chat(project["id"], "请结合材料继续", [material["id"]])
+
+        summary_prompt = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"][1]["content"]
+        self.assertIn("[本轮附带材料]", summary_prompt)
+        self.assertIn(material["display_name"], summary_prompt)
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_waits_for_complete_tool_name_before_emitting_start_event(self, mock_openai):
@@ -742,8 +1236,9 @@ class ChatRuntimeTests(unittest.TestCase):
                         result = handler.chat(project["id"], "继续", max_iterations=2)
 
         self.assertEqual(result["content"], "最终答复")
-        self.assertEqual(result["token_usage"]["usage_mode"], "estimated")
-        self.assertEqual(result["token_usage"]["current_tokens"], 1234)
+        self.assertEqual(result["token_usage"]["usage_source"], "unavailable")
+        self.assertIsNone(result["token_usage"]["context_used_tokens"])
+        self.assertEqual(result["token_usage"]["post_turn_compaction_status"], "skipped_unavailable")
 
     @unittest.skip("replaced by tempdir-backed variant below")
     @mock.patch("backend.chat.OpenAI")

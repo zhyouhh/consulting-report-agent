@@ -5,6 +5,7 @@ import re
 import requests
 import socket
 import time
+from datetime import datetime
 from typing import Dict, List
 from html import unescape
 from urllib.parse import urljoin, urlparse
@@ -35,6 +36,7 @@ STREAM_POOL_TIMEOUT_SECONDS = 30.0
 MANAGED_STREAM_READ_TIMEOUT_SECONDS = 180.0
 CUSTOM_STREAM_READ_TIMEOUT_SECONDS = 90.0
 SLOW_MODEL_STREAM_READ_TIMEOUT_SECONDS = 180.0
+AUTO_COMPACT_TRIGGER_RATIO = 0.9
 
 
 class ChatHandler:
@@ -267,6 +269,123 @@ class ChatHandler:
             "usage_mode": usage_mode,
         }
 
+    def _normalize_provider_usage(
+        self,
+        usage,
+        policy: ResolvedContextPolicy,
+        *,
+        preflight_compaction_used: bool,
+        post_turn_compaction_status: str = "not_needed",
+    ) -> Dict[str, int | bool | str | dict | None]:
+        raw_usage = self._usage_to_dict(usage)
+        input_tokens = self._first_usage_value(raw_usage, "prompt_tokens", "input_tokens")
+        output_tokens = self._first_usage_value(raw_usage, "completion_tokens", "output_tokens")
+        total_tokens = self._first_usage_value(raw_usage, "total_tokens")
+        cache_read_tokens = self._first_usage_value(
+            raw_usage,
+            "cache_read_tokens",
+            "cached_tokens",
+            nested_paths=(
+                ("prompt_tokens_details", "cached_tokens"),
+                ("input_tokens_details", "cached_tokens"),
+            ),
+        )
+        cache_write_tokens = self._first_usage_value(
+            raw_usage,
+            "cache_write_tokens",
+            nested_paths=(
+                ("prompt_tokens_details", "cache_creation_input_tokens"),
+                ("input_tokens_details", "cache_creation_input_tokens"),
+            ),
+        )
+        reasoning_tokens = self._first_usage_value(
+            raw_usage,
+            "reasoning_tokens",
+            nested_paths=(
+                ("completion_tokens_details", "reasoning_tokens"),
+                ("output_tokens_details", "reasoning_tokens"),
+            ),
+        )
+        context_used_tokens = input_tokens if input_tokens is not None else total_tokens
+
+        if input_tokens is not None:
+            usage_source = "provider"
+        elif total_tokens is not None:
+            usage_source = "provider_partial"
+        else:
+            usage_source = "unavailable"
+
+        return {
+            "usage_source": usage_source,
+            "context_used_tokens": context_used_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "max_tokens": policy.effective_context_limit,
+            "effective_max_tokens": policy.effective_context_limit,
+            "provider_max_tokens": policy.provider_context_limit,
+            "preflight_compaction_used": preflight_compaction_used,
+            "post_turn_compaction_status": post_turn_compaction_status,
+            "compressed": preflight_compaction_used,
+            "raw_usage": raw_usage or None,
+        }
+
+    def _usage_to_dict(self, usage):
+        if usage is None:
+            return {}
+        if hasattr(usage, "model_dump"):
+            return self._coerce_usage_value(usage.model_dump())
+        if isinstance(usage, dict):
+            return self._coerce_usage_value(usage)
+        if hasattr(usage, "__dict__"):
+            return self._coerce_usage_value(vars(usage))
+        return {}
+
+    def _coerce_usage_value(self, value):
+        if isinstance(value, dict):
+            return {key: self._coerce_usage_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._coerce_usage_value(item) for item in value]
+        if hasattr(value, "model_dump"):
+            return self._coerce_usage_value(value.model_dump())
+        if hasattr(value, "__dict__"):
+            return self._coerce_usage_value(vars(value))
+        return value
+
+    def _first_usage_value(self, raw_usage: Dict, *keys: str, nested_paths: tuple[tuple[str, ...], ...] = ()):
+        for key in keys:
+            value = raw_usage.get(key)
+            if value is not None:
+                return value
+        for path in nested_paths:
+            value = self._read_nested_usage_value(raw_usage, path)
+            if value is not None:
+                return value
+        return None
+
+    def _read_nested_usage_value(self, raw_usage: Dict, path: tuple[str, ...]):
+        current = raw_usage
+        for key in path:
+            if not isinstance(current, dict) or key not in current:
+                return None
+            current = current[key]
+        return current
+
+    def _should_retry_stream_without_usage(self, error: Exception) -> bool:
+        message = str(error or "").lower()
+        markers = (
+            "stream_options",
+            "include_usage",
+            "unexpected keyword argument",
+            "extra_forbidden",
+            "unknown parameter",
+            "unsupported parameter",
+        )
+        return any(marker in message for marker in markers)
+
     def _get_request_max_tokens(self, policy: ResolvedContextPolicy) -> int:
         return policy.reserved_output_tokens
 
@@ -284,7 +403,19 @@ class ChatHandler:
         max_old_msgs = 50
         if len(old_msgs) > max_old_msgs:
             old_msgs = old_msgs[-max_old_msgs:]
+        summary = self._summarize_messages(old_msgs)
+        if not summary:
+            return [system_msg] + recent_msgs
 
+        return [
+            system_msg,
+            {"role": "assistant", "content": f"[对话摘要]\n{summary}"},
+            *recent_msgs,
+        ]
+
+    def _summarize_messages(self, messages: List[Dict]) -> str | None:
+        if not messages:
+            return None
         summary_prompt = [
             {"role": "system", "content": (
                 "你是一个对话摘要助手。请将以下对话历史压缩为简洁摘要，必须保留：\n"
@@ -295,9 +426,8 @@ class ChatHandler:
                 "5. 所有精确的名称、路径、数据、引用来源\n"
                 "只输出摘要内容，不要加前缀。"
             )},
-            {"role": "user", "content": json.dumps(old_msgs, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps(messages, ensure_ascii=False)},
         ]
-
         try:
             resp = self.client.chat.completions.create(
                 model=self._get_active_model_name(),
@@ -306,15 +436,9 @@ class ChatHandler:
                 max_tokens=2000,
                 timeout=30.0,
             )
-            summary = resp.choices[0].message.content
         except Exception:
-            return [system_msg] + recent_msgs
-
-        return [
-            system_msg,
-            {"role": "assistant", "content": f"[对话摘要]\n{summary}"},
-            *recent_msgs,
-        ]
+            return None
+        return (resp.choices[0].message.content or "").strip() or None
 
     def _find_recent_start(self, conversation: List[Dict], keep_n: int) -> int:
         start = max(1, len(conversation) - keep_n)
@@ -348,6 +472,97 @@ class ChatHandler:
             isinstance(tool_call, dict) and tool_call.get("id") == tool_call_id
             for tool_call in tool_calls
         )
+
+    def _get_compact_state_path(self, project_id: str):
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return None
+        return project_path / "conversation_compact_state.json"
+
+    def _load_compact_state(self, project_id: str, history: List[Dict] | None = None) -> Dict | None:
+        compact_state_path = self._get_compact_state_path(project_id)
+        if not compact_state_path or not compact_state_path.exists():
+            return None
+        try:
+            payload = json.loads(compact_state_path.read_text(encoding="utf-8"))
+        except Exception:
+            compact_state_path.unlink(missing_ok=True)
+            return None
+
+        summary_text = payload.get("summary_text")
+        source_message_count = payload.get("source_message_count")
+        if not isinstance(summary_text, str) or not summary_text.strip() or not isinstance(source_message_count, int):
+            compact_state_path.unlink(missing_ok=True)
+            return None
+
+        if history is not None and len(history) < source_message_count:
+            compact_state_path.unlink(missing_ok=True)
+            return None
+        return payload
+
+    def _save_compact_state_atomically(self, project_id: str, payload: Dict):
+        compact_state_path = self._get_compact_state_path(project_id)
+        if not compact_state_path:
+            return
+        compact_state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = compact_state_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(compact_state_path)
+
+    def _clear_compact_state(self, project_id: str):
+        compact_state_path = self._get_compact_state_path(project_id)
+        if compact_state_path and compact_state_path.exists():
+            compact_state_path.unlink()
+
+    def _finalize_post_turn_compaction(self, project_id: str, history: List[Dict], token_usage: Dict) -> Dict:
+        if not token_usage:
+            return token_usage
+
+        context_used_tokens = token_usage.get("context_used_tokens")
+        effective_max_tokens = token_usage.get("effective_max_tokens") or 0
+        if context_used_tokens is None or effective_max_tokens <= 0:
+            token_usage["post_turn_compaction_status"] = "skipped_unavailable"
+            return token_usage
+
+        if context_used_tokens / effective_max_tokens < AUTO_COMPACT_TRIGGER_RATIO:
+            token_usage["post_turn_compaction_status"] = "not_needed"
+            return token_usage
+
+        summary_text = self._summarize_messages(self._build_compaction_summary_messages(project_id, history))
+        if not summary_text:
+            token_usage["post_turn_compaction_status"] = "failed"
+            return token_usage
+
+        try:
+            self._save_compact_state_atomically(
+                project_id,
+                {
+                    "summary_text": summary_text,
+                    "source_message_count": len(history),
+                    "last_compacted_at": datetime.now().isoformat(timespec="seconds"),
+                    "post_turn_compaction_status": "completed",
+                    "trigger_usage": {
+                        "usage_source": token_usage.get("usage_source"),
+                        "context_used_tokens": context_used_tokens,
+                        "input_tokens": token_usage.get("input_tokens"),
+                        "output_tokens": token_usage.get("output_tokens"),
+                        "total_tokens": token_usage.get("total_tokens"),
+                    },
+                },
+            )
+        except Exception:
+            token_usage["post_turn_compaction_status"] = "failed"
+            return token_usage
+        token_usage["post_turn_compaction_status"] = "completed"
+        return token_usage
+
+    def _build_compaction_summary_messages(self, project_id: str, history: List[Dict]) -> List[Dict]:
+        summary_messages = []
+        for message in history:
+            provider_message = self._to_provider_message(project_id, message, include_images=False)
+            if provider_message:
+                summary_messages.append(provider_message)
+        return summary_messages
 
     def _normalize_project_file_path(self, file_path: str) -> str:
         return file_path.replace("\\", "/").lstrip("/").strip()
@@ -462,13 +677,17 @@ class ChatHandler:
         )
         active_model = self._get_active_model_name()
 
-        total_tokens = 0
         iterations = 0
         missing_write_retries = 0
         assistant_message = ""
         compressed = False
         policy = self._resolve_context_policy()
         successful_writes: set[str] = set()
+        token_usage = self._normalize_provider_usage(
+            None,
+            policy,
+            preflight_compaction_used=False,
+        )
 
         while iterations < max_iterations:
             try:
@@ -484,20 +703,27 @@ class ChatHandler:
                 yield {"type": "error", "data": str(exc)}
                 return
 
+            include_usage_requested = True
             for retry in range(2):
+                request_kwargs = {
+                    "model": active_model,
+                    "messages": conversation,
+                    "temperature": 0.7,
+                    "max_tokens": self._get_request_max_tokens(policy),
+                    "tools": self._get_tools(),
+                    "tool_choice": "auto",
+                    "timeout": self._build_stream_timeout(active_model),
+                    "stream": True,
+                }
+                if include_usage_requested:
+                    request_kwargs["stream_options"] = {"include_usage": True}
                 try:
-                    response = self.client.chat.completions.create(
-                        model=active_model,
-                        messages=conversation,
-                        temperature=0.7,
-                        max_tokens=self._get_request_max_tokens(policy),
-                        tools=self._get_tools(),
-                        tool_choice="auto",
-                        timeout=self._build_stream_timeout(active_model),
-                        stream=True,
-                    )
+                    response = self.client.chat.completions.create(**request_kwargs)
                     break
                 except Exception as e:
+                    if include_usage_requested and self._should_retry_stream_without_usage(e):
+                        include_usage_requested = False
+                        continue
                     if retry < 1:
                         time.sleep(2)
                         continue
@@ -507,8 +733,11 @@ class ChatHandler:
             collected_message = {"role": "assistant", "content": "", "tool_calls": []}
             known_tool_names = {tool["function"]["name"] for tool in self._get_tools()}
             announced_tool_call_indexes: set[int] = set()
+            stream_usage = None
             try:
                 for chunk in response:
+                    if getattr(chunk, "usage", None) is not None:
+                        stream_usage = chunk.usage
                     if not chunk.choices:
                         continue
 
@@ -590,6 +819,11 @@ class ChatHandler:
                     })
                     continue
                 assistant_message = candidate_message
+                token_usage = self._normalize_provider_usage(
+                    stream_usage,
+                    policy,
+                    preflight_compaction_used=compressed,
+                )
                 break
         else:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
@@ -597,6 +831,7 @@ class ChatHandler:
 
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
+        token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
         self._turn_context = {
             "can_write_non_plan": True,
             "web_search_disabled": False,
@@ -604,17 +839,9 @@ class ChatHandler:
             "fetch_url_performed": False,
         }
 
-        if total_tokens == 0:
-            total_tokens = self._estimate_tokens(conversation)
-
         yield {
             "type": "usage",
-            "data": self._build_usage_payload(
-                total_tokens,
-                policy,
-                compressed,
-                usage_mode="estimated",
-            ),
+            "data": token_usage,
         }
 
     def chat(
@@ -645,14 +872,17 @@ class ChatHandler:
         )
         active_model = self._get_active_model_name()
 
-        total_tokens = 0
         iterations = 0
         missing_write_retries = 0
         assistant_message = ""
-        usage_mode = "estimated"
         compressed = False
         policy = self._resolve_context_policy()
         successful_writes: set[str] = set()
+        token_usage = self._normalize_provider_usage(
+            None,
+            policy,
+            preflight_compaction_used=False,
+        )
         while iterations < max_iterations:
             try:
                 conversation, _, iteration_compressed, policy = self._fit_conversation_to_budget(conversation)
@@ -684,13 +914,6 @@ class ChatHandler:
                         time.sleep(2)
                         continue
                     return {"content": f"API调用失败: {str(e)}", "token_usage": None}
-
-            if hasattr(response, "usage") and response.usage:
-                total_tokens = getattr(response.usage, "total_tokens", 0) or 0
-                usage_mode = "actual"
-            else:
-                total_tokens = 0
-                usage_mode = "estimated"
 
             message = response.choices[0].message
             if message.tool_calls:
@@ -737,12 +960,18 @@ class ChatHandler:
                     })
                     continue
                 assistant_message = candidate_message
+                token_usage = self._normalize_provider_usage(
+                    getattr(response, "usage", None),
+                    policy,
+                    preflight_compaction_used=compressed,
+                )
                 break
         else:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
 
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
+        token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
         self._turn_context = {
             "can_write_non_plan": True,
             "web_search_disabled": False,
@@ -750,22 +979,22 @@ class ChatHandler:
             "fetch_url_performed": False,
         }
 
-        if total_tokens == 0:
-            total_tokens = self._estimate_tokens(conversation)
-
         return {
             "content": assistant_message,
-            "token_usage": self._build_usage_payload(
-                total_tokens,
-                policy,
-                compressed,
-                usage_mode=usage_mode,
-            ),
+            "token_usage": token_usage,
         }
 
     def _build_provider_conversation(self, project_id: str, history: List[Dict], current_user_message: Dict) -> List[Dict]:
         conversation = [{"role": "system", "content": self._build_system_prompt(project_id)}]
-        for message in history:
+        compact_state = self._load_compact_state(project_id, history)
+        effective_history = history
+        if compact_state:
+            conversation.append({
+                "role": "assistant",
+                "content": f"[对话摘要]\n{compact_state['summary_text']}",
+            })
+            effective_history = history[compact_state["source_message_count"]:]
+        for message in effective_history:
             provider_message = self._to_provider_message(project_id, message, include_images=False)
             if provider_message:
                 conversation.append(provider_message)

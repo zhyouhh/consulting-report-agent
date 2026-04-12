@@ -33,6 +33,24 @@ class WorkspaceApiTests(unittest.TestCase):
         response = self.client.get("/api/projects/definitely-missing-project/workspace")
         self.assertEqual(response.status_code, 404)
 
+    @mock.patch("backend.main.skill_engine.get_project_path")
+    def test_clear_conversation_removes_compact_sidecar(self, mock_get_project_path):
+        with self.subTest("remove conversation and compact state"):
+            import tempfile
+            from pathlib import Path
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                project_path = Path(tmpdir)
+                (project_path / "conversation.json").write_text("[]", encoding="utf-8")
+                (project_path / "conversation_compact_state.json").write_text("{}", encoding="utf-8")
+                mock_get_project_path.return_value = project_path
+
+                response = self.client.delete("/api/projects/proj-demo/conversation")
+
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse((project_path / "conversation.json").exists())
+                self.assertFalse((project_path / "conversation_compact_state.json").exists())
+
     @mock.patch("backend.main.skill_engine.create_project")
     def test_create_project_accepts_theme_like_display_name_without_slugging(self, mock_create_project):
         mock_create_project.return_value = {
@@ -202,17 +220,24 @@ class WorkspaceApiTests(unittest.TestCase):
         )
 
     @mock.patch("backend.main.get_chat_handler")
-    def test_chat_endpoint_forwards_attached_material_ids(self, mock_get_chat_handler):
+    def test_chat_endpoint_returns_new_token_usage_shape(self, mock_get_chat_handler):
         handler = mock.Mock()
         handler.chat.return_value = {
             "content": "已整理完毕",
             "token_usage": {
-                "current_tokens": 1200,
-                "max_tokens": 500000,
-                "effective_max_tokens": 500000,
+                "usage_source": "provider",
+                "context_used_tokens": 180000,
+                "input_tokens": 180000,
+                "output_tokens": 1200,
+                "total_tokens": 181200,
+                "cache_read_tokens": 4000,
+                "reasoning_tokens": 0,
+                "max_tokens": 200000,
+                "effective_max_tokens": 200000,
                 "provider_max_tokens": 1000000,
+                "preflight_compaction_used": False,
+                "post_turn_compaction_status": "not_needed",
                 "compressed": False,
-                "usage_mode": "actual",
             },
         }
         mock_get_chat_handler.return_value = handler
@@ -228,16 +253,53 @@ class WorkspaceApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["content"], "已整理完毕")
-        self.assertEqual(response.json()["token_usage"]["max_tokens"], 500000)
-        self.assertEqual(response.json()["token_usage"]["effective_max_tokens"], 500000)
+        self.assertEqual(response.json()["token_usage"]["usage_source"], "provider")
+        self.assertEqual(response.json()["token_usage"]["context_used_tokens"], 180000)
+        self.assertEqual(response.json()["token_usage"]["input_tokens"], 180000)
+        self.assertEqual(response.json()["token_usage"]["output_tokens"], 1200)
+        self.assertEqual(response.json()["token_usage"]["cache_read_tokens"], 4000)
+        self.assertEqual(response.json()["token_usage"]["max_tokens"], 200000)
+        self.assertEqual(response.json()["token_usage"]["effective_max_tokens"], 200000)
         self.assertEqual(response.json()["token_usage"]["provider_max_tokens"], 1000000)
-        self.assertEqual(response.json()["token_usage"]["usage_mode"], "actual")
+        self.assertFalse(response.json()["token_usage"]["preflight_compaction_used"])
+        self.assertEqual(response.json()["token_usage"]["post_turn_compaction_status"], "not_needed")
         handler.chat.assert_called_once_with(
             "proj-demo",
             "请结合新增材料整理问题树",
             ["mat-1", "mat-2"],
             [],
         )
+
+    @mock.patch("backend.main.get_chat_handler")
+    def test_chat_endpoint_keeps_max_tokens_alias_for_existing_clients(self, mock_get_chat_handler):
+        handler = mock.Mock()
+        handler.chat.return_value = {
+            "content": "已整理完毕",
+            "token_usage": {
+                "usage_source": "provider",
+                "context_used_tokens": 180000,
+                "effective_max_tokens": 200000,
+                "provider_max_tokens": 1000000,
+                "max_tokens": 200000,
+                "preflight_compaction_used": False,
+                "post_turn_compaction_status": "not_needed",
+                "compressed": False,
+            },
+        }
+        mock_get_chat_handler.return_value = handler
+
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "project_id": "proj-demo",
+                "message_text": "请继续",
+                "attached_material_ids": [],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["token_usage"]["max_tokens"], 200000)
+        self.assertEqual(response.json()["token_usage"]["effective_max_tokens"], 200000)
 
     @mock.patch("backend.main.get_chat_handler")
     def test_chat_endpoint_forwards_transient_attachments(self, mock_get_chat_handler):

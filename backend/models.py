@@ -56,12 +56,21 @@ class ChatRequest(BaseModel):
 class TokenUsage(BaseModel):
     """Token usage snapshot."""
 
-    current_tokens: int = 0
+    usage_source: Literal["provider", "provider_partial", "unavailable"] = "unavailable"
+    context_used_tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None
     max_tokens: int = 128000
     effective_max_tokens: int = 128000
     provider_max_tokens: int = 128000
+    preflight_compaction_used: bool = False
+    post_turn_compaction_status: Literal["not_needed", "completed", "failed", "skipped_unavailable"] = "not_needed"
     compressed: bool = False
-    usage_mode: Literal["actual", "estimated"] = "estimated"
+    raw_usage: dict | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -78,6 +87,8 @@ class TokenUsage(BaseModel):
             effective_max_tokens = normalized.get("effective_max_tokens")
             if effective_max_tokens is not None:
                 normalized.setdefault("max_tokens", effective_max_tokens)
+        normalized.setdefault("effective_max_tokens", normalized.get("max_tokens", 128000))
+        normalized.setdefault("provider_max_tokens", normalized.get("provider_max_tokens", normalized["effective_max_tokens"]))
         return normalized
 
 

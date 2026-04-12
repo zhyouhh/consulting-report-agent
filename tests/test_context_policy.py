@@ -18,13 +18,13 @@ class ContextPolicyTests(unittest.TestCase):
             "gemini-3-flash",
         )
 
-    def test_exact_match_for_managed_gemini_uses_1m_provider_and_500k_effective(self):
+    def test_exact_match_for_managed_gemini_uses_1m_provider_and_200k_effective(self):
         policy = resolve_context_policy("gemini-3-flash")
 
         self.assertIsInstance(policy, ResolvedContextPolicy)
         self.assertEqual(policy.normalized_model, "gemini-3-flash")
         self.assertEqual(policy.provider_context_limit, 1_000_000)
-        self.assertEqual(policy.effective_context_limit, 500_000)
+        self.assertEqual(policy.effective_context_limit, 200_000)
         self.assertEqual(policy.resolution_source, "exact_match")
 
     def test_vendor_prefixed_model_is_normalized_before_exact_lookup(self):
@@ -47,7 +47,7 @@ class ContextPolicyTests(unittest.TestCase):
 
         self.assertEqual(policy.normalized_model, "gemini-3-flash")
         self.assertEqual(policy.provider_context_limit, 1_000_000)
-        self.assertEqual(policy.effective_context_limit, 500_000)
+        self.assertEqual(policy.effective_context_limit, 200_000)
         self.assertEqual(policy.resolution_source, "exact_match")
 
     def test_gpt_4_1_mini_uses_a_known_tier_instead_of_unknown_fallback(self):

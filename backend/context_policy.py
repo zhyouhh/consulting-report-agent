@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 
 TIER_LIMITS = {
-    "tier_1m": (1_000_000, 500_000),
+    "tier_1m": (1_000_000, 200_000),
     "tier_400k": (400_000, 320_000),
     "tier_256k": (256_000, 200_000),
     "tier_200k": (200_000, 180_000),
