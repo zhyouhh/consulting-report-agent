@@ -7,7 +7,12 @@ import socket
 import time
 from typing import Dict, List
 from html import unescape
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+
+try:
+    from curl_cffi import requests as curl_cffi_requests
+except Exception:
+    curl_cffi_requests = None
 
 from openai import OpenAI
 
@@ -36,13 +41,28 @@ class ChatHandler:
     """对话处理器"""
 
     INTERCEPT_PROXY_NETWORK = ipaddress.ip_network("198.18.0.0/15")
-    FETCH_URL_MAX_BYTES = 600_000
+    FETCH_URL_MAX_BYTES = 1_500_000
     FETCH_URL_MAX_CHARS = 12_000
+    FETCH_URL_TIMEOUT_SECONDS = 15
+    FETCH_URL_MAX_REDIRECTS = 5
+    FETCH_URL_SUCCESS_CACHE_TTL_SECONDS = 900
+    FETCH_URL_NEGATIVE_CACHE_TTL_SECONDS = 60
+    FETCH_URL_CURL_CFFI_IMPERSONATE = "chrome"
     FETCH_URL_ALLOWED_CONTENT_TYPES = (
         "text/html",
         "application/xhtml+xml",
         "text/plain",
     )
+    FETCH_URL_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
+        "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate",
+    }
     BLOCKED_HOSTNAMES = {
         "localhost",
         "host.docker.internal",
@@ -65,10 +85,17 @@ class ChatHandler:
         "确认大纲",
         "按这个大纲",
         "就按这个",
+        "开始写",
+        "开始写吧",
+        "你开始写吧",
+        "你开始写",
+        "开始写报告",
+        "开始起草",
         "继续写",
         "继续下一章",
         "开始正文",
         "开始写正文",
+        "开始写正文吧",
         "写第一章",
         "写第二章",
         "写执行摘要",
@@ -81,7 +108,10 @@ class ChatHandler:
         self._turn_context = {
             "can_write_non_plan": True,
             "web_search_disabled": False,
+            "web_search_performed": False,
+            "fetch_url_performed": False,
         }
+        self._fetch_url_cache: Dict[tuple[str, str, str], Dict[str, object]] = {}
         import httpx
 
         http_client = httpx.Client(timeout=120.0)
@@ -445,7 +475,12 @@ class ChatHandler:
                 conversation, _, iteration_compressed, policy = self._fit_conversation_to_budget(conversation)
                 compressed = compressed or iteration_compressed
             except ValueError as exc:
-                self._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+                self._turn_context = {
+                    "can_write_non_plan": True,
+                    "web_search_disabled": False,
+                    "web_search_performed": False,
+                    "fetch_url_performed": False,
+                }
                 yield {"type": "error", "data": str(exc)}
                 return
 
@@ -562,7 +597,12 @@ class ChatHandler:
 
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
-        self._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._turn_context = {
+            "can_write_non_plan": True,
+            "web_search_disabled": False,
+            "web_search_performed": False,
+            "fetch_url_performed": False,
+        }
 
         if total_tokens == 0:
             total_tokens = self._estimate_tokens(conversation)
@@ -618,7 +658,12 @@ class ChatHandler:
                 conversation, _, iteration_compressed, policy = self._fit_conversation_to_budget(conversation)
                 compressed = compressed or iteration_compressed
             except ValueError as exc:
-                self._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+                self._turn_context = {
+                    "can_write_non_plan": True,
+                    "web_search_disabled": False,
+                    "web_search_performed": False,
+                    "fetch_url_performed": False,
+                }
                 return {"content": str(exc), "token_usage": None}
 
             for retry in range(2):
@@ -698,7 +743,12 @@ class ChatHandler:
 
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
-        self._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._turn_context = {
+            "can_write_non_plan": True,
+            "web_search_disabled": False,
+            "web_search_performed": False,
+            "fetch_url_performed": False,
+        }
 
         if total_tokens == 0:
             total_tokens = self._estimate_tokens(conversation)
@@ -886,6 +936,11 @@ class ChatHandler:
                         "status": "error",
                         "message": "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。",
                     }
+                if self._should_require_fetch_url_before_write(project_id, args["file_path"]):
+                    return {
+                        "status": "error",
+                        "message": "本轮已经做过 web_search，但还没调用 fetch_url 阅读网页正文。请先对候选链接使用 fetch_url，再写正式文件。",
+                    }
                 normalized_path = self.skill_engine.validate_plan_write(project_id, args["file_path"])
                 self.skill_engine.write_file(project_id, normalized_path, args["content"])
                 return {"status": "success", "message": f"已写入文件: {normalized_path}"}
@@ -904,9 +959,14 @@ class ChatHandler:
                 result = self._web_search(args["query"])
                 if result.get("disable_for_turn"):
                     self._turn_context["web_search_disabled"] = True
+                if result.get("status") == "success":
+                    self._turn_context["web_search_performed"] = True
                 return {key: value for key, value in result.items() if key != "disable_for_turn"}
             if func_name == "fetch_url":
-                return self._fetch_url(args["url"])
+                result = self._fetch_url(project_id, args["url"])
+                if result.get("status") == "success":
+                    self._turn_context["fetch_url_performed"] = True
+                return result
             return {"status": "error", "message": f"未知工具: {func_name}"}
         except json.JSONDecodeError as e:
             logging.error(f"工具参数解析失败: {func_name}, 错误: {str(e)}")
@@ -981,66 +1041,259 @@ class ChatHandler:
                 "disable_for_turn": True,
             }
 
-    def _fetch_url(self, url: str) -> Dict[str, str | bool]:
+    def _fetch_url(self, project_id: str, url: str) -> Dict[str, str | bool]:
         parsed = self._validate_fetch_url(url)
+        original_url = parsed.geturl()
+        primary_url = self._upgrade_fetch_url(original_url)
+        current_cache_url = primary_url
+        if parsed.scheme == "http":
+            fallback_cache_hit = self._get_cached_fetch_result(project_id, original_url, "http_fallback")
+            if fallback_cache_hit is not None:
+                return fallback_cache_hit
+        primary_cache_hit = self._get_cached_fetch_result(project_id, primary_url, "https_first")
+        if primary_cache_hit is not None:
+            return primary_cache_hit
         response = None
+        final_url = original_url
+        request_mode = "https_first"
 
         try:
-            response = requests.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=15,
-                stream=True,
-                allow_redirects=True,
-            )
+            try:
+                response, final_url = self._request_fetch_response(primary_url)
+            except requests.exceptions.RequestException as exc:
+                if primary_url != original_url and self._should_retry_fetch_over_http(exc):
+                    fallback_cache_hit = self._get_cached_fetch_result(project_id, original_url, "http_fallback")
+                    if fallback_cache_hit is not None:
+                        return fallback_cache_hit
+                    request_mode = "http_fallback"
+                    current_cache_url = original_url
+                    response, final_url = self._request_fetch_response(original_url)
+                else:
+                    raise
 
-            final_url = response.url if isinstance(getattr(response, "url", None), str) else url
-            self._validate_fetch_url(final_url)
+            content_type = self._normalize_fetch_content_type(response)
+            if content_type and content_type not in self.FETCH_URL_ALLOWED_CONTENT_TYPES:
+                result = self._build_fetch_error(
+                    f"暂不支持读取该类型网页内容：{content_type}",
+                    "unsupported_content_type",
+                    original_url,
+                    final_url,
+                )
+                self._store_fetch_error_cache(project_id, current_cache_url, request_mode, result)
+                return result
 
-            if response.status_code != 200:
-                return {
-                    "status": "error",
-                    "message": f"网页抓取失败（状态码：{response.status_code}）",
-                }
+            body, overflow = self._read_response_bytes(response)
+            if overflow:
+                result = self._build_fetch_error(
+                    "网页响应过大，当前版本暂不支持读取。",
+                    "response_too_large",
+                    original_url,
+                    final_url,
+                )
+                self._store_fetch_error_cache(project_id, current_cache_url, request_mode, result)
+                return result
 
-            content_type = str(response.headers.get("Content-Type", "")).lower()
-            if content_type and not any(token in content_type for token in self.FETCH_URL_ALLOWED_CONTENT_TYPES):
-                return {
-                    "status": "error",
-                    "message": f"暂不支持读取该类型网页内容：{content_type}",
-                }
-
-            raw_text = self._read_response_text(response)
+            raw_text = self._decode_response_bytes(response, body)
             if not raw_text.strip():
-                return {"status": "error", "message": "网页内容为空，无法提取正文。"}
+                return self._build_fetch_error(
+                    "网页内容为空，无法提取正文。",
+                    "empty_content",
+                    original_url,
+                    final_url,
+                )
+
+            classified_error = self._classify_fetch_page(response.status_code, response.headers, raw_text)
+            if classified_error:
+                result = self._build_fetch_error(
+                    self._fetch_error_message_for_type(classified_error),
+                    classified_error,
+                    original_url,
+                    final_url,
+                )
+                self._store_fetch_error_cache(project_id, current_cache_url, request_mode, result)
+                return result
 
             title = self._extract_html_title(raw_text) or parsed.hostname or final_url
-            if "text/plain" in content_type:
+            if content_type == "text/plain":
                 content = raw_text.strip()
             else:
                 content = self._extract_readable_text(raw_text)
 
             if not content.strip():
-                return {"status": "error", "message": "网页正文提取失败。"}
+                return self._build_fetch_error(
+                    "网页正文提取失败。",
+                    "non_readable_page",
+                    original_url,
+                    final_url,
+                )
 
             content, truncated = self._truncate_text(content)
-            return {
+            result = {
                 "status": "success",
                 "title": title,
                 "url": final_url,
+                "final_url": final_url,
                 "content": content,
+                "content_type": content_type or "text/html",
                 "truncated": truncated,
             }
+            self._store_fetch_success_cache(project_id, current_cache_url, request_mode, result)
+            return result
         except ValueError as exc:
-            return {"status": "error", "message": str(exc)}
+            payload = self._parse_fetch_value_error(exc)
+            result = self._build_fetch_error(
+                payload["message"],
+                payload["error_type"],
+                original_url,
+                payload.get("final_url") or final_url,
+            )
+            self._store_fetch_error_cache(
+                project_id,
+                current_cache_url,
+                request_mode,
+                result,
+            )
+            return result
+        except requests.exceptions.Timeout:
+            return self._build_fetch_error("网页抓取超时。", "timeout", original_url, final_url)
+        except requests.exceptions.RequestException as exc:
+            return self._build_fetch_error(f"网页抓取失败: {str(exc)}", "request_failed", original_url, final_url)
         except Exception as exc:
-            return {"status": "error", "message": f"网页抓取失败: {str(exc)}"}
+            return self._build_fetch_error(f"网页抓取失败: {str(exc)}", "request_failed", original_url, final_url)
         finally:
             if response is not None:
                 try:
                     response.close()
                 except Exception:
                     pass
+
+    def _build_fetch_error(self, message: str, error_type: str, url: str, final_url: str | None = None):
+        result: Dict[str, str] = {
+            "status": "error",
+            "message": message,
+            "url": url,
+            "error_type": error_type,
+        }
+        if final_url:
+            result["final_url"] = final_url
+        return result
+
+    def _parse_fetch_value_error(self, exc: ValueError) -> Dict[str, str]:
+        raw_message = str(exc)
+        if raw_message.startswith("{"):
+            try:
+                payload = json.loads(raw_message)
+                if isinstance(payload, dict) and payload.get("message") and payload.get("error_type"):
+                    return payload
+            except Exception:
+                pass
+        return {"message": raw_message, "error_type": "invalid_url"}
+
+    def _get_cached_fetch_result(self, project_id: str, cache_url: str, request_mode: str):
+        cache_key = (project_id, cache_url, request_mode)
+        entry = self._fetch_url_cache.get(cache_key)
+        if not entry:
+            return None
+        if float(entry["expires_at"]) <= time.time():
+            self._fetch_url_cache.pop(cache_key, None)
+            return None
+        return dict(entry["result"])
+
+    def _store_fetch_success_cache(self, project_id: str, cache_url: str, request_mode: str, result: Dict[str, str | bool]):
+        self._fetch_url_cache[(project_id, cache_url, request_mode)] = {
+            "expires_at": time.time() + self.FETCH_URL_SUCCESS_CACHE_TTL_SECONDS,
+            "result": dict(result),
+        }
+
+    def _store_fetch_error_cache(self, project_id: str, cache_url: str, request_mode: str, result: Dict[str, str | bool]):
+        if result.get("error_type") not in {
+            "http_status_404",
+            "redirect_blocked",
+            "redirect_limit_exceeded",
+            "unsupported_content_type",
+            "response_too_large",
+        }:
+            return
+        self._fetch_url_cache[(project_id, cache_url, request_mode)] = {
+            "expires_at": time.time() + self.FETCH_URL_NEGATIVE_CACHE_TTL_SECONDS,
+            "result": dict(result),
+        }
+
+    def _upgrade_fetch_url(self, url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.scheme != "http":
+            return parsed.geturl()
+        return parsed._replace(scheme="https").geturl()
+
+    def _should_retry_fetch_over_http(self, exc: Exception) -> bool:
+        return isinstance(exc, (requests.exceptions.SSLError, requests.exceptions.ConnectionError))
+
+    def _request_fetch_response(self, start_url: str):
+        current_url = start_url
+        redirects = 0
+        response = None
+
+        while True:
+            try:
+                response = self._fetch_http_get(current_url)
+            except Exception:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                raise
+
+            final_url = response.url if isinstance(getattr(response, "url", None), str) else current_url
+            self._validate_fetch_url(final_url)
+
+            if not self._is_fetch_redirect(response.status_code):
+                return response, final_url
+
+            location = str(response.headers.get("Location", "")).strip()
+            if not location:
+                response.close()
+                raise ValueError(json.dumps({"message": "网页跳转缺少目标地址。", "error_type": "redirect_missing_location", "final_url": final_url}, ensure_ascii=False))
+
+            if redirects >= self.FETCH_URL_MAX_REDIRECTS:
+                response.close()
+                raise ValueError(json.dumps({"message": "网页跳转次数过多。", "error_type": "redirect_limit_exceeded", "final_url": final_url}, ensure_ascii=False))
+
+            next_url = urljoin(current_url, location)
+            next_parsed = self._validate_fetch_url(next_url)
+
+            redirects += 1
+            current_url = next_parsed.geturl()
+            response.close()
+
+    def _fetch_http_get(self, url: str):
+        if curl_cffi_requests is not None:
+            try:
+                return curl_cffi_requests.get(
+                    url,
+                    timeout=self.FETCH_URL_TIMEOUT_SECONDS,
+                    stream=True,
+                    allow_redirects=False,
+                    impersonate=self.FETCH_URL_CURL_CFFI_IMPERSONATE,
+                )
+            except Exception:
+                pass
+        return requests.get(
+            url,
+            headers=self.FETCH_URL_HEADERS,
+            timeout=self.FETCH_URL_TIMEOUT_SECONDS,
+            stream=True,
+            allow_redirects=False,
+        )
+
+    def _is_fetch_redirect(self, status_code: int) -> bool:
+        return status_code in {301, 302, 303, 307, 308}
+
+    def _normalize_fetch_content_type(self, response) -> str:
+        content_type = str(response.headers.get("Content-Type", "")).lower()
+        if ";" in content_type:
+            content_type = content_type.split(";", 1)[0].strip()
+        return content_type
 
     def _validate_fetch_url(self, raw_url: str):
         parsed = urlparse((raw_url or "").strip())
@@ -1092,25 +1345,182 @@ class ChatHandler:
         ):
             raise ValueError("不允许访问本地或内网地址。")
 
-    def _read_response_text(self, response) -> str:
+    def _read_response_bytes(self, response) -> tuple[bytes, bool]:
         chunks = []
         total = 0
-        response_encoding = getattr(response, "encoding", None)
-        encoding = response_encoding if isinstance(response_encoding, str) and response_encoding else "utf-8"
 
         for chunk in response.iter_content(chunk_size=8192):
             if not chunk:
                 continue
             remaining = self.FETCH_URL_MAX_BYTES - total
             if remaining <= 0:
-                break
+                return b"".join(chunks), True
             piece = chunk[:remaining]
             chunks.append(piece)
             total += len(piece)
-            if total >= self.FETCH_URL_MAX_BYTES:
-                break
+            if len(chunk) > remaining or total > self.FETCH_URL_MAX_BYTES:
+                return b"".join(chunks), True
 
-        return b"".join(chunks).decode(encoding, errors="ignore")
+        return b"".join(chunks), False
+
+    def _decode_response_bytes(self, response, body: bytes) -> str:
+        preferred_utf8_text = self._preferred_utf8_decode(response, body)
+        if preferred_utf8_text is not None:
+            return preferred_utf8_text
+
+        candidates = self._candidate_fetch_encodings(response, body)
+        best_text = ""
+        best_score = float("-inf")
+
+        for encoding in candidates:
+            try:
+                text = body.decode(encoding)
+            except Exception:
+                continue
+            score = self._score_decoded_text(text)
+            if score > best_score:
+                best_text = text
+                best_score = score
+
+        if best_text:
+            return best_text
+        return body.decode("utf-8", errors="ignore")
+
+    def _preferred_utf8_decode(self, response, body: bytes) -> str | None:
+        try:
+            utf8_text = body.decode("utf-8")
+        except Exception:
+            return None
+
+        content_type = str(response.headers.get("Content-Type", ""))
+        header_charset = self._extract_charset_from_content_type(content_type)
+        meta_charset = self._extract_meta_charset(body)
+        weak_charsets = {"latin1", "latin-1", "iso-8859-1", "windows-1252", "cp1252"}
+        explicit_charset = meta_charset or header_charset
+        if explicit_charset and explicit_charset not in weak_charsets and explicit_charset != "utf-8":
+            return None
+        if self._score_decoded_text(utf8_text) <= 0:
+            return None
+        return utf8_text
+
+    def _candidate_fetch_encodings(self, response, body: bytes) -> List[str]:
+        candidates: List[str] = []
+
+        if body.startswith(b"\xef\xbb\xbf"):
+            candidates.append("utf-8-sig")
+        elif body.startswith(b"\xff\xfe"):
+            candidates.append("utf-16")
+        elif body.startswith(b"\xfe\xff"):
+            candidates.append("utf-16")
+
+        response_encoding = self._safe_get_fetch_response_attr(response, "encoding")
+        if isinstance(response_encoding, str) and response_encoding:
+            candidates.append(response_encoding)
+
+        content_type = str(response.headers.get("Content-Type", ""))
+        header_charset = self._extract_charset_from_content_type(content_type)
+        if header_charset:
+            candidates.append(header_charset)
+
+        meta_charset = self._extract_meta_charset(body)
+        if meta_charset:
+            candidates.append(meta_charset)
+
+        apparent = self._safe_get_fetch_response_attr(response, "apparent_encoding")
+        if isinstance(apparent, str) and apparent:
+            candidates.append(apparent)
+
+        candidates.extend(["utf-8", "gb18030", "gbk", "gb2312"])
+        return self._dedupe_preserve_order(candidates)
+
+    def _safe_get_fetch_response_attr(self, response, attr_name: str):
+        try:
+            return getattr(response, attr_name, None)
+        except Exception:
+            return None
+
+    def _extract_charset_from_content_type(self, content_type: str) -> str:
+        match = re.search(r"charset=([A-Za-z0-9._-]+)", content_type, flags=re.IGNORECASE)
+        if not match:
+            return ""
+        return match.group(1).strip().strip("\"'").lower()
+
+    def _extract_meta_charset(self, body: bytes) -> str:
+        head = body[:4096].decode("ascii", errors="ignore")
+        direct_match = re.search(r"<meta[^>]+charset=['\"]?([A-Za-z0-9._-]+)", head, flags=re.IGNORECASE)
+        if direct_match:
+            return direct_match.group(1).strip().lower()
+        equiv_match = re.search(
+            r"<meta[^>]+content=['\"][^>]*charset=([A-Za-z0-9._-]+)",
+            head,
+            flags=re.IGNORECASE,
+        )
+        if not equiv_match:
+            return ""
+        return equiv_match.group(1).strip().lower()
+
+    def _dedupe_preserve_order(self, items: List[str]) -> List[str]:
+        deduped: List[str] = []
+        seen = set()
+        for item in items:
+            normalized = (item or "").strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+        return deduped
+
+    def _looks_like_garbled_text(self, text: str) -> bool:
+        stripped = text.strip()
+        if not stripped:
+            return False
+        replacement_ratio = stripped.count("\ufffd") / max(len(stripped), 1)
+        if replacement_ratio > 0.02:
+            return True
+        return False
+
+    def _score_decoded_text(self, text: str) -> float:
+        stripped = text.strip()
+        if not stripped:
+            return float("-inf")
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", stripped))
+        ascii_readable = len(re.findall(r"[A-Za-z0-9\s.,;:!?()\"'\-_/]", stripped))
+        replacement_count = stripped.count("\ufffd")
+        suspicious_count = sum(
+            stripped.count(token)
+            for token in ("Ã", "Â", "Ð", "Ñ", "ä¸", "å", "æ", "ç", "ï¼", "â€", "â€™", "â€œ")
+        )
+        return (cjk_count * 4.0) + (ascii_readable * 0.05) - (replacement_count * 30.0) - (suspicious_count * 8.0)
+
+    def _classify_fetch_page(self, status_code: int, headers, text: str) -> str | None:
+        lowered_text = text.lower()
+        lowered_title = self._extract_html_title(text).lower()
+        header_value = str(headers.get("cf-mitigated", "")).lower()
+
+        if header_value == "challenge" or "just a moment" in lowered_title or "cf challenge" in lowered_text:
+            return "challenge_page"
+        if (
+            "百度安全验证" in text
+            or "访问过于频繁" in text
+            or "location.href='/index/'" in text
+            or "location.href=\"/index/\"" in text
+        ):
+            return "non_readable_page"
+        if self._looks_like_redirect_shell(text):
+            return "non_readable_page"
+        if status_code != 200:
+            return f"http_status_{status_code}"
+        return None
+
+    def _fetch_error_message_for_type(self, error_type: str) -> str:
+        if error_type == "challenge_page":
+            return "目标网页返回了挑战页，当前 HTTP 抓取无法继续。"
+        if error_type == "non_readable_page":
+            return "抓到的是错误页或壳页，未提取到可用正文。"
+        if error_type.startswith("http_status_"):
+            status_code = error_type.rsplit("_", 1)[-1]
+            return f"网页抓取失败（状态码：{status_code}）"
+        return "网页抓取失败。"
 
     def _extract_html_title(self, html_text: str) -> str:
         match = re.search(r"<title[^>]*>(.*?)</title>", html_text, flags=re.IGNORECASE | re.DOTALL)
@@ -1134,7 +1544,37 @@ class ChatHandler:
         except Exception:
             pass
 
-        return self._strip_html(html_text)
+        return self._extract_fallback_text(html_text)
+
+    def _looks_like_redirect_shell(self, html_text: str) -> bool:
+        lowered_html = html_text.lower()
+        if not any(marker in lowered_html for marker in ("window.location", "redirecting...", "please wait", "location.replace(")):
+            return False
+        extracted = self._extract_fallback_text(html_text).lower()
+        if len(extracted) >= 80:
+            return False
+        if "<article" in lowered_html or "<main" in lowered_html:
+            return False
+        return any(marker in extracted for marker in ("redirecting", "please wait", "loading", "login"))
+
+    def _extract_fallback_text(self, html_text: str) -> str:
+        cleaned = re.sub(
+            r"<(script|style|noscript|template)[^>]*>.*?</\1>",
+            " ",
+            html_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for tag_name in ("article", "main", "body"):
+            match = re.search(
+                rf"<{tag_name}[^>]*>(.*?)</{tag_name}>",
+                cleaned,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if match:
+                candidate = self._strip_html(match.group(1))
+                if candidate:
+                    return candidate
+        return self._strip_html(cleaned)
 
     def _truncate_text(self, text: str) -> tuple[str, bool]:
         normalized = text.strip()
@@ -1198,19 +1638,28 @@ class ChatHandler:
         skill_prompt = self.skill_engine.get_skill_prompt()
         project_context = self.skill_engine.build_project_context(project_id)
         if self._turn_context.get("can_write_non_plan", True):
-            turn_rule = "本轮如用户明确要求继续正文，可在更新 plan 后撰写正文。"
+            turn_rule = (
+                "本轮如用户明确要求继续正文，可在更新 plan 后撰写正文。"
+                "像“你开始写吧”“开始写吧”“开始写正文吧”“继续写正文”都算明确授权。"
+            )
         else:
             turn_rule = (
                 "本轮只能做两类事：1）继续问清关键信息；2）更新 `plan/` 内文件。"
                 "在用户明确确认大纲或明确要求继续正文前，禁止写正文、章节草稿、report_draft 或最终报告。"
                 "如果信息不足，提出问题后就停止本轮，不要擅自继续。"
             )
-        return f"{skill_prompt}\n\n## 当前轮次约束\n{turn_rule}\n\n{project_context}"
+        evidence_rule = (
+            "如果本轮调用了 `web_search` 并准备把外部网页信息写进正式文件，"
+            "必须先对候选链接调用 `fetch_url` 阅读正文；搜索结果摘要不能直接当作正式依据。"
+        )
+        return f"{skill_prompt}\n\n## 当前轮次约束\n{turn_rule}\n{evidence_rule}\n\n{project_context}"
 
     def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, bool]:
         return {
             "can_write_non_plan": self._should_allow_non_plan_write(project_id, user_message),
             "web_search_disabled": False,
+            "web_search_performed": False,
+            "fetch_url_performed": False,
         }
 
     def _should_allow_non_plan_write(self, project_id: str, user_message: str) -> bool:
@@ -1294,3 +1743,28 @@ class ChatHandler:
         except ValueError:
             return False
         return not normalized.startswith("plan/") and not self._turn_context.get("can_write_non_plan", True)
+
+    def _should_require_fetch_url_before_write(self, project_id: str, file_path: str) -> bool:
+        if not self._turn_context.get("web_search_performed"):
+            return False
+        if self._turn_context.get("fetch_url_performed"):
+            return False
+
+        try:
+            normalized = self.skill_engine.normalize_file_path(project_id, file_path)
+        except ValueError:
+            return False
+
+        evidence_paths = {
+            "plan/references.md",
+            "plan/outline.md",
+            "plan/research-plan.md",
+            "plan/data-log.md",
+            "plan/analysis-notes.md",
+            "report_draft_v1.md",
+            "content/report.md",
+            "content/draft.md",
+            "content/final-report.md",
+            "output/final-report.md",
+        }
+        return normalized in evidence_paths

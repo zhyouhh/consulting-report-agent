@@ -6,6 +6,7 @@ from unittest import mock
 from types import SimpleNamespace
 
 import httpx
+import requests
 
 from backend.chat import ChatHandler
 from backend.config import Settings
@@ -15,6 +16,9 @@ from backend.skill import SkillEngine
 class ChatRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+        self._curl_cffi_patcher = mock.patch("backend.chat.curl_cffi_requests", None, create=True)
+        self._curl_cffi_patcher.start()
+        self.addCleanup(self._curl_cffi_patcher.stop)
 
     def _make_tool_call(self, name: str, arguments: str):
         return type(
@@ -78,6 +82,31 @@ class ChatRuntimeTests(unittest.TestCase):
         return Settings(
             **payload,
         )
+
+    def _allow_public_fetch_host(self, mock_getaddrinfo, ip: str = "93.184.216.34"):
+        mock_getaddrinfo.return_value = [
+            (2, 1, 6, "", (ip, 443)),
+        ]
+
+    def _make_fetch_response(
+        self,
+        *,
+        url: str,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        body: bytes = b"",
+        encoding: str | None = None,
+        apparent_encoding: str = "utf-8",
+    ):
+        response = mock.Mock()
+        response.url = url
+        response.status_code = status_code
+        response.headers = headers or {}
+        response.encoding = encoding
+        response.apparent_encoding = apparent_encoding
+        response.iter_content = mock.Mock(return_value=[body])
+        response.close = mock.Mock()
+        return response
 
     @mock.patch("backend.chat.OpenAI")
     def test_get_active_model_name_prefers_mode_specific_field(self, mock_openai):
@@ -1013,6 +1042,26 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertFalse(handler._should_allow_non_plan_write(project["id"], "继续"))
 
     @mock.patch("backend.chat.OpenAI")
+    def test_should_allow_non_plan_write_when_user_says_start_writing_plainly(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
+
+            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "你开始写吧"))
+
+    @mock.patch("backend.chat.OpenAI")
     def test_should_allow_non_plan_write_when_content_final_report_exists_and_user_asks_to_continue(self, mock_openai):
         del mock_openai
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1037,6 +1086,47 @@ class ChatRuntimeTests(unittest.TestCase):
             handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
 
             self.assertTrue(handler._should_allow_non_plan_write(project["id"], "继续完善"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_handler_write_file_requires_fetch_url_after_web_search_before_formal_external_write(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            settings = Settings(
+                mode="managed",
+                managed_base_url="https://newapi.z0y0h.work/client/v1",
+                managed_model="gemini-3-flash",
+                projects_dir=projects_dir,
+                skill_dir=self.repo_skill_dir,
+            )
+            handler = ChatHandler(settings, engine)
+            handler._turn_context = {
+                "can_write_non_plan": True,
+                "web_search_disabled": False,
+                "web_search_performed": True,
+                "fetch_url_performed": False,
+            }
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    '{"file_path":"plan/references.md","content":"# References\\n\\n- Example source"}',
+                ),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("fetch_url", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_handler_write_file_rejects_outline_before_evidence_gate_is_satisfied(self, mock_openai):
@@ -1472,6 +1562,67 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("fetch_url", tool_names)
 
     @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.curl_cffi_requests", create=True)
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_prefers_curl_cffi_before_requests(
+        self,
+        mock_getaddrinfo,
+        mock_requests_get,
+        mock_curl_cffi_requests,
+        mock_openai,
+    ):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_curl_cffi_requests.get.return_value = self._make_fetch_response(
+            url="https://example.com/article",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body><article>curl_cffi body.</article></body></html>",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/article"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn("curl_cffi body", result["content"])
+        mock_curl_cffi_requests.get.assert_called()
+        mock_requests_get.assert_not_called()
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.curl_cffi_requests", create=True)
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_falls_back_to_requests_when_curl_cffi_errors(
+        self,
+        mock_getaddrinfo,
+        mock_requests_get,
+        mock_curl_cffi_requests,
+        mock_openai,
+    ):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_curl_cffi_requests.get.side_effect = RuntimeError("curl transport failed")
+        mock_requests_get.return_value = self._make_fetch_response(
+            url="https://example.com/article",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body><article>requests fallback body.</article></body></html>",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/article"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn("requests fallback body", result["content"])
+        mock_curl_cffi_requests.get.assert_called()
+        mock_requests_get.assert_called()
+
+    @mock.patch("backend.chat.OpenAI")
     @mock.patch("backend.chat.requests.get")
     @mock.patch("backend.chat.socket.getaddrinfo")
     def test_fetch_url_reads_article_text_from_html(self, mock_getaddrinfo, mock_get, mock_openai):
@@ -1527,6 +1678,729 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("核心判断", result["content"])
         self.assertIn("这是网页正文", result["content"])
         mock_get.assert_called_once()
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_success_preserves_url_and_adds_final_url(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/final",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=(
+                b"<html><head><title>Example</title></head>"
+                b"<body><article>Hello world.</article></body></html>"
+            ),
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/start"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["url"], "https://example.com/final")
+        self.assertEqual(result["final_url"], "https://example.com/final")
+        self.assertEqual(result["content_type"], "text/html")
+        self.assertNotIn("error_type", result)
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_allows_same_host_redirect(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.side_effect = [
+            self._make_fetch_response(
+                url="https://example.com/start",
+                status_code=302,
+                headers={"Location": "/final", "Content-Type": "text/html"},
+            ),
+            self._make_fetch_response(
+                url="https://example.com/final",
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=b"<html><body><article>Readable body.</article></body></html>",
+            ),
+        ]
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/start"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["final_url"], "https://example.com/final")
+        self.assertGreaterEqual(mock_get.call_count, 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_allows_www_bare_domain_redirect(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.side_effect = [
+            self._make_fetch_response(
+                url="https://example.com/start",
+                status_code=302,
+                headers={"Location": "https://www.example.com/final", "Content-Type": "text/html"},
+            ),
+            self._make_fetch_response(
+                url="https://www.example.com/final",
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=b"<html><body><article>Readable body.</article></body></html>",
+            ),
+        ]
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/start"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["final_url"], "https://www.example.com/final")
+        self.assertGreaterEqual(mock_get.call_count, 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_allows_public_cross_host_redirect(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.side_effect = [
+            self._make_fetch_response(
+                url="https://example.com/start",
+                status_code=302,
+                headers={"Location": "https://canonical.example.net/final", "Content-Type": "text/html"},
+            ),
+            self._make_fetch_response(
+                url="https://canonical.example.net/final",
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=b"<html><body><article>Canonical target.</article></body></html>",
+            ),
+        ]
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/start"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["final_url"], "https://canonical.example.net/final")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_blocks_private_cross_host_redirect(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/start",
+            status_code=302,
+            headers={"Location": "https://localhost/private", "Content-Type": "text/html"},
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/start"}'),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("不允许访问", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_rejects_redirect_limit(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.side_effect = [
+            self._make_fetch_response(
+                url=f"https://example.com/{index}",
+                status_code=302,
+                headers={"Location": f"/{index + 1}", "Content-Type": "text/html"},
+            )
+            for index in range(8)
+        ]
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/0"}'),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_type"], "redirect_limit_exceeded")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_upgrades_http_to_https_first(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/page",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body><article>Secure body.</article></body></html>",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"http://example.com/page"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(mock_get.call_args_list[0].args[0], "https://example.com/page")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_falls_back_to_http_only_for_tls_failure(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.side_effect = [
+            requests.exceptions.SSLError("tls failed"),
+            self._make_fetch_response(
+                url="http://example.com/page",
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=b"<html><body><article>HTTP fallback body.</article></body></html>",
+            ),
+        ]
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"http://example.com/page"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            [call.args[0] for call in mock_get.call_args_list],
+            ["https://example.com/page", "http://example.com/page"],
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_rejects_response_body_over_hard_limit(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/huge",
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            body=b"x" * (ChatHandler.FETCH_URL_MAX_BYTES + 1),
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/huge"}'),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_type"], "response_too_large")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_allows_large_html_page_under_updated_limit(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        large_article = (
+            "<html><head><title>Large page</title></head><body><article>"
+            + ("人工智能发展趋势 " * 45000)
+            + "</article></body></html>"
+        ).encode("utf-8")
+        self.assertGreater(len(large_article), 700_000)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/large",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=large_article,
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/large"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["title"], "Large page")
+        self.assertTrue(result["truncated"])
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_decodes_meta_charset_gb18030_html(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        title_text = "政策"
+        body_text = "中国经济发展"
+        body = (
+            f'<html><head><meta charset="gb18030"><title>{title_text}</title></head>'
+            f"<body><article>{body_text}</article></body></html>"
+        ).encode("gb18030")
+        mock_get.return_value = self._make_fetch_response(
+            url="https://gov.example.cn/policy",
+            headers={"Content-Type": "text/html"},
+            body=body,
+            apparent_encoding="utf-8",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://gov.example.cn/policy"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["title"], title_text)
+        self.assertIn(body_text, result["content"])
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_classifies_challenge_page(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://blocked.example.com",
+            status_code=403,
+            headers={"Content-Type": "text/html", "cf-mitigated": "challenge"},
+            body=b"<html><title>Just a moment...</title><body>cf challenge ray id</body></html>",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://blocked.example.com"}'),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_type"], "challenge_page")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_classifies_baidu_shell_as_non_readable(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://baike.baidu.com/item/demo",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=(
+                "<html><title>百度安全验证</title><body>"
+                "访问过于频繁，请稍后再试"
+                "<script>location.href='/index/'</script>"
+                "</body></html>"
+            ).encode("utf-8"),
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://baike.baidu.com/item/demo"}'),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_type"], "non_readable_page")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_caches_success_within_same_project(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/article",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body><article>Cache me.</article></body></html>",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        first = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/article"}'),
+        )
+        second = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/article"}'),
+        )
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(second["status"], "success")
+        self.assertEqual(mock_get.call_count, 1)
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_negative_caches_404(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/missing",
+            status_code=404,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body>missing</body></html>",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        first = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/missing"}'),
+        )
+        second = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/missing"}'),
+        )
+
+        self.assertEqual(first["error_type"], "http_status_404")
+        self.assertEqual(second["error_type"], "http_status_404")
+        self.assertEqual(mock_get.call_count, 1)
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_negative_caches_redirect_limit_exceeded(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.side_effect = [
+            self._make_fetch_response(
+                url=f"https://example.com/{index}",
+                status_code=302,
+                headers={"Location": f"/{index + 1}", "Content-Type": "text/html"},
+            )
+            for index in range(8)
+        ]
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        first = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/start"}'),
+        )
+        second = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/start"}'),
+        )
+
+        self.assertEqual(first["error_type"], "redirect_limit_exceeded")
+        self.assertEqual(second["error_type"], "redirect_limit_exceeded")
+        self.assertEqual(mock_get.call_count, 6)
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_does_not_negative_cache_403(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://blocked.example.com",
+            status_code=403,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body>Forbidden</body></html>",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        first = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://blocked.example.com"}'),
+        )
+        second = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://blocked.example.com"}'),
+        )
+
+        self.assertEqual(first["error_type"], "http_status_403")
+        self.assertEqual(second["error_type"], "http_status_403")
+        self.assertEqual(mock_get.call_count, 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_cache_is_scoped_per_project_id(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/article",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body><article>Project cache.</article></body></html>",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        first = handler._execute_tool(
+            "project-a",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/article"}'),
+        )
+        second = handler._execute_tool(
+            "project-b",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/article"}'),
+        )
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(second["status"], "success")
+        self.assertEqual(mock_get.call_count, 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_cache_separates_http_fallback_mode(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.side_effect = [
+            requests.exceptions.SSLError("tls failed"),
+            self._make_fetch_response(
+                url="http://example.com/page",
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=b"<html><body><article>HTTP fallback body.</article></body></html>",
+            ),
+            self._make_fetch_response(
+                url="https://example.com/page",
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=b"<html><body><article>HTTPS body.</article></body></html>",
+            ),
+        ]
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        first = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"http://example.com/page"}'),
+        )
+        second = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/page"}'),
+        )
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(second["status"], "success")
+        self.assertIn("HTTP fallback body", first["content"])
+        self.assertIn("HTTPS body", second["content"])
+        self.assertEqual(mock_get.call_count, 3)
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_reuses_http_fallback_cache_without_retrying_https(
+        self,
+        mock_getaddrinfo,
+        mock_get,
+        mock_openai,
+    ):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.side_effect = [
+            requests.exceptions.SSLError("tls failed"),
+            self._make_fetch_response(
+                url="http://example.com/page",
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=b"<html><body><article>HTTP fallback body.</article></body></html>",
+            ),
+        ]
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        first = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"http://example.com/page"}'),
+        )
+        second = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"http://example.com/page"}'),
+        )
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(second["status"], "success")
+        self.assertEqual(mock_get.call_count, 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_returns_plain_text_verbatim(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/readme.txt",
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            body=b"line one\nline two\n",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/readme.txt"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["content"], "line one\nline two")
+        self.assertEqual(result["content_type"], "text/plain")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_rejects_pdf_with_typed_error(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/file.pdf",
+            headers={"Content-Type": "application/pdf"},
+            body=b"%PDF-1.7",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/file.pdf"}'),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_type"], "unsupported_content_type")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_falls_back_when_trafilatura_returns_empty(self, mock_getaddrinfo, mock_get, mock_openai):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/fallback",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=(
+                b"<html><body><main><h1>Title</h1><p>Paragraph one.</p>"
+                b"<p>Paragraph two.</p></main></body></html>"
+            ),
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        with mock.patch("trafilatura.extract", return_value=""):
+            result = handler._execute_tool(
+                "demo",
+                self._make_tool_call("fetch_url", '{"url":"https://example.com/fallback"}'),
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn("Paragraph one.", result["content"])
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_rejects_script_shell_when_trafilatura_returns_empty(
+        self,
+        mock_getaddrinfo,
+        mock_get,
+        mock_openai,
+    ):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/redirect",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=(
+                b"<html><body><script>window.location='/login'</script>"
+                b"<div>Redirecting...</div></body></html>"
+            ),
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        with mock.patch("trafilatura.extract", return_value=""):
+            result = handler._execute_tool(
+                "demo",
+                self._make_tool_call("fetch_url", '{"url":"https://example.com/redirect"}'),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_type"], "non_readable_page")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_allows_real_article_that_mentions_redirecting(
+        self,
+        mock_getaddrinfo,
+        mock_get,
+        mock_openai,
+    ):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/article-about-redirects",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=(
+                b"<html><body><article><h1>Redirect guide</h1>"
+                b"<p>If your app shows Redirecting..., inspect the window.location flow first.</p>"
+                b"<p>This article explains when to use location.replace and how to avoid loops.</p>"
+                b"</article></body></html>"
+            ),
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        with mock.patch("trafilatura.extract", return_value=""):
+            result = handler._execute_tool(
+                "demo",
+                self._make_tool_call("fetch_url", '{"url":"https://example.com/article-about-redirects"}'),
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn("window.location flow", result["content"])
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_prefers_utf8_when_header_charset_is_misdeclared(
+        self,
+        mock_getaddrinfo,
+        mock_get,
+        mock_openai,
+    ):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        expected_text = "中国经济发展"
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/misdeclared",
+            headers={"Content-Type": "text/html; charset=latin1"},
+            body=f"<html><body><article>{expected_text}</article></body></html>".encode("utf-8"),
+            apparent_encoding="utf-8",
+        )
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/misdeclared"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn(expected_text, result["content"])
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_ignores_apparent_encoding_when_stream_is_already_consumed(
+        self,
+        mock_getaddrinfo,
+        mock_get,
+        mock_openai,
+    ):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        response = self._make_fetch_response(
+            url="https://example.com/article",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body><article>Readable body.</article></body></html>",
+        )
+        type(response).apparent_encoding = mock.PropertyMock(side_effect=RuntimeError("already consumed"))
+        mock_get.return_value = response
+        handler = ChatHandler(self._make_settings(), SkillEngine(self._make_settings().projects_dir, self.repo_skill_dir))
+
+        result = handler._execute_tool(
+            "demo",
+            self._make_tool_call("fetch_url", '{"url":"https://example.com/article"}'),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn("Readable body.", result["content"])
 
     @mock.patch("backend.chat.OpenAI")
     @mock.patch("backend.chat.requests.get")
