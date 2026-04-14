@@ -345,12 +345,17 @@ async def clear_conversation(project_id: str):
     project_path = skill_engine.get_project_path(project_id)
     if not project_path:
         raise HTTPException(status_code=404, detail="项目不存在")
-    conv_file = project_path / "conversation.json"
-    if conv_file.exists():
-        conv_file.unlink()
-    compact_state = project_path / "conversation_compact_state.json"
-    if compact_state.exists():
-        compact_state.unlink()
+    handler = get_chat_handler(project_id)
+    request_lock = handler._get_project_request_lock(project_id)
+    with request_lock:
+        for file_name in (
+            "conversation.json",
+            "conversation_state.json",
+            "conversation_compact_state.json",
+        ):
+            target_path = project_path / file_name
+            if target_path.exists():
+                target_path.unlink()
     return {"status": "ok"}
 
 

@@ -1,12 +1,14 @@
 import base64
 import ipaddress
 import json
+import logging
 import re
 import requests
 import socket
+import threading
 import time
 from datetime import datetime
-from typing import Dict, List
+from typing import Callable, Dict, List
 from html import unescape
 from urllib.parse import urljoin, urlparse
 
@@ -37,6 +39,11 @@ MANAGED_STREAM_READ_TIMEOUT_SECONDS = 180.0
 CUSTOM_STREAM_READ_TIMEOUT_SECONDS = 90.0
 SLOW_MODEL_STREAM_READ_TIMEOUT_SECONDS = 180.0
 AUTO_COMPACT_TRIGGER_RATIO = 0.9
+POST_COMPACT_SIDECAR_TARGET_BYTES = 24_000
+_CONVERSATION_STATE_LOCKS: dict[str, threading.RLock] = {}
+_CONVERSATION_STATE_LOCKS_GUARD = threading.Lock()
+_PROJECT_REQUEST_LOCKS: dict[str, threading.RLock] = {}
+_PROJECT_REQUEST_LOCKS_GUARD = threading.Lock()
 
 
 class ChatHandler:
@@ -104,6 +111,7 @@ class ChatHandler:
         "继续完善",
         "继续撰写",
     ]
+
     def __init__(self, settings: Settings, skill_engine: SkillEngine):
         self.settings = settings
         self.skill_engine = skill_engine
@@ -230,28 +238,87 @@ class ChatHandler:
     def _fit_conversation_to_budget(
         self,
         conversation: List[Dict],
-    ) -> tuple[List[Dict], int, bool, ResolvedContextPolicy]:
+        *,
+        current_turn_start_index: int | None = None,
+        return_current_turn_start_index: bool = False,
+    ) -> tuple[List[Dict], int, bool, ResolvedContextPolicy] | tuple[List[Dict], int, bool, ResolvedContextPolicy, int]:
         policy = self._resolve_context_policy()
         current_conversation = conversation
         current_tokens = self._estimate_tokens(current_conversation)
         compressed = False
 
+        effective_current_turn_start_index = self._get_budget_current_turn_start(
+            current_conversation,
+            minimum_index=1,
+            current_turn_start_index=current_turn_start_index,
+        )
         if current_tokens <= policy.compress_threshold:
-            return current_conversation, current_tokens, compressed, policy
+            return self._fit_budget_result(
+                current_conversation,
+                current_tokens,
+                compressed,
+                policy,
+                effective_current_turn_start_index,
+                return_current_turn_start_index=return_current_turn_start_index,
+            )
 
+        system_message, summary_message, memory_items, visible_messages, current_turn_messages = (
+            self._split_conversation_for_budget(
+                current_conversation,
+                current_turn_start_index=effective_current_turn_start_index,
+            )
+        )
         previous_tokens = current_tokens
         for _ in range(MAX_BUDGET_FIT_ATTEMPTS):
-            next_conversation = self._compress_conversation(current_conversation)
+            next_visible_messages = visible_messages
+            next_memory_items = memory_items
+            if next_visible_messages:
+                next_visible_messages = self._trim_oldest_visible_group(next_visible_messages)
+            elif next_memory_items:
+                next_memory_items = next_memory_items[1:]
+            else:
+                break
+
+            next_conversation, effective_current_turn_start_index = self._compose_segmented_conversation(
+                system_message,
+                summary_message,
+                next_memory_items,
+                next_visible_messages,
+                current_turn_messages,
+            )
             compressed = True
             next_tokens = self._estimate_tokens(next_conversation)
             if next_tokens <= policy.compress_threshold:
-                return next_conversation, next_tokens, compressed, policy
+                return self._fit_budget_result(
+                    next_conversation,
+                    next_tokens,
+                    compressed,
+                    policy,
+                    effective_current_turn_start_index,
+                    return_current_turn_start_index=return_current_turn_start_index,
+                )
             if next_conversation == current_conversation or next_tokens >= previous_tokens:
                 break
             current_conversation = next_conversation
+            memory_items = next_memory_items
+            visible_messages = next_visible_messages
             previous_tokens = next_tokens
 
         raise ValueError("当前消息或附带材料过大，超过模型上下文预算，请缩短输入或减少附件。")
+
+    def _fit_budget_result(
+        self,
+        conversation: List[Dict],
+        tokens: int,
+        compressed: bool,
+        policy: ResolvedContextPolicy,
+        current_turn_start_index: int,
+        *,
+        return_current_turn_start_index: bool,
+    ):
+        if return_current_turn_start_index:
+            return conversation, tokens, compressed, policy, current_turn_start_index
+        return conversation, tokens, compressed, policy
 
     def _build_usage_payload(
         self,
@@ -473,46 +540,515 @@ class ChatHandler:
             for tool_call in tool_calls
         )
 
+    def _empty_conversation_state(self) -> Dict:
+        return {
+            "version": 1,
+            "events": [],
+            "memory_entries": [],
+            "compact_state": None,
+        }
+
+    def _get_conversation_state_path(self, project_id: str):
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return None
+        return project_path / "conversation_state.json"
+
     def _get_compact_state_path(self, project_id: str):
         project_path = self.skill_engine.get_project_path(project_id)
         if not project_path:
             return None
         return project_path / "conversation_compact_state.json"
 
-    def _load_compact_state(self, project_id: str, history: List[Dict] | None = None) -> Dict | None:
-        compact_state_path = self._get_compact_state_path(project_id)
-        if not compact_state_path or not compact_state_path.exists():
-            return None
-        try:
-            payload = json.loads(compact_state_path.read_text(encoding="utf-8"))
-        except Exception:
-            compact_state_path.unlink(missing_ok=True)
+    def _rename_broken_sidecar(self, path):
+        broken_path = path.with_name(
+            f"{path.name}.broken-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        )
+        path.replace(broken_path)
+
+    def _normalize_compact_state(self, payload: Dict | None) -> Dict | None:
+        if not isinstance(payload, dict):
             return None
 
         summary_text = payload.get("summary_text")
         source_message_count = payload.get("source_message_count")
-        if not isinstance(summary_text, str) or not summary_text.strip() or not isinstance(source_message_count, int):
-            compact_state_path.unlink(missing_ok=True)
+        if (
+            not isinstance(summary_text, str)
+            or not summary_text.strip()
+            or not isinstance(source_message_count, int)
+            or source_message_count < 0
+        ):
             return None
 
-        if history is not None and len(history) < source_message_count:
-            compact_state_path.unlink(missing_ok=True)
-            return None
-        return payload
+        source_memory_entry_count = payload.get("source_memory_entry_count", 0)
+        if not isinstance(source_memory_entry_count, int) or source_memory_entry_count < 0:
+            source_memory_entry_count = 0
 
-    def _save_compact_state_atomically(self, project_id: str, payload: Dict):
-        compact_state_path = self._get_compact_state_path(project_id)
-        if not compact_state_path:
+        normalized = dict(payload)
+        normalized["source_memory_entry_count"] = source_memory_entry_count
+        return normalized
+
+    def _compact_state_is_drifted(
+        self,
+        compact_state: Dict,
+        history: List[Dict] | None,
+        memory_entries: List[Dict],
+    ) -> bool:
+        if history is not None and compact_state["source_message_count"] > len(history):
+            return True
+        return compact_state.get("source_memory_entry_count", 0) > len(memory_entries)
+
+    def _load_legacy_compact_state_into_conversation_state(
+        self,
+        project_id: str,
+        history: List[Dict] | None = None,
+    ) -> Dict | None:
+        lock = self._get_conversation_state_lock(project_id)
+        with lock:
+            compact_state_path = self._get_compact_state_path(project_id)
+            if not compact_state_path or not compact_state_path.exists():
+                return None
+
+            try:
+                payload = json.loads(compact_state_path.read_text(encoding="utf-8"))
+            except Exception:
+                self._rename_broken_sidecar(compact_state_path)
+                return None
+
+            compact_state = self._normalize_compact_state(payload)
+            if not compact_state:
+                self._rename_broken_sidecar(compact_state_path)
+                return self._empty_conversation_state()
+
+            state = self._empty_conversation_state()
+            state["compact_state"] = compact_state
+            if self._compact_state_is_drifted(compact_state, history, state["memory_entries"]):
+                state["compact_state"] = None
+
+            try:
+                self._save_conversation_state_atomically(project_id, state)
+            except Exception:
+                return state
+
+            compact_state_path.unlink(missing_ok=True)
+            return state
+
+    def _load_conversation_state(self, project_id: str, history: List[Dict] | None = None) -> Dict:
+        lock = self._get_conversation_state_lock(project_id)
+        with lock:
+            state_path = self._get_conversation_state_path(project_id)
+            empty_state = self._empty_conversation_state()
+            if not state_path:
+                return empty_state
+
+            if not state_path.exists():
+                migrated_state = self._load_legacy_compact_state_into_conversation_state(project_id, history)
+                if migrated_state is not None:
+                    return migrated_state
+                return empty_state
+
+            try:
+                payload = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                self._rename_broken_sidecar(state_path)
+                return empty_state
+
+            state = self._empty_conversation_state()
+            if isinstance(payload, dict):
+                if isinstance(payload.get("events"), list):
+                    state["events"] = payload["events"]
+                if isinstance(payload.get("memory_entries"), list):
+                    state["memory_entries"] = payload["memory_entries"]
+                state["compact_state"] = self._normalize_compact_state(payload.get("compact_state"))
+
+            compact_state = state.get("compact_state")
+            if compact_state and self._compact_state_is_drifted(compact_state, history, state["memory_entries"]):
+                state["compact_state"] = None
+                self._save_conversation_state_atomically(project_id, state)
+
+            return state
+
+    def _save_conversation_state_atomically(self, project_id: str, payload: Dict):
+        state_path = self._get_conversation_state_path(project_id)
+        if not state_path:
             return
-        compact_state_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = compact_state_path.with_suffix(".json.tmp")
-        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp_path.replace(compact_state_path)
+
+        state = self._empty_conversation_state()
+        if isinstance(payload, dict):
+            if isinstance(payload.get("events"), list):
+                state["events"] = payload["events"]
+            if isinstance(payload.get("memory_entries"), list):
+                state["memory_entries"] = payload["memory_entries"]
+            state["compact_state"] = self._normalize_compact_state(payload.get("compact_state"))
+
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = state_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(state_path)
+
+    def _get_conversation_state_lock(self, project_id: str):
+        lock_key = str(project_id or "")
+        with _CONVERSATION_STATE_LOCKS_GUARD:
+            lock = _CONVERSATION_STATE_LOCKS.get(lock_key)
+            if lock is None:
+                lock = threading.RLock()
+                _CONVERSATION_STATE_LOCKS[lock_key] = lock
+        return lock
+
+    def _get_project_request_lock(self, project_id: str):
+        lock_key = str(project_id or "")
+        with _PROJECT_REQUEST_LOCKS_GUARD:
+            lock = _PROJECT_REQUEST_LOCKS.get(lock_key)
+            if lock is None:
+                lock = threading.RLock()
+                _PROJECT_REQUEST_LOCKS[lock_key] = lock
+        return lock
+
+    def _mutate_conversation_state(
+        self,
+        project_id: str,
+        mutator: Callable[[Dict], Dict | None],
+        history: List[Dict] | None = None,
+    ) -> Dict:
+        lock = self._get_conversation_state_lock(project_id)
+        with lock:
+            state = self._load_conversation_state(project_id, history)
+            mutated = mutator(state)
+            if mutated is None:
+                mutated = state
+            self._save_conversation_state_atomically(project_id, mutated)
+            return mutated
+
+    def _build_tool_persistence_metadata(
+        self,
+        project_id: str,
+        func_name: str,
+        args: Dict,
+        result: Dict,
+        extra: Dict | None = None,
+    ) -> Dict | None:
+        extra = extra or {}
+
+        if func_name == "read_material_file":
+            material_id = args.get("material_id")
+            if not isinstance(material_id, str) or not material_id.strip():
+                return None
+            return {
+                "category": "evidence",
+                "source_key": f"material:{material_id}",
+                "source_ref": material_id,
+                "content": result.get("content"),
+            }
+
+        if func_name == "fetch_url":
+            final_url = result.get("final_url") or result.get("url")
+            if not isinstance(final_url, str) or not final_url.strip():
+                return None
+            metadata = {
+                "category": "evidence",
+                "source_key": f"url:{final_url}",
+                "source_ref": final_url,
+                "content": result.get("content"),
+            }
+            title = result.get("title")
+            if isinstance(title, str) and title.strip():
+                metadata["title"] = title
+            return metadata
+
+        if func_name == "read_file":
+            normalized_path = extra.get("normalized_path")
+            if not isinstance(normalized_path, str) or not normalized_path.strip():
+                return None
+            return {
+                "category": "workspace",
+                "source_key": f"file:{normalized_path}",
+                "source_ref": normalized_path,
+                "content": result.get("content"),
+            }
+
+        if func_name == "write_file":
+            normalized_path = extra.get("normalized_path")
+            if not isinstance(normalized_path, str) or not normalized_path.strip():
+                return None
+            return {
+                "category": "workspace",
+                "source_key": f"file:{normalized_path}",
+                "source_ref": normalized_path,
+                "content": args.get("content"),
+            }
+
+        return None
+
+    def _build_tool_memory_entry(
+        self,
+        func_name: str,
+        metadata: Dict,
+        recorded_at: str,
+    ) -> Dict | None:
+        content = metadata.get("content")
+        if not isinstance(content, str):
+            return None
+        if func_name == "fetch_url" and not content.strip():
+            return None
+
+        entry = {
+            "category": metadata["category"],
+            "source_key": metadata["source_key"],
+            "content": content,
+            "updated_at": recorded_at,
+        }
+        source_ref = metadata.get("source_ref")
+        if isinstance(source_ref, str) and source_ref.strip():
+            entry["source_ref"] = source_ref
+        title = metadata.get("title")
+        if isinstance(title, str) and title.strip():
+            entry["title"] = title
+        return entry
+
+    def _upsert_memory_entry(
+        self,
+        memory_entries: List[Dict],
+        new_entry: Dict,
+        *,
+        covered_count: int = 0,
+    ) -> List[Dict]:
+        if covered_count < 0:
+            covered_count = 0
+        updated_entries = []
+        for index, entry in enumerate(memory_entries):
+            if (
+                isinstance(entry, dict)
+                and entry.get("category") == new_entry["category"]
+                and entry.get("source_key") == new_entry["source_key"]
+            ):
+                if index < covered_count:
+                    updated_entries.append(entry)
+                continue
+            updated_entries.append(entry)
+
+        updated_entries.append(new_entry)
+        return updated_entries
+
+    def _persist_successful_tool_result(
+        self,
+        project_id: str,
+        func_name: str,
+        args: Dict,
+        result: Dict,
+        extra: Dict | None = None,
+    ):
+        if result.get("status") != "success":
+            return
+
+        metadata = self._build_tool_persistence_metadata(project_id, func_name, args, result, extra)
+        if metadata is None:
+            return
+
+        try:
+            recorded_at = datetime.now().isoformat(timespec="seconds")
+            def mutate(state: Dict):
+                event = {
+                    "type": "tool_result",
+                    "tool_name": func_name,
+                    "category": metadata["category"],
+                    "source_key": metadata["source_key"],
+                    "recorded_at": recorded_at,
+                }
+                source_ref = metadata.get("source_ref")
+                if isinstance(source_ref, str) and source_ref.strip():
+                    event["source_ref"] = source_ref
+                title = metadata.get("title")
+                if isinstance(title, str) and title.strip():
+                    event["title"] = title
+                state["events"].append(event)
+
+                memory_entry = self._build_tool_memory_entry(func_name, metadata, recorded_at)
+                if memory_entry is not None:
+                    compact_state = state.get("compact_state") or {}
+                    covered_count = compact_state.get("source_memory_entry_count", 0)
+                    state["memory_entries"] = self._upsert_memory_entry(
+                        state["memory_entries"],
+                        memory_entry,
+                        covered_count=covered_count,
+                    )
+                return state
+
+            self._mutate_conversation_state(project_id, mutate)
+        except Exception:
+            logging.warning(
+                "工具成功结果写入 conversation_state 失败: project_id=%s tool=%s source_key=%s",
+                project_id,
+                func_name,
+                metadata.get("source_key"),
+                exc_info=True,
+            )
+
+    def _save_compact_state_atomically(
+        self,
+        project_id: str,
+        payload: Dict,
+        *,
+        covered_event_count: int | None = None,
+        covered_memory_entry_count: int | None = None,
+    ):
+        lock = self._get_conversation_state_lock(project_id)
+        with lock:
+            state = self._load_conversation_state(project_id)
+            state["compact_state"] = self._normalize_compact_state(payload)
+            if covered_event_count is not None or covered_memory_entry_count is not None:
+                state = self._prune_compacted_sidecar_state(
+                    state,
+                    covered_event_count=covered_event_count or 0,
+                    covered_memory_entry_count=covered_memory_entry_count or 0,
+                )
+            self._save_conversation_state_atomically(project_id, state)
+            compact_state_path = self._get_compact_state_path(project_id)
+            if compact_state_path and compact_state_path.exists():
+                compact_state_path.unlink(missing_ok=True)
+
+    def _prune_compacted_sidecar_state(
+        self,
+        state: Dict,
+        *,
+        covered_event_count: int,
+        covered_memory_entry_count: int,
+    ) -> Dict:
+        remaining_memory_entries = (state.get("memory_entries") or [])[max(covered_memory_entry_count, 0):]
+        slimmed_events = self._slim_compacted_events(
+            state.get("events") or [],
+            covered_event_count=covered_event_count,
+        )
+        compact_state = dict(state.get("compact_state") or {})
+        compact_state["source_memory_entry_count"] = 0
+
+        pruned_state = {
+            **state,
+            "events": self._trim_compacted_event_excerpts_if_needed(
+                slimmed_events,
+                compact_state=compact_state,
+                remaining_memory_entries=remaining_memory_entries,
+            ),
+            "memory_entries": remaining_memory_entries,
+            "compact_state": compact_state,
+        }
+        return pruned_state
+
+    def _slim_compacted_events(self, events: List[Dict], *, covered_event_count: int) -> List[Dict]:
+        if covered_event_count <= 0:
+            return list(events)
+
+        slimmed_events = []
+        effective_covered_count = min(max(covered_event_count, 0), len(events))
+        for index, event in enumerate(events):
+            if index < effective_covered_count:
+                slimmed_events.append(self._build_compacted_event_skeleton(event))
+            else:
+                slimmed_events.append(event)
+        return slimmed_events
+
+    def _build_compacted_event_skeleton(self, event) -> Dict:
+        if not isinstance(event, dict):
+            return {}
+
+        skeleton = {}
+        event_id = event.get("id")
+        if isinstance(event_id, str) and event_id.strip():
+            skeleton["id"] = event_id
+        else:
+            recorded_at = event.get("recorded_at")
+            if isinstance(recorded_at, str) and recorded_at.strip():
+                skeleton["recorded_at"] = recorded_at
+
+        event_kind = event.get("kind")
+        if isinstance(event_kind, str) and event_kind.strip():
+            skeleton["kind"] = event_kind
+
+        event_type = event.get("type")
+        if isinstance(event_type, str) and event_type.strip():
+            skeleton["type"] = event_type
+
+        tool_name = event.get("tool_name")
+        if isinstance(tool_name, str) and tool_name.strip():
+            skeleton["tool_name"] = tool_name
+
+        source_key = event.get("source_key")
+        if isinstance(source_key, str) and source_key.strip():
+            skeleton["source_key"] = source_key
+
+        source_ref = event.get("source_ref")
+        if isinstance(source_ref, str) and source_ref.strip():
+            skeleton["source_ref"] = source_ref
+
+        title = event.get("title")
+        if isinstance(title, str) and title.strip():
+            skeleton["title"] = title
+
+        excerpt = event.get("excerpt")
+        if isinstance(excerpt, str) and excerpt:
+            skeleton["excerpt"] = excerpt
+
+        return skeleton
+
+    def _trim_compacted_event_excerpts_if_needed(
+        self,
+        events: List[Dict],
+        *,
+        compact_state: Dict,
+        remaining_memory_entries: List[Dict],
+    ) -> List[Dict]:
+        trimmed_events = list(events)
+        if not trimmed_events:
+            return trimmed_events
+
+        state = {
+            "version": 1,
+            "events": trimmed_events,
+            "memory_entries": remaining_memory_entries,
+            "compact_state": compact_state,
+        }
+        if self._conversation_state_size_bytes(state) <= POST_COMPACT_SIDECAR_TARGET_BYTES:
+            return trimmed_events
+
+        for index, event in enumerate(trimmed_events):
+            if not isinstance(event, dict) or "excerpt" not in event:
+                continue
+            next_event = dict(event)
+            next_event.pop("excerpt", None)
+            trimmed_events[index] = next_event
+            state["events"] = trimmed_events
+            if self._conversation_state_size_bytes(state) <= POST_COMPACT_SIDECAR_TARGET_BYTES:
+                break
+        return trimmed_events
+
+    def _conversation_state_size_bytes(self, state: Dict) -> int:
+        return len(json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"))
+
+    def _load_compact_state(self, project_id: str, history: List[Dict] | None = None) -> Dict | None:
+        return self._load_conversation_state(project_id, history).get("compact_state")
 
     def _clear_compact_state(self, project_id: str):
-        compact_state_path = self._get_compact_state_path(project_id)
-        if compact_state_path and compact_state_path.exists():
-            compact_state_path.unlink()
+        lock = self._get_conversation_state_lock(project_id)
+        with lock:
+            state_path = self._get_conversation_state_path(project_id)
+            if state_path and state_path.exists():
+                state = self._load_conversation_state(project_id)
+                if state.get("compact_state") is not None:
+                    self._mutate_conversation_state(
+                        project_id,
+                        lambda current_state: {**current_state, "compact_state": None},
+                    )
+
+            compact_state_path = self._get_compact_state_path(project_id)
+            if compact_state_path and compact_state_path.exists():
+                compact_state_path.unlink(missing_ok=True)
+
+    def _clear_conversation_state_files(self, project_id: str):
+        for path in (
+            self._get_conversation_state_path(project_id),
+            self._get_compact_state_path(project_id),
+        ):
+            if path and path.exists():
+                path.unlink(missing_ok=True)
 
     def _finalize_post_turn_compaction(self, project_id: str, history: List[Dict], token_usage: Dict) -> Dict:
         if not token_usage:
@@ -528,10 +1064,14 @@ class ChatHandler:
             token_usage["post_turn_compaction_status"] = "not_needed"
             return token_usage
 
-        summary_text = self._summarize_messages(self._build_compaction_summary_messages(project_id, history))
+        summary_messages, state = self._build_memory_aware_history_messages(project_id, history)
+        summary_text = self._summarize_messages(summary_messages)
         if not summary_text:
             token_usage["post_turn_compaction_status"] = "failed"
             return token_usage
+
+        covered_event_count = len(state.get("events") or [])
+        covered_memory_entry_count = len(state.get("memory_entries") or [])
 
         try:
             self._save_compact_state_atomically(
@@ -539,6 +1079,7 @@ class ChatHandler:
                 {
                     "summary_text": summary_text,
                     "source_message_count": len(history),
+                    "source_memory_entry_count": 0,
                     "last_compacted_at": datetime.now().isoformat(timespec="seconds"),
                     "post_turn_compaction_status": "completed",
                     "trigger_usage": {
@@ -549,6 +1090,8 @@ class ChatHandler:
                         "total_tokens": token_usage.get("total_tokens"),
                     },
                 },
+                covered_event_count=covered_event_count,
+                covered_memory_entry_count=covered_memory_entry_count,
             )
         except Exception:
             token_usage["post_turn_compaction_status"] = "failed"
@@ -557,11 +1100,7 @@ class ChatHandler:
         return token_usage
 
     def _build_compaction_summary_messages(self, project_id: str, history: List[Dict]) -> List[Dict]:
-        summary_messages = []
-        for message in history:
-            provider_message = self._to_provider_message(project_id, message, include_images=False)
-            if provider_message:
-                summary_messages.append(provider_message)
+        summary_messages, _ = self._build_memory_aware_history_messages(project_id, history)
         return summary_messages
 
     def _normalize_project_file_path(self, file_path: str) -> str:
@@ -648,7 +1187,7 @@ class ChatHandler:
             "请先用 `write_file` 完成这些文件落盘，再用一句话说明实际已写入哪些文件。"
         )
 
-    def chat_stream(
+    def _chat_stream_unlocked(
         self,
         project_id: str,
         user_message: str,
@@ -667,14 +1206,10 @@ class ChatHandler:
             attached_material_ids=attached_material_ids or [],
         )
         self._turn_context = self._build_turn_context(project_id, user_message)
-        conversation = self._build_provider_conversation(
-            project_id,
-            history,
-            {
-                **current_user_message,
-                "transient_attachments": transient_attachments or [],
-            },
-        )
+        provider_user_message = {
+            **current_user_message,
+            "transient_attachments": transient_attachments or [],
+        }
         active_model = self._get_active_model_name()
 
         iterations = 0
@@ -683,6 +1218,7 @@ class ChatHandler:
         compressed = False
         policy = self._resolve_context_policy()
         successful_writes: set[str] = set()
+        current_turn_messages: List[Dict] = []
         token_usage = self._normalize_provider_usage(
             None,
             policy,
@@ -690,8 +1226,19 @@ class ChatHandler:
         )
 
         while iterations < max_iterations:
+            conversation, current_turn_start_index = self._build_provider_turn_conversation(
+                project_id,
+                history,
+                provider_user_message,
+                current_turn_messages=current_turn_messages,
+                exclude_current_turn_memory=True,
+            )
             try:
-                conversation, _, iteration_compressed, policy = self._fit_conversation_to_budget(conversation)
+                conversation, _, iteration_compressed, policy, current_turn_start_index = self._fit_conversation_to_budget(
+                    conversation,
+                    current_turn_start_index=current_turn_start_index,
+                    return_current_turn_start_index=True,
+                )
                 compressed = compressed or iteration_compressed
             except ValueError as exc:
                 self._turn_context = {
@@ -774,7 +1321,7 @@ class ChatHandler:
                 return
 
             if collected_message["tool_calls"]:
-                conversation.append(collected_message)
+                current_turn_messages.append(collected_message)
                 for index, tool_call in enumerate(collected_message["tool_calls"]):
                     func_name = tool_call["function"]["name"]
                     func_args = tool_call["function"]["arguments"]
@@ -797,7 +1344,7 @@ class ChatHandler:
                         successful_writes.add(write_path)
                     result_icon = "✅" if result.get("status") == "success" else "⚠️"
                     yield {"type": "tool", "data": f"{result_icon} 结果: {str(result)[:160]}..."}
-                    conversation.append({
+                    current_turn_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
                         "content": json.dumps(result, ensure_ascii=False),
@@ -812,8 +1359,8 @@ class ChatHandler:
                         "type": "tool",
                         "data": "⚠️ 检测到上条回复声称已更新文件但未实际写入，正在要求助手补做真实落盘。",
                     }
-                    conversation.append({"role": "assistant", "content": candidate_message})
-                    conversation.append({
+                    current_turn_messages.append({"role": "assistant", "content": candidate_message})
+                    current_turn_messages.append({
                         "role": "user",
                         "content": self._build_missing_write_feedback(missing_writes),
                     })
@@ -844,7 +1391,7 @@ class ChatHandler:
             "data": token_usage,
         }
 
-    def chat(
+    def _chat_unlocked(
         self,
         project_id: str,
         user_message: str,
@@ -862,14 +1409,10 @@ class ChatHandler:
             attached_material_ids=attached_material_ids or [],
         )
         self._turn_context = self._build_turn_context(project_id, user_message)
-        conversation = self._build_provider_conversation(
-            project_id,
-            history,
-            {
-                **current_user_message,
-                "transient_attachments": transient_attachments or [],
-            },
-        )
+        provider_user_message = {
+            **current_user_message,
+            "transient_attachments": transient_attachments or [],
+        }
         active_model = self._get_active_model_name()
 
         iterations = 0
@@ -878,14 +1421,26 @@ class ChatHandler:
         compressed = False
         policy = self._resolve_context_policy()
         successful_writes: set[str] = set()
+        current_turn_messages: List[Dict] = []
         token_usage = self._normalize_provider_usage(
             None,
             policy,
             preflight_compaction_used=False,
         )
         while iterations < max_iterations:
+            conversation, current_turn_start_index = self._build_provider_turn_conversation(
+                project_id,
+                history,
+                provider_user_message,
+                current_turn_messages=current_turn_messages,
+                exclude_current_turn_memory=True,
+            )
             try:
-                conversation, _, iteration_compressed, policy = self._fit_conversation_to_budget(conversation)
+                conversation, _, iteration_compressed, policy, current_turn_start_index = self._fit_conversation_to_budget(
+                    conversation,
+                    current_turn_start_index=current_turn_start_index,
+                    return_current_turn_start_index=True,
+                )
                 compressed = compressed or iteration_compressed
             except ValueError as exc:
                 self._turn_context = {
@@ -932,7 +1487,7 @@ class ChatHandler:
                             for tc in message.tool_calls
                         ],
                     }
-                conversation.append(msg_dict)
+                current_turn_messages.append(msg_dict)
                 for tool_call in message.tool_calls:
                     result = self._execute_tool(project_id, tool_call)
                     write_path = self._extract_successful_write_path(
@@ -942,7 +1497,7 @@ class ChatHandler:
                     )
                     if write_path:
                         successful_writes.add(write_path)
-                    conversation.append({
+                    current_turn_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": json.dumps(result, ensure_ascii=False),
@@ -953,8 +1508,8 @@ class ChatHandler:
                 missing_writes = self._get_missing_expected_writes(candidate_message, successful_writes)
                 if missing_writes and missing_write_retries < self.MAX_MISSING_WRITE_RETRIES:
                     missing_write_retries += 1
-                    conversation.append({"role": "assistant", "content": candidate_message})
-                    conversation.append({
+                    current_turn_messages.append({"role": "assistant", "content": candidate_message})
+                    current_turn_messages.append({
                         "role": "user",
                         "content": self._build_missing_write_feedback(missing_writes),
                     })
@@ -984,22 +1539,360 @@ class ChatHandler:
             "token_usage": token_usage,
         }
 
+    def chat_stream(
+        self,
+        project_id: str,
+        user_message: str,
+        attached_material_ids: List[str] | None = None,
+        transient_attachments: List[Dict] | None = None,
+        max_iterations: int = 10,
+    ):
+        request_lock = self._get_project_request_lock(project_id)
+        with request_lock:
+            yield from self._chat_stream_unlocked(
+                project_id,
+                user_message,
+                attached_material_ids=attached_material_ids,
+                transient_attachments=transient_attachments,
+                max_iterations=max_iterations,
+            )
+
+    def chat(
+        self,
+        project_id: str,
+        user_message: str,
+        attached_material_ids: List[str] | None = None,
+        transient_attachments: List[Dict] | None = None,
+        max_iterations: int = 5,
+    ) -> dict:
+        request_lock = self._get_project_request_lock(project_id)
+        with request_lock:
+            return self._chat_unlocked(
+                project_id,
+                user_message,
+                attached_material_ids=attached_material_ids,
+                transient_attachments=transient_attachments,
+                max_iterations=max_iterations,
+            )
+
     def _build_provider_conversation(self, project_id: str, history: List[Dict], current_user_message: Dict) -> List[Dict]:
-        conversation = [{"role": "system", "content": self._build_system_prompt(project_id)}]
-        compact_state = self._load_compact_state(project_id, history)
+        conversation, _ = self._build_provider_turn_conversation(
+            project_id,
+            history,
+            current_user_message,
+        )
+        return conversation
+
+    def _build_memory_aware_history_messages(
+        self,
+        project_id: str,
+        history: List[Dict],
+        *,
+        exclude_memory_source_keys: set[str] | None = None,
+    ) -> tuple[List[Dict], Dict]:
+        history_messages: List[Dict] = []
+        state = self._load_conversation_state(project_id, history)
+        compact_state = state.get("compact_state")
         effective_history = history
         if compact_state:
-            conversation.append({
+            history_messages.append({
                 "role": "assistant",
                 "content": f"[对话摘要]\n{compact_state['summary_text']}",
             })
             effective_history = history[compact_state["source_message_count"]:]
+        recent_memory_items = self._memory_items_from_state(
+            state.get("memory_entries") or [],
+            covered_count=compact_state.get("source_memory_entry_count", 0) if compact_state else 0,
+            exclude_source_keys=exclude_memory_source_keys,
+        )
+        if recent_memory_items:
+            history_messages.append(self._build_memory_block_message(recent_memory_items))
         for message in effective_history:
             provider_message = self._to_provider_message(project_id, message, include_images=False)
             if provider_message:
-                conversation.append(provider_message)
+                history_messages.append(provider_message)
+        return history_messages, state
+
+    def _build_provider_turn_conversation(
+        self,
+        project_id: str,
+        history: List[Dict],
+        current_user_message: Dict,
+        current_turn_messages: List[Dict] | None = None,
+        *,
+        exclude_current_turn_memory: bool = False,
+    ) -> tuple[List[Dict], int]:
+        conversation = [{"role": "system", "content": self._build_system_prompt(project_id)}]
+        history_messages, _ = self._build_memory_aware_history_messages(
+            project_id,
+            history,
+            exclude_memory_source_keys=(
+                self._current_turn_successful_tool_source_keys(project_id, current_turn_messages)
+                if exclude_current_turn_memory
+                else None
+            ),
+        )
+        conversation.extend(history_messages)
         conversation.append(self._to_provider_message(project_id, current_user_message, include_images=True))
-        return conversation
+        current_turn_start_index = len(conversation) - 1
+        if current_turn_messages:
+            conversation.extend(current_turn_messages)
+        return conversation, current_turn_start_index
+
+    def _memory_items_from_state(
+        self,
+        memory_entries: List[Dict],
+        covered_count: int = 0,
+        *,
+        exclude_source_keys: set[str] | None = None,
+    ) -> List[str]:
+        if covered_count < 0:
+            covered_count = 0
+        excluded_source_keys = exclude_source_keys or set()
+        items: List[str] = []
+        for entry in memory_entries[covered_count:]:
+            if not isinstance(entry, dict):
+                continue
+            source_key = entry.get("source_key")
+            if isinstance(source_key, str) and source_key in excluded_source_keys:
+                continue
+            formatted = self._format_memory_entry_for_model(entry)
+            if formatted:
+                items.append(formatted)
+        return items
+
+    def _current_turn_successful_tool_source_keys(
+        self,
+        project_id: str,
+        current_turn_messages: List[Dict] | None,
+    ) -> set[str]:
+        if not current_turn_messages:
+            return set()
+
+        tool_calls_by_id: dict[str, Dict] = {}
+        for message in current_turn_messages:
+            if message.get("role") != "assistant":
+                continue
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                tool_call_id = tool_call.get("id")
+                if isinstance(tool_call_id, str) and tool_call_id:
+                    tool_calls_by_id[tool_call_id] = tool_call
+
+        source_keys: set[str] = set()
+        for message in current_turn_messages:
+            if message.get("role") != "tool":
+                continue
+
+            tool_call_id = message.get("tool_call_id")
+            if not isinstance(tool_call_id, str):
+                continue
+            tool_call = tool_calls_by_id.get(tool_call_id)
+            if not isinstance(tool_call, dict):
+                continue
+
+            function_payload = tool_call.get("function") or {}
+            func_name = function_payload.get("name")
+            arguments = function_payload.get("arguments")
+            if not isinstance(func_name, str) or not func_name.strip():
+                continue
+            if not isinstance(arguments, str):
+                continue
+
+            try:
+                args = json.loads(arguments)
+                result = json.loads(message.get("content", ""))
+            except Exception:
+                continue
+            if not isinstance(args, dict) or not isinstance(result, dict):
+                continue
+            if result.get("status") != "success":
+                continue
+
+            extra = None
+            if func_name in {"read_file", "write_file"}:
+                file_path = args.get("file_path")
+                if not isinstance(file_path, str) or not file_path.strip():
+                    continue
+                try:
+                    extra = {"normalized_path": self.skill_engine.normalize_file_path(project_id, file_path)}
+                except ValueError:
+                    continue
+
+            metadata = self._build_tool_persistence_metadata(project_id, func_name, args, result, extra)
+            source_key = metadata.get("source_key") if isinstance(metadata, dict) else None
+            if isinstance(source_key, str) and source_key.strip():
+                source_keys.add(source_key)
+
+        return source_keys
+
+    def _format_memory_entry_for_model(self, entry: Dict) -> str | None:
+        content = entry.get("content")
+        if not isinstance(content, str):
+            return None
+        content = content.strip()
+        if not content:
+            return None
+
+        provenance = self._format_memory_entry_provenance(entry)
+        if provenance:
+            return f"来源: {provenance}\n{content}"
+        return content
+
+    def _format_memory_entry_provenance(self, entry: Dict) -> str | None:
+        title = entry.get("title")
+        source_ref = entry.get("source_ref")
+        normalized_title = title.strip() if isinstance(title, str) and title.strip() else None
+        normalized_source_ref = source_ref.strip() if isinstance(source_ref, str) and source_ref.strip() else None
+
+        if normalized_title and normalized_source_ref and normalized_title != normalized_source_ref:
+            return f"{normalized_title} | {normalized_source_ref}"
+        return normalized_title or normalized_source_ref
+
+    def _build_memory_block_message(self, memory_items: List[str]) -> Dict:
+        return {
+            "role": "assistant",
+            "content": self._format_memory_block(memory_items),
+        }
+
+    def _format_memory_block(self, memory_items: List[str]) -> str:
+        if not memory_items:
+            return "[工作记忆]"
+        return "[工作记忆]\n" + json.dumps(memory_items, ensure_ascii=False)
+
+    def _is_summary_block_message(self, message: Dict) -> bool:
+        return (
+            message.get("role") == "assistant"
+            and isinstance(message.get("content"), str)
+            and message.get("content", "").startswith("[对话摘要]\n")
+        )
+
+    def _is_memory_block_message(self, message: Dict) -> bool:
+        return (
+            message.get("role") == "assistant"
+            and isinstance(message.get("content"), str)
+            and message.get("content", "").startswith("[工作记忆]")
+        )
+
+    def _split_memory_block_items(self, message: Dict) -> List[str]:
+        content = message.get("content", "")
+        if not isinstance(content, str):
+            return []
+        if content == "[工作记忆]":
+            return []
+        body = content[len("[工作记忆]"):].lstrip("\n").strip()
+        if not body:
+            return []
+        try:
+            payload = json.loads(body)
+        except Exception:
+            return [body]
+
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, str) and item]
+        if isinstance(payload, dict):
+            entries = payload.get("entries")
+            if isinstance(entries, list):
+                return [item for item in entries if isinstance(item, str) and item]
+        return [body]
+
+    def _split_conversation_for_budget(
+        self,
+        conversation: List[Dict],
+        *,
+        current_turn_start_index: int | None = None,
+    ) -> tuple[Dict, Dict | None, List[str], List[Dict], List[Dict]]:
+        system_message = conversation[0]
+        index = 1
+        summary_message = None
+        if index < len(conversation) and self._is_summary_block_message(conversation[index]):
+            summary_message = conversation[index]
+            index += 1
+
+        memory_items: List[str] = []
+        if index < len(conversation) and self._is_memory_block_message(conversation[index]):
+            memory_items = self._split_memory_block_items(conversation[index])
+            index += 1
+
+        current_turn_start = self._get_budget_current_turn_start(
+            conversation,
+            minimum_index=index,
+            current_turn_start_index=current_turn_start_index,
+        )
+        visible_messages = conversation[index:current_turn_start]
+        current_turn_messages = conversation[current_turn_start:]
+        return system_message, summary_message, memory_items, visible_messages, current_turn_messages
+
+    def _get_budget_current_turn_start(
+        self,
+        conversation: List[Dict],
+        minimum_index: int,
+        *,
+        current_turn_start_index: int | None = None,
+    ) -> int:
+        candidate = current_turn_start_index
+        if isinstance(candidate, int) and minimum_index <= candidate < len(conversation):
+            return candidate
+
+        for index in range(len(conversation) - 1, minimum_index - 1, -1):
+            if conversation[index].get("role") == "user":
+                return index
+        return max(minimum_index, len(conversation) - 1)
+
+    def _compose_segmented_conversation(
+        self,
+        system_message: Dict,
+        summary_message: Dict | None,
+        memory_items: List[str],
+        visible_messages: List[Dict],
+        current_turn_messages: List[Dict],
+    ) -> tuple[List[Dict], int]:
+        conversation = [system_message]
+        if summary_message is not None:
+            conversation.append(summary_message)
+        if memory_items:
+            conversation.append(self._build_memory_block_message(memory_items))
+        conversation.extend(visible_messages)
+        conversation.extend(current_turn_messages)
+        return conversation, len(conversation) - len(current_turn_messages)
+
+    def _trim_oldest_visible_group(self, visible_messages: List[Dict]) -> List[Dict]:
+        if not visible_messages:
+            return visible_messages
+
+        first_message = visible_messages[0]
+        if first_message.get("role") == "user":
+            trim_end = 1
+            while trim_end < len(visible_messages) and visible_messages[trim_end].get("role") != "user":
+                trim_end += 1
+            return visible_messages[trim_end:]
+
+        if first_message.get("role") == "assistant" and first_message.get("tool_calls"):
+            tool_call_ids = {
+                tool_call.get("id")
+                for tool_call in first_message.get("tool_calls") or []
+                if isinstance(tool_call, dict) and tool_call.get("id")
+            }
+            trim_end = 1
+            while (
+                trim_end < len(visible_messages)
+                and visible_messages[trim_end].get("role") == "tool"
+                and (
+                    not tool_call_ids
+                    or visible_messages[trim_end].get("tool_call_id") in tool_call_ids
+                )
+            ):
+                trim_end += 1
+            return visible_messages[trim_end:]
+
+        if first_message.get("role") == "tool":
+            trim_end = 1
+            while trim_end < len(visible_messages) and visible_messages[trim_end].get("role") == "tool":
+                trim_end += 1
+            return visible_messages[trim_end:]
+
+        return visible_messages[1:]
 
     def _build_persisted_user_message(self, user_message: str, attached_material_ids: List[str] | None = None) -> Dict:
         return {
@@ -1172,13 +2065,32 @@ class ChatHandler:
                     }
                 normalized_path = self.skill_engine.validate_plan_write(project_id, args["file_path"])
                 self.skill_engine.write_file(project_id, normalized_path, args["content"])
-                return {"status": "success", "message": f"已写入文件: {normalized_path}"}
+                result = {"status": "success", "message": f"已写入文件: {normalized_path}"}
+                self._persist_successful_tool_result(
+                    project_id,
+                    func_name,
+                    args,
+                    result,
+                    {"normalized_path": normalized_path},
+                )
+                return result
             if func_name == "read_file":
-                content = self.skill_engine.read_file(project_id, args["file_path"])
-                return {"status": "success", "content": content}
+                normalized_path = self.skill_engine.normalize_file_path(project_id, args["file_path"])
+                content = self.skill_engine.read_file(project_id, normalized_path)
+                result = {"status": "success", "content": content}
+                self._persist_successful_tool_result(
+                    project_id,
+                    func_name,
+                    args,
+                    result,
+                    {"normalized_path": normalized_path},
+                )
+                return result
             if func_name == "read_material_file":
                 content = self.skill_engine.read_material_file(project_id, args["material_id"])
-                return {"status": "success", "content": content}
+                result = {"status": "success", "content": content}
+                self._persist_successful_tool_result(project_id, func_name, args, result)
+                return result
             if func_name == "web_search":
                 if self._turn_context.get("web_search_disabled"):
                     return {
@@ -1195,6 +2107,7 @@ class ChatHandler:
                 result = self._fetch_url(project_id, args["url"])
                 if result.get("status") == "success":
                     self._turn_context["fetch_url_performed"] = True
+                    self._persist_successful_tool_result(project_id, func_name, args, result)
                 return result
             return {"status": "error", "message": f"未知工具: {func_name}"}
         except json.JSONDecodeError as e:

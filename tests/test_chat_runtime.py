@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -480,6 +481,474 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(usage_event["data"]["output_tokens"], 900)
 
     @mock.patch("backend.chat.OpenAI")
+    def test_load_conversation_state_returns_empty_state_when_file_is_missing(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            state = handler._load_conversation_state(project["id"])
+
+        self.assertEqual(
+            state,
+            {
+                "version": 1,
+                "events": [],
+                "memory_entries": [],
+                "compact_state": None,
+            },
+        )
+        self.assertFalse((Path(project["project_dir"]) / "conversation_state.json").exists())
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_load_conversation_state_migrates_legacy_compact_sidecar(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            legacy_path = project_dir / "conversation_compact_state.json"
+            state_path = project_dir / "conversation_state.json"
+            legacy_path.write_text(
+                json.dumps(
+                    {
+                        "summary_text": "旧摘要",
+                        "source_message_count": 2,
+                        "last_compacted_at": "2026-04-13T12:00:00",
+                        "trigger_usage": {"context_used_tokens": 190000},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            state = handler._load_conversation_state(
+                project["id"],
+                history=[
+                    {"role": "user", "content": "第一条"},
+                    {"role": "assistant", "content": "第二条"},
+                ],
+            )
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(state["version"], 1)
+        self.assertEqual(state["events"], [])
+        self.assertEqual(state["memory_entries"], [])
+        self.assertEqual(state["compact_state"]["summary_text"], "旧摘要")
+        self.assertEqual(state["compact_state"]["source_message_count"], 2)
+        self.assertEqual(state["compact_state"]["source_memory_entry_count"], 0)
+        self.assertEqual(persisted["compact_state"]["summary_text"], "旧摘要")
+        self.assertFalse(legacy_path.exists())
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_load_conversation_state_renames_broken_legacy_compact_sidecar_and_recovers_empty_state(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            legacy_path = project_dir / "conversation_compact_state.json"
+            legacy_path.write_text("{broken json", encoding="utf-8")
+
+            state = handler._load_conversation_state(project["id"])
+
+            broken_files = list(project_dir.glob("conversation_compact_state.json.broken-*"))
+            broken_payload = broken_files[0].read_text(encoding="utf-8") if broken_files else None
+
+        self.assertEqual(
+            state,
+            {
+                "version": 1,
+                "events": [],
+                "memory_entries": [],
+                "compact_state": None,
+            },
+        )
+        self.assertFalse(legacy_path.exists())
+        self.assertEqual(len(broken_files), 1)
+        self.assertEqual(broken_payload, "{broken json")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_load_conversation_state_renames_invalid_legacy_compact_sidecar_and_recovers_empty_state(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            legacy_path = project_dir / "conversation_compact_state.json"
+            legacy_path.write_text(
+                json.dumps({"summary_text": "", "source_message_count": "two"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            state = handler._load_conversation_state(project["id"])
+
+            broken_files = list(project_dir.glob("conversation_compact_state.json.broken-*"))
+            broken_payload = broken_files[0].read_text(encoding="utf-8") if broken_files else None
+
+        self.assertEqual(
+            state,
+            {
+                "version": 1,
+                "events": [],
+                "memory_entries": [],
+                "compact_state": None,
+            },
+        )
+        self.assertFalse(legacy_path.exists())
+        self.assertEqual(len(broken_files), 1)
+        self.assertEqual(
+            broken_payload,
+            json.dumps({"summary_text": "", "source_message_count": "two"}, ensure_ascii=False),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_load_conversation_state_discards_drifted_compact_state(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            state_path = project_dir / "conversation_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "events": [{"type": "note", "content": "保留我"}],
+                        "memory_entries": [{"id": "memory-1", "content": "保留记忆"}],
+                        "compact_state": {
+                            "summary_text": "过期摘要",
+                            "source_message_count": 3,
+                            "source_memory_entry_count": 2,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            state = handler._load_conversation_state(
+                project["id"],
+                history=[
+                    {"role": "user", "content": "第一条"},
+                    {"role": "assistant", "content": "第二条"},
+                ],
+            )
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(state["events"], [{"type": "note", "content": "保留我"}])
+        self.assertEqual(state["memory_entries"], [{"id": "memory-1", "content": "保留记忆"}])
+        self.assertIsNone(state["compact_state"])
+        self.assertIsNone(persisted["compact_state"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_load_conversation_state_renames_broken_json_and_recovers_empty_state(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            state_path = project_dir / "conversation_state.json"
+            state_path.write_text("{broken json", encoding="utf-8")
+
+            state = handler._load_conversation_state(project["id"])
+
+            broken_files = list(project_dir.glob("conversation_state.json.broken-*"))
+            broken_payload = broken_files[0].read_text(encoding="utf-8") if broken_files else None
+
+        self.assertEqual(
+            state,
+            {
+                "version": 1,
+                "events": [],
+                "memory_entries": [],
+                "compact_state": None,
+            },
+        )
+        self.assertFalse(state_path.exists())
+        self.assertEqual(len(broken_files), 1)
+        self.assertEqual(broken_payload, "{broken json")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_save_compact_state_atomically_preserves_existing_events_and_memory_entries(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            state_path = project_dir / "conversation_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "events": [{"type": "note", "content": "保留事件"}],
+                        "memory_entries": [{"id": "memory-1", "content": "保留记忆"}],
+                        "compact_state": None,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            handler._save_compact_state_atomically(
+                project["id"],
+                {
+                    "summary_text": "新摘要",
+                    "source_message_count": 2,
+                },
+            )
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(persisted["events"], [{"type": "note", "content": "保留事件"}])
+        self.assertEqual(persisted["memory_entries"], [{"id": "memory-1", "content": "保留记忆"}])
+        self.assertEqual(persisted["compact_state"]["summary_text"], "新摘要")
+        self.assertEqual(persisted["compact_state"]["source_memory_entry_count"], 0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_load_conversation_state_rewrites_under_state_lock_for_legacy_migrate_and_drift_cleanup(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            state_path = project_dir / "conversation_state.json"
+            legacy_path = project_dir / "conversation_compact_state.json"
+            lock = handler._get_conversation_state_lock(project["id"])
+
+            migrate_result = {}
+            migrate_done = threading.Event()
+            lock.acquire()
+            try:
+                legacy_path.write_text(
+                    json.dumps({"summary_text": "旧摘要", "source_message_count": 2}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+                def load_migrate():
+                    migrate_result["state"] = handler._load_conversation_state(
+                        project["id"],
+                        history=[
+                            {"role": "user", "content": "第一条"},
+                            {"role": "assistant", "content": "第二条"},
+                        ],
+                    )
+                    migrate_done.set()
+
+                migrate_thread = threading.Thread(target=load_migrate)
+                migrate_thread.start()
+                self.assertFalse(migrate_done.wait(0.2))
+                self.assertFalse(state_path.exists())
+            finally:
+                lock.release()
+
+            migrate_thread.join(timeout=2)
+            self.assertFalse(migrate_thread.is_alive())
+            migrated = json.loads(state_path.read_text(encoding="utf-8"))
+
+            drift_done = threading.Event()
+            lock.acquire()
+            try:
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "events": [{"type": "note", "content": "保留我"}],
+                            "memory_entries": [{"id": "memory-1", "content": "保留记忆"}],
+                            "compact_state": {
+                                "summary_text": "过期摘要",
+                                "source_message_count": 3,
+                                "source_memory_entry_count": 2,
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                def load_drift():
+                    migrate_result["drift_state"] = handler._load_conversation_state(
+                        project["id"],
+                        history=[
+                            {"role": "user", "content": "第一条"},
+                            {"role": "assistant", "content": "第二条"},
+                        ],
+                    )
+                    drift_done.set()
+
+                drift_thread = threading.Thread(target=load_drift)
+                drift_thread.start()
+                self.assertFalse(drift_done.wait(0.2))
+                persisted_while_locked = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertIsNotNone(persisted_while_locked["compact_state"])
+            finally:
+                lock.release()
+
+            drift_thread.join(timeout=2)
+            self.assertFalse(drift_thread.is_alive())
+            drifted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(migrate_result["state"]["compact_state"]["summary_text"], "旧摘要")
+        self.assertEqual(migrated["compact_state"]["summary_text"], "旧摘要")
+        self.assertFalse(legacy_path.exists())
+        self.assertIsNone(migrate_result["drift_state"]["compact_state"])
+        self.assertEqual(drifted["events"], [{"type": "note", "content": "保留我"}])
+        self.assertEqual(drifted["memory_entries"], [{"id": "memory-1", "content": "保留记忆"}])
+        self.assertIsNone(drifted["compact_state"])
+
+    @mock.patch("backend.chat.OpenAI")
     def test_chat_auto_compact_persists_sidecar_and_skips_compacted_history_next_turn(self, mock_openai):
         mock_openai.return_value.chat.completions.create.side_effect = [
             SimpleNamespace(
@@ -514,8 +983,8 @@ class ChatRuntimeTests(unittest.TestCase):
 
             result = handler.chat(project["id"], "请继续")
 
-            compact_state_path = Path(project["project_dir"]) / "conversation_compact_state.json"
-            payload = json.loads(compact_state_path.read_text(encoding="utf-8"))
+            state_path = Path(project["project_dir"]) / "conversation_state.json"
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
             next_conversation = handler._build_provider_conversation(
                 project["id"],
                 handler._load_conversation(project["id"]),
@@ -528,12 +997,288 @@ class ChatRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(result["token_usage"]["post_turn_compaction_status"], "completed")
-        self.assertEqual(payload["source_message_count"], 2)
-        self.assertIn("紧凑摘要", payload["summary_text"])
+        self.assertEqual(payload["compact_state"]["source_message_count"], 2)
+        self.assertEqual(payload["compact_state"]["source_memory_entry_count"], 0)
+        self.assertIn("紧凑摘要", payload["compact_state"]["summary_text"])
         serialized = json.dumps(next_conversation, ensure_ascii=False)
         self.assertIn("紧凑摘要", serialized)
         self.assertNotIn("第一轮完成", serialized)
         self.assertNotIn("请继续", serialized)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_auto_compact_covers_visible_messages_and_memory_entries(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=195000, completion_tokens=500, total_tokens=195500),
+                choices=[SimpleNamespace(message=SimpleNamespace(content="第一轮完成", tool_calls=[]))],
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="记忆和历史摘要", tool_calls=[]))],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            (project_dir / "conversation_state.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "events": [],
+                        "memory_entries": [
+                            {"category": "workspace", "source_key": "file:plan/a.md", "content": "已读文件 A"},
+                            {"category": "evidence", "source_key": "url:https://example.com/b", "content": "访谈要点 B"},
+                        ],
+                        "compact_state": None,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            result = handler.chat(project["id"], "请继续")
+
+            state_path = project_dir / "conversation_state.json"
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            next_conversation = handler._build_provider_conversation(
+                project["id"],
+                handler._load_conversation(project["id"]),
+                {
+                    "role": "user",
+                    "content": "第二轮继续",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
+            )
+
+        summary_prompt = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"][1]["content"]
+
+        self.assertEqual(result["token_usage"]["post_turn_compaction_status"], "completed")
+        self.assertEqual(payload["compact_state"]["source_message_count"], 2)
+        self.assertEqual(payload["compact_state"]["source_memory_entry_count"], 0)
+        self.assertIn("已读文件 A", summary_prompt)
+        self.assertIn("访谈要点 B", summary_prompt)
+        self.assertIn("请继续", summary_prompt)
+        self.assertIn("第一轮完成", summary_prompt)
+        self.assertEqual(payload["memory_entries"], [])
+        serialized = json.dumps(next_conversation, ensure_ascii=False)
+        self.assertIn("记忆和历史摘要", serialized)
+        self.assertNotIn("[工作记忆]", serialized)
+        self.assertNotIn("已读文件 A", serialized)
+        self.assertNotIn("访谈要点 B", serialized)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_finalize_post_turn_compaction_drops_covered_memory_entries_and_slims_old_events(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            initial_state = {
+                "version": 1,
+                "events": [
+                    {
+                        "id": "event-1",
+                        "type": "tool_result",
+                        "tool_name": "fetch_url",
+                        "source_key": "url:https://example.com/a",
+                        "source_ref": "https://example.com/a",
+                        "title": "示例 A",
+                        "recorded_at": "2026-04-14T10:00:00",
+                        "content": "冗余正文",
+                        "result": {"status": "success", "content": "过长结果"},
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_name": "read_file",
+                        "source_key": "file:plan/outline.md",
+                        "source_ref": "plan/outline.md",
+                        "recorded_at": "2026-04-14T10:01:00",
+                        "payload": {"content": "# 旧大纲"},
+                    },
+                ],
+                "memory_entries": [
+                    {"category": "workspace", "source_key": "file:plan/a.md", "content": "旧记忆 A"},
+                    {"category": "evidence", "source_key": "url:https://example.com/b", "content": "旧记忆 B"},
+                ],
+                "compact_state": None,
+            }
+            history = [
+                {"role": "user", "content": "请继续"},
+                {"role": "assistant", "content": "第一轮完成"},
+            ]
+            (project_dir / "conversation_state.json").write_text(
+                json.dumps(initial_state, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(handler, "_summarize_messages", return_value="压缩摘要"):
+                token_usage = handler._finalize_post_turn_compaction(
+                    project["id"],
+                    history,
+                    {
+                        "usage_source": "provider",
+                        "context_used_tokens": 195000,
+                        "effective_max_tokens": 200000,
+                        "input_tokens": 195000,
+                        "output_tokens": 500,
+                        "total_tokens": 195500,
+                    },
+                )
+
+            persisted = json.loads((project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+            next_conversation = handler._build_provider_conversation(
+                project["id"],
+                history,
+                {
+                    "role": "user",
+                    "content": "下一轮",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
+            )
+
+        self.assertEqual(token_usage["post_turn_compaction_status"], "completed")
+        self.assertEqual(persisted["memory_entries"], [])
+        self.assertEqual(persisted["compact_state"]["summary_text"], "压缩摘要")
+        self.assertEqual(persisted["compact_state"]["source_message_count"], 2)
+        self.assertEqual(persisted["compact_state"]["source_memory_entry_count"], 0)
+        self.assertEqual(len(persisted["events"]), 2)
+        self.assertEqual(persisted["events"][0]["id"], "event-1")
+        self.assertEqual(persisted["events"][0]["tool_name"], "fetch_url")
+        self.assertEqual(persisted["events"][0]["source_key"], "url:https://example.com/a")
+        self.assertEqual(persisted["events"][0]["source_ref"], "https://example.com/a")
+        self.assertEqual(persisted["events"][0]["title"], "示例 A")
+        self.assertNotIn("content", persisted["events"][0])
+        self.assertNotIn("result", persisted["events"][0])
+        self.assertEqual(persisted["events"][1]["recorded_at"], "2026-04-14T10:01:00")
+        self.assertEqual(persisted["events"][1]["tool_name"], "read_file")
+        self.assertEqual(persisted["events"][1]["source_key"], "file:plan/outline.md")
+        self.assertEqual(persisted["events"][1]["source_ref"], "plan/outline.md")
+        self.assertNotIn("payload", persisted["events"][1])
+        serialized = json.dumps(next_conversation, ensure_ascii=False)
+        self.assertIn("压缩摘要", serialized)
+        self.assertNotIn("旧记忆 A", serialized)
+        self.assertNotIn("旧记忆 B", serialized)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_finalize_post_turn_compaction_trims_old_excerpts_when_sidecar_is_still_too_large(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            huge_excerpt = "E" * 50000
+            initial_state = {
+                "version": 1,
+                "events": [
+                    {
+                        "type": "tool_result",
+                        "tool_name": "fetch_url",
+                        "source_key": "url:https://example.com/a",
+                        "source_ref": "https://example.com/a",
+                        "title": "示例 A",
+                        "recorded_at": "2026-04-14T10:00:00",
+                        "excerpt": huge_excerpt,
+                        "content": "冗余正文",
+                    }
+                ],
+                "memory_entries": [
+                    {"category": "evidence", "source_key": "url:https://example.com/a", "content": "旧记忆 A"},
+                ],
+                "compact_state": None,
+            }
+            history = [
+                {"role": "user", "content": "请继续"},
+                {"role": "assistant", "content": "第一轮完成"},
+            ]
+            (project_dir / "conversation_state.json").write_text(
+                json.dumps(initial_state, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            before_size = len((project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+
+            with mock.patch.object(handler, "_summarize_messages", return_value="压缩摘要"):
+                token_usage = handler._finalize_post_turn_compaction(
+                    project["id"],
+                    history,
+                    {
+                        "usage_source": "provider",
+                        "context_used_tokens": 195000,
+                        "effective_max_tokens": 200000,
+                        "input_tokens": 195000,
+                        "output_tokens": 500,
+                        "total_tokens": 195500,
+                    },
+                )
+
+            persisted = json.loads((project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+            after_size = len((project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(token_usage["post_turn_compaction_status"], "completed")
+        self.assertEqual(persisted["memory_entries"], [])
+        self.assertEqual(persisted["compact_state"]["source_memory_entry_count"], 0)
+        self.assertEqual(len(persisted["events"]), 1)
+        self.assertEqual(persisted["events"][0]["tool_name"], "fetch_url")
+        self.assertEqual(persisted["events"][0]["source_key"], "url:https://example.com/a")
+        self.assertEqual(persisted["events"][0]["source_ref"], "https://example.com/a")
+        self.assertNotIn("content", persisted["events"][0])
+        self.assertNotIn("excerpt", persisted["events"][0])
+        self.assertLess(after_size, before_size)
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_discards_compact_sidecar_when_history_becomes_shorter_than_source_count(self, mock_openai):
@@ -559,15 +1304,21 @@ class ChatRuntimeTests(unittest.TestCase):
                 engine,
             )
             project_dir = Path(project["project_dir"])
-            compact_state_path = project_dir / "conversation_compact_state.json"
+            state_path = project_dir / "conversation_state.json"
             conversation_path = project_dir / "conversation.json"
-            compact_state_path.write_text(
+            state_path.write_text(
                 json.dumps(
                     {
-                        "summary_text": "旧摘要",
-                        "source_message_count": 8,
-                        "last_compacted_at": "2026-04-13T12:00:00",
-                        "trigger_usage": {"context_used_tokens": 190000},
+                        "version": 1,
+                        "events": [],
+                        "memory_entries": [],
+                        "compact_state": {
+                            "summary_text": "旧摘要",
+                            "source_message_count": 8,
+                            "source_memory_entry_count": 0,
+                            "last_compacted_at": "2026-04-13T12:00:00",
+                            "trigger_usage": {"context_used_tokens": 190000},
+                        },
                     },
                     ensure_ascii=False,
                 ),
@@ -589,8 +1340,230 @@ class ChatRuntimeTests(unittest.TestCase):
                 },
             )
 
-        self.assertFalse(compact_state_path.exists())
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertIsNone(payload["compact_state"])
         self.assertNotIn("旧摘要", json.dumps(provider_conversation, ensure_ascii=False))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_provider_conversation_orders_compact_memory_visible_history_and_current_turn(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            (project_dir / "conversation.json").write_text(
+                json.dumps(
+                    [
+                        {"role": "user", "content": "已压缩问题"},
+                        {"role": "assistant", "content": "已压缩回答"},
+                        {"role": "user", "content": "最近问题"},
+                        {"role": "assistant", "content": "最近回答"},
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (project_dir / "conversation_state.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "events": [],
+                        "memory_entries": [
+                            {"category": "workspace", "source_key": "file:old.md", "content": "已进摘要的记忆"},
+                            {"category": "workspace", "source_key": "file:recent.md", "content": "保留的记忆 A"},
+                            {"category": "evidence", "source_key": "url:https://example.com", "content": "保留的记忆 B"},
+                        ],
+                        "compact_state": {
+                            "summary_text": "压缩摘要",
+                            "source_message_count": 2,
+                            "source_memory_entry_count": 1,
+                            "last_compacted_at": "2026-04-13T12:00:00",
+                            "trigger_usage": {"context_used_tokens": 190000},
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            provider_conversation = handler._build_provider_conversation(
+                project["id"],
+                handler._load_conversation(project["id"]),
+                {
+                    "role": "user",
+                    "content": "当前追问",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
+            )
+
+        self.assertEqual(provider_conversation[0]["role"], "system")
+        self.assertEqual(provider_conversation[1], {"role": "assistant", "content": "[对话摘要]\n压缩摘要"})
+        self.assertEqual(provider_conversation[2]["role"], "assistant")
+        memory_items = handler._split_memory_block_items(provider_conversation[2])
+        self.assertEqual(memory_items, ["保留的记忆 A", "保留的记忆 B"])
+        self.assertEqual(provider_conversation[3], {"role": "user", "content": "最近问题"})
+        self.assertEqual(provider_conversation[4], {"role": "assistant", "content": "最近回答"})
+        self.assertEqual(provider_conversation[5], {"role": "user", "content": "当前追问"})
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_provider_conversation_keeps_sidecar_memory_out_of_recent_messages(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            (project_dir / "conversation_state.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "events": [],
+                        "memory_entries": [
+                            {"category": "workspace", "source_key": "file:a.md", "content": "只在记忆里 A"},
+                            {"category": "workspace", "source_key": "file:b.md", "content": "只在记忆里 B"},
+                        ],
+                        "compact_state": None,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            provider_conversation = handler._build_provider_conversation(
+                project["id"],
+                [],
+                {
+                    "role": "user",
+                    "content": "当前追问",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
+            )
+
+        self.assertEqual(provider_conversation[1]["role"], "assistant")
+        self.assertEqual(
+            handler._split_memory_block_items(provider_conversation[1]),
+            ["只在记忆里 A", "只在记忆里 B"],
+        )
+        self.assertEqual(provider_conversation[2], {"role": "user", "content": "当前追问"})
+        self.assertNotIn("只在记忆里 A", json.dumps(provider_conversation[2:], ensure_ascii=False))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_provider_conversation_keeps_updated_covered_memory_visible_on_next_turn(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            outline_path = project_dir / "plan" / "outline.md"
+            outline_path.parent.mkdir(parents=True, exist_ok=True)
+            outline_path.write_text("# 更新后的大纲", encoding="utf-8")
+            (project_dir / "conversation_state.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "events": [],
+                        "memory_entries": [
+                            {"category": "workspace", "source_key": "file:plan/outline.md", "content": "# 旧大纲"},
+                            {"category": "workspace", "source_key": "file:plan/notes.md", "content": "保留的记忆 B"},
+                        ],
+                        "compact_state": {
+                            "summary_text": "压缩摘要",
+                            "source_message_count": 0,
+                            "source_memory_entry_count": 1,
+                            "last_compacted_at": "2026-04-13T12:00:00",
+                            "trigger_usage": {"context_used_tokens": 190000},
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "read_file",
+                    json.dumps({"file_path": "plan/outline.md"}, ensure_ascii=False),
+                ),
+            )
+            persisted = json.loads((project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+            provider_conversation = handler._build_provider_conversation(
+                project["id"],
+                [],
+                {
+                    "role": "user",
+                    "content": "当前追问",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            [entry["content"] for entry in persisted["memory_entries"]],
+            ["# 旧大纲", "保留的记忆 B", "# 更新后的大纲"],
+        )
+        self.assertEqual(provider_conversation[1], {"role": "assistant", "content": "[对话摘要]\n压缩摘要"})
+        self.assertEqual(
+            handler._split_memory_block_items(provider_conversation[2]),
+            ["保留的记忆 B", "来源: plan/outline.md\n# 更新后的大纲"],
+        )
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_marks_post_turn_compaction_completed_when_threshold_is_hit(self, mock_openai):
@@ -736,6 +1709,76 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertFalse(any(event["type"] == "error" for event in events))
         usage_event = next(event for event in events if event["type"] == "usage")
         self.assertEqual(usage_event["data"]["post_turn_compaction_status"], "failed")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_skips_same_request_memory_block_but_keeps_it_for_next_request(self, mock_openai):
+        def tool_only_stream():
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-1",
+                        name="read_file",
+                        arguments='{"file_path":"plan/outline.md"}',
+                    )
+                ]
+            )
+
+        def final_stream():
+            yield self._make_chunk(content="已经继续处理")
+            yield self._make_usage_chunk(prompt_tokens=1200, completion_tokens=100, total_tokens=1300)
+
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            tool_only_stream(),
+            final_stream(),
+            final_stream(),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            project_dir = Path(project["project_dir"])
+            outline_path = project_dir / "plan" / "outline.md"
+            outline_path.parent.mkdir(parents=True, exist_ok=True)
+            outline_path.write_text("# 大纲", encoding="utf-8")
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            first_events = list(handler.chat_stream(project["id"], "继续", max_iterations=2))
+            second_events = list(handler.chat_stream(project["id"], "下一轮继续", max_iterations=1))
+
+            persisted = json.loads((project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(any(event["type"] == "content" and event["data"] == "已经继续处理" for event in first_events))
+        self.assertTrue(any(event["type"] == "content" and event["data"] == "已经继续处理" for event in second_events))
+        self.assertEqual(len(persisted["memory_entries"]), 1)
+        self.assertEqual(persisted["memory_entries"][0]["source_key"], "file:plan/outline.md")
+        self.assertEqual(persisted["memory_entries"][0]["content"], "# 大纲")
+        self.assertEqual(persisted["memory_entries"][0]["source_ref"], "plan/outline.md")
+        second_request_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        self.assertFalse(any(handler._is_memory_block_message(message) for message in second_request_messages))
+        next_request_messages = mock_openai.return_value.chat.completions.create.call_args_list[2].kwargs["messages"]
+        memory_message = next(
+            (message for message in next_request_messages if handler._is_memory_block_message(message)),
+            None,
+        )
+        self.assertIsNotNone(memory_message)
+        self.assertEqual(handler._split_memory_block_items(memory_message), ["来源: plan/outline.md\n# 大纲"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_retry_keeps_include_usage_after_transient_error(self, mock_openai):
@@ -1087,6 +2130,241 @@ class ChatRuntimeTests(unittest.TestCase):
             handler._fit_conversation_to_budget(conversation)
 
     @mock.patch("backend.chat.OpenAI")
+    def test_fit_budget_trims_oldest_visible_user_assistant_pair_as_one_group(self, mock_openai):
+        del mock_openai
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "budget-projects", self.repo_skill_dir),
+        )
+        conversation = [
+            {"role": "system", "content": "system"},
+            {"role": "assistant", "content": "[对话摘要]\n压缩摘要"},
+            handler._build_memory_block_message(["保留记忆"]),
+            {"role": "user", "content": "最近问题1"},
+            {"role": "assistant", "content": "最近回答1"},
+            {"role": "user", "content": "当前追问"},
+        ]
+
+        def estimate_message_tokens(message):
+            return {
+                "system": 8,
+                "[对话摘要]\n压缩摘要": 6,
+                "最近问题1": 10,
+                "最近回答1": 10,
+                "当前追问": 8,
+            }.get(message["content"], 12)
+
+        policy = SimpleNamespace(
+            compress_threshold=44,
+            effective_context_limit=64,
+            provider_context_limit=64,
+            reserved_output_tokens=8,
+        )
+
+        with mock.patch.object(handler, "_resolve_context_policy", return_value=policy):
+            with mock.patch.object(handler, "_estimate_message_tokens", side_effect=estimate_message_tokens):
+                fitted, _, compressed, returned_policy = handler._fit_conversation_to_budget(conversation)
+
+        self.assertTrue(compressed)
+        self.assertIs(returned_policy, policy)
+        self.assertEqual(
+            fitted,
+            [
+                {"role": "system", "content": "system"},
+                {"role": "assistant", "content": "[对话摘要]\n压缩摘要"},
+                handler._build_memory_block_message(["保留记忆"]),
+                {"role": "user", "content": "当前追问"},
+            ],
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_fit_budget_trims_recent_visible_messages_before_memory_block(self, mock_openai):
+        del mock_openai
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "budget-projects", self.repo_skill_dir),
+        )
+        conversation = [
+            {"role": "system", "content": "system"},
+            {"role": "assistant", "content": "[对话摘要]\n压缩摘要"},
+            handler._build_memory_block_message(["保留记忆"]),
+            {"role": "assistant", "content": "最近回答1"},
+            {"role": "user", "content": "当前追问"},
+        ]
+
+        def estimate_message_tokens(message):
+            return {
+                "system": 8,
+                "[对话摘要]\n压缩摘要": 6,
+                "最近回答1": 10,
+                "当前追问": 8,
+            }.get(message["content"], 12)
+
+        policy = SimpleNamespace(
+            compress_threshold=34,
+            effective_context_limit=64,
+            provider_context_limit=64,
+            reserved_output_tokens=8,
+        )
+
+        with mock.patch.object(handler, "_resolve_context_policy", return_value=policy):
+            with mock.patch.object(handler, "_estimate_message_tokens", side_effect=estimate_message_tokens):
+                fitted, _, compressed, returned_policy = handler._fit_conversation_to_budget(conversation)
+
+        self.assertTrue(compressed)
+        self.assertIs(returned_policy, policy)
+        self.assertEqual(
+            fitted,
+            [
+                {"role": "system", "content": "system"},
+                {"role": "assistant", "content": "[对话摘要]\n压缩摘要"},
+                handler._build_memory_block_message(["保留记忆"]),
+                {"role": "user", "content": "当前追问"},
+            ],
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_fit_budget_trims_memory_entries_as_whole_items_when_entry_contains_blank_lines(self, mock_openai):
+        del mock_openai
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "budget-projects", self.repo_skill_dir),
+        )
+        first_entry = "第一条记忆的第一段\n\n第一条记忆的第二段"
+        second_entry = "第二条记忆"
+        conversation = [
+            {"role": "system", "content": "system"},
+            {"role": "assistant", "content": "[对话摘要]\n压缩摘要"},
+            handler._build_memory_block_message([first_entry, second_entry]),
+            {"role": "user", "content": "当前追问"},
+        ]
+
+        def estimate_message_tokens(message):
+            content = message["content"]
+            if content == "system":
+                return 8
+            if content == "[对话摘要]\n压缩摘要":
+                return 6
+            if content == "当前追问":
+                return 8
+            if "第一条记忆的第一段" in content and "第二条记忆" in content:
+                return 24
+            if "第一条记忆的第二段" in content and "第二条记忆" in content:
+                return 8
+            if "第二条记忆" in content:
+                return 8
+            return 24
+
+        policy = SimpleNamespace(
+            compress_threshold=30,
+            effective_context_limit=64,
+            provider_context_limit=64,
+            reserved_output_tokens=8,
+        )
+
+        with mock.patch.object(handler, "_resolve_context_policy", return_value=policy):
+            with mock.patch.object(handler, "_estimate_message_tokens", side_effect=estimate_message_tokens):
+                fitted, _, compressed, returned_policy = handler._fit_conversation_to_budget(conversation)
+
+        self.assertTrue(compressed)
+        self.assertIs(returned_policy, policy)
+        self.assertEqual(
+            fitted,
+            [
+                {"role": "system", "content": "system"},
+                {"role": "assistant", "content": "[对话摘要]\n压缩摘要"},
+                handler._build_memory_block_message([second_entry]),
+                {"role": "user", "content": "当前追问"},
+            ],
+        )
+        serialized = json.dumps(fitted, ensure_ascii=False)
+        self.assertNotIn("第一条记忆的第二段", serialized)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_fit_budget_followup_preserves_current_turn_tool_chain_with_explicit_boundary(self, mock_openai):
+        del mock_openai
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "budget-projects", self.repo_skill_dir),
+        )
+        conversation = [
+            {"role": "system", "content": "system"},
+            {"role": "assistant", "content": "[对话摘要]\n压缩摘要"},
+            handler._build_memory_block_message(["保留记忆"]),
+            {"role": "user", "content": "旧问题"},
+            {"role": "assistant", "content": "旧回答"},
+            {"role": "user", "content": "当前追问"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tool-1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"file_path":"plan/outline.md"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tool-1", "content": '{"status":"success"}'},
+        ]
+
+        def estimate_message_tokens(message):
+            content = message.get("content", "")
+            if content == "system":
+                return 8
+            if content == "[对话摘要]\n压缩摘要":
+                return 6
+            if content == "旧问题":
+                return 10
+            if content == "旧回答":
+                return 10
+            if content == "当前追问":
+                return 8
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                return 10
+            if message.get("role") == "tool":
+                return 8
+            return 8
+
+        policy = SimpleNamespace(
+            compress_threshold=50,
+            effective_context_limit=64,
+            provider_context_limit=64,
+            reserved_output_tokens=8,
+        )
+
+        with mock.patch.object(handler, "_resolve_context_policy", return_value=policy):
+            with mock.patch.object(handler, "_estimate_message_tokens", side_effect=estimate_message_tokens):
+                fitted, _, compressed, returned_policy = handler._fit_conversation_to_budget(
+                    conversation,
+                    current_turn_start_index=5,
+                )
+
+        self.assertTrue(compressed)
+        self.assertIs(returned_policy, policy)
+        self.assertEqual(
+            fitted,
+            [
+                {"role": "system", "content": "system"},
+                {"role": "assistant", "content": "[对话摘要]\n压缩摘要"},
+                handler._build_memory_block_message(["保留记忆"]),
+                {"role": "user", "content": "当前追问"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "tool-1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": '{"file_path":"plan/outline.md"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "tool-1", "content": '{"status":"success"}'},
+            ],
+        )
+
+    @mock.patch("backend.chat.OpenAI")
     def test_chat_reapplies_budget_fit_before_followup_completion_after_tool_result(self, mock_openai):
         tool_call = SimpleNamespace(
             id="tool-1",
@@ -1146,11 +2424,16 @@ class ChatRuntimeTests(unittest.TestCase):
                 {"role": "tool", "tool_call_id": "tool-1", "content": '{"status":"success"}'},
             ]
 
-            def fit_side_effect(conversation):
+            def fit_side_effect(conversation, **kwargs):
+                current_turn_start_index = kwargs.get("current_turn_start_index", len(conversation) - 1)
                 fit_inputs.append(conversation)
                 if len(fit_inputs) == 1:
-                    return conversation, handler._estimate_tokens(conversation), False, policy
-                return compressed_followup, handler._estimate_tokens(compressed_followup), True, policy
+                    result = (conversation, handler._estimate_tokens(conversation), False, policy)
+                else:
+                    result = (compressed_followup, handler._estimate_tokens(compressed_followup), True, policy)
+                if kwargs.get("return_current_turn_start_index"):
+                    return (*result, current_turn_start_index)
+                return result
 
             with mock.patch.object(handler, "_fit_conversation_to_budget", side_effect=fit_side_effect) as fit_mock:
                 with mock.patch.object(
@@ -1167,6 +2450,278 @@ class ChatRuntimeTests(unittest.TestCase):
             mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"],
             compressed_followup,
         )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_does_not_reinject_same_request_tool_result_via_memory_block(self, mock_openai):
+        tool_call = SimpleNamespace(
+            id="tool-1",
+            function=SimpleNamespace(
+                name="read_file",
+                arguments='{"file_path":"plan/outline.md"}',
+            ),
+        )
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="",
+                            tool_calls=[tool_call],
+                        )
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                usage=SimpleNamespace(total_tokens=321),
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="最终答复",
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            project_dir = Path(project["project_dir"])
+            outline_path = project_dir / "plan" / "outline.md"
+            outline_path.parent.mkdir(parents=True, exist_ok=True)
+            outline_path.write_text("# 大纲正文", encoding="utf-8")
+            handler = ChatHandler(
+                self._make_settings(
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            policy = handler._resolve_context_policy()
+
+            with mock.patch.object(
+                handler,
+                "_fit_conversation_to_budget",
+                side_effect=lambda conversation, **kwargs: (
+                    conversation,
+                    handler._estimate_tokens(conversation),
+                    False,
+                    policy,
+                    kwargs.get("current_turn_start_index", len(conversation) - 1),
+                ) if kwargs.get("return_current_turn_start_index") else (
+                    conversation,
+                    handler._estimate_tokens(conversation),
+                    False,
+                    policy,
+                ),
+            ):
+                result = handler.chat(project["id"], "继续", max_iterations=2)
+
+            second_call_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+            persisted_state = json.loads((project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result["content"], "最终答复")
+        self.assertTrue(any(message.get("role") == "tool" for message in second_call_messages))
+        self.assertFalse(any(handler._is_memory_block_message(message) for message in second_call_messages))
+        self.assertEqual(len(persisted_state["memory_entries"]), 1)
+        self.assertEqual(persisted_state["memory_entries"][0]["source_key"], "file:plan/outline.md")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_failed_same_request_tool_result_does_not_hide_existing_memory_block(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            project_dir = Path(project["project_dir"])
+            (project_dir / "conversation_state.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "events": [],
+                        "memory_entries": [
+                            {
+                                "category": "workspace",
+                                "source_key": "file:plan/outline.md",
+                                "source_ref": "plan/outline.md",
+                                "content": "# 已有大纲",
+                            }
+                        ],
+                        "compact_state": None,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            current_turn_messages = [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "tool-1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": '{"file_path":"plan/outline.md"}'},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tool-1",
+                    "content": json.dumps({"status": "error", "message": "读取失败"}, ensure_ascii=False),
+                },
+            ]
+
+            conversation, _ = handler._build_provider_turn_conversation(
+                project["id"],
+                [],
+                {"role": "user", "content": "继续", "attached_material_ids": [], "transient_attachments": []},
+                current_turn_messages=current_turn_messages,
+                exclude_current_turn_memory=True,
+            )
+
+        memory_message = next(
+            (message for message in conversation if handler._is_memory_block_message(message)),
+            None,
+        )
+        self.assertIsNotNone(memory_message)
+        self.assertEqual(handler._split_memory_block_items(memory_message), ["来源: plan/outline.md\n# 已有大纲"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_serializes_same_project_requests_with_request_lock(self, mock_openai):
+        provider_lock = threading.Lock()
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+        active_calls = 0
+        max_active_calls = 0
+        call_order = []
+
+        def create_side_effect(**kwargs):
+            nonlocal active_calls, max_active_calls
+            with provider_lock:
+                active_calls += 1
+                max_active_calls = max(max_active_calls, active_calls)
+                is_first = not first_entered.is_set()
+            if is_first:
+                first_entered.set()
+                release_first.wait(timeout=2)
+                response_text = "第一轮完成"
+            else:
+                second_entered.set()
+                response_text = "第二轮完成"
+            with provider_lock:
+                call_order.append(response_text)
+                active_calls -= 1
+            return SimpleNamespace(
+                usage=SimpleNamespace(total_tokens=128),
+                choices=[SimpleNamespace(message=SimpleNamespace(content=response_text, tool_calls=[]))],
+            )
+
+        mock_openai.return_value.chat.completions.create.side_effect = create_side_effect
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            results = {}
+
+            def run_chat(slot, prompt):
+                results[slot] = handler.chat(project["id"], prompt)
+
+            first_thread = threading.Thread(target=run_chat, args=("first", "先处理我"))
+            second_thread = threading.Thread(target=run_chat, args=("second", "再处理我"))
+
+            first_thread.start()
+            self.assertTrue(first_entered.wait(1.0))
+            second_thread.start()
+            self.assertFalse(second_entered.wait(0.2))
+            release_first.set()
+            first_thread.join(timeout=2)
+            second_thread.join(timeout=2)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertEqual(call_order, ["第一轮完成", "第二轮完成"])
+        self.assertEqual(max_active_calls, 1)
+        self.assertEqual(results["first"]["content"], "第一轮完成")
+        self.assertEqual(results["second"]["content"], "第二轮完成")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_project_request_lock_is_shared_across_handler_instances(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            first_handler = ChatHandler(
+                self._make_settings(
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            second_handler = ChatHandler(
+                self._make_settings(
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            first_lock = first_handler._get_project_request_lock(project["id"])
+            second_lock = second_handler._get_project_request_lock(project["id"])
+
+        self.assertIs(first_lock, second_lock)
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_falls_back_to_estimated_usage_when_final_tool_round_has_no_provider_usage(self, mock_openai):
@@ -1225,7 +2780,13 @@ class ChatRuntimeTests(unittest.TestCase):
             with mock.patch.object(
                 handler,
                 "_fit_conversation_to_budget",
-                side_effect=lambda conversation: (conversation, 0, False, policy),
+                side_effect=lambda conversation, **kwargs: (
+                    conversation,
+                    0,
+                    False,
+                    policy,
+                    kwargs.get("current_turn_start_index", len(conversation) - 1),
+                ) if kwargs.get("return_current_turn_start_index") else (conversation, 0, False, policy),
             ):
                 with mock.patch.object(handler, "_estimate_tokens", return_value=1234):
                     with mock.patch.object(
@@ -1314,7 +2875,13 @@ class ChatRuntimeTests(unittest.TestCase):
             with mock.patch.object(
                 handler,
                 "_fit_conversation_to_budget",
-                side_effect=lambda conversation: (conversation, 0, False, policy),
+                side_effect=lambda conversation, **kwargs: (
+                    conversation,
+                    0,
+                    False,
+                    policy,
+                    kwargs.get("current_turn_start_index", len(conversation) - 1),
+                ) if kwargs.get("return_current_turn_start_index") else (conversation, 0, False, policy),
             ):
                 handler.chat("demo", "璇风户缁?")
 
@@ -1999,6 +3566,524 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertTrue(any("声称已更新文件但未实际写入" in message for message in tool_messages))
         self.assertTrue(any("调用工具: write_file" in message for message in tool_messages))
         self.assertIn("现在已经真实写入 notes。", "".join(content_messages))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_execute_read_material_file_persists_evidence_event_and_memory(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            material_path = workspace_dir / "materials" / "evidence.txt"
+            material_path.parent.mkdir(parents=True, exist_ok=True)
+            material_path.write_text("一手访谈纪要", encoding="utf-8")
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            material = engine.add_materials(project["id"], [str(material_path)], added_via="test")[0]
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "read_material_file",
+                    json.dumps({"material_id": material["id"]}, ensure_ascii=False),
+                ),
+            )
+
+            state_path = Path(project["project_dir"]) / "conversation_state.json"
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(persisted["events"]), 1)
+        self.assertEqual(persisted["events"][0]["tool_name"], "read_material_file")
+        self.assertEqual(persisted["events"][0]["category"], "evidence")
+        self.assertEqual(persisted["events"][0]["source_key"], f"material:{material['id']}")
+        self.assertIn("recorded_at", persisted["events"][0])
+        self.assertNotIn("arguments", persisted["events"][0])
+        self.assertNotIn("result", persisted["events"][0])
+        self.assertEqual(len(persisted["memory_entries"]), 1)
+        self.assertEqual(persisted["memory_entries"][0]["category"], "evidence")
+        self.assertEqual(persisted["memory_entries"][0]["source_key"], f"material:{material['id']}")
+        self.assertEqual(persisted["memory_entries"][0]["content"], "一手访谈纪要")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_write_file_upserts_workspace_memory_for_same_path(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            first = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    json.dumps(
+                        {"file_path": "notes\\draft.md", "content": "第一版内容"},
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            second = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    json.dumps(
+                        {"file_path": "notes\\draft.md", "content": "第二版内容"},
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+
+            state_path = Path(project["project_dir"]) / "conversation_state.json"
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(second["status"], "success")
+        self.assertEqual(len(persisted["events"]), 2)
+        self.assertNotIn("arguments", persisted["events"][0])
+        self.assertNotIn("result", persisted["events"][0])
+        self.assertEqual(len(persisted["memory_entries"]), 1)
+        self.assertEqual(persisted["memory_entries"][0]["category"], "workspace")
+        self.assertEqual(persisted["memory_entries"][0]["source_key"], "file:notes/draft.md")
+        self.assertEqual(persisted["memory_entries"][0]["source_ref"], "notes/draft.md")
+        self.assertEqual(persisted["memory_entries"][0]["content"], "第二版内容")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_workspace_memory_read_then_write_same_path_keeps_only_current_entry(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            target_path = project_dir / "notes" / "draft.md"
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text("第一版内容", encoding="utf-8")
+
+            read_result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "read_file",
+                    json.dumps({"file_path": "notes\\draft.md"}, ensure_ascii=False),
+                ),
+            )
+            write_result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "write_file",
+                    json.dumps(
+                        {"file_path": "notes\\draft.md", "content": "第二版内容"},
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            persisted = json.loads((project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(read_result["status"], "success")
+        self.assertEqual(write_result["status"], "success")
+        self.assertEqual(len(persisted["memory_entries"]), 1)
+        self.assertEqual(persisted["memory_entries"][0]["source_key"], "file:notes/draft.md")
+        self.assertEqual(persisted["memory_entries"][0]["source_ref"], "notes/draft.md")
+        self.assertEqual(persisted["memory_entries"][0]["content"], "第二版内容")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_provider_conversation_includes_memory_entry_provenance_when_available(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            project_dir = Path(project["project_dir"])
+            (project_dir / "conversation_state.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "events": [],
+                        "memory_entries": [
+                            {
+                                "category": "workspace",
+                                "source_key": "file:plan/outline.md",
+                                "source_ref": "plan/outline.md",
+                                "content": "# 大纲",
+                            }
+                        ],
+                        "compact_state": None,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            provider_conversation = handler._build_provider_conversation(
+                project["id"],
+                [],
+                {
+                    "role": "user",
+                    "content": "当前追问",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
+            )
+
+        self.assertEqual(provider_conversation[1]["role"], "assistant")
+        self.assertEqual(
+            handler._split_memory_block_items(provider_conversation[1]),
+            ["来源: plan/outline.md\n# 大纲"],
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mutate_conversation_state_preserves_existing_events_memory_and_compact_state(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            state_path = Path(project["project_dir"]) / "conversation_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "events": [{"type": "seed-event", "content": "旧事件"}],
+                        "memory_entries": [{"category": "workspace", "source_key": "file:old.md", "content": "旧记忆"}],
+                        "compact_state": {
+                            "summary_text": "旧摘要",
+                            "source_message_count": 2,
+                            "source_memory_entry_count": 1,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            handler._mutate_conversation_state(
+                project["id"],
+                lambda state: (
+                    state["events"].append({"type": "tool_result", "tool_name": "read_file"}),
+                    state["memory_entries"].append(
+                        {"category": "workspace", "source_key": "file:new.md", "content": "新记忆"}
+                    ),
+                    state,
+                )[-1],
+            )
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            persisted["events"],
+            [
+                {"type": "seed-event", "content": "旧事件"},
+                {"type": "tool_result", "tool_name": "read_file"},
+            ],
+        )
+        self.assertEqual(
+            persisted["memory_entries"],
+            [
+                {"category": "workspace", "source_key": "file:old.md", "content": "旧记忆"},
+                {"category": "workspace", "source_key": "file:new.md", "content": "新记忆"},
+            ],
+        )
+        self.assertEqual(persisted["compact_state"]["summary_text"], "旧摘要")
+        self.assertEqual(persisted["compact_state"]["source_message_count"], 2)
+        self.assertEqual(persisted["compact_state"]["source_memory_entry_count"], 1)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_write_file_returns_success_even_when_sidecar_persistence_fails(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            target_path = Path(project["project_dir"]) / "notes" / "draft.md"
+
+            with mock.patch.object(
+                handler,
+                "_save_conversation_state_atomically",
+                side_effect=RuntimeError("sidecar exploded"),
+            ):
+                result = handler._execute_tool(
+                    project["id"],
+                    self._make_tool_call(
+                        "write_file",
+                        json.dumps(
+                            {"file_path": "notes/draft.md", "content": "保留主写入成功"},
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+            file_exists = target_path.exists()
+            written_content = target_path.read_text(encoding="utf-8") if file_exists else None
+
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(file_exists)
+        self.assertEqual(written_content, "保留主写入成功")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_read_file_persists_workspace_memory_with_normalized_source_key(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            project_dir = Path(project["project_dir"])
+            target_path = project_dir / "plan" / "outline.md"
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text("# 大纲", encoding="utf-8")
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "read_file",
+                    json.dumps({"file_path": "plan\\outline.md"}, ensure_ascii=False),
+                ),
+            )
+
+            state_path = project_dir / "conversation_state.json"
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(persisted["memory_entries"]), 1)
+        self.assertEqual(persisted["memory_entries"][0]["category"], "workspace")
+        self.assertEqual(persisted["memory_entries"][0]["source_key"], "file:plan/outline.md")
+        self.assertEqual(persisted["memory_entries"][0]["source_ref"], "plan/outline.md")
+        self.assertEqual(persisted["memory_entries"][0]["content"], "# 大纲")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_success_persists_evidence_event_and_memory_with_final_url(
+        self,
+        mock_getaddrinfo,
+        mock_get,
+        mock_openai,
+    ):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        final_url = "https://example.com/final-article"
+        mock_get.return_value = self._make_fetch_response(
+            url=final_url,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=(
+                b"<html><head><title>Example</title></head>"
+                b"<body><article>Readable body.</article></body></html>"
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "fetch_url",
+                    json.dumps({"url": "https://example.com/start"}, ensure_ascii=False),
+                ),
+            )
+
+            state_path = Path(project["project_dir"]) / "conversation_state.json"
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["final_url"], final_url)
+        self.assertEqual(result["url"], final_url)
+        self.assertEqual(len(persisted["events"]), 1)
+        self.assertEqual(persisted["events"][0]["tool_name"], "fetch_url")
+        self.assertEqual(persisted["events"][0]["category"], "evidence")
+        self.assertEqual(persisted["events"][0]["source_key"], f"url:{final_url}")
+        self.assertIn("recorded_at", persisted["events"][0])
+        self.assertNotIn("arguments", persisted["events"][0])
+        self.assertNotIn("result", persisted["events"][0])
+        self.assertEqual(len(persisted["memory_entries"]), 1)
+        self.assertEqual(persisted["memory_entries"][0]["category"], "evidence")
+        self.assertEqual(persisted["memory_entries"][0]["source_key"], f"url:{final_url}")
+
+    @mock.patch("backend.chat.OpenAI")
+    @mock.patch("backend.chat.requests.get")
+    @mock.patch("backend.chat.socket.getaddrinfo")
+    def test_fetch_url_failure_does_not_persist_long_term_memory(
+        self,
+        mock_getaddrinfo,
+        mock_get,
+        mock_openai,
+    ):
+        del mock_openai
+        self._allow_public_fetch_host(mock_getaddrinfo)
+        mock_get.return_value = self._make_fetch_response(
+            url="https://example.com/missing",
+            status_code=404,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body>missing</body></html>",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            result = handler._execute_tool(
+                project["id"],
+                self._make_tool_call(
+                    "fetch_url",
+                    json.dumps({"url": "https://example.com/missing"}, ensure_ascii=False),
+                ),
+            )
+
+            state_path = Path(project["project_dir"]) / "conversation_state.json"
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_type"], "http_status_404")
+        self.assertFalse(state_path.exists())
 
     @mock.patch("backend.chat.OpenAI")
     @mock.patch("backend.chat.requests.get")

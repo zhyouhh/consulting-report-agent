@@ -110,3 +110,14 @@
   - 阶段推断已对齐为完整 `S0 -> S7` 顺序，不再只看粗粒度 `S0/S1/S4`
   - `S6` 对“仅报告”项目为可跳过阶段；对“报告+演示”项目仍为必经阶段
   - 工作区文件预览已默认优先 `plan/project-overview.md`，并把旧的 `plan/project-info.md` 放到末位
+
+## 2026-04-14 Session Memory Rearchitecture Update
+
+- 状态：`已完成`
+- 设计稿：`docs/superpowers/specs/2026-04-14-session-memory-rearchitecture-design.md`
+- 计划：`docs/superpowers/plans/2026-04-14-session-memory-rearchitecture.md`
+- 结论：
+  - 已新增 `conversation_state.json` 作为轻量 sidecar，统一承载 `events` / `memory_entries` / `compact_state`
+  - 成功的 `read_material_file` / `read_file` / `fetch_url` / `write_file` 会沉淀为结构化记忆，并按同源规则更新
+  - provider 上下文已改成 `system -> compact summary -> recent memory -> recent visible messages -> current turn`
+  - post-turn compaction 已覆盖 memory 层，并会在 compact 后收缩已覆盖的 `memory_entries/events`

@@ -1,6 +1,8 @@
+import asyncio
+import threading
 import unittest
-from unittest import mock
 from io import BytesIO
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -34,14 +36,15 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     @mock.patch("backend.main.skill_engine.get_project_path")
-    def test_clear_conversation_removes_compact_sidecar(self, mock_get_project_path):
-        with self.subTest("remove conversation and compact state"):
+    def test_clear_conversation_removes_new_and_legacy_sidecars(self, mock_get_project_path):
+        with self.subTest("remove conversation and both sidecars"):
             import tempfile
             from pathlib import Path
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 project_path = Path(tmpdir)
                 (project_path / "conversation.json").write_text("[]", encoding="utf-8")
+                (project_path / "conversation_state.json").write_text("{}", encoding="utf-8")
                 (project_path / "conversation_compact_state.json").write_text("{}", encoding="utf-8")
                 mock_get_project_path.return_value = project_path
 
@@ -49,7 +52,45 @@ class WorkspaceApiTests(unittest.TestCase):
 
                 self.assertEqual(response.status_code, 200)
                 self.assertFalse((project_path / "conversation.json").exists())
+                self.assertFalse((project_path / "conversation_state.json").exists())
                 self.assertFalse((project_path / "conversation_compact_state.json").exists())
+
+    def test_clear_conversation_waits_for_project_request_lock(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_path = Path(tmpdir)
+            (project_path / "conversation.json").write_text("[]", encoding="utf-8")
+            (project_path / "conversation_state.json").write_text("{}", encoding="utf-8")
+            (project_path / "conversation_compact_state.json").write_text("{}", encoding="utf-8")
+            request_lock = threading.Lock()
+            request_lock.acquire()
+            handler = mock.Mock()
+            handler._get_project_request_lock.return_value = request_lock
+            result_holder = {}
+            finished = threading.Event()
+
+            def run_clear():
+                try:
+                    result_holder["result"] = asyncio.run(main_module.clear_conversation("proj-demo"))
+                finally:
+                    finished.set()
+
+            with mock.patch("backend.main.skill_engine.get_project_path", return_value=project_path):
+                with mock.patch("backend.main.get_chat_handler", return_value=handler):
+                    clear_thread = threading.Thread(target=run_clear)
+                    clear_thread.start()
+                    self.assertFalse(finished.wait(0.2))
+                    self.assertTrue((project_path / "conversation.json").exists())
+                    request_lock.release()
+                    clear_thread.join(timeout=2)
+
+        self.assertFalse(clear_thread.is_alive())
+        self.assertEqual(result_holder["result"], {"status": "ok"})
+        self.assertFalse((project_path / "conversation.json").exists())
+        self.assertFalse((project_path / "conversation_state.json").exists())
+        self.assertFalse((project_path / "conversation_compact_state.json").exists())
 
     @mock.patch("backend.main.skill_engine.create_project")
     def test_create_project_accepts_theme_like_display_name_without_slugging(self, mock_create_project):
