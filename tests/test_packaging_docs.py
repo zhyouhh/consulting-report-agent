@@ -27,6 +27,20 @@ class PackagingDocsTests(unittest.TestCase):
             self.assertIn("/client/v1/models", content)
             self.assertIn("client token", content)
 
+    def test_build_docs_describe_search_pool_and_runtime_storage(self):
+        for doc_name in ["BUILD.md", "WINDOWS_BUILD.md"]:
+            content = (ROOT / doc_name).read_text(encoding="utf-8")
+            self.assertIn("managed_search_pool.json", content)
+            self.assertIn("search_runtime_state.json", content)
+            self.assertIn("search_cache.json", content)
+            self.assertIn("minute_limit", content)
+            self.assertIn("daily_soft_limit", content)
+            self.assertIn("cooldown_seconds", content)
+            self.assertIn("project_minute_limit", content)
+            self.assertIn("global_minute_limit", content)
+            self.assertIn("memory_cache_ttl_seconds", content)
+            self.assertIn("project_cache_ttl_seconds", content)
+
     def test_readme_describes_managed_mode_without_claiming_word_pdf_export(self):
         content = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("默认通道", content)

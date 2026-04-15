@@ -47,8 +47,10 @@ npm --version
 1. 双击运行 [build.bat](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/build.bat)
 2. 提前准备 `managed_client_token.txt`，或设置环境变量 `CONSULTING_REPORT_MANAGED_CLIENT_TOKEN`
    这个文件必须是 `/client` 使用的 client token，不是上游 API key
-3. 等待脚本自动安装依赖、构建前端、执行 PyInstaller
-4. 打包产物位于 `dist\咨询报告助手\`
+3. 提前准备 `managed_search_pool.json`，或设置环境变量 `CONSULTING_REPORT_MANAGED_SEARCH_POOL_FILE`
+   这个文件是内置搜索池的私有配置，不应提交到 Git；如果走环境变量覆盖，`build.bat` 会在打包前临时复制它
+4. 等待脚本自动安装依赖、构建前端、执行 PyInstaller
+5. 打包产物位于 `dist\咨询报告助手\`
 
 ### 方法二：手动打包
 
@@ -57,6 +59,7 @@ pip install -r requirements.txt
 pip install pyinstaller
 
 set CONSULTING_REPORT_MANAGED_CLIENT_TOKEN=你的专用客户端令牌
+copy D:\私有配置\portable-search-pool.json managed_search_pool.json
 
 cd frontend
 npm install
@@ -68,6 +71,22 @@ pyinstaller consulting_report.spec
 
 打包脚本会先请求 `https://newapi.z0y0h.work/client/v1/models` 预检 token；
 如果这一步不通过，会直接拒绝继续打包。
+它也会校验 `managed_search_pool.json` 的完整 schema，至少包括：
+
+- provider 级字段：
+  - `weight`
+  - `minute_limit`
+  - `daily_soft_limit`
+  - `cooldown_seconds`
+- limits 级字段：
+  - `per_turn_searches`
+  - `project_minute_limit`
+  - `global_minute_limit`
+  - `memory_cache_ttl_seconds`
+  - `project_cache_ttl_seconds`
+
+如果你不走 `build.bat`，而是直接运行 `pyinstaller consulting_report.spec`，
+就必须先手工把私有搜索池文件放到仓库根目录，并命名为 `managed_search_pool.json`。
 
 ## 打包产物
 
@@ -75,6 +94,7 @@ pyinstaller consulting_report.spec
 dist/
 └── 咨询报告助手/
     ├── 咨询报告助手.exe
+    ├── managed_search_pool.json
     ├── skill/
     ├── frontend/
     └── _internal/
@@ -85,6 +105,9 @@ dist/
 - 必须分发整个 `dist\咨询报告助手\` 文件夹。
 - 建议压缩为 zip 再发给同事。
 - 同事解压后直接双击 `咨询报告助手.exe`。
+- 运行时动态状态与缓存会落到：
+  - `%USERPROFILE%\.consulting-report\search_runtime_state.json`
+  - `%USERPROFILE%\.consulting-report\search_cache.json`
 
 ## 首次使用体验
 
@@ -118,6 +141,14 @@ curl https://newapi.z0y0h.work/client/v1/models -H "Authorization: Bearer 你的
 - 再确认发布包里已经带上对应的 `managed_client_token.txt`
 - 再确认这个 token 是 client token，不是上游 API key
 - 临时切到 `自定义 API`
+
+### 内置搜索池配置丢了
+
+- 构建机上最重要的源文件是 `managed_search_pool.json`
+- 打包后它会出现在 `dist\咨询报告助手\managed_search_pool.json`
+- 这份文件里的搜索 provider 凭据会随包分发；它不是服务端薄中转令牌
+- 这个文件不应该进 Git，但应该单独备份，方便你自己带走
+- 如果你通过环境变量传入外部路径，`build.bat` 会把它临时 staging 成根目录的 `managed_search_pool.json`，打包结束后再清理或恢复
 
 ### 前端构建失败
 

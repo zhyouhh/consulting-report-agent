@@ -1,10 +1,15 @@
+import json
 from pathlib import Path
 
 import requests
 
+from backend.config import load_managed_search_pool_config_from_path
+
 
 def require_non_empty_bundle_text_file(root: Path, filename: str) -> Path:
-    file_path = root / filename
+    file_path = Path(filename)
+    if not file_path.is_absolute():
+        file_path = root / file_path
     if not file_path.exists():
         raise FileNotFoundError(
             f"缺少打包必需文件 {filename}。请先在项目根目录放置该文件，再执行打包。"
@@ -49,3 +54,9 @@ def validate_bundle_managed_client_token(
         )
 
     return token_path
+
+
+def validate_bundle_managed_search_pool(root: Path, filename: str) -> Path:
+    pool_path = require_non_empty_bundle_text_file(root, filename)
+    load_managed_search_pool_config_from_path(pool_path)
+    return pool_path

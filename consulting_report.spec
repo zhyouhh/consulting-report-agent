@@ -5,7 +5,10 @@ import sys
 root = Path.cwd()
 sys.path.insert(0, str(root))
 
-from build_support import require_non_empty_bundle_text_file
+from build_support import (
+    require_non_empty_bundle_text_file,
+    validate_bundle_managed_search_pool,
+)
 
 block_cipher = None
 datas = [
@@ -17,6 +20,11 @@ managed_client_token_file = require_non_empty_bundle_text_file(
     'managed_client_token.txt',
 )
 datas.append((str(managed_client_token_file), '.'))
+managed_search_pool_file = validate_bundle_managed_search_pool(
+    root,
+    'managed_search_pool.json',
+)
+datas.append((str(managed_search_pool_file), '.'))
 
 a = Analysis(
     ['app.py'],

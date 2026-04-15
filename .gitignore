@@ -10,6 +10,7 @@ backend/static/
 __pycache__/
 .env
 managed_client_token.txt
+managed_search_pool.json
 
 # Python
 *.py[cod]

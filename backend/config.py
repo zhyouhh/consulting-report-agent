@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from pathlib import Path
@@ -10,6 +11,9 @@ DEFAULT_MANAGED_MODEL = "gemini-3-flash"
 DEFAULT_MANAGED_SEARCH_API_URL = "https://search.z0y0h.work/search"
 DEFAULT_MANAGED_CLIENT_TOKEN = "managed"
 MANAGED_CLIENT_TOKEN_FILENAME = "managed_client_token.txt"
+MANAGED_SEARCH_POOL_FILENAME = "managed_search_pool.json"
+SEARCH_RUNTIME_STATE_FILENAME = "search_runtime_state.json"
+SEARCH_CACHE_FILENAME = "search_cache.json"
 DESKTOP_CONFIG_VERSION = 4
 
 
@@ -32,6 +36,19 @@ def get_managed_client_token_path(base_path: Path | None = None) -> Path:
     return runtime_base / MANAGED_CLIENT_TOKEN_FILENAME
 
 
+def get_managed_search_pool_path(base_path: Path | None = None) -> Path:
+    runtime_base = base_path or get_base_path()
+    return runtime_base / MANAGED_SEARCH_POOL_FILENAME
+
+
+def get_search_runtime_state_path(config_dir: Path | None = None) -> Path:
+    return (config_dir or get_user_config_dir()) / SEARCH_RUNTIME_STATE_FILENAME
+
+
+def get_search_cache_path(config_dir: Path | None = None) -> Path:
+    return (config_dir or get_user_config_dir()) / SEARCH_CACHE_FILENAME
+
+
 def get_default_managed_client_token(base_path: Path | None = None) -> str:
     env_token = os.getenv("CONSULTING_REPORT_MANAGED_CLIENT_TOKEN", "").strip()
     if env_token:
@@ -44,6 +61,146 @@ def get_default_managed_client_token(base_path: Path | None = None) -> str:
             return token
 
     return DEFAULT_MANAGED_CLIENT_TOKEN
+
+
+@dataclass(frozen=True)
+class ManagedSearchProviderConfig:
+    enabled: bool
+    api_key: str
+    weight: int
+    minute_limit: int
+    daily_soft_limit: int
+    cooldown_seconds: int
+
+
+@dataclass(frozen=True)
+class ManagedSearchRoutingConfig:
+    primary: list[str]
+    secondary: list[str]
+    native_fallback: bool
+
+
+@dataclass(frozen=True)
+class ManagedSearchLimitsConfig:
+    per_turn_searches: int
+    project_minute_limit: int
+    global_minute_limit: int
+    memory_cache_ttl_seconds: int
+    project_cache_ttl_seconds: int
+
+
+@dataclass(frozen=True)
+class ManagedSearchPoolConfig:
+    version: int
+    providers: dict[str, ManagedSearchProviderConfig]
+    routing: ManagedSearchRoutingConfig
+    limits: ManagedSearchLimitsConfig
+
+
+def _require_int(payload: dict, key: str, *, minimum: int = 1) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"managed_search_pool.json 缺少有效整数配置 {key}")
+    return value
+
+
+def _require_bool(payload: dict, key: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"managed_search_pool.json 缺少有效布尔配置 {key}")
+    return value
+
+
+def _require_provider_entry(name: str, payload: dict) -> ManagedSearchProviderConfig:
+    if not isinstance(payload, dict):
+        raise ValueError(f"managed_search_pool.json 中 {name} 配置格式不正确")
+    enabled = payload.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"managed_search_pool.json 中 {name}.enabled 必须是 boolean")
+    api_key = str(payload.get("api_key", "")).strip()
+    if enabled and not api_key:
+        raise ValueError(f"managed_search_pool.json 中 {name} 缺少 api_key")
+    return ManagedSearchProviderConfig(
+        enabled=enabled,
+        api_key=api_key,
+        weight=_require_int(payload, "weight"),
+        minute_limit=_require_int(payload, "minute_limit"),
+        daily_soft_limit=_require_int(payload, "daily_soft_limit"),
+        cooldown_seconds=_require_int(payload, "cooldown_seconds"),
+    )
+
+
+def _load_json_text_file(path: Path) -> dict:
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path.name} 必须是 JSON object")
+    return payload
+
+
+def load_managed_search_pool_config_from_path(config_path: Path) -> ManagedSearchPoolConfig:
+    payload = _load_json_text_file(config_path)
+
+    provider_payloads = payload.get("providers")
+    if not isinstance(provider_payloads, dict) or not provider_payloads:
+        raise ValueError("managed_search_pool.json 缺少 providers 配置")
+    providers = {
+        name: _require_provider_entry(name, provider_payloads[name])
+        for name in provider_payloads
+    }
+
+    routing_payload = payload.get("routing")
+    if not isinstance(routing_payload, dict):
+        raise ValueError("managed_search_pool.json 缺少 routing 配置")
+
+    def _validate_routing_names(names: list[str], *, field_name: str) -> list[str]:
+        if not isinstance(names, list) or not names:
+            raise ValueError(f"managed_search_pool.json 缺少有效 routing.{field_name}")
+        for name in names:
+            if name not in providers:
+                raise ValueError(f"managed_search_pool.json 中 routing.{field_name} 引用了未知 provider: {name}")
+            if not providers[name].enabled:
+                raise ValueError(f"managed_search_pool.json 中 routing.{field_name} 引用了未启用 provider: {name}")
+        return names
+
+    primary = _validate_routing_names(routing_payload.get("primary"), field_name="primary")
+    secondary_value = routing_payload.get("secondary", [])
+    if not isinstance(secondary_value, list):
+        raise ValueError("managed_search_pool.json 中 routing.secondary 必须是列表")
+    for name in secondary_value:
+        if name not in providers:
+            raise ValueError(f"managed_search_pool.json 中 routing.secondary 引用了未知 provider: {name}")
+    routing = ManagedSearchRoutingConfig(
+        primary=primary,
+        secondary=secondary_value,
+        native_fallback=_require_bool(routing_payload, "native_fallback"),
+    )
+
+    limits_payload = payload.get("limits")
+    if not isinstance(limits_payload, dict):
+        raise ValueError("managed_search_pool.json 缺少 limits 配置")
+    limits = ManagedSearchLimitsConfig(
+        per_turn_searches=_require_int(limits_payload, "per_turn_searches"),
+        project_minute_limit=_require_int(limits_payload, "project_minute_limit"),
+        global_minute_limit=_require_int(limits_payload, "global_minute_limit"),
+        memory_cache_ttl_seconds=_require_int(limits_payload, "memory_cache_ttl_seconds"),
+        project_cache_ttl_seconds=_require_int(limits_payload, "project_cache_ttl_seconds"),
+    )
+
+    version = payload.get("version", 1)
+    if not isinstance(version, int) or version < 1:
+        raise ValueError("managed_search_pool.json 缺少有效 version")
+
+    return ManagedSearchPoolConfig(
+        version=version,
+        providers=providers,
+        routing=routing,
+        limits=limits,
+    )
+
+
+def load_managed_search_pool_config(base_path: Path | None = None) -> ManagedSearchPoolConfig:
+    config_path = get_managed_search_pool_path(base_path)
+    return load_managed_search_pool_config_from_path(config_path)
 
 
 class Settings(BaseSettings):

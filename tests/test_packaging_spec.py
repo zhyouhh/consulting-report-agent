@@ -19,6 +19,11 @@ class PackagingSpecTests(unittest.TestCase):
         self.assertIn("require_non_empty_bundle_text_file", content)
         self.assertIn("managed_client_token.txt", content)
 
+    def test_consulting_report_spec_requires_managed_search_pool_file(self):
+        content = (ROOT / "consulting_report.spec").read_text(encoding="utf-8")
+        self.assertIn("managed_search_pool.json", content)
+        self.assertIn("validate_bundle_managed_search_pool", content)
+
 
 if __name__ == "__main__":
     unittest.main()

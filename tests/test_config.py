@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +7,11 @@ from unittest import mock
 from backend.config import (
     Settings,
     get_default_managed_client_token,
+    get_managed_search_pool_path,
+    get_search_cache_path,
+    get_search_runtime_state_path,
     load_settings,
+    load_managed_search_pool_config,
     normalize_settings_payload,
     save_settings,
 )
@@ -205,3 +210,242 @@ class SettingsPersistenceTests(unittest.TestCase):
                 loaded = load_settings()
 
         self.assertIsNone(loaded.custom_context_limit_override)
+
+    def test_get_managed_search_pool_path_ignores_env_override_at_runtime(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = Path(tmpdir)
+            expected = bundle_dir / "managed_search_pool.json"
+            expected.write_text("{}", encoding="utf-8")
+
+            with mock.patch.dict(
+                "os.environ",
+                {"CONSULTING_REPORT_MANAGED_SEARCH_POOL_FILE": str(bundle_dir / "portable-search-pool.json")},
+                clear=False,
+            ), mock.patch("backend.config.get_base_path", return_value=bundle_dir):
+                resolved = get_managed_search_pool_path()
+
+        self.assertEqual(resolved, expected)
+
+    def test_load_managed_search_pool_config_reads_routing_and_limits(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = Path(tmpdir)
+            (bundle_dir / "managed_search_pool.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "providers": {
+                            "serper": {
+                                "enabled": True,
+                                "api_key": "serper-key",
+                                "weight": 5,
+                                "minute_limit": 60,
+                                "daily_soft_limit": 1200,
+                                "cooldown_seconds": 180,
+                            },
+                            "brave": {
+                                "enabled": True,
+                                "api_key": "brave-key",
+                                "weight": 3,
+                                "minute_limit": 30,
+                                "daily_soft_limit": 600,
+                                "cooldown_seconds": 180,
+                            },
+                        },
+                        "routing": {
+                            "primary": ["serper", "brave"],
+                            "secondary": [],
+                            "native_fallback": True,
+                        },
+                        "limits": {
+                            "per_turn_searches": 2,
+                            "project_minute_limit": 10,
+                            "global_minute_limit": 20,
+                            "memory_cache_ttl_seconds": 21600,
+                            "project_cache_ttl_seconds": 86400,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch("backend.config.get_base_path", return_value=bundle_dir):
+                config = load_managed_search_pool_config()
+
+        self.assertEqual(config.routing.primary, ["serper", "brave"])
+        self.assertEqual(config.providers["serper"].minute_limit, 60)
+        self.assertEqual(config.limits.project_cache_ttl_seconds, 86400)
+
+    def test_load_managed_search_pool_config_accepts_utf8_bom_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = Path(tmpdir)
+            payload = json.dumps(
+                {
+                    "version": 1,
+                    "providers": {
+                        "serper": {
+                            "enabled": True,
+                            "api_key": "serper-key",
+                            "weight": 5,
+                            "minute_limit": 60,
+                            "daily_soft_limit": 1200,
+                            "cooldown_seconds": 180,
+                        },
+                    },
+                    "routing": {
+                        "primary": ["serper"],
+                        "secondary": [],
+                        "native_fallback": True,
+                    },
+                    "limits": {
+                        "per_turn_searches": 2,
+                        "project_minute_limit": 10,
+                        "global_minute_limit": 20,
+                        "memory_cache_ttl_seconds": 21600,
+                        "project_cache_ttl_seconds": 86400,
+                    },
+                }
+            ).encode("utf-8")
+            (bundle_dir / "managed_search_pool.json").write_bytes(b"\xef\xbb\xbf" + payload)
+
+            with mock.patch("backend.config.get_base_path", return_value=bundle_dir):
+                config = load_managed_search_pool_config()
+
+        self.assertEqual(config.providers["serper"].api_key, "serper-key")
+
+    def test_load_managed_search_pool_config_rejects_unknown_routing_provider(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = Path(tmpdir)
+            (bundle_dir / "managed_search_pool.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "providers": {
+                            "serper": {
+                                "enabled": True,
+                                "api_key": "serper-key",
+                                "weight": 5,
+                                "minute_limit": 60,
+                                "daily_soft_limit": 1200,
+                                "cooldown_seconds": 180,
+                            },
+                        },
+                        "routing": {
+                            "primary": ["serper", "ghost"],
+                            "secondary": [],
+                            "native_fallback": True,
+                        },
+                        "limits": {
+                            "per_turn_searches": 2,
+                            "project_minute_limit": 10,
+                            "global_minute_limit": 20,
+                            "memory_cache_ttl_seconds": 21600,
+                            "project_cache_ttl_seconds": 86400,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch("backend.config.get_base_path", return_value=bundle_dir):
+                with self.assertRaises(ValueError) as ctx:
+                    load_managed_search_pool_config()
+
+        self.assertIn("ghost", str(ctx.exception))
+
+    def test_load_managed_search_pool_config_rejects_non_boolean_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = Path(tmpdir)
+            (bundle_dir / "managed_search_pool.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "providers": {
+                            "serper": {
+                                "enabled": "false",
+                                "api_key": "serper-key",
+                                "weight": 5,
+                                "minute_limit": 60,
+                                "daily_soft_limit": 1200,
+                                "cooldown_seconds": 180,
+                            },
+                        },
+                        "routing": {
+                            "primary": ["serper"],
+                            "secondary": [],
+                            "native_fallback": True,
+                        },
+                        "limits": {
+                            "per_turn_searches": 2,
+                            "project_minute_limit": 10,
+                            "global_minute_limit": 20,
+                            "memory_cache_ttl_seconds": 21600,
+                            "project_cache_ttl_seconds": 86400,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch("backend.config.get_base_path", return_value=bundle_dir):
+                with self.assertRaises(ValueError) as ctx:
+                    load_managed_search_pool_config()
+
+        self.assertIn("enabled", str(ctx.exception))
+
+    def test_load_managed_search_pool_config_rejects_non_boolean_native_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = Path(tmpdir)
+            (bundle_dir / "managed_search_pool.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "providers": {
+                            "serper": {
+                                "enabled": True,
+                                "api_key": "serper-key",
+                                "weight": 5,
+                                "minute_limit": 60,
+                                "daily_soft_limit": 1200,
+                                "cooldown_seconds": 180,
+                            },
+                        },
+                        "routing": {
+                            "primary": ["serper"],
+                            "secondary": [],
+                            "native_fallback": "false",
+                        },
+                        "limits": {
+                            "per_turn_searches": 2,
+                            "project_minute_limit": 10,
+                            "global_minute_limit": 20,
+                            "memory_cache_ttl_seconds": 21600,
+                            "project_cache_ttl_seconds": 86400,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch("backend.config.get_base_path", return_value=bundle_dir):
+                with self.assertRaises(ValueError) as ctx:
+                    load_managed_search_pool_config()
+
+        self.assertIn("native_fallback", str(ctx.exception))
+
+    def test_get_search_runtime_state_path_uses_user_config_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+
+            with mock.patch("backend.config.get_user_config_dir", return_value=config_dir):
+                resolved = get_search_runtime_state_path()
+
+        self.assertEqual(resolved, config_dir / "search_runtime_state.json")
+
+    def test_get_search_cache_path_uses_user_config_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+
+            with mock.patch("backend.config.get_user_config_dir", return_value=config_dir):
+                resolved = get_search_cache_path()
+
+        self.assertEqual(resolved, config_dir / "search_cache.json")
