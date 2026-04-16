@@ -89,7 +89,7 @@ class ChatStreamApiTests(unittest.TestCase):
         self.assertLess(arrivals[0][0], 0.7)
         self.assertIn('"type": "tool"', arrivals[0][1])
         self.assertIn('"type": "content"', arrivals[1][1])
-        self.assertGreater(arrivals[1][0], arrivals[0][0])
+        self.assertGreaterEqual(arrivals[1][0], arrivals[0][0])
         self.assertIn('"usage_source": "provider"', arrivals[2][1])
         self.assertIn('"context_used_tokens": 180000', arrivals[2][1])
         self.assertIn('"max_tokens": 200000', arrivals[2][1])

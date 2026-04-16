@@ -134,6 +134,47 @@ class SearchStateStore:
             usage["global"] = global_entries
             self._save_runtime_state()
 
+    def try_acquire_search_slot(
+        self,
+        *,
+        project_id: str,
+        project_window_seconds: int,
+        project_limit: int,
+        global_window_seconds: int,
+        global_limit: int,
+    ) -> str | None:
+        with _RUNTIME_STATE_LOCK:
+            self._runtime_state = self._load_runtime_state()
+            usage = self._runtime_state.setdefault("usage", {})
+            project_usage = usage.setdefault("projects", {})
+            now = time.time()
+
+            project_entries = self._trim_usage_timestamps(
+                project_usage.get(project_id) or [],
+                now=now,
+                retention_seconds=project_window_seconds,
+            )
+            global_entries = self._trim_usage_timestamps(
+                usage.get("global") or [],
+                now=now,
+                retention_seconds=global_window_seconds,
+            )
+
+            project_usage[project_id] = project_entries
+            usage["global"] = global_entries
+
+            if len(project_entries) >= project_limit:
+                self._save_runtime_state()
+                return "project_minute"
+            if len(global_entries) >= global_limit:
+                self._save_runtime_state()
+                return "global_minute"
+
+            project_entries.append(now)
+            global_entries.append(now)
+            self._save_runtime_state()
+            return None
+
     def get_recent_project_search_count(self, project_id: str, *, window_seconds: int) -> int:
         with _RUNTIME_STATE_LOCK:
             self._runtime_state = self._load_runtime_state()

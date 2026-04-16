@@ -19,8 +19,23 @@ except Exception:
 
 from openai import OpenAI
 
-from .config import Settings
+from .config import (
+    Settings,
+    get_search_cache_path,
+    get_search_runtime_state_path,
+    load_managed_search_pool_config,
+)
 from .context_policy import ResolvedContextPolicy, resolve_context_policy
+from .search_pool import SearchRouter
+from .search_providers import (
+    BraveProvider,
+    ExaProvider,
+    ProviderSearchResult,
+    SearchItem,
+    SerperProvider,
+    TavilyProvider,
+)
+from .search_state import SearchStateStore
 from .skill import SkillEngine
 
 try:
@@ -44,6 +59,8 @@ _CONVERSATION_STATE_LOCKS: dict[str, threading.RLock] = {}
 _CONVERSATION_STATE_LOCKS_GUARD = threading.Lock()
 _PROJECT_REQUEST_LOCKS: dict[str, threading.RLock] = {}
 _PROJECT_REQUEST_LOCKS_GUARD = threading.Lock()
+_SEARCH_ROUTER_SINGLETON: SearchRouter | None = None
+_SEARCH_ROUTER_GUARD = threading.Lock()
 
 
 class ChatHandler:
@@ -115,12 +132,7 @@ class ChatHandler:
     def __init__(self, settings: Settings, skill_engine: SkillEngine):
         self.settings = settings
         self.skill_engine = skill_engine
-        self._turn_context = {
-            "can_write_non_plan": True,
-            "web_search_disabled": False,
-            "web_search_performed": False,
-            "fetch_url_performed": False,
-        }
+        self._turn_context = self._new_turn_context(can_write_non_plan=True)
         self._fetch_url_cache: Dict[tuple[str, str, str], Dict[str, object]] = {}
         import httpx
 
@@ -1241,12 +1253,7 @@ class ChatHandler:
                 )
                 compressed = compressed or iteration_compressed
             except ValueError as exc:
-                self._turn_context = {
-                    "can_write_non_plan": True,
-                    "web_search_disabled": False,
-                    "web_search_performed": False,
-                    "fetch_url_performed": False,
-                }
+                self._turn_context = self._new_turn_context(can_write_non_plan=True)
                 yield {"type": "error", "data": str(exc)}
                 return
 
@@ -1379,12 +1386,7 @@ class ChatHandler:
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
-        self._turn_context = {
-            "can_write_non_plan": True,
-            "web_search_disabled": False,
-            "web_search_performed": False,
-            "fetch_url_performed": False,
-        }
+        self._turn_context = self._new_turn_context(can_write_non_plan=True)
 
         yield {
             "type": "usage",
@@ -1443,12 +1445,7 @@ class ChatHandler:
                 )
                 compressed = compressed or iteration_compressed
             except ValueError as exc:
-                self._turn_context = {
-                    "can_write_non_plan": True,
-                    "web_search_disabled": False,
-                    "web_search_performed": False,
-                    "fetch_url_performed": False,
-                }
+                self._turn_context = self._new_turn_context(can_write_non_plan=True)
                 return {"content": str(exc), "token_usage": None}
 
             for retry in range(2):
@@ -1527,12 +1524,7 @@ class ChatHandler:
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
-        self._turn_context = {
-            "can_write_non_plan": True,
-            "web_search_disabled": False,
-            "web_search_performed": False,
-            "fetch_url_performed": False,
-        }
+        self._turn_context = self._new_turn_context(can_write_non_plan=True)
 
         return {
             "content": assistant_message,
@@ -2097,9 +2089,16 @@ class ChatHandler:
                         "status": "error",
                         "message": "本轮 web_search 已因搜索服务错误被停用，请不要继续重试。",
                     }
-                result = self._web_search(args["query"])
+                current_count = int(self._turn_context.get("web_search_count", 0) or 0)
+                result = self._web_search(
+                    args["query"],
+                    project_id=project_id,
+                    turn_search_count=current_count,
+                )
                 if result.get("disable_for_turn"):
                     self._turn_context["web_search_disabled"] = True
+                if result.get("limit_scope") != "per_turn":
+                    self._turn_context["web_search_count"] = current_count + 1
                 if result.get("status") == "success":
                     self._turn_context["web_search_performed"] = True
                 return {key: value for key, value in result.items() if key != "disable_for_turn"}
@@ -2120,65 +2119,98 @@ class ChatHandler:
             logging.error(f"工具执行异常: {func_name}, 错误: {str(e)}")
             return {"status": "error", "message": f"工具执行失败: {str(e)}"}
 
-    def _web_search(self, query: str) -> Dict[str, str | bool]:
-        """网络搜索（使用 SearXNG JSON API）"""
-        import logging
+    def _get_search_router(self) -> SearchRouter:
+        global _SEARCH_ROUTER_SINGLETON
+        with _SEARCH_ROUTER_GUARD:
+            if _SEARCH_ROUTER_SINGLETON is not None:
+                return _SEARCH_ROUTER_SINGLETON
 
-        try:
-            response = requests.get(
-                self.settings.managed_search_api_url,
-                params={"q": query, "format": "json"},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=15,
+            search_config = load_managed_search_pool_config()
+            providers: dict[str, object] = {}
+            provider_factories = {
+                "serper": SerperProvider,
+                "brave": BraveProvider,
+                "tavily": TavilyProvider,
+                "exa": ExaProvider,
+            }
+            for provider_name, provider_config in search_config.providers.items():
+                if not provider_config.enabled:
+                    continue
+                factory = provider_factories.get(provider_name)
+                if factory is None:
+                    continue
+                providers[provider_name] = factory(api_key=provider_config.api_key)
+
+            _SEARCH_ROUTER_SINGLETON = SearchRouter(
+                config=search_config,
+                state_store=SearchStateStore(
+                    runtime_state_path=get_search_runtime_state_path(),
+                    cache_path=get_search_cache_path(),
+                ),
+                providers=providers,
             )
+            return _SEARCH_ROUTER_SINGLETON
 
-            if response.status_code != 200:
-                return {
-                    "status": "error",
-                    "message": f"搜索服务暂时不可用（状态码：{response.status_code}）",
-                    "disable_for_turn": True,
-                }
+    def _supports_native_web_search(self) -> bool:
+        active_model = self._get_active_model_name().lower()
+        base_url = ""
+        if self.settings.mode == "custom":
+            base_url = (self.settings.custom_api_base or self.settings.api_base or "").lower()
+        else:
+            base_url = (self.settings.api_base or self.settings.managed_base_url or "").lower()
+        return "api.openai.com" in base_url and active_model.startswith("gpt-")
 
-            payload = response.json()
-            raw_results = payload.get("results") or []
-            if not isinstance(raw_results, list):
-                return {
-                    "status": "error",
-                    "message": "搜索服务返回了不可识别的数据格式。",
-                    "disable_for_turn": True,
-                }
-
-            results = []
-            for item in raw_results:
-                if not isinstance(item, dict):
-                    continue
-                title = self._strip_html(str(item.get("title", "")).strip())
-                snippet = self._strip_html(str(item.get("content", "")).strip())
-                url = str(item.get("url", "")).strip()
-                if not title or not url:
-                    continue
-                results.append({
-                    "title": title,
-                    "snippet": snippet or "无摘要",
-                    "url": url,
-                })
-
-            if not results:
-                return {"status": "success", "results": "未找到相关信息"}
-
-            output = "搜索结果：\n"
-            for index, result in enumerate(results[:5], 1):
-                output += (
-                    f"{index}. {result['title']}\n"
-                    f"{result['snippet'][:180]}\n"
-                    f"链接: {result['url']}\n\n"
+    def _search_with_native_provider(self, query: str) -> ProviderSearchResult | None:
+        if not self._supports_native_web_search():
+            return None
+        response = self.client.responses.create(
+            model=self._get_active_model_name(),
+            input=query,
+            tools=[{"type": "web_search"}],
+        )
+        output_text = str(getattr(response, "output_text", "") or "").strip()
+        if not output_text:
+            return None
+        return ProviderSearchResult(
+            provider="native",
+            items=[
+                SearchItem(
+                    title=f"Native web search: {query}",
+                    snippet=output_text,
+                    url="native://web-search",
+                    domain="native",
+                    score=1.0,
                 )
+            ],
+            result_type="success",
+        )
 
-            return {"status": "success", "results": output.strip()}
+    def _web_search(
+        self,
+        query: str,
+        *,
+        project_id: str = "",
+        turn_search_count: int = 0,
+    ) -> Dict[str, object]:
+        try:
+            router = self._get_search_router()
+            result = router.search(
+                query,
+                project_id=project_id or "__direct__",
+                turn_search_count=turn_search_count,
+                native_search=self._search_with_native_provider,
+            )
+            if result.get("status") == "error" and result.get("error_type") != "quota_exhausted":
+                return {
+                    **result,
+                    "disable_for_turn": True,
+                }
+            return result
         except Exception as e:
             logging.error(f"搜索失败: {str(e)}")
             return {
                 "status": "error",
+                "error_type": "backend_error",
                 "message": "搜索功能暂时不可用，本轮已暂停继续搜索，请稍后重试。",
                 "disable_for_turn": True,
             }
@@ -2796,13 +2828,19 @@ class ChatHandler:
         )
         return f"{skill_prompt}\n\n## 当前轮次约束\n{turn_rule}\n{evidence_rule}\n\n{project_context}"
 
-    def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, bool]:
+    def _new_turn_context(self, *, can_write_non_plan: bool) -> Dict[str, object]:
         return {
-            "can_write_non_plan": self._should_allow_non_plan_write(project_id, user_message),
+            "can_write_non_plan": can_write_non_plan,
             "web_search_disabled": False,
             "web_search_performed": False,
             "fetch_url_performed": False,
+            "web_search_count": 0,
         }
+
+    def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, object]:
+        return self._new_turn_context(
+            can_write_non_plan=self._should_allow_non_plan_write(project_id, user_message),
+        )
 
     def _should_allow_non_plan_write(self, project_id: str, user_message: str) -> bool:
         normalized = (user_message or "").strip()

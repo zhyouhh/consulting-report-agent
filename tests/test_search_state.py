@@ -221,6 +221,37 @@ class SearchStateTests(unittest.TestCase):
         self.assertEqual(first_hit["provider"], "serper")
         self.assertEqual(second_hit["provider"], "brave")
 
+    def test_try_acquire_search_slot_is_atomic_across_threads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SearchStateStore(
+                runtime_state_path=Path(tmpdir) / "state.json",
+                cache_path=Path(tmpdir) / "cache.json",
+            )
+            barrier = threading.Barrier(2)
+            results = []
+
+            def worker(project_id: str):
+                barrier.wait()
+                results.append(
+                    store.try_acquire_search_slot(
+                        project_id=project_id,
+                        project_window_seconds=300,
+                        project_limit=10,
+                        global_window_seconds=60,
+                        global_limit=1,
+                    )
+                )
+
+            first_thread = threading.Thread(target=worker, args=("project-a",))
+            second_thread = threading.Thread(target=worker, args=("project-b",))
+            first_thread.start()
+            second_thread.start()
+            first_thread.join(timeout=2)
+            second_thread.join(timeout=2)
+
+        self.assertEqual(results.count(None), 1)
+        self.assertEqual(results.count("global_minute"), 1)
+
     def test_concurrent_provider_failure_updates_are_serialized(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_state_path = Path(tmpdir) / "state.json"

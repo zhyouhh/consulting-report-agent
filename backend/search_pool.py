@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import threading
 import time
 from typing import Callable
 
@@ -25,6 +26,7 @@ class SearchRouter:
         self.state_store = state_store
         self.providers = providers
         self._layer_cursors = {"primary": 0, "secondary": 0}
+        self._cursor_lock = threading.Lock()
 
     def search(
         self,
@@ -35,24 +37,21 @@ class SearchRouter:
         native_search: Callable[[str], ProviderSearchResult | None] | None = None,
     ) -> dict:
         if turn_search_count >= self.config.limits.per_turn_searches:
-            return self._quota_exhausted_result()
+            return self._quota_exhausted_result(limit_scope="per_turn")
 
         cached = self.state_store.get_cache(query, project_id=project_id)
         if cached is not None:
             return self._build_cached_result(cached)
 
-        if self.state_store.get_recent_project_search_count(
-            project_id,
-            window_seconds=self.PROJECT_WINDOW_SECONDS,
-        ) >= self.config.limits.project_minute_limit:
-            return self._quota_exhausted_result()
-
-        if self.state_store.get_recent_global_search_count(
-            window_seconds=self.GLOBAL_WINDOW_SECONDS,
-        ) >= self.config.limits.global_minute_limit:
-            return self._quota_exhausted_result()
-
-        self.state_store.record_search(project_id)
+        limit_scope = self.state_store.try_acquire_search_slot(
+            project_id=project_id,
+            project_window_seconds=self.PROJECT_WINDOW_SECONDS,
+            project_limit=self.config.limits.project_minute_limit,
+            global_window_seconds=self.GLOBAL_WINDOW_SECONDS,
+            global_limit=self.config.limits.global_minute_limit,
+        )
+        if limit_scope is not None:
+            return self._quota_exhausted_result(limit_scope=limit_scope)
 
         empty_result: ProviderSearchResult | None = None
         provider_errors: list[SearchProviderError] = []
@@ -124,8 +123,9 @@ class SearchRouter:
         if not weighted_names:
             return []
 
-        start = self._layer_cursors[layer_name] % len(weighted_names)
-        self._layer_cursors[layer_name] = (start + 1) % len(weighted_names)
+        with self._cursor_lock:
+            start = self._layer_cursors[layer_name] % len(weighted_names)
+            self._layer_cursors[layer_name] = (start + 1) % len(weighted_names)
 
         ordered_candidates: list[str] = []
         seen: set[str] = set()
@@ -199,10 +199,11 @@ class SearchRouter:
             project_ttl_seconds=self.config.limits.project_cache_ttl_seconds,
         )
 
-    def _quota_exhausted_result(self) -> dict:
+    def _quota_exhausted_result(self, *, limit_scope: str) -> dict:
         return {
             "status": "error",
             "error_type": "quota_exhausted",
+            "limit_scope": limit_scope,
             "message": self.QUOTA_EXHAUSTED_MESSAGE,
             "cached": False,
             "native_fallback_used": False,
@@ -220,7 +221,7 @@ class SearchRouter:
                     "native_fallback_used": False,
                     "items": [],
                 }
-        return self._quota_exhausted_result()
+        return self._quota_exhausted_result(limit_scope="pool_exhausted")
 
     def _message_for_provider_error(self, error_type: str) -> str:
         if error_type == "auth_failed":

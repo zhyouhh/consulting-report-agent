@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -143,6 +144,75 @@ class SearchRouterTests(unittest.TestCase):
             ["serper", "serper", "serper", "serper", "serper", "brave", "brave", "brave"],
         )
 
+    def test_router_serializes_cursor_updates_across_threads(self):
+        class RaceDict(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.first_read = threading.Event()
+                self.second_read = threading.Event()
+
+            def __getitem__(self, key):
+                value = super().__getitem__(key)
+                if key == "primary":
+                    if not self.first_read.is_set():
+                        self.first_read.set()
+                    else:
+                        self.second_read.set()
+                return value
+
+            def __setitem__(self, key, value):
+                if key == "primary" and self.first_read.is_set() and not self.second_read.is_set():
+                    self.second_read.wait(timeout=0.2)
+                return super().__setitem__(key, value)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            router = SearchRouter(
+                config=ManagedSearchPoolConfig(
+                    version=1,
+                    providers={
+                        "serper": _provider_cfg(weight=1),
+                        "brave": _provider_cfg(weight=1),
+                        "tavily": _provider_cfg(weight=1),
+                        "exa": _provider_cfg(weight=1),
+                    },
+                    routing=ManagedSearchRoutingConfig(
+                        primary=["serper", "brave"],
+                        secondary=[],
+                        native_fallback=True,
+                    ),
+                    limits=ManagedSearchLimitsConfig(
+                        per_turn_searches=2,
+                        project_minute_limit=100,
+                        global_minute_limit=100,
+                        memory_cache_ttl_seconds=60,
+                        project_cache_ttl_seconds=300,
+                    ),
+                ),
+                state_store=self._make_state(tmpdir),
+                providers={
+                    "serper": FakeProvider(_make_result("serper")),
+                    "brave": FakeProvider(_make_result("brave")),
+                    "tavily": FakeProvider(_make_result("tavily")),
+                    "exa": FakeProvider(_make_result("exa")),
+                },
+            )
+            router._layer_cursors = RaceDict({"primary": 0, "secondary": 0})
+            results = []
+
+            def search(query):
+                result = router.search(query, project_id="demo", turn_search_count=0)
+                results.append(result["provider"])
+
+            first_thread = threading.Thread(target=search, args=("query-a",))
+            second_thread = threading.Thread(target=search, args=("query-b",))
+            first_thread.start()
+            self.assertTrue(router._layer_cursors.first_read.wait(timeout=2))
+            second_thread.start()
+            first_thread.join(timeout=2)
+            second_thread.join(timeout=2)
+
+        self.assertEqual(sorted(results), ["brave", "serper"])
+
     def test_router_returns_cached_result_before_dispatching_provider(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._make_state(tmpdir)
@@ -243,6 +313,7 @@ class SearchRouterTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["error_type"], "quota_exhausted")
+        self.assertEqual(result["limit_scope"], "per_turn")
 
     def test_router_blocks_project_when_project_minute_limit_hit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -270,6 +341,7 @@ class SearchRouterTests(unittest.TestCase):
         self.assertEqual(first["status"], "success")
         self.assertEqual(second["status"], "error")
         self.assertEqual(second["error_type"], "quota_exhausted")
+        self.assertEqual(second["limit_scope"], "project_minute")
 
     def test_router_blocks_globally_when_global_minute_limit_hit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -297,6 +369,7 @@ class SearchRouterTests(unittest.TestCase):
         self.assertEqual(first["status"], "success")
         self.assertEqual(second["status"], "error")
         self.assertEqual(second["error_type"], "quota_exhausted")
+        self.assertEqual(second["limit_scope"], "global_minute")
 
     def test_router_uses_native_fallback_only_after_all_pool_providers_fail(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -380,6 +453,7 @@ class SearchRouterTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["error_type"], "quota_exhausted")
+        self.assertEqual(result["limit_scope"], "pool_exhausted")
 
     def test_router_returns_backend_error_when_pool_failed_for_service_reasons(self):
         with tempfile.TemporaryDirectory() as tmpdir:

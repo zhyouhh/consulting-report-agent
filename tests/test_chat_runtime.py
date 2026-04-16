@@ -10,7 +10,13 @@ import httpx
 import requests
 
 from backend.chat import ChatHandler
-from backend.config import Settings
+from backend.config import (
+    ManagedSearchLimitsConfig,
+    ManagedSearchPoolConfig,
+    ManagedSearchProviderConfig,
+    ManagedSearchRoutingConfig,
+    Settings,
+)
 from backend.skill import SkillEngine
 
 
@@ -91,6 +97,37 @@ class ChatRuntimeTests(unittest.TestCase):
         mock_getaddrinfo.return_value = [
             (2, 1, 6, "", (ip, 443)),
         ]
+
+    def _make_search_pool_config(self):
+        provider = ManagedSearchProviderConfig(
+            enabled=True,
+            api_key="k",
+            weight=1,
+            minute_limit=60,
+            daily_soft_limit=1200,
+            cooldown_seconds=180,
+        )
+        return ManagedSearchPoolConfig(
+            version=1,
+            providers={
+                "serper": provider,
+                "brave": provider,
+                "tavily": provider,
+                "exa": provider,
+            },
+            routing=ManagedSearchRoutingConfig(
+                primary=["serper", "brave"],
+                secondary=["tavily", "exa"],
+                native_fallback=True,
+            ),
+            limits=ManagedSearchLimitsConfig(
+                per_turn_searches=2,
+                project_minute_limit=10,
+                global_minute_limit=20,
+                memory_cache_ttl_seconds=60,
+                project_cache_ttl_seconds=300,
+            ),
+        )
 
     def _make_fetch_response(
         self,
@@ -2891,29 +2928,7 @@ class ChatRuntimeTests(unittest.TestCase):
             )
 
     @mock.patch("backend.chat.OpenAI")
-    @mock.patch("backend.chat.requests.get")
-    def test_web_search_returns_searxng_results(
-        self,
-        mock_get,
-        mock_openai,
-    ):
-        mock_get.return_value = mock.Mock(
-            status_code=200,
-            json=lambda: {
-                "results": [
-                    {
-                        "title": "猪猪侠2024年市场观察",
-                        "content": "围绕授权、票房和短视频热度的行业摘要。",
-                        "url": "https://example.com/a",
-                    },
-                    {
-                        "title": "咏声动漫公开信息",
-                        "content": "公司动态与IP布局。",
-                        "url": "https://example.com/b",
-                    },
-                ]
-            },
-        )
+    def test_web_search_returns_compatibility_text_and_provider_metadata(self, mock_openai):
         settings = Settings(
             mode="managed",
             managed_base_url="https://newapi.z0y0h.work/client/v1",
@@ -2922,14 +2937,225 @@ class ChatRuntimeTests(unittest.TestCase):
             skill_dir=self.repo_skill_dir,
         )
         handler = ChatHandler(settings, SkillEngine(settings.projects_dir, self.repo_skill_dir))
+        fake_router = mock.Mock()
+        fake_router.search.return_value = {
+            "status": "success",
+            "provider": "serper",
+            "cached": False,
+            "native_fallback_used": False,
+            "result_type": "success",
+            "items": [
+                {
+                    "title": "猪猪侠2025观察",
+                    "snippet": "授权与票房摘要",
+                    "url": "https://example.com/a",
+                    "domain": "example.com",
+                    "score": 0.9,
+                }
+            ],
+            "results": "搜索结果：\n1. 猪猪侠2025观察\n授权与票房摘要\n链接: https://example.com/a",
+        }
 
-        result = handler._web_search("猪猪侠 2024 咏声动漫")
+        with mock.patch.object(handler, "_get_search_router", return_value=fake_router):
+            result = handler._web_search("猪猪侠 2025", project_id="demo", turn_search_count=0)
 
         self.assertEqual(result["status"], "success")
-        self.assertIn("猪猪侠2024年市场观察", result["results"])
-        self.assertIn("咏声动漫公开信息", result["results"])
-        self.assertIn("授权、票房和短视频热度", result["results"])
-        mock_get.assert_called_once()
+        self.assertEqual(result["provider"], "serper")
+        self.assertIn("猪猪侠2025观察", result["results"])
+        self.assertEqual(result["items"][0]["domain"], "example.com")
+        fake_router.search.assert_called_once_with(
+            "猪猪侠 2025",
+            project_id="demo",
+            turn_search_count=0,
+            native_search=handler._search_with_native_provider,
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_execute_tool_increments_web_search_count_after_success(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
+            handler._turn_context = {
+                "can_write_non_plan": True,
+                "web_search_disabled": False,
+                "web_search_performed": False,
+                "fetch_url_performed": False,
+                "web_search_count": 0,
+            }
+
+            with mock.patch.object(
+                handler,
+                "_web_search",
+                return_value={"status": "success", "provider": "serper", "results": "ok"},
+            ):
+                result = handler._execute_tool(
+                    project["id"],
+                    self._make_tool_call("web_search", '{"query":"第一次"}'),
+                )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(handler._turn_context["web_search_count"], 1)
+        self.assertTrue(handler._turn_context["web_search_performed"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_execute_tool_tracks_web_search_count_and_blocks_third_search_in_same_turn(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
+            handler._turn_context = {
+                "can_write_non_plan": True,
+                "web_search_disabled": False,
+                "web_search_performed": False,
+                "fetch_url_performed": False,
+                "web_search_count": 2,
+            }
+
+            with mock.patch.object(
+                handler,
+                "_web_search",
+                return_value={
+                    "status": "error",
+                    "error_type": "quota_exhausted",
+                    "limit_scope": "per_turn",
+                    "message": "当前内置搜索额度已用尽，请稍后再试。",
+                },
+            ):
+                result = handler._execute_tool(
+                    project["id"],
+                    self._make_tool_call("web_search", '{"query":"第三次"}'),
+                )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("搜索额度已用尽", result["message"])
+        self.assertEqual(handler._turn_context["web_search_count"], 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_execute_tool_increments_web_search_count_for_non_per_turn_quota_rejection(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
+            handler._turn_context = {
+                "can_write_non_plan": True,
+                "web_search_disabled": False,
+                "web_search_performed": False,
+                "fetch_url_performed": False,
+                "web_search_count": 1,
+            }
+
+            with mock.patch.object(
+                handler,
+                "_web_search",
+                return_value={
+                    "status": "error",
+                    "error_type": "quota_exhausted",
+                    "limit_scope": "global_minute",
+                    "message": "当前内置搜索额度已用尽，请稍后再试。",
+                },
+            ):
+                result = handler._execute_tool(
+                    project["id"],
+                    self._make_tool_call("web_search", '{"query":"分钟限额"}'),
+                )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(handler._turn_context["web_search_count"], 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_native_search_helper_returns_none_when_model_is_not_supported(self, mock_openai):
+        handler = ChatHandler(
+            self._make_settings(
+                mode="managed",
+                managed_model="gemini-3-flash",
+            ),
+            SkillEngine(Path(tempfile.gettempdir()) / "native-projects", self.repo_skill_dir),
+        )
+
+        result = handler._search_with_native_provider("OpenAI news")
+
+        self.assertIsNone(result)
+        mock_openai.return_value.responses.create.assert_not_called()
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_native_search_helper_uses_openai_responses_api_when_supported(self, mock_openai):
+        mock_client = mock_openai.return_value
+        mock_client.responses.create.return_value = SimpleNamespace(output_text="Latest updates from OpenAI")
+        handler = ChatHandler(
+            self._make_settings(
+                mode="custom",
+                custom_api_base="https://api.openai.com/v1",
+                custom_api_key="secret",
+                custom_model="gpt-5",
+            ),
+            SkillEngine(Path(tempfile.gettempdir()) / "native-projects", self.repo_skill_dir),
+        )
+
+        result = handler._search_with_native_provider("OpenAI news")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.provider, "native")
+        mock_client.responses.create.assert_called_once()
+        self.assertEqual(
+            mock_client.responses.create.call_args.kwargs["tools"],
+            [{"type": "web_search"}],
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_search_router_is_shared_across_handlers(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            settings = self._make_settings(projects_dir=projects_dir)
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            handler_a = ChatHandler(settings, engine)
+            handler_b = ChatHandler(settings, engine)
+
+            with mock.patch("backend.chat._SEARCH_ROUTER_SINGLETON", None), mock.patch(
+                "backend.chat.load_managed_search_pool_config",
+                return_value=self._make_search_pool_config(),
+            ), mock.patch("backend.chat.SearchStateStore"), mock.patch(
+                "backend.chat.SerperProvider"
+            ), mock.patch("backend.chat.BraveProvider"), mock.patch(
+                "backend.chat.TavilyProvider"
+            ), mock.patch("backend.chat.ExaProvider"), mock.patch(
+                "backend.chat.SearchRouter"
+            ) as mock_router_cls:
+                router_a = handler_a._get_search_router()
+                router_b = handler_b._get_search_router()
+
+        self.assertIs(router_a, router_b)
+        mock_router_cls.assert_called_once()
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_blocks_report_draft_before_outline_confirmation(self, mock_openai):
@@ -4086,12 +4312,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertFalse(state_path.exists())
 
     @mock.patch("backend.chat.OpenAI")
-    @mock.patch("backend.chat.requests.get")
-    def test_web_search_stops_retrying_after_search_backend_error(self, mock_get, mock_openai):
-        mock_get.return_value = mock.Mock(
-            status_code=503,
-            text="service unavailable",
-        )
+    def test_web_search_stops_retrying_after_search_backend_error(self, mock_openai):
         settings = Settings(
             mode="managed",
             managed_base_url="https://newapi.z0y0h.work/client/v1",
@@ -4101,6 +4322,13 @@ class ChatRuntimeTests(unittest.TestCase):
         )
         handler = ChatHandler(settings, SkillEngine(settings.projects_dir, self.repo_skill_dir))
         handler._turn_context = {"can_write_non_plan": True}
+        fake_router = mock.Mock()
+        fake_router.search.return_value = {
+            "status": "error",
+            "error_type": "backend_error",
+            "message": "搜索服务暂时不可用，请稍后再试。",
+            "disable_for_turn": True,
+        }
 
         tool_call = type(
             "ToolCall",
@@ -4117,14 +4345,15 @@ class ChatRuntimeTests(unittest.TestCase):
             },
         )()
 
-        first_result = handler._execute_tool("demo", tool_call)
-        second_result = handler._execute_tool("demo", tool_call)
+        with mock.patch.object(handler, "_get_search_router", return_value=fake_router):
+            first_result = handler._execute_tool("demo", tool_call)
+            second_result = handler._execute_tool("demo", tool_call)
 
         self.assertEqual(first_result["status"], "error")
         self.assertIn("搜索服务暂时不可用", first_result["message"])
         self.assertEqual(second_result["status"], "error")
         self.assertIn("本轮", second_result["message"])
-        self.assertEqual(mock_get.call_count, 1)
+        fake_router.search.assert_called_once()
 
     @mock.patch("backend.chat.OpenAI")
     def test_fetch_url_tool_is_registered(self, mock_openai):
