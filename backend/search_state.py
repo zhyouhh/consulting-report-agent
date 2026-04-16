@@ -16,6 +16,7 @@ from backend.config import get_search_cache_path, get_search_runtime_state_path
 _TRAILING_PUNCTUATION = " \t\r\n!?,.;:，。！？；：、~～"
 _RUNTIME_STATE_LOCK = threading.RLock()
 _FILE_CACHE_LOCK = threading.RLock()
+_SEARCH_USAGE_RETENTION_SECONDS = 3600
 
 
 def normalize_search_query(query: str) -> str:
@@ -109,6 +110,59 @@ class SearchStateStore:
             provider_state.last_success_at = time.time()
             self._set_provider_state(provider, provider_state)
 
+    def record_search(self, project_id: str) -> None:
+        with _RUNTIME_STATE_LOCK:
+            self._runtime_state = self._load_runtime_state()
+            usage = self._runtime_state.setdefault("usage", {})
+            project_usage = usage.setdefault("projects", {})
+            now = time.time()
+
+            project_entries = self._trim_usage_timestamps(
+                project_usage.get(project_id) or [],
+                now=now,
+                retention_seconds=_SEARCH_USAGE_RETENTION_SECONDS,
+            )
+            project_entries.append(now)
+            project_usage[project_id] = project_entries
+
+            global_entries = self._trim_usage_timestamps(
+                usage.get("global") or [],
+                now=now,
+                retention_seconds=_SEARCH_USAGE_RETENTION_SECONDS,
+            )
+            global_entries.append(now)
+            usage["global"] = global_entries
+            self._save_runtime_state()
+
+    def get_recent_project_search_count(self, project_id: str, *, window_seconds: int) -> int:
+        with _RUNTIME_STATE_LOCK:
+            self._runtime_state = self._load_runtime_state()
+            usage = self._runtime_state.setdefault("usage", {})
+            project_usage = usage.setdefault("projects", {})
+            now = time.time()
+            recent_entries = self._trim_usage_timestamps(
+                project_usage.get(project_id) or [],
+                now=now,
+                retention_seconds=window_seconds,
+            )
+            project_usage[project_id] = recent_entries
+            self._save_runtime_state()
+            return len(recent_entries)
+
+    def get_recent_global_search_count(self, *, window_seconds: int) -> int:
+        with _RUNTIME_STATE_LOCK:
+            self._runtime_state = self._load_runtime_state()
+            usage = self._runtime_state.setdefault("usage", {})
+            now = time.time()
+            recent_entries = self._trim_usage_timestamps(
+                usage.get("global") or [],
+                now=now,
+                retention_seconds=window_seconds,
+            )
+            usage["global"] = recent_entries
+            self._save_runtime_state()
+            return len(recent_entries)
+
     def _get_memory_cache(self, normalized_query: str, project_id: str) -> dict[str, Any] | None:
         cache_key = self._make_cache_key(normalized_query, project_id)
         entry = self._memory_cache.get(cache_key)
@@ -157,6 +211,20 @@ class SearchStateStore:
             last_success_at=provider_payload.get("last_success_at"),
             last_error_type=provider_payload.get("last_error_type"),
         )
+
+    def _trim_usage_timestamps(
+        self,
+        timestamps: list[Any],
+        *,
+        now: float,
+        retention_seconds: int,
+    ) -> list[float]:
+        cutoff = now - retention_seconds
+        trimmed: list[float] = []
+        for timestamp in timestamps:
+            if isinstance(timestamp, (int, float)) and timestamp > cutoff:
+                trimmed.append(float(timestamp))
+        return trimmed
 
     def _load_runtime_state(self) -> dict[str, Any]:
         return self._load_json_object(self.runtime_state_path, default={"version": 1, "providers": {}})
