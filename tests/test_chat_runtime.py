@@ -3376,6 +3376,60 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertTrue(handler._should_allow_non_plan_write(project["id"], "继续完善"))
 
     @mock.patch("backend.chat.OpenAI")
+    def test_should_allow_non_plan_write_when_existing_report_exists_and_user_asks_to_expand(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            project_dir = Path(project["project_dir"])
+            (project_dir / "content").mkdir(exist_ok=True)
+            (project_dir / "content" / "final-report.md").write_text(
+                "# Final report\n\n## Executive summary\nA concrete section.\n",
+                encoding="utf-8",
+            )
+            handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
+
+            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "请扩写到5000字"))
+            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "帮我润色一下现有正文"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_should_allow_non_plan_write_uses_expand_request_as_history_approval(self, mock_openai):
+        del mock_openai
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
+            handler._save_conversation(
+                project["id"],
+                [
+                    {"role": "user", "content": "请把现有正文扩写到5000字"},
+                    {"role": "assistant", "content": "收到，我继续扩写正文。"},
+                ],
+            )
+
+            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "继续"))
+
+    @mock.patch("backend.chat.OpenAI")
     def test_handler_write_file_requires_fetch_url_after_web_search_before_formal_external_write(self, mock_openai):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"

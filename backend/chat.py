@@ -128,6 +128,20 @@ class ChatHandler:
         "继续完善",
         "继续撰写",
     ]
+    NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS = [
+        "继续",
+        "补充",
+        "完善",
+        "修改",
+        "调整",
+        "接着",
+        "扩写",
+        "续写",
+        "润色",
+        "改写",
+        "补写",
+        "丰富",
+    ]
 
     def __init__(self, settings: Settings, skill_engine: SkillEngine):
         self.settings = settings
@@ -2855,19 +2869,8 @@ class ChatHandler:
             if history_permission is not None:
                 return history_permission
 
-        project_path = self.skill_engine.get_project_path(project_id)
-        if not project_path:
-            return False
-
-        report_candidates = [
-            project_path / "report_draft_v1.md",
-            project_path / "content" / "report.md",
-            project_path / "content" / "draft.md",
-            project_path / "content" / "final-report.md",
-            project_path / "output" / "final-report.md",
-        ]
-        if any(path.exists() for path in report_candidates) and any(
-            keyword in normalized for keyword in ["继续", "补充", "完善", "修改", "调整"]
+        if self._has_existing_report_draft(project_id) and any(
+            keyword in normalized for keyword in self.NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS
         ):
             return True
 
@@ -2875,7 +2878,14 @@ class ChatHandler:
 
     def _looks_like_follow_up_non_plan_request(self, user_message: str) -> bool:
         normalized = (user_message or "").strip()
-        return any(keyword in normalized for keyword in ["继续", "补充", "完善", "修改", "调整", "接着"])
+        return any(keyword in normalized for keyword in self.NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS)
+
+    def _has_existing_report_draft(self, project_id: str) -> bool:
+        try:
+            self.skill_engine.get_primary_report_path(project_id)
+            return True
+        except ValueError:
+            return False
 
     def _recent_history_allows_non_plan_write(self, project_id: str) -> bool | None:
         history = self._load_conversation(project_id)
@@ -2901,6 +2911,10 @@ class ChatHandler:
             "继续写报告",
             "继续正文",
             "大纲没问题",
+            "扩写",
+            "续写",
+            "润色",
+            "改写",
         ]
         return any(keyword in normalized for keyword in approval_keywords)
 
