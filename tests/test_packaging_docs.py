@@ -7,15 +7,16 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class PackagingDocsTests(unittest.TestCase):
     def test_build_script_uses_windows_null_device_and_consulting_report_spec(self):
-        content = (ROOT / "build.bat").read_text(encoding="utf-8")
-        self.assertIn(">nul", content.lower())
-        self.assertIn("pyinstaller consulting_report.spec", content)
-        self.assertNotIn("/dev/null", content)
-        self.assertIn("/client/v1/models", content)
-        self.assertTrue(
-            "CONSULTING_REPORT_MANAGED_CLIENT_TOKEN" in content
-            or "managed_client_token.txt" in content
-        )
+        wrapper = (ROOT / "build.bat").read_text(encoding="utf-8")
+        script = (ROOT / "build.ps1").read_text(encoding="utf-8")
+        self.assertIn("build.ps1", wrapper)
+        self.assertIn("consulting_report.spec", script)
+        self.assertIn("/client/v1/models", script)
+        self.assertIn(".venv", script)
+        self.assertIn('"python"', script.lower())
+        self.assertIn('"venv"', script.lower())
+        self.assertIn("managed_client_token.txt", script)
+        self.assertIn("managed_search_pool.json", script)
 
     def test_build_docs_describe_managed_default_and_windows_first_release(self):
         for doc_name in ["BUILD.md", "WINDOWS_BUILD.md"]:
@@ -26,6 +27,8 @@ class PackagingDocsTests(unittest.TestCase):
             self.assertIn("可审草稿", content)
             self.assertIn("/client/v1/models", content)
             self.assertIn("client token", content)
+            self.assertIn(".venv", content)
+            self.assertIn("PyInstaller", content)
 
     def test_build_docs_describe_search_pool_and_runtime_storage(self):
         for doc_name in ["BUILD.md", "WINDOWS_BUILD.md"]:

@@ -27,6 +27,7 @@
 
 - 推荐 Python 3.11 或 3.12
 - 安装时勾选 `Add Python to PATH`
+- 推荐在项目根目录使用 `.venv`
 
 ### 2. 安装 Node.js
 
@@ -45,20 +46,24 @@ npm --version
 ### 方法一：一键打包
 
 1. 双击运行 [build.bat](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/build.bat)
-2. 提前准备 `managed_client_token.txt`，或设置环境变量 `CONSULTING_REPORT_MANAGED_CLIENT_TOKEN`
+2. `build.bat` 会自动创建并复用项目根目录的 `.venv`
+3. 提前准备 `managed_client_token.txt`，或设置环境变量 `CONSULTING_REPORT_MANAGED_CLIENT_TOKEN`
    这个文件必须是 `/client` 使用的 client token，不是上游 API key
-3. 提前准备 `managed_search_pool.json`，或设置环境变量 `CONSULTING_REPORT_MANAGED_SEARCH_POOL_FILE`
+4. 提前准备 `managed_search_pool.json`，或设置环境变量 `CONSULTING_REPORT_MANAGED_SEARCH_POOL_FILE`
    这个文件是内置搜索池的私有配置，不应提交到 Git；如果走环境变量覆盖，`build.bat` 会在打包前临时复制它
-4. 等待脚本自动安装依赖、构建前端、执行 PyInstaller
-5. 打包产物位于 `dist\咨询报告助手\`
+5. 优先把这两个私有文件直接放在仓库根目录，避免误用残留环境变量
+6. 等待脚本自动安装依赖、构建前端、执行 PyInstaller
+7. 打包产物位于 `dist\咨询报告助手\`
 
 ### 方法二：手动打包
 
 ```cmd
-pip install -r requirements.txt
-pip install pyinstaller
+python -m venv .venv
+.venv\Scripts\python -m pip install --upgrade pip
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m pip install pyinstaller
 
-set CONSULTING_REPORT_MANAGED_CLIENT_TOKEN=你的专用客户端令牌
+copy D:\私有配置\managed_client_token.txt managed_client_token.txt
 copy D:\私有配置\portable-search-pool.json managed_search_pool.json
 
 cd frontend
@@ -66,7 +71,7 @@ npm install
 npm run build
 cd ..
 
-pyinstaller consulting_report.spec
+.venv\Scripts\python -m PyInstaller consulting_report.spec
 ```
 
 打包脚本会先请求 `https://newapi.z0y0h.work/client/v1/models` 预检 token；
@@ -86,7 +91,8 @@ pyinstaller consulting_report.spec
   - `project_cache_ttl_seconds`
 
 如果你不走 `build.bat`，而是直接运行 `pyinstaller consulting_report.spec`，
-就必须先手工把私有搜索池文件放到仓库根目录，并命名为 `managed_search_pool.json`。
+就必须先手工把私有搜索池文件放到仓库根目录，并命名为 `managed_search_pool.json`，
+同时也建议使用项目自己的 `.venv`，不要直接用全局 Python 或 Anaconda 环境。
 
 ## 打包产物
 
@@ -94,11 +100,15 @@ pyinstaller consulting_report.spec
 dist/
 └── 咨询报告助手/
     ├── 咨询报告助手.exe
-    ├── managed_search_pool.json
-    ├── skill/
-    ├── frontend/
     └── _internal/
+        ├── managed_client_token.txt
+        ├── managed_search_pool.json
+        ├── skill/
+        ├── frontend/
+        └── ...
 ```
+
+PyInstaller 把所有 `datas`（skill、frontend/dist、私有文件）都收到 `_internal/` 下面，运行时通过 `sys._MEIPASS` 寻址。
 
 ## 分发说明
 
@@ -145,7 +155,7 @@ curl https://newapi.z0y0h.work/client/v1/models -H "Authorization: Bearer 你的
 ### 内置搜索池配置丢了
 
 - 构建机上最重要的源文件是 `managed_search_pool.json`
-- 打包后它会出现在 `dist\咨询报告助手\managed_search_pool.json`
+- 打包后它会出现在 `dist\咨询报告助手\_internal\managed_search_pool.json`
 - 这份文件里的搜索 provider 凭据会随包分发；它不是服务端薄中转令牌
 - 这个文件不应该进 Git，但应该单独备份，方便你自己带走
 - 如果你通过环境变量传入外部路径，`build.bat` 会把它临时 staging 成根目录的 `managed_search_pool.json`，打包结束后再清理或恢复
@@ -164,6 +174,7 @@ npm run build
 
 - 优先使用 [consulting_report.spec](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/consulting_report.spec)
 - 确认 `frontend/dist` 和 `skill/` 已存在
+- 如果包体突然膨胀到数百 MB 甚至 1GB 以上，优先检查是不是误用了全局 Python/Anaconda，而不是项目 `.venv`
 
 ## 技术说明
 
