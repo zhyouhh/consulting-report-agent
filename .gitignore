@@ -6,6 +6,7 @@ backend/static/
 .worktrees/
 .omc/
 .codepilot-uploads/
+.claude/
 *.pyc
 __pycache__/
 .env
@@ -35,6 +36,7 @@ wheels/
 venv/
 ENV/
 env/
+.venv/
 
 # PyInstaller
 *.manifest
