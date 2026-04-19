@@ -1,123 +1,112 @@
 # Current Worklist
 
-最后更新：2026-04-01
+最后更新：2026-04-17（新增阶段推进门禁重构 / 聊天与预览复制体验）
 
-## 本周目标
+## 当前未解决 / 待验证
 
-1. 上下文处理与压缩逻辑梳理
-- 状态：`已完成`
-- 计划：`docs/superpowers/plans/2026-03-30-context-policy-and-compression.md`
-- 目标：明确当前上下文窗口、历史压缩、保留消息策略以及是否需要调整。
-- 关注点：触发阈值、摘要质量、压缩后信息丢失、工具调用与长项目持续对话表现。
-- 设计稿：`docs/superpowers/specs/2026-03-30-context-policy-and-compression-design.md`
-- 结论：默认通道 `gemini-3-flash` 按 `1M / 500k` 档位运行；自定义 API 支持模型识别、保守 fallback 与手动覆盖；前后端已区分 `估算` / `实际`，并修复了流式与跨项目状态串线问题。
+1. 新包实机 smoke test
+- 状态：`待验证`
+- 目标：在最新 `85 MB` Windows 包里跑一轮完整业务流，确认代码层面的修复已经真实反映到桌面端体验。
+- 重点检查：
+  - 默认渠道启动与基础聊天
+  - 内置搜索池是否正常工作
+  - 阶段推进、文件落盘、右侧工作区同步
+  - `web_search -> fetch_url -> write_file` 门禁
+  - 打包后私有文件是否正确注入
 
-2. `draw.io skill` 评估
+2. 流式输出体感
+- 状态：`待验证`
+- 来源：原 `debug-backlog` 第 1 条
+- 现状：前端正常结束时的强制 flush 已修；默认通道读流超时和友好报错也已修。
+- 仍需确认：真实 exe 里是否还会出现“正文不是平滑流出，而是一大段集中冒出来”的体感问题。
+
+3. 新建项目表单与废 UI 整理
 - 状态：`待开始`
-- 目标：判断它对咨询报告场景是否真的有用，以及是否值得接入当前客户端工作流。
-- 关注点：适用场景、输入输出方式、是否会增加复杂度。
+- 目标：把“填了像没填”的字段、重复输入项和旧流程遗留 UI 一次性清干净。
+- 当前方向：
+  - 删除真正无效或重复的字段
+  - 把“截止日期”改成日期选择器
+  - 重新审视“已有材料或备注”和“初始材料”的语义重叠
+  - 提高项目类型、主题、目标读者、篇幅等字段在初始化和首轮交互中的利用率
 
-3. 删掉废 UI
+4. 默认渠道文案与默认模型决策
 - 状态：`待开始`
-- 目标：清理新建报告界面和相关流程里已经无用或重复的字段/提示。
-- 关注点：不要误删仍有注入价值的项；优先删“填了像没填”的部分。
-- 新增备注：把“截止日期”从手输文本改成日期选择器，默认显示当天。
+- 目标：把“推荐/保证可用”类表述改成更中性的“默认渠道 / 开箱即用”。
+- 待定项：
+  - 默认模型是否从 `gemini-3-flash` 调整为 `gpt-5.4`
+  - 设置页、README、打包文档里的相关表述统一
 
-4. 默认渠道描述与默认 API 调整
-- 状态：`待开始`
-- 目标：把“推荐/保证可用”类文案改成更中性的“默认渠道 / 开箱即用”描述。
-- 关注点：默认模型是否从 `gemini-3-flash` 改到 `gpt-5.4` 仍未最终拍板，先按待定记录。
-
-5. 试用过程中的 bug 随时插队处理
-- 状态：`进行中`
-- 目标：对试用中暴露的问题按系统化排障 + TDD 逐个修。
-- 关注点：优先处理阻断性问题，再处理体验问题。
-
-## 新增待排查问题（2026-03-30）
-
-1. 输入框不会自动换行
-- 现象：当前输入框始终单行显示，长文本输入时很难回看前文。
-- 额外诉求：希望支持自动换行、按内容增高数行；同时评估 `Ctrl+V` 直接粘贴图片/附件。
-- 状态：`已完成`
-- 设计稿：`docs/superpowers/specs/2026-03-31-chat-composer-pending-attachments-design.md`
-- 计划：`docs/superpowers/plans/2026-03-31-chat-composer-pending-attachments.md`
-- 结论：
-  - 输入区已改为多行 `textarea`
-  - `Enter` 发送，`Shift+Enter` 换行，IME 组合输入时不会误发
-  - 最多约 `6` 行自动增高，超出后内部滚动
-  - `Ctrl+V`、`+`、拖拽统一先进“待发送附件区”
-  - 图片默认 `本轮临时`，文档默认 `发送前入库`
-  - 文档在发送前导入项目材料库；chat 失败时不重复上传，图片仍留在待发送区
-
-2. 助手声称已更新文件，但没有真实落盘
-- 现象：回复里会说“已更新大纲 / notes / progress”，但实际项目目录内看不到对应文件写入或阶段变化。
-- 状态：`已完成`
-- 根因：后端此前把“自然语言里声称已更新”和“真实 `write_file` 落盘”分离了，模型没调工具时也会被当成完成。
-- 处理：已增加本轮写入校验；若助手声称已更新或已经产出了应入档的大纲内容，但未真实 `write_file`，后端会当场拦下并要求补做实际落盘。
-
-3. 重新点击左侧当前项目后，右侧阶段回退到“未开始”
-- 现象：当前项目本来已有阶段信息，但重新点一次同一个项目后，右侧摘要会退回默认态。
-- 线索：像是前端状态被清空后没有重新加载。
-- 状态：`已完成`
-- 结论：根因是重复点击同一项目时前端先清空了工作区状态，但没有触发新的 reload；现已改为同项目重复选择直接 no-op。
-
-4. 默认通道流式聊天偶发 `The read operation timed out`
-- 现象：同一台机器上直接请求上游模型很快，但桌面客户端在默认通道流式聊天中，偶发在中途报 `错误: The read operation timed out`。
-- 已知范围：
-  - 新建项目后发简单消息通常正常，问题更容易出现在“助手声称已更新文件但未真实落盘”的对话路径上。
-  - 当前不是上下文过大导致；实际对话上下文远低于默认通道的压缩阈值。
-- 当前判断：
-  - 桌面端后端对上游流式请求的读取超时当前仍偏小。
-  - 同时“未真实落盘时要求模型补做写入”的纠偏逻辑，可能让一次用户消息在后台触发多轮上游调用，导致体感明显变慢。
-  - 前端目前会把这类底层超时文案直接显示给用户，提示不够友好。
-- 状态：`源码已修复，待新包验证`
-- 根因：流式聊天每轮请求仍显式传入 `timeout=30.0`，覆盖了初始化 `httpx.Client(timeout=120.0)`；同时中途读流超时会直接从生成器抛出，没有转成可控错误事件。
-- 处理：默认通道流式请求已改为显式 `httpx.Timeout(connect=15s/read=180s/write=30s/pool=30s)`；中途读流超时已改成友好错误提示，并补了回归测试。
-
-## 新增待排查问题（2026-04-01）
-
-1. 项目阶段与信息文件存在多套事实源
-- 现象：已产出大纲后，右侧文件预览默认仍打开空的 `project-info.md`；同时项目目录里出现助手自行创建的 `plan/gate-control.md`，其阶段定义与界面顶部“当前阶段”不一致。
-- 已知范围：
-  - v2 当前实际主信息文件已经是 `project-overview.md`，`project-info.md` 仍会随模板复制进项目，但初始化阶段不会填充它。
-  - `gate-control.md` 不是模板文件，也不是后端/前端读取的正式事实源，属于模型自行写入的游离 `plan/` 文件。
-  - 顶部阶段来自 `/api/projects/{id}/workspace` 的 `stage_code`；后端当前只按 `S0/S1/S4` 三段式文件存在性推断，和 `stage-gates.md` 里完整的 `S0→S7` 顺序语义未完全对齐。
-- 状态：`待排查`
-- 下一步：统一 `project-overview` / `project-info` 约定；限制模型只能写正式登记过的 `plan/*.md` 文件；把阶段推断收敛到单一事实源，并与 `stage-gates.md` 的顺序门禁保持一致。
-
-## 建议推进顺序
-
-1. 上下文处理与压缩逻辑
-2. 试用中阻断性 bug
-3. 废 UI 清理
-4. 默认渠道文案 / 默认 API
 5. `draw.io skill` 评估
+- 状态：`待开始`
+- 目标：判断它对咨询报告场景是否真有价值，还是只会增加复杂度。
+
+6. 前端生产包优化
+- 状态：`待开始`
+- 现状：`vite build` 已通过，但主 JS chunk 仍接近 `1 MB`。
+- 目标：在不引入复杂度失控的前提下做基本拆包，降低首屏和构建产物压力。
+
+7. 技术债清理
+- 状态：`待开始`
+- 当前明确项：
+  - `pydantic` deprecation warning 仍存在
+  - 需要再看是否有可以从打包里继续排除的非必需依赖
+
+8. **⭐ 下一步首要实施项：阶段推进门禁重构**
+- 状态：`设计定稿，待工程落地`（经 9 轮审查通过：2 轮 Claude 工程/UX + 7 轮 codex xhigh 独立审查）
+- 关联文档：
+  - `docs/superpowers/specs/2026-04-17-stage-advance-gates-design.md`（设计稿）
+  - `docs/superpowers/plans/2026-04-17-stage-advance-gates.md`（分 8 个 Task 的 TDD 落地计划 + 各 Task RED 测试）
+- 根因：当前 `_infer_stage_state` 只按文件存在性推断阶段，模型一句"继续"就能从 S0 跑到 S7；同时模型被 `_should_allow_non_plan_write` 挡住时会静默把内容贴在聊天框而不告知用户。
+- 目标：把阶段推进改为"文件就绪 + 用户确认戳 + 质量门槛"三件齐备，4 个硬关卡（S1→S2、S4→S5、S5→S6/S7、S7→done），保留 S4 内部自由改写；模型被 tool error 挡住后由后端主动注入 `system_notice` 告知用户，不依赖 prompt 配合。
+- 接手指引：按 plan 末尾的 Rollout Order（Task 1 → 2 → 3 → 4 → 5/6 → 7 → 8）顺序开，每个 Task 独立 commit，先 RED test 再实现。
+
+9. 聊天与文件预览复制体验
+- 状态：`待开始`
+- 现象：
+  - 聊天对话框里的消息正文不可框选复制（只能用消息右上角的复制按钮）
+  - 文件内容预览面板完全不可复制，只能看
+- 目标：聊天与文件预览都支持原生框选复制；保留现有复制按钮作为显式入口。
+- 约束：不引入额外的富文本复杂度，只处理 CSS 层面的 `user-select` 与事件拦截。
+
+## 最近已解决
+
+1. 内置搜索池主链路
+- 状态：`已完成`
+- 结论：`managed_search_pool.json` 打包注入、运行时状态/缓存、四家 provider 适配器、分层路由、native fallback、chat runtime 接线都已落地。
+
+2. 1.29 GB 异常大包
+- 状态：`已完成`
+- 根因：之前在 Anaconda 大环境里打包，PyInstaller 把大量无关科学计算/Notebook 依赖一起卷进包。
+- 结论：已切到项目 `.venv` 打包，最新包体积约 `85.3 MB`。
+
+3. 打包脚本不稳
+- 状态：`已完成`
+- 结论：`build.bat` 已改为薄入口，实际逻辑迁到 `build.ps1`；默认走项目 `.venv`，不再依赖脏全局环境。
+
+4. 前端依赖漏洞
+- 状态：`已完成`
+- 结论：已升级前端依赖，当前 `npm audit` 为 `0 vulnerabilities`。
+
+5. 阶段事实源与工作流对齐
+- 状态：`已完成`
+- 关联文档：`docs/superpowers/specs/2026-04-01-stage-facts-and-phase-alignment-design.md`
+- 结论：`project-info.md` 已退出正式工作流；阶段推断、正式 plan 文件和门禁规则已对齐。
+
+6. Session memory 重构
+- 状态：`已完成`
+- 关联文档：`docs/superpowers/specs/2026-04-14-session-memory-rearchitecture-design.md`
+- 结论：`conversation_state.json`、memory entries、post-turn compaction 和 provider 上下文顺序已完成重构。
+
+## 已取代 / 废弃
+
+1. Web Search 相关性加固（针对 SearXNG 单后端）
+- 状态：`已被取代（Superseded）`
+- 关联文档：`docs/superpowers/specs/2026-04-15-web-search-relevance-hardening-design.md`（顶部已加 Superseded banner）
+- 取代原因：项目走了**管理型搜索池**路线（`managed-search-pool` 已完成，见"最近已解决"第 1 条），四家 provider + 分层路由，从根本上绕过了 SearXNG 召回质量问题。
+- 不要再按这份 spec 落地。保留文档是因为它记录的 SearXNG 实测问题可作为未来搜索策略调整的参考。
 
 ## 使用约定
 
-- 每完成一项，更新对应状态与结论。
-- 若中途新增本周事项，直接追加到本文件。
-- 稳定事实记到根目录 `AGENTS.md`，短期推进项记在本文件。
-## 2026-04-01 Stage Workflow Alignment Update
-
-- 状态：`已完成`
-- 设计稿：`docs/superpowers/specs/2026-04-01-stage-facts-and-phase-alignment-design.md`
-- 计划：`docs/superpowers/plans/2026-04-01-stage-facts-and-phase-alignment.md`
-- 结论：
-  - `project-info.md` 已退出正式工作流，新项目只初始化 `project-overview.md`
-  - 后端已阻止未登记的 `plan/*.md` 写入，`plan/gate-control.md` 不再允许落盘
-  - `outline.md` / `research-plan.md` 必须先满足证据门槛：有效 `notes.md` + `references.md`，且来源不少于 2 个
-  - 阶段推断已对齐为完整 `S0 -> S7` 顺序，不再只看粗粒度 `S0/S1/S4`
-  - `S6` 对“仅报告”项目为可跳过阶段；对“报告+演示”项目仍为必经阶段
-  - 工作区文件预览已默认优先 `plan/project-overview.md`，并把旧的 `plan/project-info.md` 放到末位
-
-## 2026-04-14 Session Memory Rearchitecture Update
-
-- 状态：`已完成`
-- 设计稿：`docs/superpowers/specs/2026-04-14-session-memory-rearchitecture-design.md`
-- 计划：`docs/superpowers/plans/2026-04-14-session-memory-rearchitecture.md`
-- 结论：
-  - 已新增 `conversation_state.json` 作为轻量 sidecar，统一承载 `events` / `memory_entries` / `compact_state`
-  - 成功的 `read_material_file` / `read_file` / `fetch_url` / `write_file` 会沉淀为结构化记忆，并按同源规则更新
-  - provider 上下文已改成 `system -> compact summary -> recent memory -> recent visible messages -> current turn`
-  - post-turn compaction 已覆盖 memory 层，并会在 compact 后收缩已覆盖的 `memory_entries/events`
+- 只在本文件维护“仍需要行动”的事项。
+- 已解决但值得保留上下文的内容，放到“最近已解决”。
+- 历史调试记录归档到 `docs/debug-backlog.md`，不再作为当前事实源。

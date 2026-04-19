@@ -1,40 +1,35 @@
 # Desktop Debug Backlog
 
-最后更新：2026-03-27
+最后更新：2026-04-17
 
-## 当前待解决问题
+## 归档说明
+
+- 从 `2026-04-17` 开始，本文件不再维护“当前待解决问题”。
+- 当前仍需行动的事项，统一维护在 [current-worklist.md](D:/CodexProject/Consult%20report/consulting-report-agent/docs/current-worklist.md)。
+- 本文件只保留历史调试脉络，避免和当前 worklist 双份漂移。
+
+## 历史问题去向
 
 1. 聊天正文对用户而言几乎不是流式输出
-- 现象：无论是首轮欢迎消息，还是后续正文，界面上都表现为一大段集中出现。
-- 当前判断：
-  - 上游 `gemini-3-flash` 确实支持流式，但实测首个正文 chunk 可能要约 19 秒才到，之后 chunk 会在很短时间内集中吐出。
-  - 前端 `ChatPanel` 还存在“正常完成时强制 flush 剩余队列”的问题，会把本来想平滑显示的内容再次一股脑刷出。
-  - 已修复前端正常结束时的强制 flush；后续还需要继续观察真实 exe 里的体感是否足够好。
+- 去向：已转入 [current-worklist.md](D:/CodexProject/Consult%20report/consulting-report-agent/docs/current-worklist.md) 的“流式输出体感”
+- 当前口径：代码层修复已完成，等待新包实机验证
 
-2. `web_search` 工具不可用
-- 现象：会报 `401`。
-- 当前根因：旧版本实现依赖 Tavily，但发布版没有 Tavily key。
-- 当前状态：已改成 `DuckDuckGo HTML` 直连方案，且真网 smoke test 已能返回中文搜索结果。
+2. `web_search` 工具不可用 / `401`
+- 去向：已关闭
+- 结论：旧 Tavily 依赖路径已退出；当前正式路径是内置 managed search pool
 
 3. Skill 门禁不够硬，会擅自继续推进
-- 现象：问完信息后没有停在本轮等待确认；大纲后也没等待确认，继续写正文。
-- 当前判断：Skill 文案里“先问后停”“大纲确认前不得写正文”的约束不够硬；后端也没有对 `write_file(report_draft*.md)` 做门禁。
+- 去向：已关闭
+- 结论：后端正式写入门禁、证据门槛和正文写入限制已补齐
 
 4. 右侧阶段不同步
-- 现象：助手已经初始化并写了若干文件，但右侧仍显示“未开始”。
-- 当前根因：
-  - 有些项目目录里 `plan/stage-gates.md` 缺失，当前工作区摘要只会读它，缺失时直接退回默认值。
-  - 阶段推断还把模板自带的 `plan/outline.md` 误判成了真实大纲，导致新项目刚创建就可能被推进到 `S1`。
-- 当前状态：已修复 `stage-gates.md` 缺失回填；也已修复“模板 outline 误判为真实进度”的问题。
+- 去向：已关闭
+- 结论：`stage-gates.md` 缺失回填与模板 `outline` 误判问题都已修复
 
 5. 新建项目表单信息利用率不足
-- 现象：红框内填写的项目类型、主题、目标读者、截止日期、篇幅、备注，进入聊天后体感上没有被明显利用；“已有材料或备注”和下面“初始材料”语义也有重叠。
-- 当前判断：这些字段主要只写入初始化文件，没有在首轮欢迎消息与后续提问里主动利用。
-- 方向：要么显式注入首轮欢迎语和系统上下文，要么删掉冗余字段，避免“填了像没填”。
+- 去向：已转入 [current-worklist.md](D:/CodexProject/Consult%20report/consulting-report-agent/docs/current-worklist.md) 的“新建项目表单与废 UI 整理”
 
-## 额外记录
+## 备注
 
-- 默认通道 / 自定义 API 的启动问题已修复：
-  - 桌面端每次启动默认回到默认通道
-  - 托管 token 不再从配置缓存读取，而是固定走打包内 bundle
-- 当前发布版调通的默认模型：`gemini-3-flash`
+- 如果后面再出现新的纯调试线索，先记到这里；
+- 但一旦确认是正式待办，就转移到 `current-worklist.md`，不要双写。
