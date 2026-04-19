@@ -43,12 +43,12 @@ class SkillEngine:
         "presentation_ready_at",
         "delivery_archived_at",
     }
-    _EXPECTED_LENGTH_LINE_PATTERN = re.compile(r"预期篇幅[^\n]*?[:：]\s*([^\n]+)")
+    _EXPECTED_LENGTH_LINE_PATTERN = re.compile(r"预期篇幅[^\n]*?[:：]\s*([^\n(（]+)")
     _EXPECTED_LENGTH_HEADING_PATTERN = re.compile(
-        r"^##\s*预期篇幅\s*\n\s*([^\n]+)",
+        r"^##\s*预期篇幅\s*\n\s*([^\n(（]+)",
         re.MULTILINE,
     )
-    _DL_ENTRY_PATTERN = re.compile(r"^###\s*\[(DL-[^\]]+)\]", re.MULTILINE)
+    _DL_ENTRY_PATTERN = re.compile(r"^#{3,4}\s*\*{0,2}\s*\[(DL-[^\]]+)\]", re.MULTILINE)
     _DL_REFERENCE_PATTERN = re.compile(r"\[(DL-[^\]]+)\]")
     _EVIDENCE_MARKERS = (
         re.compile(r"https?://"),

@@ -116,6 +116,32 @@ def test_has_enough_analysis_refs_deduplicates_and_requires_dl_match():
         assert engine._has_enough_analysis_refs(project_dir, min_refs=3) is False
 
 
+def test_resolve_length_targets_ignores_parenthetical_commentary():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        engine = SkillEngine(projects_dir=tmp_path, skill_dir=Path('skill'))
+        project_dir = _make_project_with_overview(
+            tmp_path, '5000字 (经讨论：6000字)'
+        )
+        result = engine._resolve_length_targets(project_dir)
+        assert result['expected_length'] == 5000
+        assert result['fallback_used'] is False
+
+
+def test_has_enough_data_log_sources_matches_bolded_and_h4_headings():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        engine = SkillEngine(projects_dir=tmp_path, skill_dir=Path('skill'))
+        project_dir = _make_project(tmp_path)
+        (project_dir / 'plan' / 'data-log.md').write_text(
+            '### **[DL-001]** 标题\n来源: https://example.com/a\n\n'
+            '#### [DL-002] 子条目\n素材: material:abc-123\n\n'
+            '### [DL-003]\n来源: https://example.com/c\n',
+            encoding='utf-8',
+        )
+        assert engine._has_enough_data_log_sources(project_dir, min_count=3) is True
+
+
 def load_tests(loader, tests, pattern):
     import unittest
     suite = unittest.TestSuite()
