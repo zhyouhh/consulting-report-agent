@@ -59,6 +59,7 @@
 - 根因：当前 `_infer_stage_state` 只按文件存在性推断阶段，模型一句"继续"就能从 S0 跑到 S7；同时模型被 `_should_allow_non_plan_write` 挡住时会静默把内容贴在聊天框而不告知用户。
 - 目标：把阶段推进改为"文件就绪 + 用户确认戳 + 质量门槛"三件齐备，4 个硬关卡（S1→S2、S4→S5、S5→S6/S7、S7→done），保留 S4 内部自由改写；模型被 tool error 挡住后由后端主动注入 `system_notice` 告知用户，不依赖 prompt 配合。
 - 接手指引：按 plan 末尾的 Rollout Order（Task 1 → 2 → 3 → 4 → 5/6 → 7 → 8）顺序开，每个 Task 独立 commit，先 RED test 再实现。
+- 前置兼容提醒：2026-04-17 已经把非 plan 写入关键词库扩充提交到 main（commit `22e8976`，新增 `NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS` 常量 + `_has_existing_report_draft` helper）。plan Task 4 Step 5 的代码片段是按旧结构写的，落地时要把 blanket pass 插在**当前**的 `_should_allow_non_plan_write` 结构之上，常量名用 main 上的最新版本，不要把 salvage 改动回退掉。
 
 9. 聊天与文件预览复制体验
 - 状态：`待开始`
