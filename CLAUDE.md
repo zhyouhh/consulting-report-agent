@@ -1,101 +1,99 @@
-# 咨询报告写作智能体
+# CLAUDE.md
 
-## 项目概述
-为公司部门开发的咨询报告写作智能体，面向不太懂AI的同事使用。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 项目目标
-- 提供简单易用的界面（网站或桌面程序）
-- 帮助同事快速生成专业的咨询报告
-- 作为部门AI应用的成果展示
+## 项目定位
 
-## 目标用户
-- 公司部门同事
-- AI使用经验：初级/无经验
-- 需求：简单、直观、可靠
+Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI 的同事，交付形态是 `dist\咨询报告助手\` 整个文件夹（不是裸 exe）。当前只承诺 Windows 分发和 `可审草稿` 导出，不承诺 macOS 正式支持和最终排版稿。
 
-## 技术栈（已确定）
+## 运行时结构
 
-**后端**：
-- Python 3.9+
-- FastAPI（Web框架）
-- OpenAI SDK（LLM调用，兼容硅基流动API）
-- PyWebView（桌面客户端封装）
+桌面应用本质上是三层：
 
-**前端**：
-- React 18
-- Tailwind CSS
-- Axios（API调用）
-- React Markdown（内容预览）
+1. `app.py` 启动 `backend/main.py` 里的 FastAPI（`127.0.0.1:8080`），线程化跑在后台
+2. `PyWebView` 打开内嵌窗口，加载同一 FastAPI 挂载的 `frontend/dist/` 静态 SPA
+3. LLM 请求默认走 `managed` 模式（`https://newapi.z0y0h.work/client/v1`，模型 `gemini-3-flash`），由薄中转（见 `managed_proxy/app.py`）注入真实上游 key。用户可切到 `custom` 模式自填 OpenAI 兼容 API
 
-**部署**：
-- PyWebView桌面客户端（Windows exe）
-- 本地运行，无需服务器
+`DesktopBridge`（`app.py`）通过 `register_desktop_bridge()` 把原生文件选择器暴露给 FastAPI，这是"本地 HTTP API 能调用原生 OS 对话框"的唯一通道——Web 模式（`run_web.py`）下这些接口会 503。
 
-## 已实现的功能
+## 关键数据边界
 
-### 1. Skill定义系统 ✅
-- 4种报告类型：专题研究、体系规划、实施方案、管理制度
-- 流程门禁机制：项目初始化 → 大纲设计 → 分段撰写 → 质量审查 → 导出
-- 去AI化规则：禁用"赋能、抓手、闭环"等词汇
-- 数据真实性检查：严禁编造数据，必须标注来源
-- 质量检查问答式：主动向用户确认关键信息
+**运行时用户数据全部位于** `~/.consulting-report/`（即 `C:\Users\<user>\.consulting-report\`）：
 
-### 2. 后端API ✅
-- Function Calling机制：LLM可调用write_file、read_file、web_search工具
-- 项目管理：创建、删除项目、保存对话历史、文件操作
-- 模型列表获取：从API自动获取可用模型列表
-- 安全加固：路径遍历防护、输入验证、循环调用限制、线程锁保护
-- 默认配置：硅基流动API + DeepSeek-V3.2模型（已验证V3.2存在）
-- web_search：使用Tavily API（已验证可用，免费1000次/月）
+- `config.json` — `Settings` 序列化（排除 `mode/api_key/api_base/model/projects_dir/skill_dir/managed_client_token` 等运行时派生字段）
+- `projects/<project_id>/` — 每个项目的完整工作区（对话历史、plan 文件、正文、附件）
+- `search_runtime_state.json`、`search_cache.json` — 内置搜索池动态状态与缓存
 
-### 3. 前端界面 ✅
-- 三栏布局：项目列表 | 对话区 | Markdown预览
-- 深色模式：护眼配色，类似Claude Code风格
-- 实时预览：动态加载项目文件
-- Token统计：实时显示上下文使用情况
-- API设置：Sidebar底部设置入口，支持获取模型列表
-- 项目管理：删除项目按钮（带确认对话框）
-- 对话操作：清空对话、复制消息、停止生成
+**构建期私有文件**（`.gitignore` 已忽略，必须本地注入）：
 
-### 4. 上下文管理 ✅
-- 自动压缩：达到阈值时自动总结历史对话
-- Token统计：实时追踪输入/输出/总计token数
-- 可配置：压缩阈值、保留消息数可在设置中调整
-- 压缩策略：保留系统提示+最近N条+压缩摘要
+- `managed_client_token.txt` — `/client` 的 client token（**不是**上游 API key）。`build.ps1` 会打包前请求 `/client/v1/models` 预检
+- `managed_search_pool.json` — 内置搜索池 provider 凭据，schema 见 `backend/config.py:load_managed_search_pool_config_from_path`。这份文件会**随安装包一起分发**，不是服务端秘密
 
-## 当前状态
+`backend/config.py:get_base_path()` 在 PyInstaller 打包态下返回 `sys._MEIPASS`，在开发态下返回仓库根，所有相对路径寻址都必须经过它。
 
-**开发进度**：核心功能已完成，UI优化完成（2026-03-17）
+## Skill 工作流（S0-S7）
 
-**最新更新**（2026-03-17）：
-1. ✅ 深色模式 - 全局深色配色，护眼舒适
-2. ✅ 上下文压缩 - 自动总结历史，节省token
-3. ✅ Token统计 - 实时显示使用量和百分比
-4. ✅ 项目删除 - Sidebar添加删除按钮，带确认对话框
-5. ✅ 清空对话 - ChatPanel顶部清空按钮，保留项目文件
-6. ✅ 复制消息 - 每条消息hover显示复制按钮
-7. ✅ 停止生成 - loading时可中断请求，节省token
-8. ✅ 获取模型列表 - API设置中一键获取可用模型，自动填充下拉选择
-9. ✅ web_search功能 - 使用Tavily API（已验证可用）
-10. ✅ 代码质量优化 - 修复tool_calls序列化、压缩截断、线程安全等问题
+`skill/SKILL.md` 定义的阶段状态机由 `backend/skill.py:SkillEngine` 执行。**几个硬约束**，改动任何阶段/plan 文件逻辑前必须理解：
 
-**历史修复**（2026-03-16）：
-1. ✅ 前端消息列表key值问题 - 添加唯一id字段
-2. ✅ 前端useEffect依赖项问题 - 使用useCallback优化
-3. ✅ API Key安全存储 - 移至~/.consulting-report/config.json
-4. ✅ 输入长度限制 - 添加消息验证和max_tokens=4096
-5. ✅ 打包路径兼容 - 添加get_base_path()函数
-6. ✅ 依赖版本统一 - 删除backend/requirements.txt
-7. ✅ 静态文件服务 - 在main.py中添加挂载
+- `plan/project-overview.md` 是项目元信息唯一真值源
+- `plan/stage-gates.md`、`plan/progress.md`、`plan/tasks.md` **由后端自动回写**，模型不能手写，测试/代码里也别假设它们是手工维护
+- `plan/project-info.md` 已退役，不要新建、读取或引用
+- 禁止创建 `gate-control.md`
+- 写 `outline.md` / `research-plan.md` 前必须先 `web_search → fetch_url → 写入 notes.md/references.md`，门禁在 `backend/chat.py`（`NON_PLAN_WRITE_ALLOW_KEYWORDS`、`FILE_UPDATE_VERBS`、证据计数逻辑）
 
-**下一步**：
-1. PyInstaller打包成exe
-2. 内部试用收集反馈
-3. 根据反馈迭代优化
+## 管理型搜索池
 
-## 开发注意事项
-- 界面简洁直观，三栏布局清晰
-- Skill流程引导用户逐步完成报告
-- 错误提示友好（已添加try-catch）
-- 本地部署，双击exe即可使用
-- 配置文件位于用户目录：~/.consulting-report/
+`backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
+
+路由单例在 `ChatHandler` 里（`_SEARCH_ROUTER_SINGLETON`），`managed_search_pool.json` 一旦加载不会热重载，改配置需要重启。
+
+## 常用命令
+
+所有命令在仓库根执行。Windows 开发机需要 Python 3.11/3.12 + Node 20 LTS。
+
+```bash
+# 开发环境初始化
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+cd frontend && npm install && cd ..
+
+# 启动桌面应用（开发态）
+cd frontend && npm run build && cd ..
+python app.py
+
+# 前端热更新开发（配合已跑起来的 FastAPI）
+cd frontend && npm run dev   # 3000 端口，代理 /api → 8080
+
+# 后端单元测试
+.venv\Scripts\python -m pytest tests/                      # 全部
+.venv\Scripts\python -m pytest tests/test_chat_runtime.py  # 单文件
+.venv\Scripts\python -m pytest tests/test_chat_runtime.py::ChatRuntimeTests::test_xxx  # 单用例
+
+# 前端测试（Node 原生 test runner，不是 vitest）
+cd frontend && node --test tests/chatMaterials.test.mjs
+cd frontend && node --test tests/                          # 全部
+
+# Windows 打包（必须先放好 managed_client_token.txt 和 managed_search_pool.json）
+build.bat                    # 等价于 powershell -File build.ps1
+# 或直接：.venv\Scripts\python -m PyInstaller consulting_report.spec
+```
+
+**打包前常被忽略的坑**：PyInstaller 必须用项目 `.venv`，不能在 Anaconda 全局环境里打（会从 1GB+ 膨胀）。`build.ps1` 会强制检查 `.venv` 是否存在。
+
+## 文档与追踪
+
+- `docs/current-worklist.md` — 当前待解决/待验证事项的唯一真值源
+- `docs/debug-backlog.md` — 已归档的调试历史，**不再维护**当前待办
+- `docs/superpowers/plans/` 与 `docs/superpowers/specs/` — 正式变更的设计和落地计划，新功能改动前先去这里看最近的 spec
+
+发现正式待办别在 `debug-backlog.md` 里加新条目，直接加到 `current-worklist.md`。
+
+## 测试与质量约定
+
+- 后端用 `unittest` + `pytest` 发现，一律 mock 外部 HTTP（`curl_cffi_requests`、OpenAI 客户端等）。`tests/test_packaging_docs.py` 锁死了 BUILD.md/WINDOWS_BUILD.md 的关键句子，改文档时注意同步
+- 前端测试用 Node 原生 `node:test`，不依赖 vitest/jest；单测聚焦 `utils/` 的纯函数和组件状态逻辑
+- `tests/test_packaging_spec.py`、`test_packaging_docs.py`、`test_build_support.py` 是打包侧门禁，改 spec 或 build 脚本必跑
+
+## 语言与文案
+
+项目面向中文同事，UI 文案和文档均为中文。代码/命令/变量名/commit message 用英文。不要在用户可见文案里出现"赋能、抓手、闭环"这类 AI 味词汇，也不要暴露"AI reference""内部推理""系统提示"等后台术语（见 `skill/SKILL.md` 写作约束）。
