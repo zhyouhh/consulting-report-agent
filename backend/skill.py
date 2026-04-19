@@ -34,6 +34,14 @@ class SkillEngine:
         "presentation-plan.md",
         "delivery-log.md",
     }
+    STAGE_CHECKPOINTS_FILENAME = "stage_checkpoints.json"
+    STAGE_CHECKPOINT_KEYS = {
+        "outline_confirmed_at",
+        "review_started_at",
+        "review_passed_at",
+        "presentation_ready_at",
+        "delivery_archived_at",
+    }
     IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
     TEXT_SUFFIXES = {".md", ".txt", ".csv"}
     STAGE_CHECKLIST_ITEMS = {
@@ -100,6 +108,61 @@ class SkillEngine:
         "content/final-report.md",
         "output/final-report.md",
     )
+
+    def _stage_checkpoints_path(self, project_path):
+        return Path(project_path) / self.STAGE_CHECKPOINTS_FILENAME
+
+    def _load_stage_checkpoints(self, project_path) -> dict[str, str]:
+        raw = self._read_raw_stage_checkpoints(project_path)
+        return {
+            key: value
+            for key, value in raw.items()
+            if key in self.STAGE_CHECKPOINT_KEYS and isinstance(value, str)
+        }
+
+    def _read_raw_stage_checkpoints(self, project_path) -> dict:
+        checkpoints_path = self._stage_checkpoints_path(project_path)
+        if not checkpoints_path.exists():
+            return {}
+        try:
+            data = json.loads(checkpoints_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+
+    def _write_raw_stage_checkpoints(self, project_path, data):
+        checkpoints_path = self._stage_checkpoints_path(project_path)
+        checkpoints_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _save_stage_checkpoint(self, project_path, key):
+        if key not in self.STAGE_CHECKPOINT_KEYS:
+            raise ValueError(f"Unsupported stage checkpoint key: {key}")
+
+        raw = self._read_raw_stage_checkpoints(project_path)
+        existing = raw.get(key)
+        if isinstance(existing, str):
+            return existing
+
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        raw[key] = timestamp
+        self._write_raw_stage_checkpoints(project_path, raw)
+        return timestamp
+
+    def _clear_stage_checkpoint(self, project_path, key):
+        if key not in self.STAGE_CHECKPOINT_KEYS:
+            raise ValueError(f"Unsupported stage checkpoint key: {key}")
+
+        raw = self._read_raw_stage_checkpoints(project_path)
+        if key not in raw:
+            return
+
+        raw.pop(key, None)
+        self._write_raw_stage_checkpoints(project_path, raw)
 
     def __init__(self, projects_dir: Path, skill_dir: Path):
         self.projects_dir = projects_dir
