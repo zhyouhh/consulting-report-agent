@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 import json
+import math
 import mimetypes
 import re
 import shutil
@@ -42,6 +43,18 @@ class SkillEngine:
         "presentation_ready_at",
         "delivery_archived_at",
     }
+    _EXPECTED_LENGTH_LINE_PATTERN = re.compile(r"预期篇幅[^\n]*?[:：]\s*([^\n]+)")
+    _EXPECTED_LENGTH_HEADING_PATTERN = re.compile(
+        r"^##\s*预期篇幅\s*\n\s*([^\n]+)",
+        re.MULTILINE,
+    )
+    _DL_ENTRY_PATTERN = re.compile(r"^###\s*\[(DL-[^\]]+)\]", re.MULTILINE)
+    _DL_REFERENCE_PATTERN = re.compile(r"\[(DL-[^\]]+)\]")
+    _EVIDENCE_MARKERS = (
+        re.compile(r"https?://"),
+        re.compile(r"material:[a-zA-Z0-9\-]+"),
+        re.compile(r"^(访谈|调研)[:：]", re.MULTILINE),
+    )
     IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
     TEXT_SUFFIXES = {".md", ".txt", ".csv"}
     STAGE_CHECKLIST_ITEMS = {
@@ -163,6 +176,70 @@ class SkillEngine:
 
         raw.pop(key, None)
         self._write_raw_stage_checkpoints(project_path, raw)
+
+    def _resolve_length_targets(self, project_path):
+        overview_path = project_path / "plan" / "project-overview.md"
+        expected = 3000
+        fallback_used = True
+        if overview_path.exists():
+            text = overview_path.read_text(encoding="utf-8")
+            for pattern in (
+                self._EXPECTED_LENGTH_LINE_PATTERN,
+                self._EXPECTED_LENGTH_HEADING_PATTERN,
+            ):
+                match = pattern.search(text)
+                if not match:
+                    continue
+                nums = re.findall(r"\d+", match.group(1))
+                if nums:
+                    expected = max(int(n) for n in nums)
+                    fallback_used = False
+                    break
+        data_log_min = min(12, math.ceil(expected / 1000 * 1.3))
+        analysis_refs_min = min(8, math.ceil(expected / 1000 * 0.8))
+        return {
+            "expected_length": expected,
+            "data_log_min": max(3, data_log_min),
+            "analysis_refs_min": max(2, analysis_refs_min),
+            "report_word_floor": int(expected * 0.7),
+            "fallback_used": fallback_used,
+        }
+
+    def _has_enough_data_log_sources(self, project_path, min_count):
+        data_log = project_path / "plan" / "data-log.md"
+        if not data_log.exists():
+            return False
+        text = data_log.read_text(encoding="utf-8")
+        entries = list(self._DL_ENTRY_PATTERN.finditer(text))
+        if len(entries) < min_count:
+            return False
+        valid = 0
+        for idx, match in enumerate(entries):
+            start = match.end()
+            end = entries[idx + 1].start() if idx + 1 < len(entries) else len(text)
+            body = text[start:end]
+            if any(pattern.search(body) for pattern in self._EVIDENCE_MARKERS):
+                valid += 1
+        return valid >= min_count
+
+    def _has_enough_analysis_refs(self, project_path, min_refs):
+        analysis = project_path / "plan" / "analysis-notes.md"
+        data_log = project_path / "plan" / "data-log.md"
+        if not analysis.exists() or not data_log.exists():
+            return False
+        dl_ids = {
+            m.group(1)
+            for m in self._DL_ENTRY_PATTERN.finditer(
+                data_log.read_text(encoding="utf-8")
+            )
+        }
+        refs = {
+            m.group(1)
+            for m in self._DL_REFERENCE_PATTERN.finditer(
+                analysis.read_text(encoding="utf-8")
+            )
+        }
+        return len(refs & dl_ids) >= min_refs
 
     def __init__(self, projects_dir: Path, skill_dir: Path):
         self.projects_dir = projects_dir
