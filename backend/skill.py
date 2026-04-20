@@ -43,6 +43,14 @@ class SkillEngine:
         "presentation_ready_at",
         "delivery_archived_at",
     }
+    MIGRATION_MARKER_KEY = "__migrated_at"
+    _CASCADE_ORDER = [
+        "outline_confirmed_at",
+        "review_started_at",
+        "review_passed_at",
+        "presentation_ready_at",
+        "delivery_archived_at",
+    ]
     _EXPECTED_LENGTH_LINE_PATTERN = re.compile(r"预期篇幅[^\n]*?[:：]\s*([^\n(（]+)")
     _EXPECTED_LENGTH_HEADING_PATTERN = re.compile(
         r"^##\s*预期篇幅\s*\n\s*([^\n(（]+)",
@@ -163,6 +171,45 @@ class SkillEngine:
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _backfill_stage_checkpoints_if_missing(self, project_path):
+        checkpoints_path = self._stage_checkpoints_path(project_path)
+        if checkpoints_path.exists():
+            return
+
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        migrated = {self.MIGRATION_MARKER_KEY: timestamp}
+        stage_gates_path = Path(project_path) / "plan" / "stage-gates.md"
+        if stage_gates_path.exists():
+            stage_text = stage_gates_path.read_text(encoding="utf-8")
+            current_stage = self._extract_stage_code(stage_text)
+            if current_stage and self._stage_index(current_stage) >= self._stage_index("S2"):
+                migrated["outline_confirmed_at"] = timestamp
+
+        checkpoints_path.write_text(
+            json.dumps(migrated, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _clear_stage_checkpoint_cascade(self, project_path, key):
+        if key not in self._CASCADE_ORDER:
+            raise ValueError(f"unknown cascade key: {key}")
+
+        start = self._CASCADE_ORDER.index(key)
+        checkpoints = self._load_stage_checkpoints(project_path)
+        changed = False
+        for cascade_key in self._CASCADE_ORDER[start:]:
+            if cascade_key in checkpoints:
+                del checkpoints[cascade_key]
+                changed = True
+
+        if changed:
+            raw = self._read_raw_stage_checkpoints(project_path)
+            marker = raw.get(self.MIGRATION_MARKER_KEY)
+            payload = dict(checkpoints)
+            if marker:
+                payload[self.MIGRATION_MARKER_KEY] = marker
+            self._write_raw_stage_checkpoints(project_path, payload)
 
     def _save_stage_checkpoint(self, project_path, key):
         if key not in self.STAGE_CHECKPOINT_KEYS:
@@ -1103,6 +1150,8 @@ class SkillEngine:
         return []
 
     def _stage_index(self, stage_code: str) -> int:
+        if stage_code == "done":
+            return len(self.STAGE_ORDER)
         return self.STAGE_ORDER.index(stage_code)
 
     def _tracked_stage_items(self) -> list[str]:

@@ -33,6 +33,19 @@ class SkillEngineTests(unittest.TestCase):
         project = engine.create_project(self._project_payload(workspace_dir))
         return engine, Path(project["project_dir"])
 
+    def _make_project(self) -> Path:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        engine, project_dir = self._create_engine_and_project(tmpdir.name)
+        self.engine = engine
+        return project_dir
+
+    def _write_stage_gates_at_stage(self, project_dir: Path, stage_code: str):
+        (project_dir / "plan" / "stage-gates.md").write_text(
+            f"# Stage gates\n\n**阶段**: {stage_code}\n**状态**: 进行中\n",
+            encoding="utf-8",
+        )
+
     def _write_stage_two_prerequisites(
         self,
         project_dir: Path,
@@ -202,6 +215,24 @@ class SkillEngineTests(unittest.TestCase):
             "# Draft\n\n"
             "## Executive summary\n"
             f"{body}\n",
+            encoding="utf-8",
+        )
+
+    def _write_report_draft(self, project_dir: Path, words: int):
+        body = " ".join(f"word{idx}" for idx in range(words))
+        (project_dir / "report_draft_v1.md").write_text(
+            "# Draft\n\n"
+            "## Executive summary\n"
+            f"{body}\n",
+            encoding="utf-8",
+        )
+
+    def _write_review_checklist(self, project_dir: Path):
+        (project_dir / "plan" / "review-checklist.md").write_text(
+            "# Review checklist\n\n"
+            "- [x] Facts and sources checked\n"
+            "- [x] Conclusions align with evidence\n"
+            "- [x] Structure and logic reviewed\n",
             encoding="utf-8",
         )
 
@@ -1204,3 +1235,36 @@ class SkillEngineTests(unittest.TestCase):
         state = self.engine._infer_stage_state(project_dir)
         self.assertEqual(state["stage_code"], "S7")
         self.assertEqual(state["stage_status"], "进行中")
+
+    def test_migration_only_backfills_outline_even_for_old_s7_projects(self):
+        project_dir = self._make_project()
+        self._write_stage_gates_at_stage(project_dir, "S7")
+        self._write_report_draft(project_dir, words=5000)
+        self._write_review_checklist(project_dir)
+        self._write_delivery_log(project_dir)
+
+        self.engine._backfill_stage_checkpoints_if_missing(project_dir)
+
+        checkpoints = self.engine._load_stage_checkpoints(project_dir)
+        self.assertIn("outline_confirmed_at", checkpoints)
+        self.assertNotIn("review_started_at", checkpoints)
+        self.assertNotIn("review_passed_at", checkpoints)
+        self.assertNotIn("delivery_archived_at", checkpoints)
+
+    def test_clear_cascade_clears_all_subsequent_checkpoints(self):
+        project_dir = self._make_project()
+        for key in ("outline_confirmed_at", "review_started_at", "review_passed_at", "delivery_archived_at"):
+            self.engine._save_stage_checkpoint(project_dir, key)
+        raw = self.engine._read_raw_stage_checkpoints(project_dir)
+        raw[self.engine.MIGRATION_MARKER_KEY] = "2026-04-20T18:00:00"
+        self.engine._write_raw_stage_checkpoints(project_dir, raw)
+
+        self.engine._clear_stage_checkpoint_cascade(project_dir, "review_started_at")
+
+        checkpoints = self.engine._load_stage_checkpoints(project_dir)
+        raw_checkpoints = self.engine._read_raw_stage_checkpoints(project_dir)
+        self.assertIn("outline_confirmed_at", checkpoints)
+        self.assertNotIn("review_started_at", checkpoints)
+        self.assertNotIn("review_passed_at", checkpoints)
+        self.assertNotIn("delivery_archived_at", checkpoints)
+        self.assertEqual(raw_checkpoints[self.engine.MIGRATION_MARKER_KEY], "2026-04-20T18:00:00")
