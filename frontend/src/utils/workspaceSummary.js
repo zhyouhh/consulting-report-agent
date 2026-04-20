@@ -1,3 +1,8 @@
+// §9.6 Delivery mode literals — these MUST match backend/skill.py:1012-1022
+// which returns the Chinese string directly. Any mismatch breaks progress bar.
+export const DELIVERY_MODE_REPORT_ONLY = "仅报告";
+export const DELIVERY_MODE_REPORT_WITH_PRESENTATION = "报告+演示";
+
 export function summarizeWorkspace(apiSummary = {}) {
   const source = apiSummary || {};
   return {
@@ -18,8 +23,16 @@ export function summarizeWorkspace(apiSummary = {}) {
     qualityProgress: source.quality_progress || null,
     stalledSince: source.stalled_since || null,
     // §9.6 delivery mode → progress bar segment count
-    deliveryMode: source.delivery_mode || "report_only",
+    deliveryMode: source.delivery_mode || DELIVERY_MODE_REPORT_ONLY,
   };
+}
+
+/**
+ * Returns true when the progress bar should include the S6 "准备演示" segment.
+ * Only true when backend explicitly says 报告+演示.
+ */
+export function shouldShowPresentationStage(deliveryMode) {
+  return deliveryMode === DELIVERY_MODE_REPORT_WITH_PRESENTATION;
 }
 
 /**

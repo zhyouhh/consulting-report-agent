@@ -5,6 +5,9 @@ import {
   summarizeWorkspace,
   isS4ReviewButtonVisible,
   isS1ConfirmOutlineEnabled,
+  shouldShowPresentationStage,
+  DELIVERY_MODE_REPORT_ONLY,
+  DELIVERY_MODE_REPORT_WITH_PRESENTATION,
 } from "../src/utils/workspaceSummary.js";
 
 test("summarizeWorkspace falls back safely when stage data is missing", () => {
@@ -47,7 +50,7 @@ test("summarizeWorkspace maps new Task 7 fields from api response", () => {
     length_fallback_used: false,
     quality_progress: { label: "有效来源条目", current: 5, target: 8 },
     stalled_since: null,
-    delivery_mode: "report_only",
+    delivery_mode: "仅报告",
   });
   assert.equal(summary.stageCode, "S4");
   assert.equal(summary.nextStageHint, "S7");
@@ -58,7 +61,7 @@ test("summarizeWorkspace maps new Task 7 fields from api response", () => {
   assert.equal(summary.lengthFallbackUsed, false);
   assert.deepEqual(summary.qualityProgress, { label: "有效来源条目", current: 5, target: 8 });
   assert.equal(summary.stalledSince, null);
-  assert.equal(summary.deliveryMode, "report_only");
+  assert.equal(summary.deliveryMode, "仅报告");
 });
 
 test("summarizeWorkspace uses safe defaults when new fields are absent", () => {
@@ -68,7 +71,7 @@ test("summarizeWorkspace uses safe defaults when new fields are absent", () => {
   assert.equal(summary.lengthFallbackUsed, false);
   assert.equal(summary.qualityProgress, null);
   assert.equal(summary.stalledSince, null);
-  assert.equal(summary.deliveryMode, "report_only");
+  assert.equal(summary.deliveryMode, "仅报告");
   assert.equal(summary.nextStageHint, null);
   assert.deepEqual(summary.flags, {});
   assert.deepEqual(summary.checkpoints, {});
@@ -138,4 +141,55 @@ test("isS1ConfirmOutlineEnabled: checkpoints.outline_md_exists overrides when pr
 test("isS1ConfirmOutlineEnabled: safe for empty summary", () => {
   assert.equal(isS1ConfirmOutlineEnabled({}), false);
   assert.equal(isS1ConfirmOutlineEnabled(), false);
+});
+
+// ── delivery_mode constants must match backend/skill.py:1012-1022 ───────────
+
+test("DELIVERY_MODE constants match backend Chinese literals", () => {
+  assert.equal(DELIVERY_MODE_REPORT_ONLY, "仅报告");
+  assert.equal(DELIVERY_MODE_REPORT_WITH_PRESENTATION, "报告+演示");
+});
+
+test("summarizeWorkspace preserves backend Chinese delivery_mode value", () => {
+  const s1 = summarizeWorkspace({ delivery_mode: "报告+演示" });
+  assert.equal(s1.deliveryMode, "报告+演示");
+  const s2 = summarizeWorkspace({ delivery_mode: "仅报告" });
+  assert.equal(s2.deliveryMode, "仅报告");
+});
+
+test("summarizeWorkspace defaults deliveryMode to 仅报告 (not english snake_case)", () => {
+  const s = summarizeWorkspace({});
+  assert.equal(s.deliveryMode, "仅报告");
+  // Must NOT default to any english-ish placeholder
+  assert.notEqual(s.deliveryMode, "report_only");
+  assert.notEqual(s.deliveryMode, "report_and_presentation");
+});
+
+test("shouldShowPresentationStage: true only for 报告+演示", () => {
+  assert.equal(shouldShowPresentationStage("报告+演示"), true);
+  assert.equal(shouldShowPresentationStage("仅报告"), false);
+  assert.equal(shouldShowPresentationStage("report_and_presentation"), false);
+  assert.equal(shouldShowPresentationStage(""), false);
+  assert.equal(shouldShowPresentationStage(null), false);
+  assert.equal(shouldShowPresentationStage(undefined), false);
+});
+
+test("shouldShowPresentationStage gates S6 segment correctly for RED case", () => {
+  // Regression guard: 报告+演示 project MUST show S6 (8-seg bar).
+  // Previously compared to 'report_and_presentation' so this returned false,
+  // dropping the S6 segment.
+  const summary = summarizeWorkspace({
+    stage_code: "S4",
+    delivery_mode: "报告+演示",
+  });
+  assert.equal(shouldShowPresentationStage(summary.deliveryMode), true);
+});
+
+test("shouldShowPresentationStage gates S6 segment correctly for report-only", () => {
+  // 7-seg bar: no S6 ghost.
+  const summary = summarizeWorkspace({
+    stage_code: "S4",
+    delivery_mode: "仅报告",
+  });
+  assert.equal(shouldShowPresentationStage(summary.deliveryMode), false);
 });

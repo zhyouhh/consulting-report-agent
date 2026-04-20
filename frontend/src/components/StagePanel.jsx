@@ -1,5 +1,5 @@
 import React from 'react'
-import { summarizeWorkspace } from '../utils/workspaceSummary'
+import { summarizeWorkspace, shouldShowPresentationStage } from '../utils/workspaceSummary'
 import StageAdvanceControl from './StageAdvanceControl'
 import RollbackMenu from './RollbackMenu'
 
@@ -33,7 +33,7 @@ function getStageIndex(code) {
 }
 
 function ProgressBar({ stageCode, deliveryMode, checkpoints }) {
-  const stages = deliveryMode === 'report_and_presentation'
+  const stages = shouldShowPresentationStage(deliveryMode)
     ? REPORT_AND_PRESENTATION_STAGES
     : REPORT_ONLY_STAGES
 
