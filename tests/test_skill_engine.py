@@ -1399,7 +1399,7 @@ class SkillEngineTests(unittest.TestCase):
         self.assertNotIn("delivery_archived_at", checkpoints)
         self.assertEqual(raw_checkpoints[self.engine.MIGRATION_MARKER_KEY], "2026-04-20T18:00:00")
 
-    def test_record_stage_checkpoint_sets_and_clears_under_shared_lock(self):
+    def test_record_stage_checkpoint_set_and_clear_roundtrip(self):
         project_dir = self._make_project()
 
         result = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
