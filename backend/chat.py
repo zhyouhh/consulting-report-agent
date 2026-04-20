@@ -2963,6 +2963,7 @@ class ChatHandler:
             "web_search_count": 0,
             "system_notice_emitted": False,
             "pending_system_notices": [],
+            "checkpoint_event": None,
         }
 
     def _is_question(self, text: str) -> bool:
@@ -3013,6 +3014,7 @@ class ChatHandler:
         return None
 
     def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, object]:
+        self._turn_context = self._new_turn_context(can_write_non_plan=False)
         project_path = self.skill_engine.get_project_path(project_id)
         if project_path:
             summary = self.skill_engine.get_workspace_summary(project_id)
@@ -3027,9 +3029,9 @@ class ChatHandler:
                     else:
                         self.skill_engine._clear_stage_checkpoint_cascade(project_path, key)
                     self.skill_engine._sync_stage_tracking_files(project_path)
-        return self._new_turn_context(
-            can_write_non_plan=self._should_allow_non_plan_write(project_id, user_message),
-        )
+                    self._turn_context["checkpoint_event"] = {"action": action, "key": key}
+        self._turn_context["can_write_non_plan"] = self._should_allow_non_plan_write(project_id, user_message)
+        return self._turn_context
 
     def _emit_system_notice_once(
         self,

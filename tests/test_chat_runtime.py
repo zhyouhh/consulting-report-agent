@@ -5891,6 +5891,18 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("outline_confirmed_at", checkpoints)
 
     @mock.patch("backend.chat.OpenAI")
+    def test_build_turn_context_records_checkpoint_event_on_set(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        handler._turn_context = handler._build_turn_context(self.project_id, "确认大纲")
+
+        self.assertEqual(
+            handler._turn_context["checkpoint_event"],
+            {"action": "set", "key": "outline_confirmed_at"},
+        )
+
+    @mock.patch("backend.chat.OpenAI")
     def test_build_turn_context_rollback_clears_outline_checkpoint_cascade(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
@@ -5904,6 +5916,19 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertNotIn("review_started_at", checkpoints)
 
     @mock.patch("backend.chat.OpenAI")
+    def test_build_turn_context_records_checkpoint_event_on_clear(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+
+        handler._turn_context = handler._build_turn_context(self.project_id, "大纲再改下")
+
+        self.assertEqual(
+            handler._turn_context["checkpoint_event"],
+            {"action": "clear", "key": "outline_confirmed_at"},
+        )
+
+    @mock.patch("backend.chat.OpenAI")
     def test_build_turn_context_empty_message_has_no_stage_checkpoint_side_effect(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
@@ -5911,6 +5936,15 @@ class ChatRuntimeTests(unittest.TestCase):
         handler._build_turn_context(self.project_id, "")
 
         self.assertEqual(handler.skill_engine._load_stage_checkpoints(self.project_dir), {})
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_turn_context_no_checkpoint_event_when_no_keyword(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        handler._turn_context = handler._build_turn_context(self.project_id, "随便聊聊")
+
+        self.assertIsNone(handler._turn_context["checkpoint_event"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_should_allow_non_plan_write_blocking_message_beats_outline_blanket_pass(self, mock_openai):
