@@ -89,6 +89,9 @@ class SkillEngine:
     _ARCHIVE_CLAIM_PATTERNS = [
         re.compile(r"(项目状态|交付状态)[^\n]*?[:：]?\s*(已完成|已交付|已归档|已结束)"),
     ]
+    # Broadened from spec's `客户反馈` to `反馈` to catch variants like `**反馈 A**`
+    # that the literal spec regex would miss. Covers all feedback headings, not only
+    # customer-facing ones, which also closes a real bypass vector.
     _DELIVERY_PLACEHOLDER_INLINE = re.compile(
         r"-\s*\[x\][^\n]*反馈[^\n]*[(（]?\s*(待记录|待补充|暂无)\s*[)）]?"
     )
@@ -712,6 +715,19 @@ class SkillEngine:
         return False
 
     def validate_self_signature(self, normalized_path: str, content: str, checkpoints: dict) -> str | None:
+        """Return an error message if `content` violates self-signature / premature-verdict /
+        archive-claim rules for the given plan file path, else None.
+
+        Interception is auto-disabled when the corresponding checkpoint stamp is present
+        (spec §12.3): `review_passed_at` disables review-checklist.md interception; and
+        `delivery_archived_at` disables delivery-log.md interception. The auto-disable
+        lets the UI-driven advance flow write whatever it needs without false positives
+        after the user has already confirmed the stage via the right-side workspace.
+
+        Returns:
+            str error message for the caller to surface in the chat stream AND return
+            as the tool error, or None if the write is allowed.
+        """
         if normalized_path == "plan/review-checklist.md":
             if "review_passed_at" in checkpoints:
                 return None
@@ -746,6 +762,17 @@ class SkillEngine:
         return None
 
     def is_protected_stage_checkpoints_path(self, normalized_path: str) -> bool:
+        """Return True if `normalized_path` points to `stage_checkpoints.json` (the user-
+        confirmation truth source). The model must never be able to directly write this
+        file via `write_file` — only the checkpoint endpoints (via `record_stage_checkpoint`)
+        may mutate it.
+
+        Comparison must be case-insensitive because Windows filesystems are case-insensitive
+        by default: `Stage_Checkpoints.json` and `STAGE_CHECKPOINTS.JSON` all resolve to
+        the same file. Backslashes are normalized to forward slashes before the basename
+        extraction so Windows-style relative paths (`plan\\..\\Stage_Checkpoints.json`)
+        are also blocked.
+        """
         if not normalized_path:
             return False
         tail = normalized_path.replace("\\", "/").rsplit("/", 1)[-1]
