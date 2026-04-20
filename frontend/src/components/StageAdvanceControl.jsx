@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import axios from 'axios'
 import ConfirmDialog from './ConfirmDialog'
-import { isS4ReviewButtonVisible } from '../utils/workspaceSummary'
+import { isS4ReviewButtonVisible, isS1ConfirmOutlineEnabled } from '../utils/workspaceSummary'
 
 /**
  * §9.1 / §9.2 stage-advance button area.
@@ -15,7 +15,7 @@ import { isS4ReviewButtonVisible } from '../utils/workspaceSummary'
 export default function StageAdvanceControl({ projectId, summary, onCheckpointSet, onInsertPrompt }) {
   const [confirmState, setConfirmState] = useState(null) // { title, body, onConfirm }
 
-  const { stageCode, nextStageHint, wordCount, lengthTargets, checkpoints } = summary
+  const { stageCode, wordCount, lengthTargets } = summary
 
   // Helper: POST checkpoint
   const postCheckpoint = async (name, action = 'set') => {
@@ -33,7 +33,7 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
 
   // ── S1 ──────────────────────────────────────────────────────────────────
   if (stageCode === 'S1') {
-    const outlineExists = !!(checkpoints.outline_md_exists ?? summary.flags?.outline_exists)
+    const outlineExists = isS1ConfirmOutlineEnabled(summary)
     return (
       <div className="mt-4">
         <button

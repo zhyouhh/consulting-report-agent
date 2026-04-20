@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { summarizeWorkspace, isS4ReviewButtonVisible } from "../src/utils/workspaceSummary.js";
+import {
+  summarizeWorkspace,
+  isS4ReviewButtonVisible,
+  isS1ConfirmOutlineEnabled,
+} from "../src/utils/workspaceSummary.js";
 
 test("summarizeWorkspace falls back safely when stage data is missing", () => {
   const summary = summarizeWorkspace({});
@@ -88,4 +92,50 @@ test("isS4ReviewButtonVisible returns true at exactly 70% threshold", () => {
 
 test("isS4ReviewButtonVisible returns true when above threshold", () => {
   assert.equal(isS4ReviewButtonVisible(3500, { target: 4000 }), true);
+});
+
+// ── isS1ConfirmOutlineEnabled ──────────────────────────────────────────────
+
+test("isS1ConfirmOutlineEnabled: enabled when flags.outline_ready is true", () => {
+  const summary = summarizeWorkspace({
+    stage_code: "S1",
+    flags: { outline_ready: true },
+  });
+  assert.equal(isS1ConfirmOutlineEnabled(summary), true);
+});
+
+test("isS1ConfirmOutlineEnabled: disabled when flags.outline_ready is false", () => {
+  const summary = summarizeWorkspace({
+    stage_code: "S1",
+    flags: { outline_ready: false },
+  });
+  assert.equal(isS1ConfirmOutlineEnabled(summary), false);
+});
+
+test("isS1ConfirmOutlineEnabled: disabled when flags.outline_ready is absent", () => {
+  const summary = summarizeWorkspace({ stage_code: "S1", flags: {} });
+  assert.equal(isS1ConfirmOutlineEnabled(summary), false);
+});
+
+test("isS1ConfirmOutlineEnabled: the legacy outline_exists field is NOT honored", () => {
+  // Guards against regressions — backend field is outline_ready, not outline_exists
+  const summary = summarizeWorkspace({
+    stage_code: "S1",
+    flags: { outline_exists: true },
+  });
+  assert.equal(isS1ConfirmOutlineEnabled(summary), false);
+});
+
+test("isS1ConfirmOutlineEnabled: checkpoints.outline_md_exists overrides when present", () => {
+  const summary = summarizeWorkspace({
+    stage_code: "S1",
+    flags: { outline_ready: false },
+    checkpoints: { outline_md_exists: true },
+  });
+  assert.equal(isS1ConfirmOutlineEnabled(summary), true);
+});
+
+test("isS1ConfirmOutlineEnabled: safe for empty summary", () => {
+  assert.equal(isS1ConfirmOutlineEnabled({}), false);
+  assert.equal(isS1ConfirmOutlineEnabled(), false);
 });

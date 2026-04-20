@@ -30,3 +30,16 @@ export function isS4ReviewButtonVisible(wordCount, lengthTargets) {
   if (!lengthTargets || !lengthTargets.target) return false;
   return wordCount >= lengthTargets.target * 0.7;
 }
+
+/**
+ * Returns true when the S1 "确认大纲，进入资料采集" button should be enabled.
+ * Backend signals outline readiness via `flags.outline_ready`
+ * (source: backend/skill.py:1255-1275 — "outline.md exists and is non-empty").
+ * `checkpoints.outline_md_exists` is preferred when present for forward
+ * compatibility, but current backend does not set it.
+ */
+export function isS1ConfirmOutlineEnabled(summary = {}) {
+  const checkpoints = summary.checkpoints || {};
+  const flags = summary.flags || {};
+  return !!(checkpoints.outline_md_exists ?? flags.outline_ready);
+}
