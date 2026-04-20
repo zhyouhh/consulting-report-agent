@@ -250,10 +250,6 @@ function App() {
             onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
             onCheckpointSet={loadWorkspace}
             onInsertPrompt={(text) => setInjectedPrompt(text)}
-            onOpenEditProject={() => {
-              // TODO: open project edit form — Sidebar owns that modal; for now no-op
-              // This will be wired when the edit modal is exposed via Sidebar props
-            }}
           />
         )}
       </div>

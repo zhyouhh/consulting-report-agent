@@ -131,7 +131,6 @@ export default function StagePanel({
   onExportDraft,
   onCheckpointSet,
   onInsertPrompt,
-  onOpenEditProject,
 }) {
   const summary = summarizeWorkspace(workspace)
   const {

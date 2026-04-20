@@ -18,7 +18,6 @@ export default function WorkspacePanel({
   onProjectMutated,
   onCheckpointSet,
   onInsertPrompt,
-  onOpenEditProject,
 }) {
   const [activeTab, setActiveTab] = useState('stage')
   const [files, setFiles] = useState([])
@@ -170,14 +169,14 @@ export default function WorkspacePanel({
           </button>
         </div>
 
-        {/* §9.3 length_fallback chip — shown when backend used default word target */}
+        {/* §9.3 length_fallback hint — non-interactive; user adjusts length via chat */}
         {wsSummary.lengthFallbackUsed && (
-          <button
-            onClick={onOpenEditProject}
-            className="mt-2 w-full text-left px-3 py-1.5 rounded-lg bg-[#2a1e10] border border-[#5a3a10] text-xs text-[#c8a060] hover:bg-[#3a2810] transition-colors"
+          <div
+            className="mt-2 w-full px-3 py-1.5 rounded-lg bg-[#2a1e10] border border-[#5a3a10] text-xs text-[#c8a060]"
+            role="note"
           >
-            预期字数：3000（默认值，点击修改）
-          </button>
+            预期字数：3000（默认值）
+          </div>
         )}
       </div>
 
@@ -190,7 +189,6 @@ export default function WorkspacePanel({
           onExportDraft={exportDraft}
           onCheckpointSet={onCheckpointSet}
           onInsertPrompt={onInsertPrompt}
-          onOpenEditProject={onOpenEditProject}
         />
       ) : activeTab === 'files' ? (
         <FilePreviewPanel
