@@ -5911,3 +5911,44 @@ class ChatRuntimeTests(unittest.TestCase):
         handler._build_turn_context(self.project_id, "")
 
         self.assertEqual(handler.skill_engine._load_stage_checkpoints(self.project_dir), {})
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_should_allow_non_plan_write_blocking_message_beats_outline_blanket_pass(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+
+        self.assertFalse(handler._should_allow_non_plan_write(self.project_id, "先别写正文"))
+        self.assertIn(
+            "outline_confirmed_at",
+            handler.skill_engine._load_stage_checkpoints(self.project_dir),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_should_allow_non_plan_write_outline_blanket_pass_returns_on_next_turn(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+
+        self.assertFalse(handler._should_allow_non_plan_write(self.project_id, "先别写正文"))
+        self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "继续"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_turn_context_confirm_outline_turn_immediately_allows_non_plan_write(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        turn_context = handler._build_turn_context(self.project_id, "确认大纲")
+
+        self.assertTrue(turn_context["can_write_non_plan"])
+        self.assertIn(
+            "outline_confirmed_at",
+            handler.skill_engine._load_stage_checkpoints(self.project_dir),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_should_allow_non_plan_write_preserves_existing_start_writing_fallback(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "开始写"))

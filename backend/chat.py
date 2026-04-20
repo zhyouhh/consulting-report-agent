@@ -3057,6 +3057,15 @@ class ChatHandler:
         if not normalized:
             return False
 
+        if self._is_non_plan_write_blocking_message(normalized):
+            return False
+
+        project_path = self.skill_engine.get_project_path(project_id)
+        if project_path:
+            checkpoints = self.skill_engine._load_stage_checkpoints(project_path)
+            if "outline_confirmed_at" in checkpoints:
+                return True
+
         if any(keyword in normalized for keyword in self.NON_PLAN_WRITE_ALLOW_KEYWORDS):
             return True
 
