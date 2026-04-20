@@ -255,7 +255,11 @@ async def chat(request: Request, chat_request: ChatRequest):
         )
         token_usage = result.get("token_usage") or {}
         logger.info(f"Chat completed, tokens: {token_usage.get('context_used_tokens', 0)}")
-        return ChatResponse(content=result["content"], token_usage=result.get("token_usage"))
+        return ChatResponse(
+            content=result["content"],
+            token_usage=result.get("token_usage"),
+            system_notices=result.get("system_notices"),
+        )
     except Exception as e:
         logger.error(f"Chat error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

@@ -78,6 +78,25 @@ class SkillEngine:
         re.compile(r"material:[a-zA-Z0-9\-]+"),
         re.compile(r"^(访谈|调研)[:：]", re.MULTILINE),
     )
+    _SELF_SIGNATURE_PATTERNS = [
+        re.compile(r"审查人\s*[:：]\s*(咨询报告写作助手|AI|助手|Claude|GPT|ChatGPT|gemini|模型)"),
+    ]
+    _PREMATURE_REVIEW_VERDICT_PATTERNS = [
+        re.compile(r"审查结论\s*[:：]"),
+        re.compile(r"建议通过"),
+        re.compile(r"审查通过"),
+    ]
+    _ARCHIVE_CLAIM_PATTERNS = [
+        re.compile(r"(项目状态|交付状态)[^\n]*?[:：]?\s*(已完成|已交付|已归档|已结束)"),
+    ]
+    _DELIVERY_PLACEHOLDER_INLINE = re.compile(
+        r"-\s*\[x\][^\n]*反馈[^\n]*[(（]?\s*(待记录|待补充|暂无)\s*[)）]?"
+    )
+    _DELIVERY_BLOCK_RE = re.compile(
+        r"-\s*\[x\][^\n]*反馈[^\n]*\n(?P<body>(?:[^\n]*(?:\n|$)){0,5})",
+        re.MULTILINE,
+    )
+    _PLACEHOLDER_WORDS_RE = re.compile(r"[(（]?\s*(待记录|待补充|暂无)\s*[)）]?")
     IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
     TEXT_SUFFIXES = {".md", ".txt", ".csv"}
     STAGE_CHECKLIST_ITEMS = {
@@ -678,6 +697,59 @@ class SkillEngine:
             )
 
         return normalized_path
+
+    def _delivery_log_has_placeholder_feedback(self, content: str) -> bool:
+        if self._DELIVERY_PLACEHOLDER_INLINE.search(content):
+            return True
+        for match in self._DELIVERY_BLOCK_RE.finditer(content):
+            body = match.group("body")
+            for line in body.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("- [") or stripped.startswith("#"):
+                    break
+                if self._PLACEHOLDER_WORDS_RE.search(line):
+                    return True
+        return False
+
+    def validate_self_signature(self, normalized_path: str, content: str, checkpoints: dict) -> str | None:
+        if normalized_path == "plan/review-checklist.md":
+            if "review_passed_at" in checkpoints:
+                return None
+            for pattern in self._SELF_SIGNATURE_PATTERNS:
+                if pattern.search(content):
+                    return (
+                        "review-checklist.md 的\"审查人\"字段必须由真实用户签字，"
+                        "请保留\"审查人：[待用户确认]\"让用户在 UI 上签字。"
+                    )
+            if "review_started_at" not in checkpoints:
+                for pattern in self._PREMATURE_REVIEW_VERDICT_PATTERNS:
+                    if pattern.search(content):
+                        return (
+                            "review-checklist.md 的\"审查结论 / 建议通过\"字段必须在用户点击"
+                            "\"完成撰写，开始审查\"按钮之后再写入。当前审查尚未开始，"
+                            "请保留为空或\"[待审查]\"，并告知用户需要他们先点按钮进入审查阶段。"
+                        )
+        if normalized_path == "plan/delivery-log.md":
+            if "delivery_archived_at" in checkpoints:
+                return None
+            for pattern in self._ARCHIVE_CLAIM_PATTERNS:
+                if pattern.search(content):
+                    return (
+                        "delivery-log.md 声明\"已归档/已交付\"需要用户点击 UI 的\"归档结束项目\"按钮。"
+                        "请把状态保持为\"待归档\"，并告知用户需要他们点按钮。"
+                    )
+            if self._delivery_log_has_placeholder_feedback(content):
+                return (
+                    "delivery-log.md 勾选\"客户反馈\"需要真实反馈内容，"
+                    "请保留为未勾选，等用户补齐反馈后再勾。"
+                )
+        return None
+
+    def is_protected_stage_checkpoints_path(self, normalized_path: str) -> bool:
+        if not normalized_path:
+            return False
+        tail = normalized_path.replace("\\", "/").rsplit("/", 1)[-1]
+        return tail.casefold() == self.STAGE_CHECKPOINTS_FILENAME.casefold()
 
     def read_material_file(self, project_ref: str, material_id: str) -> str:
         project_record = self.get_project_record(project_ref)

@@ -381,3 +381,34 @@ class WorkspaceApiTests(unittest.TestCase):
                 }
             ],
         )
+
+    @mock.patch("backend.main.get_chat_handler")
+    def test_chat_endpoint_passes_through_system_notices(self, mock_get_chat_handler):
+        handler = mock.Mock()
+        handler.chat.return_value = {
+            "content": "已拦截伪造写入",
+            "token_usage": None,
+            "system_notices": [
+                {
+                    "category": "write_blocked",
+                    "path": "plan/review-checklist.md",
+                    "reason": "review-checklist.md 的\"审查人\"字段必须由真实用户签字，请保留\"审查人：[待用户确认]\"让用户在 UI 上签字。",
+                    "user_action": "请联系用户在右侧工作区完成对应的确认后再写入",
+                }
+            ],
+        }
+        mock_get_chat_handler.return_value = handler
+
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "project_id": "proj-demo",
+                "message_text": "请继续",
+                "attached_material_ids": [],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["content"], "已拦截伪造写入")
+        self.assertEqual(len(response.json()["system_notices"]), 1)
+        self.assertEqual(response.json()["system_notices"][0]["category"], "write_blocked")

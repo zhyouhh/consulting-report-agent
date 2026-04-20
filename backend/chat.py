@@ -26,6 +26,7 @@ from .config import (
     load_managed_search_pool_config,
 )
 from .context_policy import ResolvedContextPolicy, resolve_context_policy
+from .models import SystemNotice
 from .search_pool import SearchRouter
 from .search_providers import (
     BraveProvider,
@@ -1363,6 +1364,14 @@ class ChatHandler:
                     write_path = self._extract_successful_write_path(func_name, func_args, result)
                     if write_path:
                         successful_writes.add(write_path)
+                    for notice in self._turn_context.pop("pending_system_notices", []):
+                        yield {
+                            "type": "system_notice",
+                            "category": notice["category"],
+                            "path": notice.get("path"),
+                            "reason": notice["reason"],
+                            "user_action": notice["user_action"],
+                        }
                     result_icon = "✅" if result.get("status") == "success" else "⚠️"
                     yield {"type": "tool", "data": f"{result_icon} 结果: {str(result)[:160]}..."}
                     current_turn_messages.append({
@@ -1538,11 +1547,21 @@ class ChatHandler:
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
+        system_notices = [
+            SystemNotice(
+                category=notice["category"],
+                path=notice.get("path"),
+                reason=notice["reason"],
+                user_action=notice["user_action"],
+            )
+            for notice in self._turn_context.pop("pending_system_notices", [])
+        ]
         self._turn_context = self._new_turn_context(can_write_non_plan=True)
 
         return {
             "content": assistant_message,
             "token_usage": token_usage,
+            "system_notices": system_notices or None,
         }
 
     def chat_stream(
@@ -2060,16 +2079,57 @@ class ChatHandler:
 
             if func_name == "write_file":
                 if self._should_block_non_plan_write(project_id, args["file_path"]):
+                    reason = "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。"
+                    self._emit_system_notice_once(
+                        category="non_plan_write_blocked",
+                        path=None,
+                        reason=reason,
+                        user_action="请先让用户确认大纲或明确要求继续正文后，再尝试写正式内容。",
+                    )
                     return {
                         "status": "error",
-                        "message": "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。",
+                        "message": reason,
                     }
                 if self._should_require_fetch_url_before_write(project_id, args["file_path"]):
+                    reason = "本轮已经做过 web_search，但还没调用 fetch_url 阅读网页正文。请先对候选链接使用 fetch_url，再写正式文件。"
+                    self._emit_system_notice_once(
+                        category="fetch_url_gate_blocked",
+                        path=None,
+                        reason=reason,
+                        user_action="请先读取候选网页正文，再把外部信息写入正式文件。",
+                    )
                     return {
                         "status": "error",
-                        "message": "本轮已经做过 web_search，但还没调用 fetch_url 阅读网页正文。请先对候选链接使用 fetch_url，再写正式文件。",
+                        "message": reason,
                     }
                 normalized_path = self.skill_engine.validate_plan_write(project_id, args["file_path"])
+                if self.skill_engine.is_protected_stage_checkpoints_path(normalized_path):
+                    reason = (
+                        "stage_checkpoints.json 是用户确认真值源，模型不能直接写入。"
+                        "推进阶段需要用户点击右侧工作区对应按钮（例如\"确认大纲，进入资料采集\"）。"
+                    )
+                    self._emit_system_notice_once(
+                        category="checkpoint_forge_blocked",
+                        path=normalized_path,
+                        reason=reason,
+                        user_action="请告知用户需要他们点击工作区按钮来推进阶段；不要尝试直接写这个文件。",
+                    )
+                    return {"status": "error", "message": reason}
+                project_path = self.skill_engine.get_project_path(project_id)
+                checkpoints = self.skill_engine._load_stage_checkpoints(project_path) if project_path else {}
+                signature_error = self.skill_engine.validate_self_signature(
+                    normalized_path,
+                    args["content"],
+                    checkpoints,
+                )
+                if signature_error:
+                    self._emit_system_notice_once(
+                        category="write_blocked",
+                        path=normalized_path,
+                        reason=signature_error,
+                        user_action="请联系用户在右侧工作区完成对应的确认后再写入",
+                    )
+                    return {"status": "error", "message": signature_error}
                 self.skill_engine.write_file(project_id, normalized_path, args["content"])
                 result = {"status": "success", "message": f"已写入文件: {normalized_path}"}
                 self._persist_successful_tool_result(
@@ -2128,9 +2188,23 @@ class ChatHandler:
             return {"status": "error", "message": f"参数解析失败: {str(e)}"}
         except ValueError as e:
             logging.error(f"工具参数验证失败: {func_name}, 错误: {str(e)}")
+            if func_name == "write_file":
+                self._emit_system_notice_once(
+                    category="write_blocked",
+                    path=None,
+                    reason=str(e),
+                    user_action="请根据提示调整写入目标或内容后再重试。",
+                )
             return {"status": "error", "message": str(e)}
         except Exception as e:
             logging.error(f"工具执行异常: {func_name}, 错误: {str(e)}")
+            if func_name == "write_file":
+                self._emit_system_notice_once(
+                    category="write_blocked",
+                    path=None,
+                    reason=f"工具执行失败: {str(e)}",
+                    user_action="请检查写入条件是否满足，然后重试。",
+                )
             return {"status": "error", "message": f"工具执行失败: {str(e)}"}
 
     def _get_search_router(self) -> SearchRouter:
@@ -2849,12 +2923,35 @@ class ChatHandler:
             "web_search_performed": False,
             "fetch_url_performed": False,
             "web_search_count": 0,
+            "system_notice_emitted": False,
+            "pending_system_notices": [],
         }
 
     def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, object]:
         return self._new_turn_context(
             can_write_non_plan=self._should_allow_non_plan_write(project_id, user_message),
         )
+
+    def _emit_system_notice_once(
+        self,
+        *,
+        category: str,
+        path: str | None = None,
+        reason: str,
+        user_action: str,
+    ) -> None:
+        if self._turn_context.get("system_notice_emitted"):
+            return
+        notice = {
+            "type": "system_notice",
+            "category": category,
+            "path": path,
+            "reason": reason,
+            "user_action": user_action,
+        }
+        self._turn_context["system_notice_emitted"] = True
+        queue = self._turn_context.setdefault("pending_system_notices", [])
+        queue.append(notice)
 
     def _should_allow_non_plan_write(self, project_id: str, user_message: str) -> bool:
         normalized = (user_message or "").strip()
