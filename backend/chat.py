@@ -154,6 +154,39 @@ class ChatHandler:
         "补写",
         "丰富",
     ]
+    _STRONG_ADVANCE_KEYWORDS = {
+        "outline_confirmed_at": ["确认大纲", "大纲没问题", "按这个大纲写", "就这个大纲", "就按这个版本"],
+        "review_started_at": ["开始审查", "进入审查", "可以审查了", "开始 review"],
+        "review_passed_at": ["审查通过", "审查没问题", "报告可以交付"],
+        "presentation_ready_at": ["演示准备好了", "演示准备完成", "PPT 完成", "讲稿完成"],
+        "delivery_archived_at": ["归档结束项目", "项目交付完成", "交付归档"],
+    }
+    _WEAK_ADVANCE_BY_STAGE = {
+        "S1": (["行", "可以", "同意", "没问题", "OK", "ok", "好的", "挺好的"], "outline_confirmed_at"),
+        "S5": (["行", "可以", "挺好", "通过", "没问题"], "review_passed_at"),
+        "S6": (["行", "可以", "OK", "ok"], "presentation_ready_at"),
+        "S7": (["行", "可以", "归档吧"], "delivery_archived_at"),
+    }
+    _ROLLBACK_KEYWORDS = {
+        "outline_confirmed_at": ["大纲再改下", "大纲还要调整", "回去改大纲", "先别写了，大纲有问题"],
+        "review_started_at": ["还要改报告", "再改改报告", "回到写作阶段", "暂停审查"],
+        "review_passed_at": ["重新审查", "再看看", "审查没过"],
+        "presentation_ready_at": ["演示再改", "讲稿还要调整"],
+        "delivery_archived_at": ["还没归档", "撤回归档"],
+    }
+    _QUESTION_PATTERNS = [
+        re.compile(r"(吗|么)[?？]?$"),
+        re.compile(r"[?？]$"),
+    ]
+    _NEGATION_RE = re.compile(r"(不要|别|没|不是|不想|不|并非|非要|非得)[^。！？!?\n]{0,9}$")
+    _NEGATION_WINDOW_CHARS = 10
+    _STAGE_RANK = {
+        "outline_confirmed_at": 1,
+        "review_started_at": 2,
+        "review_passed_at": 3,
+        "presentation_ready_at": 4,
+        "delivery_archived_at": 5,
+    }
 
     def __init__(self, settings: Settings, skill_engine: SkillEngine):
         self.settings = settings
@@ -2932,7 +2965,68 @@ class ChatHandler:
             "pending_system_notices": [],
         }
 
+    def _is_question(self, text: str) -> bool:
+        return any(pattern.search(text) for pattern in self._QUESTION_PATTERNS)
+
+    def _phrase_hits(self, text: str, phrases: list[str]) -> bool:
+        """Substring match with negation suppression. If any occurrence of the phrase
+        has a clean (negation-free) preceding window of 10 chars, the phrase counts as
+        a hit. Otherwise the match is suppressed."""
+        for phrase in phrases:
+            idx = text.find(phrase)
+            while idx != -1:
+                preceding = text[max(0, idx - self._NEGATION_WINDOW_CHARS): idx]
+                if not self._NEGATION_RE.search(preceding):
+                    return True
+                idx = text.find(phrase, idx + 1)
+        return False
+
+    def _detect_stage_keyword(self, user_message: str, current_stage: str) -> tuple[str, str] | None:
+        if not user_message:
+            return None
+        trimmed = user_message.strip()
+        if self._is_question(trimmed):
+            return None
+
+        rollback_hits = [
+            key for key, phrases in self._ROLLBACK_KEYWORDS.items()
+            if self._phrase_hits(trimmed, phrases)
+        ]
+        if rollback_hits:
+            key = max(rollback_hits, key=lambda k: self._STAGE_RANK.get(k, 0))
+            return ("clear", key)
+
+        advance_hits: list[str] = []
+        for key, phrases in self._STRONG_ADVANCE_KEYWORDS.items():
+            if self._phrase_hits(trimmed, phrases):
+                advance_hits.append(key)
+        weak_entry = self._WEAK_ADVANCE_BY_STAGE.get(current_stage)
+        if weak_entry:
+            phrases, target_key = weak_entry
+            if self._phrase_hits(trimmed, phrases):
+                advance_hits.append(target_key)
+
+        if advance_hits:
+            key = max(advance_hits, key=lambda k: self._STAGE_RANK.get(k, 0))
+            return ("set", key)
+
+        return None
+
     def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, object]:
+        project_path = self.skill_engine.get_project_path(project_id)
+        if project_path:
+            summary = self.skill_engine.get_workspace_summary(project_id)
+            current_stage = summary.get("stage_code", "S0")
+            detected = self._detect_stage_keyword(user_message, current_stage)
+            if detected:
+                action, key = detected
+                lock = self._get_project_request_lock(project_id)
+                with lock:
+                    if action == "set":
+                        self.skill_engine._save_stage_checkpoint(project_path, key)
+                    else:
+                        self.skill_engine._clear_stage_checkpoint_cascade(project_path, key)
+                    self.skill_engine._sync_stage_tracking_files(project_path)
         return self._new_turn_context(
             can_write_non_plan=self._should_allow_non_plan_write(project_id, user_message),
         )
