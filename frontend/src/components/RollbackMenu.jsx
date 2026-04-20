@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import ConfirmDialog from './ConfirmDialog'
+import { showError } from '../utils/toast'
 import {
   ROLLBACK_HIDDEN_STAGES,
   getFirstLevelOption,
@@ -20,12 +21,11 @@ import {
  *   stageCode       {string}
  *   onCheckpointSet {() => void}
  *   onInsertPrompt  {(text: string) => void}  — for "调整大纲" (S2/S3)
- *   onRequestError  {(message: string) => void} — surface POST failures
  */
 
 export { getFirstLevelOption } from '../utils/rollbackMenuLogic'
 
-export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, onInsertPrompt, onRequestError }) {
+export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, onInsertPrompt }) {
   const [open, setOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [confirmState, setConfirmState] = useState(null)
@@ -51,9 +51,11 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
         `/api/projects/${encodeURIComponent(projectId)}/checkpoints/${name}?action=${action}`
       )
       onCheckpointSet?.()
+      return true
     } catch (err) {
       const detail = err?.response?.data?.detail || err?.message || '请稍后重试'
-      onRequestError?.(`操作失败：${detail}`)
+      showError(`操作失败：${detail}`)
+      return false
     }
   }
 
@@ -83,8 +85,8 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
         firstLevel.confirmTitle,
         firstLevel.confirmBody,
         async () => {
-          await postCheckpoint(firstLevel.checkpoint, firstLevel.action)
-          closeConfirm()
+          const ok = await postCheckpoint(firstLevel.checkpoint, firstLevel.action)
+          if (ok) closeConfirm()
         }
       )
     }
@@ -138,8 +140,8 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
                       '确认重置大纲确认？',
                       '你写好的报告正文不会被删除，但暂时无法继续修改，\n直到重新确认新的大纲后才能继续写。',
                       async () => {
-                        await postCheckpoint('outline-confirmed', 'clear')
-                        closeConfirm()
+                        const ok = await postCheckpoint('outline-confirmed', 'clear')
+                        if (ok) closeConfirm()
                       }
                     )
                   }
@@ -155,8 +157,8 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
                       '确认撤回归档？',
                       '所有文件都会保留，只是项目重新回到待归档状态。',
                       async () => {
-                        await postCheckpoint('delivery-archived', 'clear')
-                        closeConfirm()
+                        const ok = await postCheckpoint('delivery-archived', 'clear')
+                        if (ok) closeConfirm()
                       }
                     )
                   }

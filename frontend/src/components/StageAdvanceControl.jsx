@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import axios from 'axios'
 import ConfirmDialog from './ConfirmDialog'
 import { isS4ReviewButtonVisible, isS1ConfirmOutlineEnabled } from '../utils/workspaceSummary'
+import { showError } from '../utils/toast'
 
 /**
  * §9.1 / §9.2 stage-advance button area.
@@ -14,15 +15,28 @@ import { isS4ReviewButtonVisible, isS1ConfirmOutlineEnabled } from '../utils/wor
  */
 export default function StageAdvanceControl({ projectId, summary, onCheckpointSet, onInsertPrompt }) {
   const [confirmState, setConfirmState] = useState(null) // { title, body, onConfirm }
+  const [pending, setPending] = useState(false)
 
   const { stageCode, wordCount, lengthTargets } = summary
 
-  // Helper: POST checkpoint
+  // Helper: POST checkpoint with user-visible error feedback.
+  // Returns true on success, false on failure (caller can skip follow-ups).
   const postCheckpoint = async (name, action = 'set') => {
-    await axios.post(
-      `/api/projects/${encodeURIComponent(projectId)}/checkpoints/${name}?action=${action}`
-    )
-    onCheckpointSet?.()
+    if (pending) return false
+    setPending(true)
+    try {
+      await axios.post(
+        `/api/projects/${encodeURIComponent(projectId)}/checkpoints/${name}?action=${action}`
+      )
+      onCheckpointSet?.()
+      return true
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.message || '请稍后重试'
+      showError(`操作失败：${detail}`)
+      return false
+    } finally {
+      setPending(false)
+    }
   }
 
   const openConfirm = (title, body, onConfirm) => {
@@ -38,16 +52,16 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
       <div className="mt-4">
         <button
           onClick={() => postCheckpoint('outline-confirmed')}
-          disabled={!outlineExists}
+          disabled={!outlineExists || pending}
           className={`w-full py-2.5 px-4 rounded-xl text-sm font-medium transition-colors ${
-            outlineExists
+            outlineExists && !pending
               ? 'bg-[#3b4fa8] text-white hover:bg-[#4a5fcc]'
               : 'bg-[#1e2140] text-[#4a4f72] cursor-not-allowed'
           }`}
         >
-          确认大纲，进入资料采集
+          {pending ? '处理中…' : '确认大纲，进入资料采集'}
         </button>
-        {!outlineExists && (
+        {!outlineExists && !pending && (
           <p className="mt-2 text-xs text-[#5a5e80] text-center">需要先生成大纲才能继续</p>
         )}
       </div>
@@ -80,9 +94,10 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
           {reviewVisible && (
             <button
               onClick={() => postCheckpoint('review-started')}
-              className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] transition-colors"
+              disabled={pending}
+              className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              完成撰写，开始审查
+              {pending ? '处理中…' : '完成撰写，开始审查'}
             </button>
           )}
         </div>
@@ -102,9 +117,10 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
         <div className="mt-4 flex gap-2">
           <button
             onClick={() => postCheckpoint('review-passed')}
-            className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] transition-colors"
+            disabled={pending}
+            className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            审查通过，准备交付
+            {pending ? '处理中…' : '审查通过，准备交付'}
           </button>
           <button
             onClick={() =>
@@ -112,12 +128,13 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
                 '确认回去继续改报告？',
                 '你写好的正文内容不会被删除，只是重新打开修改通道。',
                 async () => {
-                  await postCheckpoint('review-started', 'clear')
-                  closeConfirm()
+                  const ok = await postCheckpoint('review-started', 'clear')
+                  if (ok) closeConfirm()
                 }
               )
             }
-            className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#262a4c] text-[#a8accc] hover:bg-[#30365a] transition-colors"
+            disabled={pending}
+            className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#262a4c] text-[#a8accc] hover:bg-[#30365a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             回去再改
           </button>
@@ -139,9 +156,10 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
       <div className="mt-4">
         <button
           onClick={() => postCheckpoint('presentation-ready')}
-          className="w-full py-2.5 px-4 rounded-xl text-sm font-medium bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] transition-colors"
+          disabled={pending}
+          className="w-full py-2.5 px-4 rounded-xl text-sm font-medium bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          演示准备完成
+          {pending ? '处理中…' : '演示准备完成'}
         </button>
       </div>
     )
@@ -153,9 +171,10 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
       <div className="mt-4">
         <button
           onClick={() => postCheckpoint('delivery-archived')}
-          className="w-full py-2.5 px-4 rounded-xl text-sm font-medium bg-[#26315d] text-[#a8accc] hover:bg-[#32407a] transition-colors"
+          disabled={pending}
+          className="w-full py-2.5 px-4 rounded-xl text-sm font-medium bg-[#26315d] text-[#a8accc] hover:bg-[#32407a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          归档，结束项目
+          {pending ? '处理中…' : '归档，结束项目'}
         </button>
       </div>
     )
