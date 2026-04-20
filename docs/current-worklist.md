@@ -51,15 +51,27 @@
   - `pydantic` deprecation warning 仍存在
   - 需要再看是否有可以从打包里继续排除的非必需依赖
 
-8. **⭐ 下一步首要实施项：阶段推进门禁重构**
-- 状态：`设计定稿，待工程落地`（经 9 轮审查通过：2 轮 Claude 工程/UX + 7 轮 codex xhigh 独立审查）
+8. **⭐ 阶段推进门禁重构（进行中，跨设备接手）**
+- 状态：`Task 1/2/6 + regex 加固已完成，Task 3 待重派`
+- 工作分支：`feat/stage-advance-gates`（已 push 到 origin）
+- 已落 commit（按时间顺序）：
+  - `9f192c0 feat(skill): add stage_checkpoints.json storage helpers` — Task 1
+  - `b127da2 feat(skill): add length target + quality gate helpers` — Task 2
+  - `aded34e fix(skill): tighten regex for bolded DL headings and parenthetical length commentary` — Task 2 后续 hardening（修复 `_DL_ENTRY_PATTERN` 漏匹配 bolded 头、`_EXPECTED_LENGTH_LINE_PATTERN` 误吃括号注释）
+  - `fd37631 docs(skill): document stage advancement gates and tool error handling rules` — Task 6
 - 关联文档：
   - `docs/superpowers/specs/2026-04-17-stage-advance-gates-design.md`（设计稿）
   - `docs/superpowers/plans/2026-04-17-stage-advance-gates.md`（分 8 个 Task 的 TDD 落地计划 + 各 Task RED 测试）
-- 根因：当前 `_infer_stage_state` 只按文件存在性推断阶段，模型一句"继续"就能从 S0 跑到 S7；同时模型被 `_should_allow_non_plan_write` 挡住时会静默把内容贴在聊天框而不告知用户。
-- 目标：把阶段推进改为"文件就绪 + 用户确认戳 + 质量门槛"三件齐备，4 个硬关卡（S1→S2、S4→S5、S5→S6/S7、S7→done），保留 S4 内部自由改写；模型被 tool error 挡住后由后端主动注入 `system_notice` 告知用户，不依赖 prompt 配合。
-- 接手指引：按 plan 末尾的 Rollout Order（Task 1 → 2 → 3 → 4 → 5/6 → 7 → 8）顺序开，每个 Task 独立 commit，先 RED test 再实现。
-- 前置兼容提醒：2026-04-17 已经把非 plan 写入关键词库扩充提交到 main（commit `22e8976`，新增 `NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS` 常量 + `_has_existing_report_draft` helper）。plan Task 4 Step 5 的代码片段是按旧结构写的，落地时要把 blanket pass 插在**当前**的 `_should_allow_non_plan_write` 结构之上，常量名用 main 上的最新版本，不要把 salvage 改动回退掉。
+- 剩余 Task：
+  - **Task 3（待重派）** — 重写 `_infer_stage_state`。⚠️ 已两次派给 codex xhigh 全量做，都在写完 `tests/test_skill_engine.py` 后进程死掉（同一失败点）。**接手时务必拆成 3 个 sub-task 分别派**：(3a) Step 1 RED 测试 + Step 2 `_infer_stage_state` 改写；(3b) Step 3 `_count_words` + Step 4 migration & cascade；(3c) Step 5 `get_workspace_summary` 扩字段 + Step 6 旧测试断言批量更新 + Step 7 全量回归。每段独立 commit。
+  - Task 4 — checkpoint endpoints + `_detect_stage_keyword`（依赖 Task 3）
+  - Task 5 — `write_file` 自签名拦截 + `system_notice` 注入（只依赖 Task 1）
+  - Task 7 — 前端 StageAdvanceControl（依赖 Task 4，派给 sonnet）
+  - Task 8 — smoke test + regression sweep
+  - Final code review across all 8 tasks
+- 前置兼容提醒：non-plan-write 关键词库扩充已在 main commit `22e8976`（`NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS` 常量 + `_has_existing_report_draft` helper）。plan Task 4 Step 5 的代码片段按旧结构写，落地时要把 blanket pass 插在**当前**的 `_should_allow_non_plan_write` 结构上，不要把 salvage 改动回退掉。
+- 已完成的 Task 2 regex hardening（`backend/skill.py:46-51`）必须保留：`_DL_ENTRY_PATTERN` 用 `^#{3,4}\s*\*{0,2}\s*\[`，`_EXPECTED_LENGTH_*_PATTERN` 用 `[^\n(（]+` 边界。Task 3 改写时不要回退。
+- Codex 死法记录：第一次（v1）跑了 27 min 后死，留下未 commit 的 backend/skill.py + test_skill_engine.py 改动（已 stash，stash 名 `task3-codex-partial-died-at-20:18`，对端可 `git stash drop` 或 `git stash show` 参考）；第二次（v2）跑了 1h09 后死，未 commit 的部分已 `git checkout --` 丢弃。
 
 9. 聊天与文件预览复制体验
 - 状态：`待开始`
