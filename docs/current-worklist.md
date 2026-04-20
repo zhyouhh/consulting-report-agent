@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-04-17（新增阶段推进门禁重构 / 聊天与预览复制体验）
+最后更新：2026-04-20（Task 3a/3b 落地、codex 插件绕过方案、review 派发纪律）
 
 ## 当前未解决 / 待验证
 
@@ -51,27 +51,40 @@
   - `pydantic` deprecation warning 仍存在
   - 需要再看是否有可以从打包里继续排除的非必需依赖
 
-8. **⭐ 阶段推进门禁重构（进行中，跨设备接手）**
-- 状态：`Task 1/2/6 + regex 加固已完成，Task 3 待重派`
-- 工作分支：`feat/stage-advance-gates`（已 push 到 origin）
+8. **⭐ 阶段推进门禁重构（进行中，3c 下一步）**
+- 状态：`Task 1/2/3a/3b/6 + regex 加固已完成，3c 下一步`
+- 工作分支：`feat/stage-advance-gates`
 - 已落 commit（按时间顺序）：
-  - `9f192c0 feat(skill): add stage_checkpoints.json storage helpers` — Task 1
-  - `b127da2 feat(skill): add length target + quality gate helpers` — Task 2
-  - `aded34e fix(skill): tighten regex for bolded DL headings and parenthetical length commentary` — Task 2 后续 hardening（修复 `_DL_ENTRY_PATTERN` 漏匹配 bolded 头、`_EXPECTED_LENGTH_LINE_PATTERN` 误吃括号注释）
-  - `fd37631 docs(skill): document stage advancement gates and tool error handling rules` — Task 6
+  - `9f192c0` Task 1 — stage_checkpoints.json storage helpers
+  - `b127da2` Task 2 — length target + quality gate helpers
+  - `aded34e` Task 2 hardening — 收紧 `_DL_ENTRY_PATTERN` / `_EXPECTED_LENGTH_*_PATTERN`
+  - `fd37631` Task 6 — docs(skill) 阶段推进与工具错误规则
+  - `59cfc91` **Task 3a** — 重写 `_infer_stage_state`（三条件投影）+ 7 条 RED 测试 + Step 3 skill.py 侧（`_count_words` / `_MARKDOWN_STRIP_PATTERNS` / `_has_effective_report_draft` 加 `min_words` kwarg）。两道闸 ✅。
+  - `0c4f85e` **Task 3b** — migration（`_backfill_stage_checkpoints_if_missing` 只回填 `outline_confirmed_at` for ≥S2，写 `__migrated_at` 幂等标记）+ cascade（`_clear_stage_checkpoint_cascade` 保留 marker）+ 2 RED 测试 + `_stage_index("done")` 防御返回 `len(STAGE_ORDER)`。两道闸 ✅（1 Important follow-up，见下）。
 - 关联文档：
   - `docs/superpowers/specs/2026-04-17-stage-advance-gates-design.md`（设计稿）
-  - `docs/superpowers/plans/2026-04-17-stage-advance-gates.md`（分 8 个 Task 的 TDD 落地计划 + 各 Task RED 测试）
-- 剩余 Task：
-  - **Task 3（待重派）** — 重写 `_infer_stage_state`。⚠️ 已两次派给 codex xhigh 全量做，都在写完 `tests/test_skill_engine.py` 后进程死掉（同一失败点）。**接手时务必拆成 3 个 sub-task 分别派**：(3a) Step 1 RED 测试 + Step 2 `_infer_stage_state` 改写；(3b) Step 3 `_count_words` + Step 4 migration & cascade；(3c) Step 5 `get_workspace_summary` 扩字段 + Step 6 旧测试断言批量更新 + Step 7 全量回归。每段独立 commit。
-  - Task 4 — checkpoint endpoints + `_detect_stage_keyword`（依赖 Task 3）
-  - Task 5 — `write_file` 自签名拦截 + `system_notice` 注入（只依赖 Task 1）
-  - Task 7 — 前端 StageAdvanceControl（依赖 Task 4，派给 sonnet）
-  - Task 8 — smoke test + regression sweep
-  - Final code review across all 8 tasks
-- 前置兼容提醒：non-plan-write 关键词库扩充已在 main commit `22e8976`（`NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS` 常量 + `_has_existing_report_draft` helper）。plan Task 4 Step 5 的代码片段按旧结构写，落地时要把 blanket pass 插在**当前**的 `_should_allow_non_plan_write` 结构上，不要把 salvage 改动回退掉。
-- 已完成的 Task 2 regex hardening（`backend/skill.py:46-51`）必须保留：`_DL_ENTRY_PATTERN` 用 `^#{3,4}\s*\*{0,2}\s*\[`，`_EXPECTED_LENGTH_*_PATTERN` 用 `[^\n(（]+` 边界。Task 3 改写时不要回退。
-- Codex 死法记录：第一次（v1）跑了 27 min 后死，留下未 commit 的 backend/skill.py + test_skill_engine.py 改动（已 stash，stash 名 `task3-codex-partial-died-at-20:18`，对端可 `git stash drop` 或 `git stash show` 参考）；第二次（v2）跑了 1h09 后死，未 commit 的部分已 `git checkout --` 丢弃。
+  - `docs/superpowers/plans/2026-04-17-stage-advance-gates.md`（plan）
+- 当前测试基线（`0c4f85e` 上）：`unittest discover tests` — **313 passed / 27 failed / 1 skipped**。27 failed 全是 `test_workspace_summary_*`，分布：**17 在 `tests/test_skill_engine.py` + 10 在 `tests/test_workspace_materials.py`**。后者是新发现——plan Step 6 的 line 列表**只覆盖了 test_skill_engine**，没列 test_workspace_materials，3c sweep 时需自行补齐。sweep 套路一致（缺 `_save_stage_checkpoint(project_dir, "outline_confirmed_at")`）。
+- 剩余 Task（按依赖）：
+  - **Task 3c（下一步）** — 扩 `get_workspace_summary` 增加 `checkpoints` / `length_targets` / `quality_progress` / `flags` / `next_stage_hint` / `stalled_since` / `word_count` / `delivery_mode`，新增 `_current_report_word_count` / `_extract_delivery_mode` / `_last_evidence_write_at` / `_build_quality_progress` / `record_stage_checkpoint`；在 summary 入口 wire 进 `_backfill_stage_checkpoints_if_missing`；批量 sweep 27 个 `test_workspace_summary_*`；全量回归 GREEN。
+  - Task 4 — `backend/main.py` 加 `/api/projects/{id}/stage/checkpoint` endpoint（走 `record_stage_checkpoint`）+ `backend/chat.py` 加 `_detect_stage_keyword` + Step 5 的 chat.py refactor（`REPORT_DRAFT_CANDIDATES` 改引用 `skill_engine` 属性）。依赖 Task 3c。
+  - Task 5 — `write_file` 自签名拦截 + `system_notice` 注入。只依赖 Task 1（可与 3c / 4 并行）。
+  - Task 7 — 前端 `StageAdvanceControl` 组件。依赖 Task 4。**派 sonnet 4.6 high，不派 codex**（用户指示）。
+  - Task 8 — smoke test + 桌面端实机回归。
+  - Final cross-task code review（sonnet high）。
+- **Code review follow-ups**（在 3c 或后续任务顺手吸收，未做成独立 task）：
+  - (Important, 3b) `_CASCADE_ORDER`(list) 和 `STAGE_CHECKPOINT_KEYS`(set) 平行结构，未来添新 checkpoint 键时会静默漂移。加一行 class-body assert `set(_CASCADE_ORDER) == STAGE_CHECKPOINT_KEYS` 自校验。
+  - (Minor, 3b) `_backfill_stage_checkpoints_if_missing` 的 idempotency（第二次调 no-op）未测，补一个测试。
+  - (Minor, 3b) 迁移用 `now()` 而非项目历史时间戳，在方法里一行 why 注释。
+  - (Minor, 3b) `test_migration_only_*` 里 `_write_review_checklist` / `_write_delivery_log` 对该方法无影响，可删减 noise。
+  - (Minor, 3a) Flag dict 命名混合 `*_ready`（文件就绪）vs `*_confirmed/_started/_passed/_done/_archived`（checkpoint 事件）——分类合理但 dict 里加一行注释点名。
+  - (Minor, 3a) `_resolve_length_targets` 内嵌数学（`ceil(expected/1000*1.3)`, `int(expected*0.7)`）缺来源，加注释指 plan section。
+  - (Minor, 3a) `fallback_used=True` 已暴露在 `length_targets` 但无消费者——3c 在 `get_workspace_summary` 层提示用户"当前用默认篇幅"。
+  - (Minor, 3a) `_build_completed_items` 的 `done` 早退重复了后续循环的 S6-skip 逻辑，可合一。
+- **Codex 派发绝对路径**：⚠️ **不要走 `codex:codex-rescue` / `Skill('codex:rescue')` 插件 Agent**——插件 1.0.4 的 companion shim 在 Windows Git Bash 下有 heredoc/stdin 处理 bug，两次派任务都在 bash 层循环、`transcript 0 字节、状态僵尸 "running"`。**正确姿势**：写 prompt 到 `.codex-run/task-<X>-prompt.md`，`codex exec --cd <abs-path> --color never --output-last-message .codex-run/task-<X>-last.txt < .codex-run/task-<X>-prompt.md > .codex-run/task-<X>-full.log 2>&1` 后台跑（Bash `run_in_background: true`）。stdout 重定向到 log 是裸 unix 流，**不像插件 JSONL 会死锁**，随时 `tail -f` 看进度。`~/.codex/config.toml` 已是 `gpt-5.4 / xhigh / danger-full-access / approval_policy=never / profile=auto-max`，CLI 直调不需任何 override。`.codex-run/` 已 gitignore。
+- **Review 派发纪律**：spec compliance + code quality review 一律 **sonnet 4.6 high**（或 codex），不用 opus（太贵）。通过 `Agent` tool 的 `model: "sonnet"` 参数 override。
+- 前置兼容提醒保留：non-plan-write 关键词库扩充已在 main commit `22e8976`（`NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS` 常量 + `_has_existing_report_draft` helper）。**Task 4 Step 5 落地**时要把 blanket pass 插在**当前**的 `_should_allow_non_plan_write` 结构上，不要把 salvage 改动回退掉。
+- Task 2 regex hardening（`backend/skill.py:46-51`）已保留未回退（3a/3b spec-review 确认）。
 
 9. 聊天与文件预览复制体验
 - 状态：`待开始`
