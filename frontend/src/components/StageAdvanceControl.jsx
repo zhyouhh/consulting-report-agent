@@ -76,7 +76,7 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
   // ── S4 ──────────────────────────────────────────────────────────────────
   if (stageCode === 'S4') {
     const reviewVisible = isS4ReviewButtonVisible(wordCount, lengthTargets)
-    const targetVal = lengthTargets?.target ?? 0
+    const targetVal = lengthTargets?.expected_length ?? 0
 
     return (
       <div className="mt-4 space-y-2">

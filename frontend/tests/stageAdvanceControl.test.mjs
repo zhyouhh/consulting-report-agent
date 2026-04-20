@@ -8,29 +8,33 @@ import assert from "node:assert/strict";
 import { isS4ReviewButtonVisible } from "../src/utils/workspaceSummary.js";
 
 // ── S4 secondary button visibility ──────────────────────────────────────────
+// Uses backend-budgeted report_word_floor (= expected_length × 0.7).
+// See backend/skill.py:287-293 for the source-of-truth schema.
 
-test("S4 review button hidden when word_count well below 70%", () => {
-  assert.equal(isS4ReviewButtonVisible(0, { target: 4000 }), false);
+test("S4 review button hidden when word_count well below floor", () => {
+  assert.equal(isS4ReviewButtonVisible(0, { report_word_floor: 2800 }), false);
 });
 
-test("S4 review button hidden at 69.9%", () => {
-  assert.equal(isS4ReviewButtonVisible(2799, { target: 4000 }), false);
+test("S4 review button hidden just below floor", () => {
+  assert.equal(isS4ReviewButtonVisible(2799, { report_word_floor: 2800 }), false);
 });
 
-test("S4 review button visible at exactly 70%", () => {
-  assert.equal(isS4ReviewButtonVisible(2800, { target: 4000 }), true);
+test("S4 review button visible at exactly the floor", () => {
+  assert.equal(isS4ReviewButtonVisible(2800, { report_word_floor: 2800 }), true);
 });
 
-test("S4 review button visible well above 70%", () => {
-  assert.equal(isS4ReviewButtonVisible(5000, { target: 4000 }), true);
+test("S4 review button visible well above the floor", () => {
+  assert.equal(isS4ReviewButtonVisible(5000, { report_word_floor: 2800 }), true);
 });
 
 test("S4 review button hidden when length_targets is null", () => {
   assert.equal(isS4ReviewButtonVisible(9999, null), false);
 });
 
-test("S4 review button hidden when length_targets.target is 0", () => {
-  assert.equal(isS4ReviewButtonVisible(9999, { target: 0 }), false);
+test("S4 review button hidden when length_targets has only legacy `target` field", () => {
+  // Regression guard against Task 7 field-name mismatch bug: backend returns
+  // report_word_floor, not target — a stale .target read must not pass.
+  assert.equal(isS4ReviewButtonVisible(9999, { target: 1000 }), false);
 });
 
 // ── Stage-to-button mapping rules (encoded as data, not rendering) ──────────

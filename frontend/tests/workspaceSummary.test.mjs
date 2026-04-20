@@ -49,7 +49,14 @@ test("summarizeWorkspace maps new Task 7 fields from api response", () => {
     flags: { outline_confirmed: true },
     checkpoints: { outline_confirmed_at: "2026-04-21T10:00:00Z" },
     word_count: 2500,
-    length_targets: { target: 4000, minimum: 2800 },
+    // Real backend schema (backend/skill.py:287-293)
+    length_targets: {
+      expected_length: 4000,
+      data_log_min: 6,
+      analysis_refs_min: 4,
+      report_word_floor: 2800,
+      fallback_used: false,
+    },
     length_fallback_used: false,
     quality_progress: { label: "有效来源条目", current: 5, target: 8 },
     stalled_since: null,
@@ -60,7 +67,8 @@ test("summarizeWorkspace maps new Task 7 fields from api response", () => {
   assert.deepEqual(summary.flags, { outline_confirmed: true });
   assert.equal(summary.checkpoints.outline_confirmed_at, "2026-04-21T10:00:00Z");
   assert.equal(summary.wordCount, 2500);
-  assert.deepEqual(summary.lengthTargets, { target: 4000, minimum: 2800 });
+  assert.equal(summary.lengthTargets.expected_length, 4000);
+  assert.equal(summary.lengthTargets.report_word_floor, 2800);
   assert.equal(summary.lengthFallbackUsed, false);
   assert.deepEqual(summary.qualityProgress, { label: "有效来源条目", current: 5, target: 8 });
   assert.equal(summary.stalledSince, null);
@@ -83,21 +91,32 @@ test("summarizeWorkspace uses safe defaults when new fields are absent", () => {
 test("isS4ReviewButtonVisible returns false when no lengthTargets", () => {
   assert.equal(isS4ReviewButtonVisible(3000, null), false);
   assert.equal(isS4ReviewButtonVisible(3000, {}), false);
-  assert.equal(isS4ReviewButtonVisible(3000, { target: 0 }), false);
 });
 
-test("isS4ReviewButtonVisible returns false when below 70% threshold", () => {
-  // target=4000, threshold=2800; word_count=2799 → not visible
-  assert.equal(isS4ReviewButtonVisible(2799, { target: 4000 }), false);
+test("isS4ReviewButtonVisible returns false when below report_word_floor", () => {
+  // floor=2800 (backend budget of expected_length=4000 × 0.7);
+  // word_count=2799 → not visible
+  assert.equal(isS4ReviewButtonVisible(2799, { report_word_floor: 2800 }), false);
 });
 
-test("isS4ReviewButtonVisible returns true at exactly 70% threshold", () => {
-  // target=4000, threshold=2800; word_count=2800 → visible
-  assert.equal(isS4ReviewButtonVisible(2800, { target: 4000 }), true);
+test("isS4ReviewButtonVisible returns true at exactly report_word_floor", () => {
+  assert.equal(isS4ReviewButtonVisible(2800, { report_word_floor: 2800 }), true);
 });
 
-test("isS4ReviewButtonVisible returns true when above threshold", () => {
-  assert.equal(isS4ReviewButtonVisible(3500, { target: 4000 }), true);
+test("isS4ReviewButtonVisible returns true when well above report_word_floor", () => {
+  assert.equal(isS4ReviewButtonVisible(3500, { report_word_floor: 2800 }), true);
+});
+
+test("isS4ReviewButtonVisible returns false when report_word_floor is not a number", () => {
+  // Regression guard: bad field names (e.g. legacy `target`) must not evaluate true
+  assert.equal(isS4ReviewButtonVisible(9999, { target: 1000 }), false);
+  assert.equal(isS4ReviewButtonVisible(9999, { report_word_floor: null }), false);
+  assert.equal(isS4ReviewButtonVisible(9999, { report_word_floor: "2800" }), false);
+});
+
+test("isS4ReviewButtonVisible honors zero floor (unusual but valid)", () => {
+  // A floor of 0 means "no minimum" — any nonnegative word_count passes.
+  assert.equal(isS4ReviewButtonVisible(0, { report_word_floor: 0 }), true);
 });
 
 // ── isS1ConfirmOutlineEnabled ──────────────────────────────────────────────

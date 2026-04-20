@@ -57,11 +57,15 @@ export function shouldShowPresentationStage(deliveryMode) {
 
 /**
  * Returns true when the S4 "complete writing, start review" secondary button
- * should be visible: word_count >= length_targets.target * 0.7
+ * should be visible: word_count >= length_targets.report_word_floor.
+ *
+ * The backend (backend/skill.py:287-293) already budgets the 70% floor as
+ * `report_word_floor = int(expected_length * 0.7)`, so the frontend must NOT
+ * recompute it — the server owns that calculation.
  */
 export function isS4ReviewButtonVisible(wordCount, lengthTargets) {
-  if (!lengthTargets || !lengthTargets.target) return false;
-  return wordCount >= lengthTargets.target * 0.7;
+  if (!lengthTargets || typeof lengthTargets.report_word_floor !== "number") return false;
+  return wordCount >= lengthTargets.report_word_floor;
 }
 
 /**
