@@ -6,6 +6,8 @@ import {
   isS4ReviewButtonVisible,
   isS1ConfirmOutlineEnabled,
   shouldShowPresentationStage,
+  getStageName,
+  STAGE_NAMES,
   DELIVERY_MODE_REPORT_ONLY,
   DELIVERY_MODE_REPORT_WITH_PRESENTATION,
 } from "../src/utils/workspaceSummary.js";
@@ -26,14 +28,15 @@ test("summarizeWorkspace falls back safely when api summary is null", () => {
   assert.deepEqual(summary.nextActions, []);
 });
 
-test("summarizeWorkspace preserves api summary values", () => {
+test("summarizeWorkspace maps stage_code to human-readable Chinese label", () => {
   const summary = summarizeWorkspace({
     stage_code: "S4",
     status: "进行中",
     completed_items: ["报告结构确定"],
     next_actions: ["图表制作完成"],
   });
-  assert.equal(summary.stageLabel, "S4");
+  // stageLabel is the user-facing name, never the raw stage code.
+  assert.equal(summary.stageLabel, "撰写报告");
   assert.equal(summary.statusLabel, "进行中");
   assert.deepEqual(summary.completedItems, ["报告结构确定"]);
   assert.deepEqual(summary.nextActions, ["图表制作完成"]);
@@ -192,4 +195,51 @@ test("shouldShowPresentationStage gates S6 segment correctly for report-only", (
     delivery_mode: "仅报告",
   });
   assert.equal(shouldShowPresentationStage(summary.deliveryMode), false);
+});
+
+// ── Stage-code → human-readable label ──────────────────────────────────────
+
+test("STAGE_NAMES covers every stage the backend can emit", () => {
+  // Ensures no missing mapping would leak a raw code to the user
+  for (const code of ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "done"]) {
+    assert.ok(STAGE_NAMES[code], `STAGE_NAMES missing entry for ${code}`);
+    assert.ok(
+      typeof STAGE_NAMES[code] === "string" && STAGE_NAMES[code].length > 0,
+      `${code} label must be a non-empty string`
+    );
+  }
+});
+
+test("STAGE_NAMES labels never contain raw stage codes", () => {
+  for (const [code, name] of Object.entries(STAGE_NAMES)) {
+    assert.equal(name.includes("S0"), false, `${code} label should not contain 'S0'`);
+    assert.equal(/\bS\d\b/.test(name), false, `${code} label should not contain raw 'Sx'`);
+  }
+});
+
+test("getStageName resolves each stage to a human-readable Chinese name", () => {
+  assert.equal(getStageName("S0"), "准备阶段");
+  assert.equal(getStageName("S1"), "拟定大纲");
+  assert.equal(getStageName("S2"), "收集资料");
+  assert.equal(getStageName("S3"), "分析论证");
+  assert.equal(getStageName("S4"), "撰写报告");
+  assert.equal(getStageName("S5"), "质量审查");
+  assert.equal(getStageName("S6"), "准备演示");
+  assert.equal(getStageName("S7"), "等待归档");
+  assert.equal(getStageName("done"), "已完成");
+});
+
+test("getStageName falls back to '未开始' for unknown / empty input", () => {
+  assert.equal(getStageName(""), "未开始");
+  assert.equal(getStageName(null), "未开始");
+  assert.equal(getStageName(undefined), "未开始");
+  assert.equal(getStageName("S99"), "未开始");
+});
+
+test("summarizeWorkspace.stageLabel is never a raw stage code", () => {
+  // Hard guard: raw 'S4' must not leak to the UI via stageLabel
+  for (const code of ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "done"]) {
+    const s = summarizeWorkspace({ stage_code: code });
+    assert.notEqual(s.stageLabel, code, `stageLabel for ${code} must be humanized`);
+  }
 });

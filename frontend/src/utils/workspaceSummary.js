@@ -3,10 +3,30 @@
 export const DELIVERY_MODE_REPORT_ONLY = "仅报告";
 export const DELIVERY_MODE_REPORT_WITH_PRESENTATION = "报告+演示";
 
+// Human-readable stage names — user-visible UI MUST use these instead of the
+// raw stage codes. Keeps CLAUDE.md + Spec §9.5 "不暴露后台术语" invariant.
+export const STAGE_NAMES = Object.freeze({
+  S0: "准备阶段",
+  S1: "拟定大纲",
+  S2: "收集资料",
+  S3: "分析论证",
+  S4: "撰写报告",
+  S5: "质量审查",
+  S6: "准备演示",
+  S7: "等待归档",
+  done: "已完成",
+});
+
+/** Resolve a stage code to a human-readable Chinese name. */
+export function getStageName(stageCode) {
+  if (!stageCode) return "未开始";
+  return STAGE_NAMES[stageCode] || "未开始";
+}
+
 export function summarizeWorkspace(apiSummary = {}) {
   const source = apiSummary || {};
   return {
-    stageLabel: source.stage_code || "未开始",
+    stageLabel: getStageName(source.stage_code),
     statusLabel: source.status || "待开始",
     completedItems: source.completed_items || [],
     nextActions: source.next_actions || [],

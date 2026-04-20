@@ -1,30 +1,17 @@
 import React from 'react'
-import { summarizeWorkspace, shouldShowPresentationStage } from '../utils/workspaceSummary'
+import { summarizeWorkspace, shouldShowPresentationStage, getStageName } from '../utils/workspaceSummary'
 import StageAdvanceControl from './StageAdvanceControl'
 import RollbackMenu from './RollbackMenu'
 
 // ── §9.6 Progress bar ────────────────────────────────────────────────────────
+// Labels come from the single STAGE_NAMES source of truth (see
+// workspaceSummary.js) so any rename lands in one place.
 
-const REPORT_ONLY_STAGES = [
-  { code: 'S0', label: '项目初始化' },
-  { code: 'S1', label: '大纲确认' },
-  { code: 'S2', label: '资料采集' },
-  { code: 'S3', label: '深度分析' },
-  { code: 'S4', label: '报告撰写' },
-  { code: 'S5', label: '质量审查' },
-  { code: 'S7', label: '交付归档' },
-]
+const REPORT_ONLY_CODES = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S7']
+const REPORT_AND_PRESENTATION_CODES = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7']
 
-const REPORT_AND_PRESENTATION_STAGES = [
-  { code: 'S0', label: '项目初始化' },
-  { code: 'S1', label: '大纲确认' },
-  { code: 'S2', label: '资料采集' },
-  { code: 'S3', label: '深度分析' },
-  { code: 'S4', label: '报告撰写' },
-  { code: 'S5', label: '质量审查' },
-  { code: 'S6', label: '演示准备' },
-  { code: 'S7', label: '交付归档' },
-]
+const REPORT_ONLY_STAGES = REPORT_ONLY_CODES.map(code => ({ code, label: getStageName(code) }))
+const REPORT_AND_PRESENTATION_STAGES = REPORT_AND_PRESENTATION_CODES.map(code => ({ code, label: getStageName(code) }))
 
 const STAGE_ORDER = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'done']
 
