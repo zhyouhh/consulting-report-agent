@@ -1,7 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import ConfirmDialog from './ConfirmDialog'
-import { ROLLBACK_HIDDEN_STAGES, getFirstLevelOption } from '../utils/rollbackMenuLogic'
+import {
+  ROLLBACK_HIDDEN_STAGES,
+  getFirstLevelOption,
+  OPTION_KIND_INSERT_PROMPT,
+  OPTION_KIND_CLEAR_CHECKPOINT,
+  OPTION_KIND_NOOP,
+} from '../utils/rollbackMenuLogic'
 
 /**
  * §9.4 "⋯" rollback menu.
@@ -13,11 +19,13 @@ import { ROLLBACK_HIDDEN_STAGES, getFirstLevelOption } from '../utils/rollbackMe
  *   projectId       {string}
  *   stageCode       {string}
  *   onCheckpointSet {() => void}
+ *   onInsertPrompt  {(text: string) => void}  — for "调整大纲" (S2/S3)
+ *   onRequestError  {(message: string) => void} — surface POST failures
  */
 
 export { getFirstLevelOption } from '../utils/rollbackMenuLogic'
 
-export default function RollbackMenu({ projectId, stageCode, onCheckpointSet }) {
+export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, onInsertPrompt, onRequestError }) {
   const [open, setOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [confirmState, setConfirmState] = useState(null)
@@ -38,10 +46,15 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet }) 
   if (ROLLBACK_HIDDEN_STAGES.has(stageCode) || !stageCode) return null
 
   const postCheckpoint = async (name, action) => {
-    await axios.post(
-      `/api/projects/${encodeURIComponent(projectId)}/checkpoints/${name}?action=${action}`
-    )
-    onCheckpointSet?.()
+    try {
+      await axios.post(
+        `/api/projects/${encodeURIComponent(projectId)}/checkpoints/${name}?action=${action}`
+      )
+      onCheckpointSet?.()
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.message || '请稍后重试'
+      onRequestError?.(`操作失败：${detail}`)
+    }
   }
 
   const openConfirm = (title, body, onConfirm) => {
@@ -56,19 +69,25 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet }) 
 
   const handleFirstLevelClick = () => {
     if (!firstLevel) return
-    if (!firstLevel.checkpoint) {
-      // informational / no-op (S2/S3 调整大纲, S4 回到继续改的状态)
+    if (firstLevel.kind === OPTION_KIND_INSERT_PROMPT) {
+      onInsertPrompt?.(firstLevel.prompt)
       setOpen(false)
       return
     }
-    openConfirm(
-      firstLevel.confirmTitle,
-      firstLevel.confirmBody,
-      async () => {
-        await postCheckpoint(firstLevel.checkpoint, firstLevel.action)
-        closeConfirm()
-      }
-    )
+    if (firstLevel.kind === OPTION_KIND_NOOP) {
+      setOpen(false)
+      return
+    }
+    if (firstLevel.kind === OPTION_KIND_CLEAR_CHECKPOINT) {
+      openConfirm(
+        firstLevel.confirmTitle,
+        firstLevel.confirmBody,
+        async () => {
+          await postCheckpoint(firstLevel.checkpoint, firstLevel.action)
+          closeConfirm()
+        }
+      )
+    }
   }
 
   return (

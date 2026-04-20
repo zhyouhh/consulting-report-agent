@@ -161,6 +161,7 @@ export default function StagePanel({
             projectId={projectId}
             stageCode={stageCode}
             onCheckpointSet={onCheckpointSet}
+            onInsertPrompt={onInsertPrompt}
           />
         </div>
 
