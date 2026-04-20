@@ -123,6 +123,97 @@ class SkillEngineTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _make_project_with_all_s1_files(self) -> Path:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        engine, project_dir = self._create_engine_and_project(tmpdir.name)
+        self.engine = engine
+        overview_path = project_dir / "plan" / "project-overview.md"
+        overview_text = overview_path.read_text(encoding="utf-8").replace(
+            "**预期篇幅**: 3000 words",
+            "**预期篇幅**: 6000 字",
+        )
+        overview_path.write_text(overview_text, encoding="utf-8")
+        self._write_stage_two_prerequisites(project_dir)
+        return project_dir
+
+    def _make_project_past_outline_confirm(self) -> Path:
+        project_dir = self._make_project_with_all_s1_files()
+        self.engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+        return project_dir
+
+    def _make_project_past_s3(self) -> Path:
+        project_dir = self._make_project_past_outline_confirm()
+        self._write_data_log_with_n_sources(project_dir, n=8)
+        self._write_analysis_with_refs(project_dir, ref_count=5)
+        return project_dir
+
+    def _make_project_past_s4(self) -> Path:
+        project_dir = self._make_project_past_s3()
+        self._write_report(project_dir, word_count=4300)
+        return project_dir
+
+    def _make_project_past_s5(self) -> Path:
+        project_dir = self._make_project_past_s4()
+        (project_dir / "plan" / "review-checklist.md").write_text(
+            "# 审查清单\n\n"
+            "- [x] 事实与数据来源已核对\n"
+            "- [x] 关键结论与证据一致\n"
+            "- [x] 结构逻辑完整\n",
+            encoding="utf-8",
+        )
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+        self.engine._save_stage_checkpoint(project_dir, "review_passed_at")
+        return project_dir
+
+    def _write_data_log_with_n_sources(self, project_dir: Path, n: int):
+        lines = ["# Data log", ""]
+        for idx in range(1, n + 1):
+            lines.extend(
+                [
+                    f"### [DL-{idx:03d}] Source {idx}",
+                    f"- 来源: https://example.com/source-{idx}",
+                    f"- 摘要: 第 {idx} 条来源记录包含实质证据。",
+                    "",
+                ]
+            )
+        (project_dir / "plan" / "data-log.md").write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+    def _write_analysis_with_refs(self, project_dir: Path, ref_count: int):
+        lines = ["# Analysis notes", "", "## Core insights", ""]
+        for idx in range(1, ref_count + 1):
+            lines.extend(
+                [
+                    f"### Insight {idx}",
+                    f"Conclusion: 洞察 {idx} 聚焦关键业务问题。",
+                    f"Evidence: 依据 [DL-{idx:03d}] 与相关访谈记录。",
+                    f"Impact: 建议将洞察 {idx} 转化为执行动作。",
+                    "",
+                ]
+            )
+        (project_dir / "plan" / "analysis-notes.md").write_text(
+            "\n".join(lines).strip() + "\n",
+            encoding="utf-8",
+        )
+
+    def _write_report(self, project_dir: Path, word_count: int):
+        body = "研" * word_count
+        (project_dir / "report_draft_v1.md").write_text(
+            "# Draft\n\n"
+            "## Executive summary\n"
+            f"{body}\n",
+            encoding="utf-8",
+        )
+
+    def _write_delivery_log(self, project_dir: Path):
+        (project_dir / "plan" / "delivery-log.md").write_text(
+            "# Delivery log\n\n"
+            "Delivery date: 2026-04-10\n"
+            "Shared with client: executive steering committee\n"
+            "Feedback: client requested follow-up workshop\n",
+            encoding="utf-8",
+        )
+
     def _assert_items_include(self, items, fragment: str):
         self.assertTrue(any(fragment in item for item in items), msg=f"Expected `{fragment}` in {items}")
 
@@ -1066,3 +1157,50 @@ class SkillEngineTests(unittest.TestCase):
             refreshed = stage_gates_path.read_text(encoding="utf-8")
 
             self.assertIn("- [x] Manual client follow-up captured", refreshed)
+
+    def test_infer_stage_holds_at_s1_without_outline_checkpoint(self):
+        project_dir = self._make_project_with_all_s1_files()
+        state = self.engine._infer_stage_state(project_dir)
+        self.assertEqual(state["stage_code"], "S1")
+
+    def test_infer_stage_advances_to_s2_once_outline_checkpoint_set(self):
+        project_dir = self._make_project_with_all_s1_files()
+        self.engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+        state = self.engine._infer_stage_state(project_dir)
+        self.assertEqual(state["stage_code"], "S2")
+
+    def test_infer_stage_holds_at_s3_when_analysis_refs_insufficient(self):
+        project_dir = self._make_project_past_outline_confirm()
+        self._write_data_log_with_n_sources(project_dir, n=8)
+        self._write_analysis_with_refs(project_dir, ref_count=1)
+        state = self.engine._infer_stage_state(project_dir)
+        self.assertEqual(state["stage_code"], "S3")
+
+    def test_infer_stage_holds_at_s4_when_word_count_below_floor(self):
+        project_dir = self._make_project_past_s3()
+        self._write_report(project_dir, word_count=1200)
+        state = self.engine._infer_stage_state(project_dir)
+        self.assertEqual(state["stage_code"], "S4")
+
+    def test_infer_stage_holds_at_s5_without_review_passed_checkpoint(self):
+        project_dir = self._make_project_past_s4()
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+        state = self.engine._infer_stage_state(project_dir)
+        self.assertEqual(state["stage_code"], "S5")
+
+    def test_infer_stage_returns_done_after_delivery_archived(self):
+        project_dir = self._make_project_past_s5()
+        for key in ("review_passed_at", "delivery_archived_at"):
+            self.engine._save_stage_checkpoint(project_dir, key)
+        self._write_delivery_log(project_dir)
+        state = self.engine._infer_stage_state(project_dir)
+        self.assertEqual(state["stage_code"], "done")
+        self.assertEqual(state["stage_status"], "已归档")
+
+    def test_infer_stage_stays_at_s7_when_archived_stamp_missing(self):
+        project_dir = self._make_project_past_s5()
+        self.engine._save_stage_checkpoint(project_dir, "review_passed_at")
+        self._write_delivery_log(project_dir)
+        state = self.engine._infer_stage_state(project_dir)
+        self.assertEqual(state["stage_code"], "S7")
+        self.assertEqual(state["stage_status"], "进行中")

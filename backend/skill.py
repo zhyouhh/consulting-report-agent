@@ -50,6 +50,18 @@ class SkillEngine:
     )
     _DL_ENTRY_PATTERN = re.compile(r"^#{3,4}\s*\*{0,2}\s*\[(DL-[^\]]+)\]", re.MULTILINE)
     _DL_REFERENCE_PATTERN = re.compile(r"\[(DL-[^\]]+)\]")
+    _MARKDOWN_STRIP_PATTERNS = [
+        (re.compile(r"```[\s\S]*?```"), ""),
+        (re.compile(r"`[^`]*`"), ""),
+        (re.compile(r"!\[[^\]]*\]\([^)]*\)"), ""),
+        (re.compile(r"\[([^\]]*)\]\([^)]*\)"), r"\1"),
+        (re.compile(r"^\s{0,3}#{1,6}\s+", re.MULTILINE), ""),
+        (re.compile(r"^\s*[-*+]\s+", re.MULTILINE), ""),
+        (re.compile(r"^\s*\d+\.\s+", re.MULTILINE), ""),
+        (re.compile(r"\*\*([^*]+)\*\*"), r"\1"),
+        (re.compile(r"\*([^*]+)\*"), r"\1"),
+        (re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE), ""),
+    ]
     _EVIDENCE_MARKERS = (
         re.compile(r"https?://"),
         re.compile(r"material:[a-zA-Z0-9\-]+"),
@@ -927,68 +939,75 @@ class SkillEngine:
         return self._has_effective_outline(project_path)
 
     def _infer_stage_state(self, project_path: Path) -> dict:
+        targets = self._resolve_length_targets(project_path)
+        checkpoints = self._load_stage_checkpoints(project_path)
+
         project_overview_ready = self._is_effective_plan_file(project_path, "project-overview.md")
         notes_ready = self._has_effective_notes(project_path)
         references_ready = self._has_effective_references(project_path)
         outline_ready = self._has_effective_outline(project_path)
         research_plan_ready = self._has_effective_research_plan(project_path)
-        data_log_ready = self._has_effective_data_log(project_path)
-        analysis_ready = self._has_effective_analysis_notes(project_path)
-        report_ready = self._has_effective_report_draft(project_path)
+
+        data_log_quality_ok = self._has_enough_data_log_sources(project_path, targets["data_log_min"])
+        analysis_quality_ok = self._has_enough_analysis_refs(project_path, targets["analysis_refs_min"])
+
+        report_ready = self._has_effective_report_draft(project_path, min_words=targets["report_word_floor"])
         review_checklist_ready = self._has_effective_review_checklist(project_path)
-        review_notes_ready = self._has_effective_review_notes(project_path)
-        review_ready = review_checklist_ready
         presentation_ready = self._has_effective_presentation_plan(project_path)
         delivery_ready = self._has_effective_delivery_log(project_path)
         presentation_required = self._delivery_mode_requires_presentation(project_path)
-        post_init_started = any(
-            [
-                notes_ready,
-                references_ready,
-                outline_ready,
-                research_plan_ready,
-                data_log_ready,
-                analysis_ready,
-                report_ready,
-                review_checklist_ready,
-                review_notes_ready,
-                presentation_ready,
-                delivery_ready,
-            ]
-        )
+
+        outline_confirmed = "outline_confirmed_at" in checkpoints
+        review_started = "review_started_at" in checkpoints
+        review_passed = "review_passed_at" in checkpoints
+        presentation_done = "presentation_ready_at" in checkpoints
+        delivery_archived = "delivery_archived_at" in checkpoints
+
         stage_zero_complete = project_overview_ready
-        stage_one_complete = stage_zero_complete and all(
-            [notes_ready, references_ready, outline_ready, research_plan_ready]
+        stage_one_complete = (
+            stage_zero_complete
+            and notes_ready
+            and references_ready
+            and outline_ready
+            and research_plan_ready
+            and outline_confirmed
         )
-        stage_two_complete = stage_one_complete and data_log_ready
-        stage_three_complete = stage_two_complete and analysis_ready
-        stage_four_complete = stage_three_complete and report_ready
-        stage_five_complete = stage_four_complete and review_ready
+        stage_two_complete = stage_one_complete and data_log_quality_ok
+        stage_three_complete = stage_two_complete and analysis_quality_ok
+        stage_four_complete = stage_three_complete and report_ready and review_started
+        stage_five_complete = stage_four_complete and review_checklist_ready and review_passed
         stage_six_complete = stage_five_complete and (
-            presentation_ready if presentation_required else True
+            (presentation_ready and presentation_done) if presentation_required else True
         )
-        stage_seven_complete = stage_six_complete and delivery_ready
+        stage_seven_complete = stage_six_complete and delivery_ready and delivery_archived
 
         if not stage_zero_complete:
             stage_code = "S0"
-        elif not post_init_started:
-            stage_code = "S0"
+            stage_status = "进行中"
         elif not stage_one_complete:
             stage_code = "S1"
+            stage_status = "进行中"
         elif not stage_two_complete:
             stage_code = "S2"
+            stage_status = "进行中"
         elif not stage_three_complete:
             stage_code = "S3"
+            stage_status = "进行中"
         elif not stage_four_complete:
             stage_code = "S4"
+            stage_status = "进行中"
         elif not stage_five_complete:
             stage_code = "S5"
+            stage_status = "进行中"
         elif presentation_required and not stage_six_complete:
             stage_code = "S6"
+            stage_status = "进行中"
         elif not stage_seven_complete:
             stage_code = "S7"
+            stage_status = "进行中"
         else:
-            stage_code = "S7"
+            stage_code = "done"
+            stage_status = "已归档"
 
         flags = {
             "project_overview_ready": project_overview_ready,
@@ -996,24 +1015,40 @@ class SkillEngine:
             "references_ready": references_ready,
             "outline_ready": outline_ready,
             "research_plan_ready": research_plan_ready,
-            "data_log_ready": data_log_ready,
-            "analysis_ready": analysis_ready,
+            "data_log_ready": data_log_quality_ok,
+            "analysis_ready": analysis_quality_ok,
             "report_ready": report_ready,
             "review_checklist_ready": review_checklist_ready,
-            "review_notes_ready": review_notes_ready,
-            "review_ready": review_ready,
+            "review_notes_ready": self._has_effective_review_notes(project_path),
+            "review_ready": review_checklist_ready and review_passed,
             "presentation_ready": presentation_ready,
-            "delivery_ready": delivery_ready,
+            "delivery_ready": delivery_ready and delivery_archived,
             "presentation_required": presentation_required,
+            "outline_confirmed": outline_confirmed,
+            "review_started": review_started,
+            "review_passed": review_passed,
+            "presentation_done": presentation_done,
+            "delivery_archived": delivery_archived,
         }
         return {
             "stage_code": stage_code,
+            "stage_status": stage_status,
             "completed_items": self._build_completed_items(stage_code, flags),
             "skipped_items": self._build_skipped_items(stage_code, flags),
+            "checkpoints": checkpoints,
+            "length_targets": targets,
+            "flags": flags,
         }
 
     def _build_completed_items(self, stage_code: str, flags: dict) -> list[str]:
         completed: list[str] = []
+        if stage_code == "done":
+            for stage in self.STAGE_ORDER:
+                if stage == "S6" and not flags["presentation_required"]:
+                    continue
+                completed.extend(self.STAGE_CHECKLIST_ITEMS[stage])
+            return list(dict.fromkeys(completed))
+
         stage_index = self._stage_index(stage_code)
         for stage in self.STAGE_ORDER[:stage_index]:
             if stage == "S6" and not flags["presentation_required"]:
@@ -1063,7 +1098,7 @@ class SkillEngine:
         return list(dict.fromkeys(completed))
 
     def _build_skipped_items(self, stage_code: str, flags: dict) -> list[str]:
-        if not flags["presentation_required"] and stage_code == "S7":
+        if not flags["presentation_required"] and stage_code in {"S7", "done"}:
             return list(self.STAGE_CHECKLIST_ITEMS["S6"])
         return []
 
@@ -1369,11 +1404,21 @@ class SkillEngine:
             and self._has_substantive_body(delivery_text)
         )
 
-    def _has_effective_report_draft(self, project_path: Path) -> bool:
+    def _count_words(self, content: str) -> int:
+        text = content
+        for pattern, repl in self._MARKDOWN_STRIP_PATTERNS:
+            text = pattern.sub(repl, text)
+        stripped = re.sub(r"[\s\u3000]+", "", text)
+        return len(stripped)
+
+    def _has_effective_report_draft(self, project_path: Path, min_words: int = 0) -> bool:
         for candidate in self.REPORT_DRAFT_CANDIDATES:
             draft_text = self._read_project_file(project_path, candidate)
-            if draft_text and self._has_substantive_body(draft_text):
-                return True
+            if not draft_text or not self._has_substantive_body(draft_text):
+                continue
+            if min_words and self._count_words(draft_text) < min_words:
+                continue
+            return True
         return False
 
     def _delivery_mode_requires_presentation(self, project_path: Path) -> bool:
