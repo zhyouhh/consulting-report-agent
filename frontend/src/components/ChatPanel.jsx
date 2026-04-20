@@ -35,6 +35,8 @@ export default function ChatPanel({
   onMaterialsMerged,
   onProjectMutated,
   onToggleWorkspacePanel,
+  injectedPrompt,
+  onInjectedPromptConsumed,
 }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
@@ -64,6 +66,15 @@ export default function ChatPanel({
   const contextUsagePercent = tokenUsage ? getContextUsagePercent(tokenUsage) : null
   activeProjectIdRef.current = projectId
   pendingAttachmentsRef.current = pendingAttachments
+
+  // Consume injected prompt (from S4 "继续扩写" button in StageAdvanceControl)
+  useEffect(() => {
+    if (injectedPrompt) {
+      setInput(injectedPrompt)
+      composerInputRef.current?.focus()
+      onInjectedPromptConsumed?.()
+    }
+  }, [injectedPrompt]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const isActiveProjectRequest = (requestProjectId) => shouldApplyProjectResponse({
     requestProject: requestProjectId,
@@ -503,6 +514,23 @@ export default function ChatPanel({
                   break
                 }
                 setTokenUsage(parsed.data)
+              } else if (parsed.type === 'system_notice') {
+                // §9 system_notice: inject as a special message in the stream
+                if (!isActiveProjectRequest(requestProjectId)) {
+                  streamCompleted = true
+                  break
+                }
+                const noticeId = `notice_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+                setMessages(prev => [
+                  ...prev,
+                  {
+                    id: noticeId,
+                    role: 'system_notice',
+                    category: parsed.category || '',
+                    reason: parsed.reason || '',
+                    user_action: parsed.user_action || '',
+                  },
+                ])
               } else if (parsed.type === 'error') {
                 streamFailed = true
                 if (shouldFlushStreamingQueueImmediately('error')) {
@@ -643,6 +671,21 @@ export default function ChatPanel({
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((msg) => {
+          // §9 system_notice — distinct warning block, yellow-orange tone
+          if (msg.role === 'system_notice') {
+            return (
+              <div key={msg.id} className="flex justify-start">
+                <div className="max-w-2xl w-full rounded-xl border border-[#6b4f1a] bg-[#2a1e0a] px-4 py-3 flex gap-3 items-start">
+                  <span className="text-lg leading-none mt-0.5 flex-shrink-0" aria-hidden="true">⚠️</span>
+                  <div className="space-y-1 min-w-0">
+                    <p className="text-sm text-[#e8b060] leading-snug">{msg.reason}</p>
+                    <p className="text-xs text-[#c8904a] leading-snug">{msg.user_action}</p>
+                  </div>
+                </div>
+              </div>
+            )
+          }
+
           const assistantBlocks = msg.role === 'assistant'
             ? splitAssistantMessageBlocks(msg.content)
             : [{ type: 'text', content: msg.content }]
