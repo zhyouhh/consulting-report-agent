@@ -1060,11 +1060,7 @@ class SkillEngine:
         return None
 
     def record_stage_checkpoint(self, project_id: str, key: str, action: str) -> dict:
-        # Deferred import: the per-project RLock lives in chat.py's module-level
-        # _PROJECT_REQUEST_LOCKS dict, but is exposed only via ChatHandler. Going
-        # through backend.main.get_chat_handler is the cheapest way to reach the
-        # same lock the chat endpoint uses, without duplicating the dict here.
-        from backend.main import get_chat_handler
+        from backend.chat import _get_project_request_lock
 
         project_path = self.get_project_path(project_id)
         if project_path is None:
@@ -1072,7 +1068,7 @@ class SkillEngine:
         if action not in ("set", "clear"):
             raise ValueError(f"未知 action: {action}")
 
-        lock = get_chat_handler(project_id)._get_project_request_lock(project_id)
+        lock = _get_project_request_lock(project_id)
         with lock:
             if action == "set":
                 timestamp = self._save_stage_checkpoint(project_path, key)

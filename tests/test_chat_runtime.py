@@ -2796,8 +2796,17 @@ class ChatRuntimeTests(unittest.TestCase):
 
         module_obj = module_lock(self.project_id)
         instance_obj = handler._get_project_request_lock(self.project_id)
+        with mock.patch("backend.main.get_chat_handler") as mock_get_chat_handler:
+            handler.skill_engine.record_stage_checkpoint(
+                self.project_id,
+                "outline_confirmed_at",
+                "set",
+            )
+            checkpoint_obj = module_lock(self.project_id)
 
         self.assertIs(module_obj, instance_obj)
+        self.assertIs(module_obj, checkpoint_obj)
+        mock_get_chat_handler.assert_not_called()
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_falls_back_to_estimated_usage_when_final_tool_round_has_no_provider_usage(self, mock_openai):
