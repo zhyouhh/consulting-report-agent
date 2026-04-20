@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -456,7 +457,7 @@ class SkillEngineTests(unittest.TestCase):
 
             summary = engine.get_workspace_summary("demo")
 
-            self.assertEqual(summary["stage_code"], "S0")
+            self.assertEqual(summary["stage_code"], "S1")
             self.assertEqual(summary["status"], "进行中")
             self.assertTrue(summary["next_actions"])
             self.assertTrue(summary["next_actions"])
@@ -710,6 +711,7 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
 
             summary = engine.get_workspace_summary("demo")
 
@@ -729,6 +731,7 @@ class SkillEngineTests(unittest.TestCase):
                     "- CRM留存导出\n"
                 ),
             )
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
 
             summary = engine.get_workspace_summary("demo")
 
@@ -746,6 +749,7 @@ class SkillEngineTests(unittest.TestCase):
                     "2. Industry benchmark memo (2025): onboarding conversion study.\n"
                 ),
             )
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
 
             summary = engine.get_workspace_summary("demo")
 
@@ -809,6 +813,7 @@ class SkillEngineTests(unittest.TestCase):
                 "- CRM export\n",
                 encoding="utf-8",
             )
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
 
             summary = engine.get_workspace_summary("demo")
 
@@ -909,7 +914,8 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
-            self._write_data_log(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+            self._write_data_log_with_n_sources(project_dir, n=8)
 
             summary = engine.get_workspace_summary("demo")
 
@@ -921,6 +927,7 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
             (project_dir / "plan" / "data-log.md").write_text(
                 "# Data log\n\n"
                 "## Source index\n\n"
@@ -940,6 +947,7 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
             (project_dir / "plan" / "data-log.md").write_text(
                 "# Data log\n\n"
                 "## Interview notes\n"
@@ -959,6 +967,7 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
             self._write_analysis_notes(project_dir)
 
             summary = engine.get_workspace_summary("demo")
@@ -971,8 +980,9 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
-            self._write_data_log(project_dir)
-            self._write_analysis_notes(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+            self._write_data_log_with_n_sources(project_dir, n=8)
+            self._write_analysis_with_refs(project_dir, ref_count=5)
 
             summary = engine.get_workspace_summary("demo")
 
@@ -1024,8 +1034,9 @@ class SkillEngineTests(unittest.TestCase):
                 "- Fictional anti-gravity can be modeled as a local field effect.\n",
                 encoding="utf-8",
             )
-            self._write_data_log(project_dir)
-            self._write_analysis_notes(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+            self._write_data_log_with_n_sources(project_dir, n=8)
+            self._write_analysis_with_refs(project_dir, ref_count=5)
 
             summary = engine.get_workspace_summary("demo")
             stage_gates_text = (project_dir / "plan" / "stage-gates.md").read_text(encoding="utf-8")
@@ -1037,7 +1048,8 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
-            self._write_data_log(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+            self._write_data_log_with_n_sources(project_dir, n=8)
             (project_dir / "plan" / "analysis-notes.md").write_text(
                 "# Analysis notes\n\n"
                 "## Conclusion\n"
@@ -1056,7 +1068,8 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
-            self._write_data_log(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+            self._write_data_log_with_n_sources(project_dir, n=8)
             (project_dir / "plan" / "analysis-notes.md").write_text(
                 "# Analysis notes\n\n"
                 "## Core insights\n\n"
@@ -1080,13 +1093,14 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
-            self._write_data_log(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+            self._write_data_log_with_n_sources(project_dir, n=8)
             (project_dir / "plan" / "analysis-notes.md").write_text(
                 "# 分析笔记\n\n"
                 "## 核心洞察\n"
                 "### 洞察 1\n"
                 "**结论**：续约风险主要来自导入期摩擦。\n"
-                "**证据**：访谈记录与留存数据互相印证。\n"
+                "**证据**：[DL-001]、[DL-002]、[DL-003]、[DL-004]、[DL-005] 互相印证。\n"
                 "**影响**：建议优先改造 onboarding 流程。\n",
                 encoding="utf-8",
             )
@@ -1100,7 +1114,8 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
-            self._write_data_log(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+            self._write_data_log_with_n_sources(project_dir, n=8)
             (project_dir / "report_draft_v1.md").write_text(
                 "# Draft\n\n## Executive summary\nA concrete report section.\n",
                 encoding="utf-8",
@@ -1116,12 +1131,11 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
-            self._write_data_log(project_dir)
-            self._write_analysis_notes(project_dir)
-            (project_dir / "report_draft_v1.md").write_text(
-                "# Draft\n\n## Executive summary\nA concrete report section.\n",
-                encoding="utf-8",
-            )
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+            self._write_data_log_with_n_sources(project_dir, n=8)
+            self._write_analysis_with_refs(project_dir, ref_count=5)
+            self._write_report(project_dir, word_count=4300)
+            engine._save_stage_checkpoint(project_dir, "review_started_at")
 
             summary = engine.get_workspace_summary("demo")
 
@@ -1133,12 +1147,11 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
-            self._write_data_log(project_dir)
-            self._write_analysis_notes(project_dir)
-            (project_dir / "report_draft_v1.md").write_text(
-                "# Draft\n\n## Executive summary\nA concrete report section.\n",
-                encoding="utf-8",
-            )
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+            self._write_data_log_with_n_sources(project_dir, n=8)
+            self._write_analysis_with_refs(project_dir, ref_count=5)
+            self._write_report(project_dir, word_count=4300)
+            engine._save_stage_checkpoint(project_dir, "review_started_at")
             (project_dir / "plan" / "review-checklist.md").write_text(
                 "# 审查清单\n\n"
                 "- [x] 事实与数据来源已核对\n"
@@ -1188,6 +1201,112 @@ class SkillEngineTests(unittest.TestCase):
             refreshed = stage_gates_path.read_text(encoding="utf-8")
 
             self.assertIn("- [x] Manual client follow-up captured", refreshed)
+
+    def test_workspace_summary_s2_reports_data_log_quality_progress(self):
+        project_dir = self._make_project_past_outline_confirm()
+        self._write_data_log_with_n_sources(project_dir, n=3)
+
+        summary = self.engine.get_workspace_summary("demo")
+
+        self.assertEqual(summary["stage_code"], "S2")
+        self.assertEqual(
+            summary["quality_progress"],
+            {"label": "有效来源条目", "current": 3, "target": 8},
+        )
+
+    def test_workspace_summary_next_stage_hint_s6_when_review_passed_and_presentation_required(self):
+        project_dir = self._make_project_past_s5()
+        overview_path = project_dir / "plan" / "project-overview.md"
+        overview_text = overview_path.read_text(encoding="utf-8").replace(
+            "**交付形式**: 仅报告",
+            "**交付形式**: 报告+演示",
+        )
+        overview_path.write_text(overview_text, encoding="utf-8")
+
+        summary = self.engine.get_workspace_summary("demo")
+
+        self.assertEqual(summary["next_stage_hint"], "S6")
+
+    def test_workspace_summary_next_stage_hint_s7_when_review_passed_and_report_only(self):
+        project_dir = self._make_project_past_s5()
+
+        summary = self.engine.get_workspace_summary("demo")
+
+        self.assertEqual(summary["next_stage_hint"], "S7")
+
+    def test_workspace_summary_next_stage_hint_none_without_review_passed_checkpoint(self):
+        project_dir = self._make_project_past_s4()
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+
+        summary = self.engine.get_workspace_summary("demo")
+
+        self.assertIsNone(summary["next_stage_hint"])
+
+    def test_workspace_summary_word_count_uses_max_report_candidate_count(self):
+        project_dir = self._make_project()
+        (project_dir / "content" / "report.md").write_text(
+            ("短" * 800) + "\n",
+            encoding="utf-8",
+        )
+        (project_dir / "output" / "final-report.md").write_text(
+            ("长" * 5000) + "\n",
+            encoding="utf-8",
+        )
+
+        summary = self.engine.get_workspace_summary("demo")
+
+        self.assertEqual(summary["word_count"], 5000)
+
+    def test_workspace_summary_sets_stalled_since_when_s2_evidence_is_old(self):
+        project_dir = self._make_project_past_outline_confirm()
+        self._write_data_log_with_n_sources(project_dir, n=3)
+        old_time = datetime.now().timestamp() - 31 * 60
+        for file_name in ("notes.md", "references.md", "data-log.md", "analysis-notes.md"):
+            path = project_dir / "plan" / file_name
+            os.utime(path, (old_time, old_time))
+
+        summary = self.engine.get_workspace_summary("demo")
+
+        self.assertEqual(summary["stage_code"], "S2")
+        self.assertIsNotNone(summary["stalled_since"])
+
+    def test_workspace_summary_stalled_since_none_for_s4_even_when_evidence_is_old(self):
+        project_dir = self._make_project_past_s3()
+        old_time = datetime.now().timestamp() - 31 * 60
+        for file_name in ("notes.md", "references.md", "data-log.md", "analysis-notes.md"):
+            path = project_dir / "plan" / file_name
+            os.utime(path, (old_time, old_time))
+
+        summary = self.engine.get_workspace_summary("demo")
+
+        self.assertEqual(summary["stage_code"], "S4")
+        self.assertIsNone(summary["stalled_since"])
+
+    def test_workspace_summary_delivery_mode_reports_presentation_mode(self):
+        project_dir = self._make_project()
+        overview_path = project_dir / "plan" / "project-overview.md"
+        overview_text = overview_path.read_text(encoding="utf-8").replace(
+            "**交付形式**: 仅报告",
+            "**交付形式**: 报告+演示",
+        )
+        overview_path.write_text(overview_text, encoding="utf-8")
+
+        summary = self.engine.get_workspace_summary("demo")
+
+        self.assertEqual(summary["delivery_mode"], "报告+演示")
+
+    def test_workspace_summary_delivery_mode_defaults_to_report_only_when_key_absent(self):
+        project_dir = self._make_project()
+        overview_path = project_dir / "plan" / "project-overview.md"
+        overview_text = "\n".join(
+            line for line in overview_path.read_text(encoding="utf-8").splitlines()
+            if "交付形式" not in line
+        )
+        overview_path.write_text(overview_text, encoding="utf-8")
+
+        summary = self.engine.get_workspace_summary("demo")
+
+        self.assertEqual(summary["delivery_mode"], "仅报告")
 
     def test_infer_stage_holds_at_s1_without_outline_checkpoint(self):
         project_dir = self._make_project_with_all_s1_files()
@@ -1240,8 +1359,6 @@ class SkillEngineTests(unittest.TestCase):
         project_dir = self._make_project()
         self._write_stage_gates_at_stage(project_dir, "S7")
         self._write_report_draft(project_dir, words=5000)
-        self._write_review_checklist(project_dir)
-        self._write_delivery_log(project_dir)
 
         self.engine._backfill_stage_checkpoints_if_missing(project_dir)
 
@@ -1250,6 +1367,19 @@ class SkillEngineTests(unittest.TestCase):
         self.assertNotIn("review_started_at", checkpoints)
         self.assertNotIn("review_passed_at", checkpoints)
         self.assertNotIn("delivery_archived_at", checkpoints)
+
+    def test_backfill_stage_checkpoints_is_idempotent(self):
+        project_dir = self._make_project()
+        self._write_stage_gates_at_stage(project_dir, "S3")
+
+        self.engine._backfill_stage_checkpoints_if_missing(project_dir)
+        checkpoints_path = self.engine._stage_checkpoints_path(project_dir)
+        first_content = checkpoints_path.read_text(encoding="utf-8")
+
+        self.engine._backfill_stage_checkpoints_if_missing(project_dir)
+        second_content = checkpoints_path.read_text(encoding="utf-8")
+
+        self.assertEqual(first_content, second_content)
 
     def test_clear_cascade_clears_all_subsequent_checkpoints(self):
         project_dir = self._make_project()
@@ -1268,3 +1398,15 @@ class SkillEngineTests(unittest.TestCase):
         self.assertNotIn("review_passed_at", checkpoints)
         self.assertNotIn("delivery_archived_at", checkpoints)
         self.assertEqual(raw_checkpoints[self.engine.MIGRATION_MARKER_KEY], "2026-04-20T18:00:00")
+
+    def test_record_stage_checkpoint_sets_and_clears_under_shared_lock(self):
+        project_dir = self._make_project()
+
+        result = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["key"], "outline_confirmed_at")
+        self.assertIn("outline_confirmed_at", self.engine._load_stage_checkpoints(project_dir))
+
+        cleared = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "clear")
+        self.assertEqual(cleared, {"status": "ok", "key": "outline_confirmed_at", "cleared": True})
+        self.assertNotIn("outline_confirmed_at", self.engine._load_stage_checkpoints(project_dir))

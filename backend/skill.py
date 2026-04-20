@@ -51,6 +51,9 @@ class SkillEngine:
         "presentation_ready_at",
         "delivery_archived_at",
     ]
+    assert set(_CASCADE_ORDER) == STAGE_CHECKPOINT_KEYS, (
+        "_CASCADE_ORDER must cover exactly STAGE_CHECKPOINT_KEYS"
+    )
     _EXPECTED_LENGTH_LINE_PATTERN = re.compile(r"预期篇幅[^\n]*?[:：]\s*([^\n(（]+)")
     _EXPECTED_LENGTH_HEADING_PATTERN = re.compile(
         r"^##\s*预期篇幅\s*\n\s*([^\n(（]+)",
@@ -177,6 +180,7 @@ class SkillEngine:
         if checkpoints_path.exists():
             return
 
+        # No historical confirm event exists; migration records that backfill happened.
         timestamp = datetime.now().isoformat(timespec="seconds")
         migrated = {self.MIGRATION_MARKER_KEY: timestamp}
         stage_gates_path = Path(project_path) / "plan" / "stage-gates.md"
@@ -254,24 +258,25 @@ class SkillEngine:
                     expected = max(int(n) for n in nums)
                     fallback_used = False
                     break
+        # Plan §9.3: minimum data-log entries scale with expected report length.
         data_log_min = min(12, math.ceil(expected / 1000 * 1.3))
+        # Plan §9.3: analysis citations also scale, capped to keep S3 practical.
         analysis_refs_min = min(8, math.ceil(expected / 1000 * 0.8))
         return {
             "expected_length": expected,
             "data_log_min": max(3, data_log_min),
             "analysis_refs_min": max(2, analysis_refs_min),
+            # Plan §9.3: drafts below 70% of target length are not review-ready.
             "report_word_floor": int(expected * 0.7),
             "fallback_used": fallback_used,
         }
 
-    def _has_enough_data_log_sources(self, project_path, min_count):
+    def _count_valid_data_log_sources(self, project_path):
         data_log = project_path / "plan" / "data-log.md"
         if not data_log.exists():
-            return False
+            return 0
         text = data_log.read_text(encoding="utf-8")
         entries = list(self._DL_ENTRY_PATTERN.finditer(text))
-        if len(entries) < min_count:
-            return False
         valid = 0
         for idx, match in enumerate(entries):
             start = match.end()
@@ -279,13 +284,16 @@ class SkillEngine:
             body = text[start:end]
             if any(pattern.search(body) for pattern in self._EVIDENCE_MARKERS):
                 valid += 1
-        return valid >= min_count
+        return valid
 
-    def _has_enough_analysis_refs(self, project_path, min_refs):
+    def _has_enough_data_log_sources(self, project_path, min_count):
+        return self._count_valid_data_log_sources(project_path) >= min_count
+
+    def _count_analysis_refs(self, project_path):
         analysis = project_path / "plan" / "analysis-notes.md"
         data_log = project_path / "plan" / "data-log.md"
         if not analysis.exists() or not data_log.exists():
-            return False
+            return 0
         dl_ids = {
             m.group(1)
             for m in self._DL_ENTRY_PATTERN.finditer(
@@ -298,7 +306,10 @@ class SkillEngine:
                 analysis.read_text(encoding="utf-8")
             )
         }
-        return len(refs & dl_ids) >= min_refs
+        return len(refs & dl_ids)
+
+    def _has_enough_analysis_refs(self, project_path, min_refs):
+        return self._count_analysis_refs(project_path) >= min_refs
 
     def __init__(self, projects_dir: Path, skill_dir: Path):
         self.projects_dir = projects_dir
@@ -711,33 +722,49 @@ class SkillEngine:
         return (Path(project_record["project_dir"]) / material["stored_rel_path"]).resolve()
 
     def get_workspace_summary(self, project_ref: str) -> dict:
-        project_record = self.get_project_record(project_ref)
-        if not project_record:
-            raise ValueError(f"项目 {project_ref} 不存在")
-        project_path = Path(project_record["project_dir"])
-        if not project_path.exists():
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
             raise ValueError(f"项目 {project_ref} 不存在")
 
+        self._backfill_stage_checkpoints_if_missing(project_path)
+        stage_state = self._infer_stage_state(project_path)
+        project_record = self.get_project_record(project_ref) or {}
         tracking_state = self._sync_stage_tracking_files(project_path)
         materials = self.list_materials(project_ref)
 
+        checkpoints = stage_state.get("checkpoints", {})
+        next_stage_hint = None
+        if "review_passed_at" in checkpoints:
+            next_stage_hint = "S6" if self._delivery_mode_requires_presentation(project_path) else "S7"
+
+        stalled_since = None
+        if stage_state["stage_code"] in ("S2", "S3"):
+            last_write = self._last_evidence_write_at(project_path)
+            if last_write is not None:
+                elapsed = datetime.now() - last_write
+                if elapsed.total_seconds() >= 30 * 60:
+                    stalled_since = last_write.isoformat(timespec="seconds")
+
+        length_targets = stage_state.get("length_targets", {})
+
         return {
-            "stage_code": tracking_state["stage_code"],
-            "status": tracking_state["status"],
-            "completed_items": tracking_state["completed_items"],
-            "next_actions": tracking_state["next_actions"][:3],
-            "workspace_dir": project_record["workspace_dir"],
-            "project_dir": project_record["project_dir"],
-            "materials": [
-                {
-                    "id": material["id"],
-                    "display_name": material["display_name"],
-                    "source_type": material["source_type"],
-                    "media_kind": material["media_kind"],
-                    "file_type": material["file_type"],
-                }
-                for material in materials
-            ],
+            "stage_code": stage_state["stage_code"],
+            "status": stage_state.get("stage_status", tracking_state["status"]),
+            "completed_items": stage_state["completed_items"],
+            "skipped_items": stage_state.get("skipped_items", []),
+            "next_actions": tracking_state["next_actions"],
+            "workspace_dir": project_record.get("workspace_dir", ""),
+            "project_dir": str(project_path),
+            "materials": materials,
+            "checkpoints": checkpoints,
+            "length_targets": length_targets,
+            "length_fallback_used": length_targets.get("fallback_used", False),
+            "quality_progress": self._build_quality_progress(project_path, stage_state),
+            "flags": stage_state.get("flags", {}),
+            "next_stage_hint": next_stage_hint,
+            "stalled_since": stalled_since,
+            "word_count": self._current_report_word_count(project_path),
+            "delivery_mode": self._extract_delivery_mode(project_path),
         }
 
     def build_project_context(self, project_ref: str) -> str:
@@ -882,6 +909,75 @@ class SkillEngine:
             "next_actions": next_actions,
             "stage_gates_text": stage_gates_text,
         }
+
+    def _extract_delivery_mode(self, project_path: Path) -> str:
+        """Parse 交付形式 from plan/project-overview.md."""
+        overview_path = project_path / "plan" / "project-overview.md"
+        if not overview_path.exists():
+            return "仅报告"
+        text = overview_path.read_text(encoding="utf-8")
+        match = re.search(r"交付形式[^\n]*?[:：]\s*([^\n]+)", text)
+        if not match:
+            return "仅报告"
+        value = match.group(1).strip()
+        return "报告+演示" if "演示" in value else "仅报告"
+
+    def _current_report_word_count(self, project_path: Path) -> int:
+        counts = []
+        for candidate in self.REPORT_DRAFT_CANDIDATES:
+            draft_text = self._read_project_file(project_path, candidate)
+            if not draft_text or self._is_template_stub(draft_text):
+                continue
+            counts.append(self._count_words(draft_text))
+        return max(counts) if counts else 0
+
+    def _last_evidence_write_at(self, project_path: Path) -> datetime | None:
+        candidates = [
+            project_path / "plan" / "notes.md",
+            project_path / "plan" / "references.md",
+            project_path / "plan" / "data-log.md",
+            project_path / "plan" / "analysis-notes.md",
+        ]
+        mtimes = [path.stat().st_mtime for path in candidates if path.exists()]
+        if not mtimes:
+            return None
+        return datetime.fromtimestamp(max(mtimes))
+
+    def _build_quality_progress(self, project_path: Path, stage_state: dict) -> dict | None:
+        stage = stage_state["stage_code"]
+        targets = stage_state.get("length_targets", {})
+        if stage == "S2":
+            return {
+                "label": "有效来源条目",
+                "current": self._count_valid_data_log_sources(project_path),
+                "target": targets.get("data_log_min", 0),
+            }
+        if stage == "S3":
+            return {
+                "label": "分析证据引用",
+                "current": self._count_analysis_refs(project_path),
+                "target": targets.get("analysis_refs_min", 0),
+            }
+        return None
+
+    def record_stage_checkpoint(self, project_id: str, key: str, action: str) -> dict:
+        from backend.main import get_chat_handler
+
+        project_path = self.get_project_path(project_id)
+        if project_path is None:
+            raise ValueError(f"项目不存在: {project_id}")
+        if action not in ("set", "clear"):
+            raise ValueError(f"未知 action: {action}")
+
+        lock = get_chat_handler(project_id)._get_project_request_lock(project_id)
+        with lock:
+            if action == "set":
+                timestamp = self._save_stage_checkpoint(project_path, key)
+                self._sync_stage_tracking_files(project_path)
+                return {"status": "ok", "key": key, "timestamp": timestamp}
+            self._clear_stage_checkpoint_cascade(project_path, key)
+            self._sync_stage_tracking_files(project_path)
+            return {"status": "ok", "key": key, "cleared": True}
 
     def _write_tracking_file(self, path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1056,6 +1152,7 @@ class SkillEngine:
             stage_code = "done"
             stage_status = "已归档"
 
+        # *_ready means effective file content; *_confirmed/started/passed/done/archived means a user checkpoint.
         flags = {
             "project_overview_ready": project_overview_ready,
             "notes_ready": notes_ready,
@@ -1089,13 +1186,6 @@ class SkillEngine:
 
     def _build_completed_items(self, stage_code: str, flags: dict) -> list[str]:
         completed: list[str] = []
-        if stage_code == "done":
-            for stage in self.STAGE_ORDER:
-                if stage == "S6" and not flags["presentation_required"]:
-                    continue
-                completed.extend(self.STAGE_CHECKLIST_ITEMS[stage])
-            return list(dict.fromkeys(completed))
-
         stage_index = self._stage_index(stage_code)
         for stage in self.STAGE_ORDER[:stage_index]:
             if stage == "S6" and not flags["presentation_required"]:
@@ -1460,10 +1550,13 @@ class SkillEngine:
         stripped = re.sub(r"[\s\u3000]+", "", text)
         return len(stripped)
 
+    def _is_template_stub(self, text: str) -> bool:
+        return not self._has_substantive_body(text)
+
     def _has_effective_report_draft(self, project_path: Path, min_words: int = 0) -> bool:
         for candidate in self.REPORT_DRAFT_CANDIDATES:
             draft_text = self._read_project_file(project_path, candidate)
-            if not draft_text or not self._has_substantive_body(draft_text):
+            if not draft_text or self._is_template_stub(draft_text):
                 continue
             if min_words and self._count_words(draft_text) < min_words:
                 continue
@@ -1471,16 +1564,7 @@ class SkillEngine:
         return False
 
     def _delivery_mode_requires_presentation(self, project_path: Path) -> bool:
-        overview_text = self._read_plan_file(project_path, "project-overview.md")
-        if not overview_text:
-            return False
-        match = re.search(r"\*\*.*(?:交付形式|交付方式|浜や粯褰㈠紡).*\*\*:\s*([^\n]+)", overview_text)
-        if not match:
-            return False
-        delivery_mode = match.group(1).strip().lower()
-        if "report+presentation" in delivery_mode:
-            return True
-        return "报告+演示" in delivery_mode or "鎶ュ憡+婕旂ず" in delivery_mode
+        return self._extract_delivery_mode(project_path) == "报告+演示"
 
     def get_skill_prompt(self) -> str:
         """鑾峰彇Skill瀹氫箟"""

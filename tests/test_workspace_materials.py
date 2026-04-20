@@ -55,21 +55,38 @@ class WorkspaceMaterialTests(unittest.TestCase):
         )
         (project_dir / "plan" / "data-log.md").write_text(
             "# Data log\n\n"
-            "| Date | Type | Source | Fact |\n"
-            "| --- | --- | --- | --- |\n"
-            "| 2026-04-01 | Interview | Operations lead | Renewal rate down 8 percent |\n",
+            "### [DL-001] Interview 1\n"
+            "- 来源: https://example.com/interview-1\n"
+            "- 摘要: Renewal rate down 8 percent.\n\n"
+            "### [DL-002] Interview 2\n"
+            "- 来源: https://example.com/interview-2\n"
+            "- 摘要: Onboarding delay extends go-live by two weeks.\n\n"
+            "### [DL-003] CRM export\n"
+            "- 来源: material:crm-export\n"
+            "- 摘要: Trial-to-paid conversion fell 11 percent.\n\n"
+            "### [DL-004] Benchmark report\n"
+            "- 来源: https://example.com/benchmark\n"
+            "- 摘要: Peers cut onboarding friction with guided rollout.\n",
             encoding="utf-8",
         )
         (project_dir / "plan" / "analysis-notes.md").write_text(
             "# Analysis notes\n\n"
             "## Insight 1\n"
             "Conclusion: onboarding friction is driving renewal loss.\n"
-            "Evidence: interview transcript and retention export.\n"
-            "Impact: prioritize onboarding redesign.\n",
+            "Evidence: [DL-001] and [DL-003] show the same failure pattern.\n"
+            "Impact: prioritize onboarding redesign.\n\n"
+            "## Insight 2\n"
+            "Conclusion: go-live delays reduce stakeholder confidence.\n"
+            "Evidence: [DL-002] highlights the implementation bottleneck.\n"
+            "Impact: tighten enablement support during rollout.\n\n"
+            "## Insight 3\n"
+            "Conclusion: the market already treats guided rollout as table stakes.\n"
+            "Evidence: [DL-004] confirms the competitive benchmark.\n"
+            "Impact: position onboarding redesign as a retention move, not polish.\n",
             encoding="utf-8",
         )
         (project_dir / "report_draft_v1.md").write_text(
-            "# Draft\n\n## Executive summary\nA concrete report section.\n",
+            "# Draft\n\n" + ("报" * 2200) + "\n",
             encoding="utf-8",
         )
         (project_dir / "plan" / "review-checklist.md").write_text(
@@ -94,6 +111,10 @@ class WorkspaceMaterialTests(unittest.TestCase):
         content = overview_path.read_text(encoding="utf-8")
         updated = content.replace("**交付形式**: 仅报告", f"**交付形式**: {delivery_mode}")
         overview_path.write_text(updated, encoding="utf-8")
+
+    def _save_checkpoints(self, engine: SkillEngine, project_dir: Path, *keys: str):
+        for key in keys:
+            engine._save_stage_checkpoint(project_dir, key)
 
     def test_create_project_stores_workspace_metadata_and_initial_materials(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -186,11 +207,14 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             self._write_stage_two_prerequisites(project_dir)
-            (project_dir / "plan" / "review-checklist.md").unlink()
-            (project_dir / "report_draft_v1.md").write_text(
-                "# Draft\n\n## Executive summary\nA concrete report section.\n",
-                encoding="utf-8",
+            self._save_checkpoints(
+                engine,
+                project_dir,
+                "outline_confirmed_at",
+                "review_started_at",
             )
+            (project_dir / "plan" / "review-checklist.md").unlink()
+            (project_dir / "report_draft_v1.md").write_text("# Draft\n\n" + ("报" * 2200) + "\n", encoding="utf-8")
             (project_dir / "plan" / "delivery-log.md").write_text(
                 "# Delivery log\n\n"
                 "**Delivery date**: 2026-04-01\n"
@@ -225,6 +249,13 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             self._write_stage_two_prerequisites(project_dir)
+            self._save_checkpoints(
+                engine,
+                project_dir,
+                "outline_confirmed_at",
+                "review_started_at",
+                "review_passed_at",
+            )
 
             summary = engine.get_workspace_summary(project["id"])
             stage_gates_text = (project_dir / "plan" / "stage-gates.md").read_text(encoding="utf-8")
@@ -252,6 +283,13 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             self._write_stage_two_prerequisites(project_dir)
+            self._save_checkpoints(
+                engine,
+                project_dir,
+                "outline_confirmed_at",
+                "review_started_at",
+                "review_passed_at",
+            )
             (project_dir / "plan" / "review.md").write_text(
                 "# Review log\n\n"
                 "## Review cycle 1\n"
@@ -266,7 +304,7 @@ class WorkspaceMaterialTests(unittest.TestCase):
             self.assertEqual(summary["stage_code"], "S7")
             self.assertTrue(any("delivery-log.md" in item for item in summary["next_actions"]))
 
-    def test_workspace_summary_keeps_report_only_projects_at_s5_when_review_notes_only_have_metadata_labels(self):
+    def test_workspace_summary_review_notes_with_metadata_only_do_not_block_report_only_s7(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_projects_dir = Path(tmpdir) / "config-projects"
             workspace_dir = Path(tmpdir) / "鐎广垺鍩涙い鍦窗"
@@ -284,6 +322,13 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             self._write_stage_two_prerequisites(project_dir)
+            self._save_checkpoints(
+                engine,
+                project_dir,
+                "outline_confirmed_at",
+                "review_started_at",
+                "review_passed_at",
+            )
             (project_dir / "plan" / "review.md").write_text(
                 "# Review log\n\n"
                 "## Review cycle 1\n"
@@ -296,7 +341,7 @@ class WorkspaceMaterialTests(unittest.TestCase):
             self.assertEqual(summary["stage_code"], "S7")
             self.assertNotIn("review.md", " ".join(summary["next_actions"]))
 
-    def test_workspace_summary_keeps_report_only_projects_at_s5_when_review_notes_only_have_checkbox_status_values(self):
+    def test_workspace_summary_review_notes_with_checkbox_status_only_do_not_block_report_only_s7(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_projects_dir = Path(tmpdir) / "config-projects"
             workspace_dir = Path(tmpdir) / "鐎广垺鍩涙い鍦窗"
@@ -314,6 +359,13 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             self._write_stage_two_prerequisites(project_dir)
+            self._save_checkpoints(
+                engine,
+                project_dir,
+                "outline_confirmed_at",
+                "review_started_at",
+                "review_passed_at",
+            )
             (project_dir / "plan" / "review.md").write_text(
                 "# Review log\n\n"
                 "## Review cycle 1\n"
@@ -345,6 +397,13 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             self._write_stage_two_prerequisites(project_dir)
+            self._save_checkpoints(
+                engine,
+                project_dir,
+                "outline_confirmed_at",
+                "review_started_at",
+                "review_passed_at",
+            )
             (project_dir / "plan" / "review.md").unlink()
 
             summary = engine.get_workspace_summary(project["id"])
@@ -371,15 +430,21 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             self._write_stage_two_prerequisites(project_dir)
+            self._save_checkpoints(
+                engine,
+                project_dir,
+                "outline_confirmed_at",
+                "review_started_at",
+            )
             (project_dir / "plan" / "review.md").unlink()
 
             summary = engine.get_workspace_summary(project["id"])
 
-            self.assertEqual(summary["stage_code"], "S7")
-            self.assertNotIn("review.md", " ".join(summary["next_actions"]))
+            self.assertEqual(summary["stage_code"], "S5")
+            self.assertIn("review.md", " ".join(summary["next_actions"]))
             self.assertNotIn("delivery-log.md 更新", summary["completed_items"])
 
-    def test_workspace_summary_keeps_report_only_projects_at_s5_when_review_notes_only_rephrase_template_checklists(self):
+    def test_workspace_summary_template_like_review_notes_do_not_block_report_only_s7(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_projects_dir = Path(tmpdir) / "config-projects"
             workspace_dir = Path(tmpdir) / "鐎广垺鍩涙い鍦窗"
@@ -397,6 +462,13 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             self._write_stage_two_prerequisites(project_dir)
+            self._save_checkpoints(
+                engine,
+                project_dir,
+                "outline_confirmed_at",
+                "review_started_at",
+                "review_passed_at",
+            )
             (project_dir / "plan" / "review.md").write_text(
                 "# Review log\n\n"
                 "## Content quality\n"
@@ -433,6 +505,13 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             self._write_stage_two_prerequisites(project_dir)
+            self._save_checkpoints(
+                engine,
+                project_dir,
+                "outline_confirmed_at",
+                "review_started_at",
+                "review_passed_at",
+            )
             (project_dir / "plan" / "delivery-log.md").write_text(
                 "# Delivery log\n\n"
                 "**Delivery date**: 2026-04-01\n"
@@ -463,8 +542,15 @@ class WorkspaceMaterialTests(unittest.TestCase):
             )
 
             project_dir = workspace_dir / ".consulting-report"
-            self._set_delivery_mode(project_dir, "鎶ュ憡+婕旂ず")
+            self._set_delivery_mode(project_dir, "报告+演示")
             self._write_stage_two_prerequisites(project_dir)
+            self._save_checkpoints(
+                engine,
+                project_dir,
+                "outline_confirmed_at",
+                "review_started_at",
+                "review_passed_at",
+            )
             (project_dir / "plan" / "delivery-log.md").write_text(
                 "# Delivery log\n\n"
                 "**Delivery date**: 2026-04-01\n"
