@@ -26,6 +26,7 @@ from .config import (
     load_managed_search_pool_config,
 )
 from .context_policy import ResolvedContextPolicy, resolve_context_policy
+from .models import SystemNotice
 from .search_pool import SearchRouter
 from .search_providers import (
     BraveProvider,
@@ -61,6 +62,17 @@ _PROJECT_REQUEST_LOCKS: dict[str, threading.RLock] = {}
 _PROJECT_REQUEST_LOCKS_GUARD = threading.Lock()
 _SEARCH_ROUTER_SINGLETON: SearchRouter | None = None
 _SEARCH_ROUTER_GUARD = threading.Lock()
+
+
+def _get_project_request_lock(project_id: str) -> threading.RLock:
+    """Module-level accessor for the per-project RLock."""
+    lock_key = str(project_id or "")
+    with _PROJECT_REQUEST_LOCKS_GUARD:
+        lock = _PROJECT_REQUEST_LOCKS.get(lock_key)
+        if lock is None:
+            lock = threading.RLock()
+            _PROJECT_REQUEST_LOCKS[lock_key] = lock
+    return lock
 
 
 class ChatHandler:
@@ -142,6 +154,39 @@ class ChatHandler:
         "补写",
         "丰富",
     ]
+    _STRONG_ADVANCE_KEYWORDS = {
+        "outline_confirmed_at": ["确认大纲", "大纲没问题", "按这个大纲写", "就这个大纲", "就按这个版本"],
+        "review_started_at": ["开始审查", "进入审查", "可以审查了", "开始 review"],
+        "review_passed_at": ["审查通过", "审查没问题", "报告可以交付"],
+        "presentation_ready_at": ["演示准备好了", "演示准备完成", "PPT 完成", "讲稿完成"],
+        "delivery_archived_at": ["归档结束项目", "项目交付完成", "交付归档"],
+    }
+    _WEAK_ADVANCE_BY_STAGE = {
+        "S1": (["行", "可以", "同意", "没问题", "OK", "ok", "好的", "挺好的"], "outline_confirmed_at"),
+        "S5": (["行", "可以", "挺好", "通过", "没问题"], "review_passed_at"),
+        "S6": (["行", "可以", "OK", "ok"], "presentation_ready_at"),
+        "S7": (["行", "可以", "归档吧"], "delivery_archived_at"),
+    }
+    _ROLLBACK_KEYWORDS = {
+        "outline_confirmed_at": ["大纲再改下", "大纲还要调整", "回去改大纲", "先别写了，大纲有问题"],
+        "review_started_at": ["还要改报告", "再改改报告", "回到写作阶段", "暂停审查"],
+        "review_passed_at": ["重新审查", "再看看", "审查没过"],
+        "presentation_ready_at": ["演示再改", "讲稿还要调整"],
+        "delivery_archived_at": ["还没归档", "撤回归档"],
+    }
+    _QUESTION_PATTERNS = [
+        re.compile(r"(吗|么)[?？]?$"),
+        re.compile(r"[?？]$"),
+    ]
+    _NEGATION_RE = re.compile(r"(不要|别|没|不是|不想|不|并非|非要|非得)[^。！？!?\n]{0,9}$")
+    _NEGATION_WINDOW_CHARS = 10
+    _STAGE_RANK = {
+        "outline_confirmed_at": 1,
+        "review_started_at": 2,
+        "review_passed_at": 3,
+        "presentation_ready_at": 4,
+        "delivery_archived_at": 5,
+    }
 
     def __init__(self, settings: Settings, skill_engine: SkillEngine):
         self.settings = settings
@@ -722,13 +767,7 @@ class ChatHandler:
         return lock
 
     def _get_project_request_lock(self, project_id: str):
-        lock_key = str(project_id or "")
-        with _PROJECT_REQUEST_LOCKS_GUARD:
-            lock = _PROJECT_REQUEST_LOCKS.get(lock_key)
-            if lock is None:
-                lock = threading.RLock()
-                _PROJECT_REQUEST_LOCKS[lock_key] = lock
-        return lock
+        return _get_project_request_lock(project_id)
 
     def _mutate_conversation_state(
         self,
@@ -1363,6 +1402,14 @@ class ChatHandler:
                     write_path = self._extract_successful_write_path(func_name, func_args, result)
                     if write_path:
                         successful_writes.add(write_path)
+                    for notice in self._turn_context.pop("pending_system_notices", []):
+                        yield {
+                            "type": "system_notice",
+                            "category": notice["category"],
+                            "path": notice.get("path"),
+                            "reason": notice["reason"],
+                            "user_action": notice["user_action"],
+                        }
                     result_icon = "✅" if result.get("status") == "success" else "⚠️"
                     yield {"type": "tool", "data": f"{result_icon} 结果: {str(result)[:160]}..."}
                     current_turn_messages.append({
@@ -1538,11 +1585,21 @@ class ChatHandler:
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
+        system_notices = [
+            SystemNotice(
+                category=notice["category"],
+                path=notice.get("path"),
+                reason=notice["reason"],
+                user_action=notice["user_action"],
+            )
+            for notice in self._turn_context.pop("pending_system_notices", [])
+        ]
         self._turn_context = self._new_turn_context(can_write_non_plan=True)
 
         return {
             "content": assistant_message,
             "token_usage": token_usage,
+            "system_notices": system_notices or None,
         }
 
     def chat_stream(
@@ -2060,16 +2117,57 @@ class ChatHandler:
 
             if func_name == "write_file":
                 if self._should_block_non_plan_write(project_id, args["file_path"]):
+                    reason = "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。"
+                    self._emit_system_notice_once(
+                        category="non_plan_write_blocked",
+                        path=None,
+                        reason=reason,
+                        user_action="请先让用户确认大纲或明确要求继续正文后，再尝试写正式内容。",
+                    )
                     return {
                         "status": "error",
-                        "message": "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。",
+                        "message": reason,
                     }
                 if self._should_require_fetch_url_before_write(project_id, args["file_path"]):
+                    reason = "本轮已经做过 web_search，但还没调用 fetch_url 阅读网页正文。请先对候选链接使用 fetch_url，再写正式文件。"
+                    self._emit_system_notice_once(
+                        category="fetch_url_gate_blocked",
+                        path=None,
+                        reason=reason,
+                        user_action="请先读取候选网页正文，再把外部信息写入正式文件。",
+                    )
                     return {
                         "status": "error",
-                        "message": "本轮已经做过 web_search，但还没调用 fetch_url 阅读网页正文。请先对候选链接使用 fetch_url，再写正式文件。",
+                        "message": reason,
                     }
                 normalized_path = self.skill_engine.validate_plan_write(project_id, args["file_path"])
+                if self.skill_engine.is_protected_stage_checkpoints_path(normalized_path):
+                    reason = (
+                        "stage_checkpoints.json 是用户确认真值源，模型不能直接写入。"
+                        "推进阶段需要用户点击右侧工作区对应按钮（例如\"确认大纲，进入资料采集\"）。"
+                    )
+                    self._emit_system_notice_once(
+                        category="checkpoint_forge_blocked",
+                        path=normalized_path,
+                        reason=reason,
+                        user_action="请告知用户需要他们点击工作区按钮来推进阶段；不要尝试直接写这个文件。",
+                    )
+                    return {"status": "error", "message": reason}
+                project_path = self.skill_engine.get_project_path(project_id)
+                checkpoints = self.skill_engine._load_stage_checkpoints(project_path) if project_path else {}
+                signature_error = self.skill_engine.validate_self_signature(
+                    normalized_path,
+                    args["content"],
+                    checkpoints,
+                )
+                if signature_error:
+                    self._emit_system_notice_once(
+                        category="write_blocked",
+                        path=normalized_path,
+                        reason=signature_error,
+                        user_action="请联系用户在右侧工作区完成对应的确认后再写入",
+                    )
+                    return {"status": "error", "message": signature_error}
                 self.skill_engine.write_file(project_id, normalized_path, args["content"])
                 result = {"status": "success", "message": f"已写入文件: {normalized_path}"}
                 self._persist_successful_tool_result(
@@ -2128,9 +2226,23 @@ class ChatHandler:
             return {"status": "error", "message": f"参数解析失败: {str(e)}"}
         except ValueError as e:
             logging.error(f"工具参数验证失败: {func_name}, 错误: {str(e)}")
+            if func_name == "write_file":
+                self._emit_system_notice_once(
+                    category="write_blocked",
+                    path=None,
+                    reason=str(e),
+                    user_action="请根据提示调整写入目标或内容后再重试。",
+                )
             return {"status": "error", "message": str(e)}
         except Exception as e:
             logging.error(f"工具执行异常: {func_name}, 错误: {str(e)}")
+            if func_name == "write_file":
+                self._emit_system_notice_once(
+                    category="write_blocked",
+                    path=None,
+                    reason=f"工具执行失败: {str(e)}",
+                    user_action="请检查写入条件是否满足，然后重试。",
+                )
             return {"status": "error", "message": f"工具执行失败: {str(e)}"}
 
     def _get_search_router(self) -> SearchRouter:
@@ -2849,17 +2961,112 @@ class ChatHandler:
             "web_search_performed": False,
             "fetch_url_performed": False,
             "web_search_count": 0,
+            "system_notice_emitted": False,
+            "pending_system_notices": [],
+            "checkpoint_event": None,
         }
 
+    def _is_question(self, text: str) -> bool:
+        return any(pattern.search(text) for pattern in self._QUESTION_PATTERNS)
+
+    def _phrase_hits(self, text: str, phrases: list[str]) -> bool:
+        """Substring match with negation suppression. If any occurrence of the phrase
+        has a clean (negation-free) preceding window of 10 chars, the phrase counts as
+        a hit. Otherwise the match is suppressed."""
+        for phrase in phrases:
+            idx = text.find(phrase)
+            while idx != -1:
+                preceding = text[max(0, idx - self._NEGATION_WINDOW_CHARS): idx]
+                if not self._NEGATION_RE.search(preceding):
+                    return True
+                idx = text.find(phrase, idx + 1)
+        return False
+
+    def _detect_stage_keyword(self, user_message: str, current_stage: str) -> tuple[str, str] | None:
+        if not user_message:
+            return None
+        trimmed = user_message.strip()
+        if self._is_question(trimmed):
+            return None
+
+        rollback_hits = [
+            key for key, phrases in self._ROLLBACK_KEYWORDS.items()
+            if self._phrase_hits(trimmed, phrases)
+        ]
+        if rollback_hits:
+            key = max(rollback_hits, key=lambda k: self._STAGE_RANK.get(k, 0))
+            return ("clear", key)
+
+        advance_hits: list[str] = []
+        for key, phrases in self._STRONG_ADVANCE_KEYWORDS.items():
+            if self._phrase_hits(trimmed, phrases):
+                advance_hits.append(key)
+        weak_entry = self._WEAK_ADVANCE_BY_STAGE.get(current_stage)
+        if weak_entry:
+            phrases, target_key = weak_entry
+            if self._phrase_hits(trimmed, phrases):
+                advance_hits.append(target_key)
+
+        if advance_hits:
+            key = max(advance_hits, key=lambda k: self._STAGE_RANK.get(k, 0))
+            return ("set", key)
+
+        return None
+
     def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, object]:
-        return self._new_turn_context(
-            can_write_non_plan=self._should_allow_non_plan_write(project_id, user_message),
-        )
+        self._turn_context = self._new_turn_context(can_write_non_plan=False)
+        project_path = self.skill_engine.get_project_path(project_id)
+        if project_path:
+            summary = self.skill_engine.get_workspace_summary(project_id)
+            current_stage = summary.get("stage_code", "S0")
+            detected = self._detect_stage_keyword(user_message, current_stage)
+            if detected:
+                action, key = detected
+                lock = self._get_project_request_lock(project_id)
+                with lock:
+                    if action == "set":
+                        self.skill_engine._save_stage_checkpoint(project_path, key)
+                    else:
+                        self.skill_engine._clear_stage_checkpoint_cascade(project_path, key)
+                    self.skill_engine._sync_stage_tracking_files(project_path)
+                    self._turn_context["checkpoint_event"] = {"action": action, "key": key}
+        self._turn_context["can_write_non_plan"] = self._should_allow_non_plan_write(project_id, user_message)
+        return self._turn_context
+
+    def _emit_system_notice_once(
+        self,
+        *,
+        category: str,
+        path: str | None = None,
+        reason: str,
+        user_action: str,
+    ) -> None:
+        if self._turn_context.get("system_notice_emitted"):
+            return
+        notice = {
+            "type": "system_notice",
+            "category": category,
+            "path": path,
+            "reason": reason,
+            "user_action": user_action,
+        }
+        self._turn_context["system_notice_emitted"] = True
+        queue = self._turn_context.setdefault("pending_system_notices", [])
+        queue.append(notice)
 
     def _should_allow_non_plan_write(self, project_id: str, user_message: str) -> bool:
         normalized = (user_message or "").strip()
         if not normalized:
             return False
+
+        if self._is_non_plan_write_blocking_message(normalized):
+            return False
+
+        project_path = self.skill_engine.get_project_path(project_id)
+        if project_path:
+            checkpoints = self.skill_engine._load_stage_checkpoints(project_path)
+            if "outline_confirmed_at" in checkpoints:
+                return True
 
         if any(keyword in normalized for keyword in self.NON_PLAN_WRITE_ALLOW_KEYWORDS):
             return True

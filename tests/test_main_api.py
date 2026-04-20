@@ -9,6 +9,60 @@ from fastapi.testclient import TestClient
 import backend.main as main_module
 
 
+class CheckpointTableInvariantTests(unittest.TestCase):
+    def test_checkpoint_tables_key_sets_are_aligned(self):
+        from backend.chat import ChatHandler
+        from backend.main import _CHECKPOINT_ROUTES
+        from backend.skill import SkillEngine
+
+        engine_keys = set(SkillEngine.STAGE_CHECKPOINT_KEYS)
+        cascade_keys = set(SkillEngine._CASCADE_ORDER)
+        rank_keys = set(ChatHandler._STAGE_RANK.keys())
+        route_keys = set(_CHECKPOINT_ROUTES.values())
+
+        self.assertEqual(engine_keys, cascade_keys, "STAGE_CHECKPOINT_KEYS vs _CASCADE_ORDER")
+        self.assertEqual(engine_keys, rank_keys, "STAGE_CHECKPOINT_KEYS vs _STAGE_RANK")
+        self.assertEqual(engine_keys, route_keys, "STAGE_CHECKPOINT_KEYS vs _CHECKPOINT_ROUTES values")
+
+
+class CheckpointEndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(main_module.app)
+        main_module.register_desktop_bridge(None)
+
+    def tearDown(self):
+        main_module.register_desktop_bridge(None)
+
+    @mock.patch("backend.main.skill_engine.record_stage_checkpoint")
+    def test_checkpoint_set_delegates_to_public_service(self, mock_record):
+        mock_record.return_value = {"status": "ok", "key": "outline_confirmed_at", "timestamp": "2026-04-17T12:00:00"}
+        r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["timestamp"], "2026-04-17T12:00:00")
+        mock_record.assert_called_once_with("demo", "outline_confirmed_at", "set")
+
+    @mock.patch("backend.main.skill_engine.record_stage_checkpoint")
+    def test_checkpoint_clear_passes_clear_action(self, mock_record):
+        mock_record.return_value = {"status": "ok", "key": "outline_confirmed_at", "cleared": True}
+        r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed?action=clear")
+        self.assertEqual(r.status_code, 200)
+        mock_record.assert_called_once_with("demo", "outline_confirmed_at", "clear")
+
+    def test_unknown_checkpoint_returns_404(self):
+        r = self.client.post("/api/projects/demo/checkpoints/not-a-real-one")
+        self.assertEqual(r.status_code, 404)
+
+    @mock.patch("backend.main.skill_engine.record_stage_checkpoint")
+    def test_missing_project_returns_404(self, mock_record):
+        mock_record.side_effect = ValueError("项目不存在: demo")
+        r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed")
+        self.assertEqual(r.status_code, 404)
+
+    def test_unknown_action_returns_400(self):
+        r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed?action=weird")
+        self.assertEqual(r.status_code, 400)
+
+
 class WorkspaceApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main_module.app)
@@ -381,3 +435,34 @@ class WorkspaceApiTests(unittest.TestCase):
                 }
             ],
         )
+
+    @mock.patch("backend.main.get_chat_handler")
+    def test_chat_endpoint_passes_through_system_notices(self, mock_get_chat_handler):
+        handler = mock.Mock()
+        handler.chat.return_value = {
+            "content": "已拦截伪造写入",
+            "token_usage": None,
+            "system_notices": [
+                {
+                    "category": "write_blocked",
+                    "path": "plan/review-checklist.md",
+                    "reason": "review-checklist.md 的\"审查人\"字段必须由真实用户签字，请保留\"审查人：[待用户确认]\"让用户在 UI 上签字。",
+                    "user_action": "请联系用户在右侧工作区完成对应的确认后再写入",
+                }
+            ],
+        }
+        mock_get_chat_handler.return_value = handler
+
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "project_id": "proj-demo",
+                "message_text": "请继续",
+                "attached_material_ids": [],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["content"], "已拦截伪造写入")
+        self.assertEqual(len(response.json()["system_notices"]), 1)
+        self.assertEqual(response.json()["system_notices"][0]["category"], "write_blocked")

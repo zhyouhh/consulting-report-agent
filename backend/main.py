@@ -255,7 +255,11 @@ async def chat(request: Request, chat_request: ChatRequest):
         )
         token_usage = result.get("token_usage") or {}
         logger.info(f"Chat completed, tokens: {token_usage.get('context_used_tokens', 0)}")
-        return ChatResponse(content=result["content"], token_usage=result.get("token_usage"))
+        return ChatResponse(
+            content=result["content"],
+            token_usage=result.get("token_usage"),
+            system_notices=result.get("system_notices"),
+        )
     except Exception as e:
         logger.error(f"Chat error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -325,6 +329,30 @@ async def delete_project(project_id: str):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+
+_CHECKPOINT_ROUTES = {
+    "outline-confirmed": "outline_confirmed_at",
+    "review-started": "review_started_at",
+    "review-passed": "review_passed_at",
+    "presentation-ready": "presentation_ready_at",
+    "delivery-archived": "delivery_archived_at",
+}
+
+
+@app.post("/api/projects/{project_id}/checkpoints/{name}")
+async def set_checkpoint(project_id: str, name: str, action: str = "set"):
+    key = _CHECKPOINT_ROUTES.get(name)
+    if key is None:
+        raise HTTPException(status_code=404, detail=f"未知 checkpoint: {name}")
+    if action not in ("set", "clear"):
+        raise HTTPException(status_code=400, detail=f"未知 action: {action}")
+    try:
+        return skill_engine.record_stage_checkpoint(project_id, key, action)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if "项目不存在" in detail else 400
+        raise HTTPException(status_code=status, detail=detail)
 
 
 @app.get("/api/projects/{project_id}/conversation")

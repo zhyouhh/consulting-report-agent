@@ -92,9 +92,17 @@ class TokenUsage(BaseModel):
         return normalized
 
 
+class SystemNotice(BaseModel):
+    category: str
+    path: Optional[str] = None
+    reason: str
+    user_action: str
+
+
 class ChatResponse(BaseModel):
     """Chat response payload."""
 
     content: str
     files_updated: Optional[List[str]] = None
     token_usage: Optional[TokenUsage] = None
+    system_notices: Optional[List[SystemNotice]] = None
