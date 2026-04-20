@@ -9,6 +9,22 @@ from fastapi.testclient import TestClient
 import backend.main as main_module
 
 
+class CheckpointTableInvariantTests(unittest.TestCase):
+    def test_checkpoint_tables_key_sets_are_aligned(self):
+        from backend.chat import ChatHandler
+        from backend.main import _CHECKPOINT_ROUTES
+        from backend.skill import SkillEngine
+
+        engine_keys = set(SkillEngine.STAGE_CHECKPOINT_KEYS)
+        cascade_keys = set(SkillEngine._CASCADE_ORDER)
+        rank_keys = set(ChatHandler._STAGE_RANK.keys())
+        route_keys = set(_CHECKPOINT_ROUTES.values())
+
+        self.assertEqual(engine_keys, cascade_keys, "STAGE_CHECKPOINT_KEYS vs _CASCADE_ORDER")
+        self.assertEqual(engine_keys, rank_keys, "STAGE_CHECKPOINT_KEYS vs _STAGE_RANK")
+        self.assertEqual(engine_keys, route_keys, "STAGE_CHECKPOINT_KEYS vs _CHECKPOINT_ROUTES values")
+
+
 class CheckpointEndpointTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main_module.app)
