@@ -34,6 +34,7 @@ function App() {
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0)
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(true)
   const [loading, setLoading] = useState(true)
+  const [injectedPrompt, setInjectedPrompt] = useState(null)
   const activeProjectRef = useRef(currentProjectId)
 
   useEffect(() => {
@@ -235,6 +236,8 @@ function App() {
           onMaterialsMerged={handleMaterialsMerged}
           onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
           onToggleWorkspacePanel={() => setShowWorkspacePanel(!showWorkspacePanel)}
+          injectedPrompt={injectedPrompt}
+          onInjectedPromptConsumed={() => setInjectedPrompt(null)}
         />
         {showWorkspacePanel && (
           <WorkspacePanel
@@ -245,6 +248,12 @@ function App() {
             refreshToken={workspaceRefreshToken}
             onMaterialDeleted={handleMaterialDeleted}
             onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
+            onCheckpointSet={loadWorkspace}
+            onInsertPrompt={(text) => setInjectedPrompt(text)}
+            onOpenEditProject={() => {
+              // TODO: open project edit form — Sidebar owns that modal; for now no-op
+              // This will be wired when the edit modal is exposed via Sidebar props
+            }}
           />
         )}
       </div>
