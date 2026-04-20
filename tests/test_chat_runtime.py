@@ -5761,3 +5761,153 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("不允许访问", result["message"])
         mock_get.assert_not_called()
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_confirm_outline_triggers_on_any_stage(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        for stage in ("S0", "S1", "S4", "S5", "S7"):
+            self.assertEqual(
+                handler._detect_stage_keyword("确认大纲", stage),
+                ("set", "outline_confirmed_at"),
+            )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_weak_can_only_advances_on_allowed_stage(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        self.assertEqual(
+            handler._detect_stage_keyword("可以", "S1"),
+            ("set", "outline_confirmed_at"),
+        )
+        self.assertIsNone(handler._detect_stage_keyword("可以", "S4"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_s4_weak_affirmations_do_not_start_review(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        for message in ("挺好", "挺好继续写下一节"):
+            self.assertIsNone(handler._detect_stage_keyword(message, "S4"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_s5_weak_can_advances_review_passed(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        self.assertEqual(
+            handler._detect_stage_keyword("可以", "S5"),
+            ("set", "review_passed_at"),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_question_does_not_trigger(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        self.assertIsNone(handler._detect_stage_keyword("就按这个大纲写吗？", "S1"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_ma_suffix_is_not_treated_as_question(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        self.assertFalse(handler._is_question("开始写报告嘛"))
+        self.assertEqual(
+            handler._detect_stage_keyword("确认大纲嘛", "S1"),
+            ("set", "outline_confirmed_at"),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_strong_plus_weak_takes_highest_stage_rank(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        self.assertEqual(
+            handler._detect_stage_keyword("审查通过归档吧", "S7"),
+            ("set", "delivery_archived_at"),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_multiple_strong_hits_take_highest_stage_rank(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        self.assertEqual(
+            handler._detect_stage_keyword("开始审查审查通过", "S4"),
+            ("set", "review_passed_at"),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_negated_messages_do_not_trigger(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        cases = [
+            ("先不要开始审查", "S4"),
+            ("别开始审查", "S4"),
+            ("不是说审查通过了吗", "S5"),
+            ("不要归档吧", "S7"),
+            ("不太建议现在开始审查", "S4"),
+            ("其实我不想现在开始审查", "S4"),
+            ("先别确认大纲", "S1"),
+        ]
+        for message, stage in cases:
+            self.assertIsNone(
+                handler._detect_stage_keyword(message, stage),
+                f"message triggered unexpectedly: {message}",
+            )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_positive_fei_phrase_is_not_treated_as_negation(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        self.assertEqual(
+            handler._detect_stage_keyword("非常同意，就按这个大纲写", "S1"),
+            ("set", "outline_confirmed_at"),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_detect_stage_keyword_rollback_returns_outline_clear_action(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        self.assertEqual(
+            handler._detect_stage_keyword("大纲再改下", "S4"),
+            ("clear", "outline_confirmed_at"),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_turn_context_sets_outline_checkpoint_from_keyword(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        handler._build_turn_context(self.project_id, "确认大纲，开始写")
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+
+        self.assertIn("outline_confirmed_at", checkpoints)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_turn_context_rollback_clears_outline_checkpoint_cascade(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
+
+        handler._build_turn_context(self.project_id, "大纲再改下")
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+        self.assertNotIn("review_started_at", checkpoints)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_build_turn_context_empty_message_has_no_stage_checkpoint_side_effect(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        handler._build_turn_context(self.project_id, "")
+
+        self.assertEqual(handler.skill_engine._load_stage_checkpoints(self.project_dir), {})
