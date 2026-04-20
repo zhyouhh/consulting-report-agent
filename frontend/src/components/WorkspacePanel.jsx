@@ -6,6 +6,7 @@ import { showError, showSuccess } from '../utils/toast'
 import { getNextQualityResult } from '../utils/workspacePanelState'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { getDefaultPreviewFile, orderPreviewFiles } from '../utils/workspaceFiles'
+import { summarizeWorkspace } from '../utils/workspaceSummary'
 
 export default function WorkspacePanel({
   projectId,
@@ -15,6 +16,9 @@ export default function WorkspacePanel({
   refreshToken,
   onMaterialDeleted,
   onProjectMutated,
+  onCheckpointSet,
+  onInsertPrompt,
+  onOpenEditProject,
 }) {
   const [activeTab, setActiveTab] = useState('stage')
   const [files, setFiles] = useState([])
@@ -140,6 +144,8 @@ export default function WorkspacePanel({
     }
   }
 
+  const wsSummary = summarizeWorkspace(workspace)
+
   return (
     <div className="w-[28rem] bg-[#1a1a2e] border-l border-[#2a2a4a] flex flex-col">
       <div className="p-4 border-b border-[#2a2a4a]">
@@ -163,14 +169,28 @@ export default function WorkspacePanel({
             材料
           </button>
         </div>
+
+        {/* §9.3 length_fallback chip — shown when backend used default word target */}
+        {wsSummary.lengthFallbackUsed && (
+          <button
+            onClick={onOpenEditProject}
+            className="mt-2 w-full text-left px-3 py-1.5 rounded-lg bg-[#2a1e10] border border-[#5a3a10] text-xs text-[#c8a060] hover:bg-[#3a2810] transition-colors"
+          >
+            预期字数：3000（默认值，点击修改）
+          </button>
+        )}
       </div>
 
       {activeTab === 'stage' ? (
         <StagePanel
+          projectId={projectId}
           workspace={workspace}
           qualityResult={qualityResult}
           onRunQualityCheck={runQualityCheck}
           onExportDraft={exportDraft}
+          onCheckpointSet={onCheckpointSet}
+          onInsertPrompt={onInsertPrompt}
+          onOpenEditProject={onOpenEditProject}
         />
       ) : activeTab === 'files' ? (
         <FilePreviewPanel
