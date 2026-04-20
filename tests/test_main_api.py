@@ -9,6 +9,44 @@ from fastapi.testclient import TestClient
 import backend.main as main_module
 
 
+class CheckpointEndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(main_module.app)
+        main_module.register_desktop_bridge(None)
+
+    def tearDown(self):
+        main_module.register_desktop_bridge(None)
+
+    @mock.patch("backend.main.skill_engine.record_stage_checkpoint")
+    def test_checkpoint_set_delegates_to_public_service(self, mock_record):
+        mock_record.return_value = {"status": "ok", "key": "outline_confirmed_at", "timestamp": "2026-04-17T12:00:00"}
+        r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["timestamp"], "2026-04-17T12:00:00")
+        mock_record.assert_called_once_with("demo", "outline_confirmed_at", "set")
+
+    @mock.patch("backend.main.skill_engine.record_stage_checkpoint")
+    def test_checkpoint_clear_passes_clear_action(self, mock_record):
+        mock_record.return_value = {"status": "ok", "key": "outline_confirmed_at", "cleared": True}
+        r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed?action=clear")
+        self.assertEqual(r.status_code, 200)
+        mock_record.assert_called_once_with("demo", "outline_confirmed_at", "clear")
+
+    def test_unknown_checkpoint_returns_404(self):
+        r = self.client.post("/api/projects/demo/checkpoints/not-a-real-one")
+        self.assertEqual(r.status_code, 404)
+
+    @mock.patch("backend.main.skill_engine.record_stage_checkpoint")
+    def test_missing_project_returns_404(self, mock_record):
+        mock_record.side_effect = ValueError("项目不存在: demo")
+        r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed")
+        self.assertEqual(r.status_code, 404)
+
+    def test_unknown_action_returns_400(self):
+        r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed?action=weird")
+        self.assertEqual(r.status_code, 400)
+
+
 class WorkspaceApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main_module.app)
