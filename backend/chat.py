@@ -64,6 +64,17 @@ _SEARCH_ROUTER_SINGLETON: SearchRouter | None = None
 _SEARCH_ROUTER_GUARD = threading.Lock()
 
 
+def _get_project_request_lock(project_id: str) -> threading.RLock:
+    """Module-level accessor for the per-project RLock."""
+    lock_key = str(project_id or "")
+    with _PROJECT_REQUEST_LOCKS_GUARD:
+        lock = _PROJECT_REQUEST_LOCKS.get(lock_key)
+        if lock is None:
+            lock = threading.RLock()
+            _PROJECT_REQUEST_LOCKS[lock_key] = lock
+    return lock
+
+
 class ChatHandler:
     """对话处理器"""
 
@@ -723,13 +734,7 @@ class ChatHandler:
         return lock
 
     def _get_project_request_lock(self, project_id: str):
-        lock_key = str(project_id or "")
-        with _PROJECT_REQUEST_LOCKS_GUARD:
-            lock = _PROJECT_REQUEST_LOCKS.get(lock_key)
-            if lock is None:
-                lock = threading.RLock()
-                _PROJECT_REQUEST_LOCKS[lock_key] = lock
-        return lock
+        return _get_project_request_lock(project_id)
 
     def _mutate_conversation_state(
         self,

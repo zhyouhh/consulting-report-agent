@@ -2788,6 +2788,18 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIs(first_lock, second_lock)
 
     @mock.patch("backend.chat.OpenAI")
+    def test_module_and_instance_level_project_locks_share_identity(self, mock_openai):
+        del mock_openai
+        from backend.chat import _get_project_request_lock as module_lock
+
+        handler = self._make_handler_with_project()
+
+        module_obj = module_lock(self.project_id)
+        instance_obj = handler._get_project_request_lock(self.project_id)
+
+        self.assertIs(module_obj, instance_obj)
+
+    @mock.patch("backend.chat.OpenAI")
     def test_chat_falls_back_to_estimated_usage_when_final_tool_round_has_no_provider_usage(self, mock_openai):
         tool_call = SimpleNamespace(
             id="tool-1",
