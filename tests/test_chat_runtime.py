@@ -5974,24 +5974,37 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_build_turn_context_sets_outline_checkpoint_from_keyword(self, mock_openai):
+    def test_build_turn_context_defers_outline_checkpoint_until_finalize(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
 
-        handler._build_turn_context(self.project_id, "确认大纲，开始写")
+        turn_context = handler._build_turn_context(self.project_id, "确认大纲，开始写")
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
 
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+        self.assertEqual(
+            turn_context["pending_stage_keyword"],
+            ("set", "outline_confirmed_at"),
+        )
+        handler._finalize_assistant_turn(self.project_id, "好的，按大纲写。")
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
         self.assertIn("outline_confirmed_at", checkpoints)
 
     @mock.patch("backend.chat.OpenAI")
-    def test_build_turn_context_records_checkpoint_event_on_set(self, mock_openai):
+    def test_build_turn_context_records_checkpoint_event_on_set_finalize(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
 
         handler._turn_context = handler._build_turn_context(self.project_id, "确认大纲")
 
+        self.assertIsNone(handler._turn_context["checkpoint_event"])
+        self.assertEqual(
+            handler._turn_context["pending_stage_keyword"],
+            ("set", "outline_confirmed_at"),
+        )
+        handler._finalize_assistant_turn(self.project_id, "好的，按大纲写。")
         self.assertEqual(
             handler._turn_context["checkpoint_event"],
             {"action": "set", "key": "outline_confirmed_at"},
@@ -6079,7 +6092,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(turn_context["pending_system_notices"], [])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_build_turn_context_strong_outline_keyword_without_effective_outline_emits_prereq_notice(
+    def test_build_turn_context_strong_outline_keyword_without_effective_outline_emits_prereq_notice_on_finalize(
         self,
         mock_openai,
     ):
@@ -6092,12 +6105,16 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertNotIn("outline_confirmed_at", checkpoints)
         self.assertIsNone(turn_context["checkpoint_event"])
+        handler._finalize_assistant_turn(self.project_id, "好的，按大纲写。")
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+        self.assertIsNone(turn_context["checkpoint_event"])
         self.assertEqual(
             turn_context["pending_system_notices"],
             [
                 {
                     "type": "system_notice",
-                    "category": "checkpoint_prereq_missing",
+                    "category": "stage_keyword_prereq_missing",
                     "path": "plan/outline.md",
                     "reason": "需要先生成有效报告大纲，才能确认大纲并进入资料采集。",
                     "user_action": "请先让助手补齐 `plan/outline.md`，再确认大纲。",
@@ -6106,14 +6123,20 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_build_turn_context_confirm_outline_turn_immediately_allows_non_plan_write(self, mock_openai):
+    def test_build_turn_context_confirm_outline_turn_allows_non_plan_write_after_finalize(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
 
         turn_context = handler._build_turn_context(self.project_id, "确认大纲")
 
-        self.assertTrue(turn_context["can_write_non_plan"])
+        self.assertFalse(turn_context["can_write_non_plan"])
+        self.assertNotIn(
+            "outline_confirmed_at",
+            handler.skill_engine._load_stage_checkpoints(self.project_dir),
+        )
+        handler._finalize_assistant_turn(self.project_id, "好的，按大纲写。")
+        self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "确认大纲"))
         self.assertIn(
             "outline_confirmed_at",
             handler.skill_engine._load_stage_checkpoints(self.project_dir),
@@ -6451,3 +6474,493 @@ class StreamTailGuardHelperTests(unittest.TestCase):
         self.assertEqual(safe, "正文段。\n")
         self.assertEqual(held, tail)
         self.assertGreater(len(tail.encode("utf-8")), 128)
+
+
+class StageAckFinalizePipelineTests(ChatRuntimeTests):
+    def _write_effective_outline(self):
+        (self.project_dir / "plan" / "outline.md").write_text(
+            "# 大纲\n## 章节 1\n- 要点 A\n## 章节 2\n- 要点 B\n",
+            encoding="utf-8",
+        )
+
+    def _set_checkpoints(self, data):
+        import json
+        (self.project_dir / "stage_checkpoints.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _write_conversation(self, messages):
+        import json
+        (self.project_dir / "conversation.json").write_text(
+            json.dumps(messages, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def test_valid_set_tag_sets_checkpoint_strips_content(self):
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        self._write_effective_outline()
+        stripped = handler._finalize_assistant_turn(
+            self.project_id,
+            "大纲完成。\n\n<stage-ack>outline_confirmed_at</stage-ack>\n",
+        )
+        self.assertNotIn("<stage-ack", stripped)
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertIn("outline_confirmed_at", checkpoints)
+
+    def test_tag_in_code_fence_not_executed_still_stripped(self):
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        self._write_effective_outline()
+        stripped = handler._finalize_assistant_turn(
+            self.project_id,
+            "示例：\n```md\n<stage-ack>outline_confirmed_at</stage-ack>\n```\n结尾。\n",
+        )
+        self.assertNotIn("<stage-ack", stripped)
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+
+    def test_multi_tag_executed_in_order(self):
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({
+            "s0_interview_done_at": "2026-04-21T10:00:00",
+            "outline_confirmed_at": "2026-04-21T11:00:00",
+        })
+        self._write_effective_outline()
+        handler._finalize_assistant_turn(
+            self.project_id,
+            "回退再推进。\n"
+            '<stage-ack action="clear">outline_confirmed_at</stage-ack>\n'
+            "<stage-ack>outline_confirmed_at</stage-ack>\n",
+        )
+        # Final state: outline_confirmed_at is set (the last action wins
+        # by sequential execution)
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertIn("outline_confirmed_at", checkpoints)
+
+    def test_set_missing_prereq_emits_notice_no_checkpoint(self):
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        # outline.md NOT written - prereq will fail
+        handler._finalize_assistant_turn(
+            self.project_id,
+            "大纲没写但强推。\n<stage-ack>outline_confirmed_at</stage-ack>\n",
+        )
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertTrue(any("outline.md" in str(n) for n in notices))
+
+    def test_s0_tag_first_turn_without_prior_assistant_rejected(self):
+        handler = self._make_handler_with_project()
+        self._write_conversation([{"role": "user", "content": "你好"}])
+        # No assistant history
+        handler._finalize_assistant_turn(
+            self.project_id,
+            "先简化流程。\n<stage-ack>s0_interview_done_at</stage-ack>\n",
+        )
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertNotIn("s0_interview_done_at", checkpoints)
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertTrue(any("S0" in n.get("reason", "") for n in notices))
+
+    def test_s0_tag_after_prior_assistant_succeeds(self):
+        handler = self._make_handler_with_project()
+        self._write_conversation([
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "请回答：1) 读者是谁？"},
+        ])
+        stripped = handler._finalize_assistant_turn(
+            self.project_id,
+            "记录了。\n<stage-ack>s0_interview_done_at</stage-ack>\n",
+        )
+        self.assertNotIn("<stage-ack", stripped)
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertIn("s0_interview_done_at", checkpoints)
+
+    def test_unknown_key_tag_stripped_no_checkpoint_no_notice(self):
+        handler = self._make_handler_with_project()
+        handler._finalize_assistant_turn(
+            self.project_id,
+            "写错 key。\n<stage-ack>bogus_key</stage-ack>\n",
+        )
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertNotIn("bogus_key", checkpoints)
+        # Per spec §2: unknown key logs warning but does NOT emit system_notice
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertFalse(any(
+            "bogus_key" in n.get("reason", "") or
+            "bogus_key" in n.get("path", "") for n in notices
+        ))
+
+    def test_clear_idempotent_through_tag(self):
+        handler = self._make_handler_with_project()
+        # Clear when not set - should be idempotent
+        handler._finalize_assistant_turn(
+            self.project_id,
+            '回退。\n<stage-ack action="clear">outline_confirmed_at</stage-ack>\n',
+        )
+        # No assertion failure; no notice raised
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertFalse(any("outline" in n.get("reason", "") for n in notices))
+
+    def test_executable_tag_wins_over_pending_keyword(self):
+        """User said '确认大纲' (keyword → stored as pending_stage_keyword in
+        _build_turn_context, NOT executed yet). Assistant then emits an
+        executable tag pointing at a DIFFERENT checkpoint. The tag must win;
+        pending keyword is discarded without setting outline_confirmed_at."""
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({
+            "s0_interview_done_at": "2026-04-21T10:00:00",
+            "outline_confirmed_at": "2026-04-21T11:00:00",
+        })
+        # Build effective report draft so review_started_at prereq passes
+        (self.project_dir / "content").mkdir(exist_ok=True)
+        (self.project_dir / "content" / "report.md").write_text(
+            "# Report\n\n" + ("数据资产核算。" * 400),
+            encoding="utf-8",
+        )
+        # Simulate keyword pending (what _build_turn_context would store)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["pending_stage_keyword"] = ("set", "outline_confirmed_at")
+        # Clear outline_confirmed_at first so we can see whether pending keyword
+        # would have set it (it shouldn't - tag wins)
+        handler.skill_engine._clear_stage_checkpoint(
+            self.project_dir, "outline_confirmed_at"
+        )
+        # Assistant tag points at review_started_at
+        handler._finalize_assistant_turn(
+            self.project_id,
+            "进入审查。\n<stage-ack>review_started_at</stage-ack>\n",
+        )
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        # Tag's target set
+        self.assertIn("review_started_at", checkpoints)
+        # Pending keyword target NOT set (tag won; keyword discarded)
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+        # pending_stage_keyword cleared
+        self.assertIsNone(handler._turn_context.get("pending_stage_keyword"))
+
+    def test_pending_keyword_fallback_fires_when_no_executable_tag(self):
+        """Assistant has only a non-executable tag (e.g., inside code fence);
+        pending keyword falls back to record_stage_checkpoint."""
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        self._write_effective_outline()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["pending_stage_keyword"] = ("set", "outline_confirmed_at")
+        # Non-executable tag (inside code fence) must NOT block fallback
+        handler._finalize_assistant_turn(
+            self.project_id,
+            "示例：\n```md\n<stage-ack>review_started_at</stage-ack>\n```\n完。\n",
+        )
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        # Keyword fallback set outline_confirmed_at
+        self.assertIn("outline_confirmed_at", checkpoints)
+        # Non-executable tag target NOT set
+        self.assertNotIn("review_started_at", checkpoints)
+
+    def test_pending_keyword_fallback_emits_prereq_notice_on_failure(self):
+        """Pending keyword set fails prereq → emit notice, no checkpoint."""
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        # NO effective outline - prereq will fail
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["pending_stage_keyword"] = ("set", "outline_confirmed_at")
+        handler._finalize_assistant_turn(
+            self.project_id,
+            "没 tag 的正文。\n",
+        )
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertTrue(any("outline.md" in str(n) for n in notices))
+
+    def test_user_message_tag_not_parsed_by_finalize(self):
+        # Finalize operates on assistant content only; user tag is never
+        # fed to it.
+        handler = self._make_handler_with_project()
+        # No exception, no checkpoint change
+        stripped = handler._finalize_assistant_turn(
+            self.project_id,
+            "用户问到了 <stage-ack>outline_confirmed_at</stage-ack>"
+            " 这种语法。\n",  # non-tail tag
+        )
+        self.assertNotIn("<stage-ack", stripped)
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+
+    def test_compaction_receives_stripped_content(self):
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        self._write_effective_outline()
+        final = handler._finalize_assistant_turn(
+            self.project_id,
+            "完成。\n<stage-ack>outline_confirmed_at</stage-ack>\n",
+        )
+        # Whatever the caller persists must have no tag
+        self.assertNotIn("<stage-ack", final)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in StageAckFinalizePipelineTests.__dict__
+    ):
+        setattr(StageAckFinalizePipelineTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class ChatPathIntegrationTests(ChatRuntimeTests):
+    """End-to-end integration with mocked provider, verifying:
+      - finalize runs on both chat() and chat_stream() paths
+      - conversation.json persisted without tag (and post-turn compaction input too)
+      - stream SSE order: content → system_notice → usage
+      - unknown key logs WARNING via logger `backend.chat`, no system_notice
+      - user-role tag survives literal into conversation.json
+      - set+clear final clear; clear+set final set
+      - keyword fallback works when assistant has no executable tag
+    """
+    def _set_checkpoints(self, data):
+        import json
+        (self.project_dir / "stage_checkpoints.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _write_effective_outline(self):
+        (self.project_dir / "plan" / "outline.md").write_text(
+            "# 大纲\n## 章节 1\n- 要点 A\n## 章节 2\n- 要点 B\n",
+            encoding="utf-8",
+        )
+
+    def _mock_non_stream_completion(self, full_text):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            id="mock-id",
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    role="assistant",
+                    content=full_text,
+                    tool_calls=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=10, total_tokens=20,
+            ),
+        )
+
+    def _mock_stream_chunks(self, full_text, chunk_size=5):
+        from types import SimpleNamespace
+        def _iter():
+            for i in range(0, len(full_text), chunk_size):
+                piece = full_text[i:i+chunk_size]
+                yield SimpleNamespace(
+                    id="mock-id",
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(content=piece, role=None, tool_calls=None),
+                        finish_reason=None,
+                    )],
+                    usage=None,
+                )
+            yield SimpleNamespace(
+                id="mock-id",
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content=None, role=None, tool_calls=None),
+                    finish_reason="stop",
+                )],
+                usage=SimpleNamespace(
+                    prompt_tokens=10, completion_tokens=10, total_tokens=20,
+                ),
+            )
+        return _iter()
+
+    def test_non_stream_chat_strips_tag_and_persists_cleanly(self):
+        """Real handler.chat() path: returned message has no tag AND
+        conversation.json saves stripped content."""
+        from unittest import mock
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        self._write_effective_outline()
+        assistant_text = "大纲已批准。\n\n<stage-ack>outline_confirmed_at</stage-ack>\n"
+        with mock.patch.object(
+            handler.client.chat.completions, "create",
+            return_value=self._mock_non_stream_completion(assistant_text),
+        ):
+            response = handler.chat(project_id=self.project_id, user_message="你看行吗")
+        # Response has no tag
+        response_text = response.get("message") or response.get("content") or ""
+        self.assertNotIn("<stage-ack", response_text)
+        # conversation.json has no tag
+        import json
+        conv = json.loads(
+            (self.project_dir / "conversation.json").read_text(encoding="utf-8")
+        )
+        assistant_msgs = [m for m in conv if m["role"] == "assistant"]
+        self.assertTrue(assistant_msgs)
+        self.assertNotIn("<stage-ack", assistant_msgs[-1]["content"])
+        # Checkpoint set via tag
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertIn("outline_confirmed_at", checkpoints)
+
+    def test_stream_chat_never_leaks_tag_to_frontend(self):
+        """Real handler.chat_stream(): even with chunk_size=5 splitting
+        mid-tag, no SSE content event contains '<stage-ack'."""
+        from unittest import mock
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        self._write_effective_outline()
+        assistant_text = "大纲已批准。\n\n<stage-ack>outline_confirmed_at</stage-ack>\n"
+        with mock.patch.object(
+            handler.client.chat.completions, "create",
+            return_value=self._mock_stream_chunks(assistant_text, chunk_size=5),
+        ):
+            events = list(handler.chat_stream(
+                project_id=self.project_id, user_message="",
+            ))
+        content_events = [e for e in events if e.get("type") == "content"]
+        combined = "".join(e["data"] for e in content_events)
+        self.assertNotIn("<stage-ack", combined)
+        self.assertIn("大纲已批准", combined)
+        # conversation_state.json / conversation.json tag-free too
+        import json
+        conv = json.loads(
+            (self.project_dir / "conversation.json").read_text(encoding="utf-8")
+        )
+        for msg in conv:
+            self.assertNotIn("<stage-ack", msg.get("content", "") or "")
+
+    def test_stream_system_notice_before_usage(self):
+        """SSE yield order: system_notice emitted by finalize must precede
+        the usage event, otherwise frontend notice rendering breaks."""
+        from unittest import mock
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        # NO outline → prereq fail → finalize emits notice
+        assistant_text = "强推大纲。\n<stage-ack>outline_confirmed_at</stage-ack>\n"
+        with mock.patch.object(
+            handler.client.chat.completions, "create",
+            return_value=self._mock_stream_chunks(assistant_text, chunk_size=5),
+        ):
+            events = list(handler.chat_stream(
+                project_id=self.project_id, user_message="",
+            ))
+        notice_indices = [i for i, e in enumerate(events) if e.get("type") == "system_notice"]
+        usage_indices = [i for i, e in enumerate(events) if e.get("type") == "usage"]
+        self.assertTrue(notice_indices, "finalize must yield system_notice")
+        self.assertTrue(usage_indices, "stream must yield usage")
+        self.assertLess(
+            max(notice_indices), min(usage_indices),
+            "system_notice must precede usage in SSE stream",
+        )
+
+    def test_unknown_key_logs_warning_no_notice(self):
+        """Unknown key: log WARNING via backend.chat logger, no system_notice."""
+        from unittest import mock
+        handler = self._make_handler_with_project()
+        assistant_text = "错 key。\n<stage-ack>bogus_key</stage-ack>\n"
+        with mock.patch.object(
+            handler.client.chat.completions, "create",
+            return_value=self._mock_non_stream_completion(assistant_text),
+        ):
+            with self.assertLogs("backend.chat", level="WARNING") as cm:
+                response = handler.chat(project_id=self.project_id, user_message="")
+        self.assertTrue(
+            any("bogus_key" in record for record in cm.output),
+            f"Expected warning mentioning bogus_key, got {cm.output!r}",
+        )
+        notices = response.get("system_notices") or []
+        for n in notices:
+            self.assertNotIn("bogus_key", str(n))
+
+    def test_user_message_tag_preserved_as_literal(self):
+        """User writes <stage-ack> as part of a question. Must survive into
+        conversation.json unchanged, never parsed."""
+        from unittest import mock
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        user_text = "请问 <stage-ack>outline_confirmed_at</stage-ack> 是什么意思？"
+        with mock.patch.object(
+            handler.client.chat.completions, "create",
+            return_value=self._mock_non_stream_completion("这是 stage-ack tag 语法。"),
+        ):
+            handler.chat(project_id=self.project_id, user_message=user_text)
+        import json
+        conv = json.loads(
+            (self.project_dir / "conversation.json").read_text(encoding="utf-8")
+        )
+        user_msgs = [m for m in conv if m["role"] == "user"]
+        self.assertTrue(
+            any("<stage-ack>" in m["content"] for m in user_msgs),
+            "user's literal tag must be preserved",
+        )
+        # Checkpoint NOT set (tag was user-role, not parsed)
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+
+    def test_set_then_clear_same_key_final_clear(self):
+        """Assistant emits `set outline; clear outline` in that order.
+        Final state: outline_confirmed_at NOT set."""
+        from unittest import mock
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({
+            "s0_interview_done_at": "2026-04-21T10:00:00",
+            "outline_confirmed_at": "2026-04-21T11:00:00",
+        })
+        self._write_effective_outline()
+        assistant_text = (
+            "设后清。\n"
+            "<stage-ack>outline_confirmed_at</stage-ack>\n"
+            '<stage-ack action="clear">outline_confirmed_at</stage-ack>\n'
+        )
+        with mock.patch.object(
+            handler.client.chat.completions, "create",
+            return_value=self._mock_non_stream_completion(assistant_text),
+        ):
+            handler.chat(project_id=self.project_id, user_message="")
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+
+    def test_clear_then_set_same_key_final_set(self):
+        from unittest import mock
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({
+            "s0_interview_done_at": "2026-04-21T10:00:00",
+            "outline_confirmed_at": "2026-04-21T11:00:00",
+        })
+        self._write_effective_outline()
+        assistant_text = (
+            "清后设。\n"
+            '<stage-ack action="clear">outline_confirmed_at</stage-ack>\n'
+            "<stage-ack>outline_confirmed_at</stage-ack>\n"
+        )
+        with mock.patch.object(
+            handler.client.chat.completions, "create",
+            return_value=self._mock_non_stream_completion(assistant_text),
+        ):
+            handler.chat(project_id=self.project_id, user_message="")
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertIn("outline_confirmed_at", checkpoints)
+
+    def test_keyword_fallback_when_no_tag(self):
+        """User says strong keyword; assistant emits no tag.
+        Keyword fallback in _finalize_assistant_turn sets the checkpoint."""
+        from unittest import mock
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        self._write_effective_outline()
+        with mock.patch.object(
+            handler.client.chat.completions, "create",
+            return_value=self._mock_non_stream_completion("好的，按大纲写。"),
+        ):
+            handler.chat(project_id=self.project_id, user_message="确认大纲")
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertIn("outline_confirmed_at", checkpoints)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in ChatPathIntegrationTests.__dict__
+    ):
+        setattr(ChatPathIntegrationTests, _inherited_test_name, None)
+del _inherited_test_name

@@ -1506,6 +1506,18 @@ class ChatHandler:
         else:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
             yield {"type": "content", "data": assistant_message}
+            accumulated = assistant_message
+            stream_buffer = ""
+
+        assistant_message = self._finalize_assistant_turn(project_id, assistant_message)
+        already_emitted_len = len(accumulated) - len(stream_buffer)
+        remainder = assistant_message[already_emitted_len:]
+        if remainder:
+            yield {"type": "content", "data": remainder}
+
+        for notice in list(self._turn_context.get("pending_system_notices") or []):
+            yield notice
+        self._turn_context["pending_system_notices"] = []
 
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
@@ -1645,6 +1657,7 @@ class ChatHandler:
         else:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
 
+        assistant_message = self._finalize_assistant_turn(project_id, assistant_message)
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
@@ -3062,6 +3075,7 @@ class ChatHandler:
             "system_notice_emitted": False,
             "pending_system_notices": [],
             "checkpoint_event": None,
+            "pending_stage_keyword": None,
         }
 
     def _is_question(self, text: str) -> bool:
@@ -3144,23 +3158,106 @@ class ChatHandler:
             detected = self._detect_stage_keyword(user_message, current_stage, project_id)
             if detected:
                 action, key = detected
+                if action == "clear":
+                    try:
+                        self.skill_engine.record_stage_checkpoint(project_id, key, action)
+                    except ValueError as exc:
+                        notice = self.skill_engine.get_stage_checkpoint_prereq_notice(key)
+                        if notice:
+                            self._emit_system_notice_once(
+                                category="checkpoint_prereq_missing",
+                                path=notice["path"],
+                                reason=notice["reason"],
+                                user_action=notice["user_action"],
+                            )
+                        else:
+                            raise exc
+                    else:
+                        self._turn_context["checkpoint_event"] = {"action": action, "key": key}
+                else:
+                    self._turn_context["pending_stage_keyword"] = (action, key)
+        self._turn_context["can_write_non_plan"] = self._should_allow_non_plan_write(project_id, user_message)
+        return self._turn_context
+
+    def _finalize_assistant_turn(self, project_id: str, full_content: str) -> str:
+        """Resolve stage-ack tags and pending keyword fallback for one turn."""
+        from backend.stage_ack import StageAckParser
+
+        parser = StageAckParser()
+        events = parser.parse(full_content)
+        executable_events = [event for event in events if event.executable]
+        pending = self._turn_context.get("pending_stage_keyword")
+
+        lock = _get_project_request_lock(project_id)
+        with lock:
+            for event in events:
+                if event.ignored_reason == "unknown_key":
+                    logging.getLogger("backend.chat").warning(
+                        "Ignoring stage-ack with unknown key: %r", event.key
+                    )
+
+            if executable_events:
+                self._turn_context["pending_stage_keyword"] = None
+                for event in events:
+                    if event.executable:
+                        self._apply_stage_ack_event(project_id, event)
+            elif pending:
+                action, key = pending
+                self._turn_context["pending_stage_keyword"] = None
                 try:
                     self.skill_engine.record_stage_checkpoint(project_id, key, action)
-                except ValueError as exc:
+                except ValueError:
                     notice = self.skill_engine.get_stage_checkpoint_prereq_notice(key)
-                    if action == "set" and notice:
+                    if notice:
                         self._emit_system_notice_once(
-                            category="checkpoint_prereq_missing",
+                            category="stage_keyword_prereq_missing",
                             path=notice["path"],
                             reason=notice["reason"],
                             user_action=notice["user_action"],
                         )
-                    else:
-                        raise exc
                 else:
                     self._turn_context["checkpoint_event"] = {"action": action, "key": key}
-        self._turn_context["can_write_non_plan"] = self._should_allow_non_plan_write(project_id, user_message)
-        return self._turn_context
+
+        return parser.strip(full_content)
+
+    def _apply_stage_ack_event(self, project_id: str, event) -> None:
+        if (
+            event.key == "s0_interview_done_at"
+            and event.action == "set"
+            and not self._has_prior_s0_assistant_turn(project_id)
+        ):
+            self._emit_system_notice_once(
+                category="s0_tag_soft_gate",
+                path=None,
+                reason=(
+                    "S0 阶段第一轮必须先对 seed 做一轮打包追问，"
+                    "再推进；本轮 tag 不执行。"
+                ),
+                user_action=(
+                    "请模型按 SKILL.md §S0 先发 3-5 个澄清问题，"
+                    "下一轮再发 tag。"
+                ),
+            )
+            return
+
+        try:
+            self.skill_engine.record_stage_checkpoint(
+                project_id, event.key, event.action
+            )
+        except ValueError:
+            notice = self.skill_engine.get_stage_checkpoint_prereq_notice(event.key)
+            if notice:
+                self._emit_system_notice_once(
+                    category="stage_ack_prereq_missing",
+                    path=notice["path"],
+                    reason=notice["reason"],
+                    user_action=notice["user_action"],
+                )
+        else:
+            self._turn_context["checkpoint_event"] = {
+                "action": event.action,
+                "key": event.key,
+            }
 
     def _emit_system_notice_once(
         self,
