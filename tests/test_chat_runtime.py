@@ -6990,3 +6990,54 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(ChatPathIntegrationTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class LoadConversationSanitizeTests(ChatRuntimeTests):
+    def _write_conv(self, messages):
+        import json
+        (self.project_dir / "conversation.json").write_text(
+            json.dumps(messages, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def test_assistant_residual_tag_stripped(self):
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": (
+                "回复。\n<stage-ack>outline_confirmed_at</stage-ack>\n"
+            )},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertNotIn("<stage-ack", loaded[1]["content"])
+        self.assertIn("回复。", loaded[1]["content"])
+
+    def test_user_role_tag_preserved_as_literal(self):
+        handler = self._make_handler_with_project()
+        self._write_conv([{
+            "role": "user",
+            "content": "我写的 <stage-ack>xxx</stage-ack> 是什么意思？",
+        }])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertIn("<stage-ack>", loaded[0]["content"])
+
+    def test_no_tag_messages_unchanged(self):
+        handler = self._make_handler_with_project()
+        original = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好，请问..."},
+        ]
+        self._write_conv(original)
+        loaded = handler._load_conversation(self.project_id)
+        self.assertEqual(
+            [(m["role"], m["content"]) for m in loaded],
+            [(m["role"], m["content"]) for m in original],
+        )
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in LoadConversationSanitizeTests.__dict__
+    ):
+        setattr(LoadConversationSanitizeTests, _inherited_test_name, None)
+del _inherited_test_name

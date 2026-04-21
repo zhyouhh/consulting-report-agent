@@ -3000,6 +3000,8 @@ class ChatHandler:
 
     def _load_conversation(self, project_id: str) -> List[Dict]:
         """加载对话历史。仅持久化 user/assistant 显示消息。"""
+        from backend.stage_ack import StageAckParser
+
         project_path = self.skill_engine.get_project_path(project_id)
         if not project_path:
             return []
@@ -3019,7 +3021,18 @@ class ChatHandler:
                 "content": self._extract_message_text(message.get("content", "")),
                 "attached_material_ids": message.get("attached_material_ids", []),
             })
-        return normalized
+        parser = StageAckParser()
+        sanitized = []
+        for message in normalized:
+            role = message.get("role")
+            content = message.get("content", "") or ""
+            if role == "assistant" and "<stage-ack" in content.lower():
+                new_message = dict(message)
+                new_message["content"] = parser.strip(content)
+                sanitized.append(new_message)
+            else:
+                sanitized.append(message)
+        return sanitized
 
     def _save_conversation(self, project_id: str, conversation: List[Dict]):
         """保存对话历史"""
