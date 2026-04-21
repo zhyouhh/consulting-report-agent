@@ -56,6 +56,11 @@ class StageAckParser:
     - `strip(content)` removes every tag span regardless of executable flag.
     """
 
+    STRIP_PATTERN = re.compile(
+        r'<stage-ack(?:\s+action="(?:set|clear)")?>[a-z_0-9]+</stage-ack>',
+        re.IGNORECASE,
+    )
+
     def parse_raw(self, content: str) -> list[StageAckEvent]:
         if not content:
             return []
@@ -183,3 +188,13 @@ class StageAckParser:
                 last_pos = i
             i += 1
         return last_pos + 1
+
+    def strip(self, content: str) -> str:
+        """Remove every <stage-ack>…</stage-ack> occurrence regardless of key
+        validity or position. Collapse runs of 3+ newlines caused by the
+        removal down to 2.
+        """
+        if not content or "<stage-ack" not in content.lower():
+            return content
+        result = self.STRIP_PATTERN.sub("", content)
+        return re.sub(r"\n{3,}", "\n\n", result)

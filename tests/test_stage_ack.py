@@ -137,3 +137,49 @@ class StageAckPositionJudgeTests(unittest.TestCase):
         )
         self.assertFalse(events[0].executable)
         self.assertEqual(events[0].ignored_reason, "unknown_key")
+
+
+class StageAckStripTests(unittest.TestCase):
+    def setUp(self):
+        self.parser = StageAckParser()
+
+    def test_strip_executable_tag(self):
+        content = "完成。\n<stage-ack>outline_confirmed_at</stage-ack>\n"
+        out = self.parser.strip(content)
+        self.assertNotIn("<stage-ack", out)
+        self.assertIn("完成。", out)
+
+    def test_strip_non_executable_fenced_tag(self):
+        content = "示例：\n```md\n<stage-ack>outline_confirmed_at</stage-ack>\n```\n"
+        out = self.parser.strip(content)
+        self.assertNotIn("<stage-ack", out)
+        self.assertIn("```md", out)
+
+    def test_strip_unknown_key_tag(self):
+        content = "正文。\n<stage-ack>bogus</stage-ack>"
+        self.assertNotIn("<stage-ack", self.parser.strip(content))
+
+    def test_strip_clear_action_tag(self):
+        content = '<stage-ack action="clear">outline_confirmed_at</stage-ack>'
+        self.assertNotIn("<stage-ack", self.parser.strip(content))
+
+    def test_strip_multiple_tags(self):
+        content = (
+            "A\n<stage-ack>outline_confirmed_at</stage-ack>\n"
+            "B\n<stage-ack>review_started_at</stage-ack>\n"
+        )
+        out = self.parser.strip(content)
+        self.assertNotIn("<stage-ack", out)
+        self.assertIn("A", out)
+        self.assertIn("B", out)
+
+    def test_strip_no_tag_unchanged(self):
+        content = "纯正文。"
+        self.assertEqual(self.parser.strip(content), content)
+
+    def test_strip_collapses_3plus_newlines_to_2(self):
+        content = "头。\n<stage-ack>outline_confirmed_at</stage-ack>\n\n\n尾。"
+        out = self.parser.strip(content)
+        self.assertNotIn("\n\n\n", out)
+        self.assertIn("头。", out)
+        self.assertIn("尾。", out)
