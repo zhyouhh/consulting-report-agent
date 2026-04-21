@@ -3577,6 +3577,8 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("S0 阶段", result["message"])
+        self.assertIn("大纲", result["message"])
+        self.assertIn("澄清", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_handler_write_file_rejects_outline_in_s0_with_one_reference_source(self, mock_openai):
@@ -3650,6 +3652,8 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("S0 阶段", result["message"])
+        self.assertIn("研究计划", result["message"])
+        self.assertIn("澄清", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_handler_write_file_rejects_research_plan_in_s0_with_one_reference_source(self, mock_openai):
