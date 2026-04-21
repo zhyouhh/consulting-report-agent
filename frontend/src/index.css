@@ -27,6 +27,13 @@ select, input, textarea {
   color-scheme: dark;
 }
 
+/* 允许消息气泡和预览区域的文本被选中复制 */
+.selectable-content,
+.selectable-content * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 /* Markdown 内容深色适配 */
 .prose-dark {
   color: #c8c8e0;

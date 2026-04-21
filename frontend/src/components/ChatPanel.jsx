@@ -675,7 +675,7 @@ export default function ChatPanel({
           if (msg.role === 'system_notice') {
             return (
               <div key={msg.id} className="flex justify-start">
-                <div className="max-w-2xl w-full rounded-xl border border-[#6b4f1a] bg-[#2a1e0a] px-4 py-3 flex gap-3 items-start">
+                <div className="max-w-2xl w-full rounded-xl border border-[#6b4f1a] bg-[#2a1e0a] px-4 py-3 flex gap-3 items-start selectable-content">
                   <span className="text-lg leading-none mt-0.5 flex-shrink-0" aria-hidden="true">⚠️</span>
                   <div className="space-y-1 min-w-0">
                     <p className="text-sm text-[#e8b060] leading-snug">{msg.reason}</p>
@@ -692,7 +692,7 @@ export default function ChatPanel({
 
           return (
             <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-2xl px-4 py-2 rounded-lg relative group ${
+              <div className={`max-w-2xl px-4 py-2 rounded-lg relative group selectable-content ${
                 msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-[#252545] text-[#e2e2f0]'
               }`}>
                 {msg.attachedMaterialIds?.length > 0 && (

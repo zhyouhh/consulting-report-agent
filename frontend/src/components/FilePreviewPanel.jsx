@@ -26,7 +26,7 @@ export default function FilePreviewPanel({ files, currentFile, content, onSelect
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 bg-[#0d0d1a]">
-        <div className="markdown-body max-w-none">
+        <div className="markdown-body max-w-none selectable-content">
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[rehypeKatex, rehypeHighlight, rehypeRaw]}
