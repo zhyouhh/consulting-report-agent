@@ -24,6 +24,11 @@ export function shouldFlushStreamingQueueImmediately(reason = "") {
   return reason === "tool" || reason === "error" || reason === "abort";
 }
 
+export function appendToolEventContent(prev = "", toolText = "") {
+  const separator = prev && !prev.endsWith("\n") ? "\n" : "";
+  return `${prev}${separator}${toolText}\n`;
+}
+
 export async function getStreamResponseError(response) {
   const contentType = response.headers.get("content-type") || "";
   if (response.ok && contentType.includes("text/event-stream")) {

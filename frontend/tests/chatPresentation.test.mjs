@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  appendToolEventContent,
   buildProjectWelcomeMessage,
   extractSseDataPayload,
   getStreamResponseError,
@@ -82,6 +83,22 @@ test("splitAssistantMessageBlocks preserves tool and text ordering", () => {
       { type: "tool", content: "🔧 调用工具: web_search({\"query\":\"猪猪侠\"})" },
       { type: "tool", content: "✅ 结果: {'status':'success'}" },
       { type: "text", content: "再继续第二句正文" },
+    ],
+  );
+});
+
+test("appendToolEventContent terminates tool events before following assistant text", () => {
+  const content = appendToolEventContent(
+    appendToolEventContent("", "✅ 结果: xxx"),
+    "✅ 结果: yyy",
+  ) + "正文段";
+
+  assert.deepEqual(
+    splitAssistantMessageBlocks(content),
+    [
+      { type: "tool", content: "✅ 结果: xxx" },
+      { type: "tool", content: "✅ 结果: yyy" },
+      { type: "text", content: "正文段" },
     ],
   );
 });

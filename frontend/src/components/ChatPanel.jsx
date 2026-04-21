@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import { showError, showInfo, showSuccess } from '../utils/toast'
 import { buildChatRequest, toggleMaterialSelection } from '../utils/chatMaterials'
 import {
+  appendToolEventContent,
   buildProjectWelcomeMessage,
   extractSseDataPayload,
   getStreamResponseError,
@@ -506,7 +507,7 @@ export default function ChatPanel({
                 }
                 // 显示工具调用信息
                 setMessages(prev => prev.map(m =>
-                  m.id === assistantId ? { ...m, content: m.content + '\n' + parsed.data } : m
+                  m.id === assistantId ? { ...m, content: appendToolEventContent(m.content, parsed.data) } : m
                 ))
               } else if (parsed.type === 'usage') {
                 if (!isActiveProjectRequest(requestProjectId)) {
