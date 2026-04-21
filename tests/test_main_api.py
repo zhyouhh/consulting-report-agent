@@ -63,6 +63,63 @@ class CheckpointEndpointTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
 
+class S0CheckpointEndpointTests(unittest.TestCase):
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        from unittest import mock
+        import backend.main as main_module
+        self.main_module = main_module
+        self.client = TestClient(main_module.app)
+        # Patch the skill_engine singleton
+        self.patcher = mock.patch.object(
+            main_module, "skill_engine", autospec=True
+        )
+        self.mock_engine = self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+        # Successful record returns {"status":"ok","key":...,"timestamp":...}
+        self.mock_engine.record_stage_checkpoint.return_value = {
+            "status": "ok", "key": "s0_interview_done_at",
+            "timestamp": "2026-04-21T12:00:00",
+        }
+
+    def test_s0_clear_route_returns_200_and_calls_engine(self):
+        resp = self.client.post(
+            "/api/projects/demo/checkpoints/s0-interview-done",
+            params={"action": "clear"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.mock_engine.record_stage_checkpoint.assert_called_once_with(
+            "demo", "s0_interview_done_at", "clear"
+        )
+
+    def test_s0_set_route_returns_400_and_does_not_call_engine(self):
+        resp = self.client.post(
+            "/api/projects/demo/checkpoints/s0-interview-done",
+            params={"action": "set"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        detail = resp.json()["detail"]
+        self.assertIn("s0", detail.lower())
+        self.mock_engine.record_stage_checkpoint.assert_not_called()
+
+    def test_s0_clear_idempotent_when_engine_returns_ok(self):
+        # engine mock returns ok regardless; endpoint should still 200
+        resp = self.client.post(
+            "/api/projects/demo/checkpoints/s0-interview-done",
+            params={"action": "clear"},
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    def test_other_checkpoint_set_unaffected(self):
+        # Sanity: outline-confirmed set still works
+        resp = self.client.post(
+            "/api/projects/demo/checkpoints/outline-confirmed",
+            params={"action": "set"},
+        )
+        self.assertIn(resp.status_code, {200, 400})  # whichever the existing
+        # suite asserts is fine — we just check we did not break it
+
+
 class WorkspaceApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main_module.app)

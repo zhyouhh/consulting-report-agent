@@ -348,6 +348,15 @@ async def set_checkpoint(project_id: str, name: str, action: str = "set"):
         raise HTTPException(status_code=404, detail=f"未知 checkpoint: {name}")
     if action not in ("set", "clear"):
         raise HTTPException(status_code=400, detail=f"未知 action: {action}")
+    if key == "s0_interview_done_at" and action == "set":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "s0_interview_done_at 不能通过 endpoint 直接 set："
+                "endpoint 层无对话上下文，无法执行 S0 对话级软门槛。"
+                "set 只能走 StageAckParser / strong 关键词软门槛 / schema migration。"
+            ),
+        )
     try:
         return skill_engine.record_stage_checkpoint(project_id, key, action)
     except ValueError as exc:
