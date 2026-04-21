@@ -182,6 +182,7 @@ class ChatHandler:
     _NEGATION_RE = re.compile(r"(不要|别|没|不是|不想|不|并非|非要|非得)[^。！？!?\n]{0,9}$")
     _NEGATION_WINDOW_CHARS = 10
     _STAGE_RANK = {
+        "s0_interview_done_at": 0,
         "outline_confirmed_at": 1,
         "review_started_at": 2,
         "review_passed_at": 3,

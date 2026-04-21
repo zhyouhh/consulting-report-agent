@@ -332,6 +332,7 @@ async def delete_project(project_id: str):
 
 
 _CHECKPOINT_ROUTES = {
+    "s0-interview-done": "s0_interview_done_at",
     "outline-confirmed": "outline_confirmed_at",
     "review-started": "review_started_at",
     "review-passed": "review_passed_at",

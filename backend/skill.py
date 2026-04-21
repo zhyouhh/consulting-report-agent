@@ -37,6 +37,7 @@ class SkillEngine:
     }
     STAGE_CHECKPOINTS_FILENAME = "stage_checkpoints.json"
     STAGE_CHECKPOINT_KEYS = {
+        "s0_interview_done_at",
         "outline_confirmed_at",
         "review_started_at",
         "review_passed_at",
@@ -45,6 +46,7 @@ class SkillEngine:
     }
     MIGRATION_MARKER_KEY = "__migrated_at"
     _CASCADE_ORDER = [
+        "s0_interview_done_at",
         "outline_confirmed_at",
         "review_started_at",
         "review_passed_at",
@@ -167,6 +169,7 @@ class SkillEngine:
         "output/final-report.md",
     )
     CHECKPOINT_PREREQ = {
+        "s0_interview_done_at": None,
         "outline_confirmed_at": (
             "_has_effective_outline",
             "plan/outline.md",

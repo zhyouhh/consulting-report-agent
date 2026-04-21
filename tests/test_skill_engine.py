@@ -1469,3 +1469,34 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertNotIn("outline_confirmed_at", self.engine._read_raw_stage_checkpoints(project_dir))
         self.assertEqual(self.engine._load_stage_checkpoints(project_dir), {})
+
+
+class S0CheckpointInfrastructureTests(unittest.TestCase):
+    def test_s0_in_stage_checkpoint_keys(self):
+        from backend.skill import SkillEngine
+        self.assertIn("s0_interview_done_at", SkillEngine.STAGE_CHECKPOINT_KEYS)
+
+    def test_s0_first_in_cascade_order(self):
+        from backend.skill import SkillEngine
+        self.assertEqual(SkillEngine._CASCADE_ORDER[0], "s0_interview_done_at")
+
+    def test_s0_prereq_none_entry_present(self):
+        from backend.skill import SkillEngine
+        self.assertIn("s0_interview_done_at", SkillEngine.CHECKPOINT_PREREQ)
+        self.assertIsNone(SkillEngine.CHECKPOINT_PREREQ["s0_interview_done_at"])
+
+    def test_cascade_order_covers_all_keys_assertion_still_holds(self):
+        # SkillEngine has `assert set(_CASCADE_ORDER) == STAGE_CHECKPOINT_KEYS`
+        # at class-body level. If Task A broke parity, import fails outright.
+        import backend.skill
+        self.assertTrue(hasattr(backend.skill, "SkillEngine"))
+
+    def test_s0_prereq_notice_returns_none(self):
+        import tempfile
+        from pathlib import Path
+        from backend.skill import SkillEngine
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "p", Path(tmp) / "s")
+            self.assertIsNone(
+                engine.get_stage_checkpoint_prereq_notice("s0_interview_done_at")
+            )
