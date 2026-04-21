@@ -27,6 +27,31 @@ description: Use when writing consulting reports, strategy analysis, market rese
 5. 如果使用外部网页作为正式依据，先用 `web_search` 找候选来源，再用 `fetch_url` 读取正文；没有读过正文，不要把外链当成已阅读依据写入正式文件。
 6. 模型只更新实质内容文件；阶段跟踪文件由后端自动投影，不要尝试手写 `stage-gates.md`、`progress.md`、`tasks.md`。
 
+### S0 预访谈（强制）
+
+当前阶段是 S0 且本项目 `stage_checkpoints.json` 还没有 `s0_interview_done_at` 时：
+
+1. 你的第一轮回复只能做一件事：基于 `plan/project-overview.md` 提出 3-5 个打包的澄清问题（一条消息内全发完）。
+2. 第一轮**禁止**：
+   - 调用 `write_file` 写入 `plan/outline.md`、`plan/research-plan.md`、`plan/data-log.md`、`plan/analysis-notes.md`
+   - 输出 `<stage-ack>s0_interview_done_at</stage-ack>`
+3. 用户回答问题后，或用户明确说"跳过访谈 / 不用问了 / 直接开始"后，才可以更新 `plan/project-overview.md`；用户跳过就沿用 seed 不改。
+4. 完成上述处理后，在回复**最后单独一行**输出：
+
+`<stage-ack>s0_interview_done_at</stage-ack>`
+
+不要解释这个 tag。不要把 tag 放进代码块、列表、引用、正文中间。
+
+### S0 追问维度建议清单
+
+从以下 6 条里选 3-5 条，内容按 seed 自由改写：
+- 决策场景（这份报告将拿去做什么决定？）
+- 读者深度（读者对主题的既有了解？）
+- 期望核心发现（最想在报告里看到的 1-2 个洞察）
+- 时间 / 资源约束（除截止日外是否有其他约束）
+- 已有假设（心中已经有哪些预判想验证或推翻）
+- 关键风险与盲区（最担心报告漏掉什么）
+
 ## S0-S7 工作流
 
 ### S0 项目启动
@@ -40,7 +65,7 @@ description: Use when writing consulting reports, strategy analysis, market rese
 - 形成 `outline.md`
 - 形成 `research-plan.md`
 
-**推进到 S2：** 必须等用户在工作区点击「确认大纲，进入资料采集」，或用户在对话里明确说「确认大纲 / 按这个大纲写 / 大纲 ok」。你不能仅凭「文件齐了」就自行进入 S2。
+**推进到 S2：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
 
 ### S2 资料采集
 - 把事实材料持续写入 `data-log.md`
@@ -78,25 +103,25 @@ description: Use when writing consulting reports, strategy analysis, market rese
 - 形成有效草稿
 - 持续同步摘要、图表、章节结构
 
-**推进到 S5：** 必须等用户在工作区点击「开始审查」，或用户在对话里明确说「开始审查」。S4 内你可以自由改写正文，但「挺好继续写」「这段可以」之类弱表达都不会被识别为推进信号——只有「开始审查」这条强短语生效。在用户给出明确推进信号前，即便正文已超过目标字数，也要继续留在 S4。
+**推进到 S5：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
 
 ### S5 质量审查
 - 完成 `review-checklist.md`
 - `review.md` 可选，用于记录修订意见
 
-**推进到 S6 / S7：** 必须等用户明确说「审查通过」或在工作区点击对应按钮。你绝对不能在用户未表态时自己写「审查结论：通过」「建议通过」之类语句——这会被后端拦截，并且会被视为越权。后续走 S6 还是 S7 取决于交付形式：报告+演示 → S6；仅报告 → 直接 S7。
+**推进到 S6 / S7：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。后续走 S6 还是 S7 取决于交付形式：报告+演示 → S6；仅报告 → 直接 S7。
 
 ### S6 演示准备
 - 仅当交付形式 = `报告+演示` 时启用
 - 完成 `presentation-plan.md`
 
-**推进到 S7：** 必须等用户说「演示准备就绪」或在工作区确认。
+**推进到 S7：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
 
 ### S7 交付归档
 - 更新 `delivery-log.md`
 - 记录交付版本、反馈和后续动作
 
-**推进到 done：** 必须等用户说「交付归档」或在工作区点击对应按钮。在那之前，即便 `delivery-log.md` 已经填完，也要留在 S7。同样禁止你自填「客户反馈：（待记录）」一类占位符就当成已完成。
+**推进到 done：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
 
 ## 工具错误处理
 
@@ -132,3 +157,34 @@ description: Use when writing consulting reports, strategy analysis, market rese
 3. `stage-gates.md` 的最新状态
 4. 本 Skill 的正式文件约束
 5. 当前系统提示中已注入的生命周期与质量约束
+
+## 附录：stage-ack 标签规范
+
+阶段推进 / 回退的控制信号。只在用户明确表达推进或回退意图时使用。
+
+**合法 KEY（6 个）**：
+- `s0_interview_done_at`
+- `outline_confirmed_at`
+- `review_started_at`
+- `review_passed_at`
+- `presentation_ready_at`
+- `delivery_archived_at`
+
+**语法**：
+- Set：`<stage-ack>KEY</stage-ack>`
+- Clear：`<stage-ack action="clear">KEY</stage-ack>`
+
+**用法规则**：
+- 只在用户明确表达推进 / 回退意图时发
+- 不要每条消息都发
+- 不要发未列出的 KEY
+- tag **必须放在回复最后、单独一行、代码块外**
+- **正文中需要展示 XML 示例时必须使用转义文本**（如 `\<stage-ack\>...\</stage-ack\>`）；**即使在 code fence 内也不要输出真实 `<stage-ack>` 标签**——真实 tag 不管放哪里都会被 parser 识别并剥离
+
+**强关键词短语表**（用户习惯说法，供你理解意图；非要求模型输出）：
+- s0_interview_done_at：跳过访谈 / 不用问了 / 先写大纲吧 / 够了开始吧 / 直接开始
+- outline_confirmed_at：确认大纲 / 大纲没问题 / 按这个大纲写 / 就这个大纲 / 就按这个版本
+- review_started_at：开始审查 / 进入审查 / 可以审查了 / 开始 review
+- review_passed_at：审查通过 / 审查没问题 / 报告可以交付
+- presentation_ready_at：演示准备好了 / 演示准备完成 / PPT 完成 / 讲稿完成
+- delivery_archived_at：归档结束项目 / 项目交付完成 / 交付归档

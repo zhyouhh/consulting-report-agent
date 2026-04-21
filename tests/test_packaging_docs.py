@@ -53,5 +53,53 @@ class PackagingDocsTests(unittest.TestCase):
         self.assertNotIn("Word/PDF", content)
 
 
+class SkillMdS0InterviewLockTests(unittest.TestCase):
+    def setUp(self):
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        self.skill_md = (repo_root / "skill" / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_s0_mandatory_block_present(self):
+        self.assertIn("### S0 预访谈（强制）", self.skill_md)
+
+    def test_s0_rules_present(self):
+        # Rule 1: first-turn must ask clarifying questions
+        self.assertIn("第一轮回复只能做一件事", self.skill_md)
+        # Rule 2: four forbidden files
+        self.assertIn("plan/outline.md", self.skill_md)
+        self.assertIn("plan/research-plan.md", self.skill_md)
+        self.assertIn("plan/data-log.md", self.skill_md)
+        self.assertIn("plan/analysis-notes.md", self.skill_md)
+        # Rule 4: tag emission on last line
+        self.assertIn(
+            "<stage-ack>s0_interview_done_at</stage-ack>", self.skill_md
+        )
+
+    def test_all_six_keys_in_appendix(self):
+        for key in [
+            "s0_interview_done_at",
+            "outline_confirmed_at",
+            "review_started_at",
+            "review_passed_at",
+            "presentation_ready_at",
+            "delivery_archived_at",
+        ]:
+            self.assertIn(key, self.skill_md, f"Missing key {key} in SKILL.md")
+
+    def test_escape_rule_for_examples(self):
+        # Per spec: examples in body text MUST use escaped form, even in code fences
+        self.assertIn("即使在 code fence", self.skill_md)
+
+    def test_strong_keyword_examples_table(self):
+        # Checks a sample phrase from each of the six key's strong-keyword set
+        self.assertIn("跳过访谈", self.skill_md)  # s0
+        self.assertIn("确认大纲", self.skill_md)
+        self.assertIn("开始审查", self.skill_md)
+        self.assertIn("审查通过", self.skill_md)
+        self.assertIn("演示准备完成", self.skill_md)
+        self.assertIn("归档结束项目", self.skill_md)
+
+
 if __name__ == "__main__":
     unittest.main()
