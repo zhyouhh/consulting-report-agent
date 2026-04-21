@@ -47,6 +47,20 @@ class SkillEngineTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _mark_s0_done(self, project_dir: Path):
+        checkpoints_path = project_dir / "stage_checkpoints.json"
+        checkpoints = {}
+        if checkpoints_path.exists():
+            checkpoints = json.loads(checkpoints_path.read_text(encoding="utf-8"))
+        checkpoints.setdefault(
+            "s0_interview_done_at",
+            datetime.now().isoformat(timespec="seconds"),
+        )
+        checkpoints_path.write_text(
+            json.dumps(checkpoints, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     def _write_stage_two_prerequisites(
         self,
         project_dir: Path,
@@ -93,6 +107,7 @@ class SkillEngineTests(unittest.TestCase):
                 "- CRM export\n",
                 encoding="utf-8",
             )
+        self._mark_s0_done(project_dir)
 
     def _write_evidence_gate_prerequisites(self, project_dir: Path, *, source_count: int = 2):
         (project_dir / "plan" / "notes.md").write_text(
@@ -445,7 +460,7 @@ class SkillEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
             engine = SkillEngine(projects_dir, self.repo_skill_dir)
-            engine.create_project(
+            project = engine.create_project(
                 "demo",
                 "strategy-consulting",
                 "AI 鎴樼暐瑙勫垝",
@@ -454,6 +469,7 @@ class SkillEngineTests(unittest.TestCase):
                 "3000瀛?",
                 "宸叉湁璁胯皥绾",
             )
+            self._mark_s0_done(Path(project["project_dir"]))
 
             summary = engine.get_workspace_summary("demo")
 
@@ -813,6 +829,7 @@ class SkillEngineTests(unittest.TestCase):
                 "- CRM export\n",
                 encoding="utf-8",
             )
+            self._mark_s0_done(project_dir)
             engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
 
             summary = engine.get_workspace_summary("demo")
@@ -857,6 +874,7 @@ class SkillEngineTests(unittest.TestCase):
                 "- CRM export\n",
                 encoding="utf-8",
             )
+            self._mark_s0_done(project_dir)
 
             summary = engine.get_workspace_summary("demo")
 
@@ -903,6 +921,7 @@ class SkillEngineTests(unittest.TestCase):
                 "- CRM export\n",
                 encoding="utf-8",
             )
+            self._mark_s0_done(project_dir)
 
             summary = engine.get_workspace_summary("demo")
 
@@ -1083,6 +1102,7 @@ class SkillEngineTests(unittest.TestCase):
                 "- Fictional anti-gravity can be modeled as a local field effect.\n",
                 encoding="utf-8",
             )
+            self._mark_s0_done(project_dir)
             engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
             self._write_data_log_with_n_sources(project_dir, n=8)
             self._write_analysis_with_refs(project_dir, ref_count=5)
@@ -1500,3 +1520,68 @@ class S0CheckpointInfrastructureTests(unittest.TestCase):
             self.assertIsNone(
                 engine.get_stage_checkpoint_prereq_notice("s0_interview_done_at")
             )
+
+
+class S0StageInferenceTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from backend.skill import SkillEngine
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        projects_dir = Path(self.tmp.name) / "projects"
+        skill_dir = Path(__file__).resolve().parents[1] / "skill"
+        projects_dir.mkdir()
+        self.engine = SkillEngine(projects_dir, skill_dir)
+        project = self.engine.create_project(
+            name="demo-s0",
+            workspace_dir=str(Path(self.tmp.name) / "ws"),
+            project_type="strategy-consulting",
+            theme="S0 test",
+            target_audience="CFO",
+            deadline="2026-12-31",
+            expected_length="3000",
+        )
+        self.project_path = Path(project["project_dir"])
+
+    def test_s0_without_checkpoint_stays_s0(self):
+        state = self.engine._infer_stage_state(self.project_path)
+        self.assertEqual(state["stage_code"], "S0")
+
+    def test_s0_with_checkpoint_advances_to_s1(self):
+        import json
+        from datetime import datetime
+        (self.project_path / "stage_checkpoints.json").write_text(
+            json.dumps({
+                "s0_interview_done_at": datetime.now().isoformat(timespec="seconds"),
+            }),
+            encoding="utf-8",
+        )
+        state = self.engine._infer_stage_state(self.project_path)
+        self.assertEqual(state["stage_code"], "S1")
+
+    def test_flags_has_s0_interview_done(self):
+        state = self.engine._infer_stage_state(self.project_path)
+        self.assertIn("s0_interview_done", state["flags"])
+        self.assertFalse(state["flags"]["s0_interview_done"])
+
+    def test_flags_s0_true_after_checkpoint(self):
+        import json
+        (self.project_path / "stage_checkpoints.json").write_text(
+            json.dumps({"s0_interview_done_at": "2026-04-21T12:00:00"}),
+            encoding="utf-8",
+        )
+        state = self.engine._infer_stage_state(self.project_path)
+        self.assertTrue(state["flags"]["s0_interview_done"])
+
+    def test_build_completed_s0_only_lights_overview(self):
+        # S0 stage, project-overview.md exists (from create_project),
+        # no s0_interview_done_at checkpoint — should only light item [2]
+        from backend.skill import SkillEngine
+        state = self.engine._infer_stage_state(self.project_path)
+        completed = state["completed_items"]
+        overview_item = SkillEngine.STAGE_CHECKLIST_ITEMS["S0"][2]  # "project-overview.md 创建"
+        self.assertIn(overview_item, completed)
+        # Other S0 items NOT complete yet
+        interview_item = SkillEngine.STAGE_CHECKLIST_ITEMS["S0"][0]  # "需求访谈完成"
+        self.assertNotIn(interview_item, completed)

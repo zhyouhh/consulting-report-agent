@@ -1251,13 +1251,14 @@ class SkillEngine:
         delivery_ready = self._has_effective_delivery_log(project_path)
         presentation_required = self._delivery_mode_requires_presentation(project_path)
 
+        interview_done = "s0_interview_done_at" in checkpoints
         outline_confirmed = "outline_confirmed_at" in checkpoints
         review_started = "review_started_at" in checkpoints
         review_passed = "review_passed_at" in checkpoints
         presentation_done = "presentation_ready_at" in checkpoints
         delivery_archived = "delivery_archived_at" in checkpoints
 
-        stage_zero_complete = project_overview_ready
+        stage_zero_complete = project_overview_ready and interview_done
         stage_one_complete = (
             stage_zero_complete
             and notes_ready
@@ -1306,6 +1307,7 @@ class SkillEngine:
         # *_ready means effective file content; *_confirmed/started/passed/done/archived means a user checkpoint.
         flags = {
             "project_overview_ready": project_overview_ready,
+            "s0_interview_done": interview_done,
             "notes_ready": notes_ready,
             "references_ready": references_ready,
             "outline_ready": outline_ready,

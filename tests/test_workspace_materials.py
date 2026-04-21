@@ -1,4 +1,5 @@
 ﻿import base64
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,7 +20,19 @@ class WorkspaceMaterialTests(unittest.TestCase):
     def setUp(self):
         self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
 
+    def _mark_s0_done(self, project_dir: Path):
+        checkpoints_path = project_dir / "stage_checkpoints.json"
+        checkpoints = {}
+        if checkpoints_path.exists():
+            checkpoints = json.loads(checkpoints_path.read_text(encoding="utf-8"))
+        checkpoints.setdefault("s0_interview_done_at", "2026-01-01T00:00:00")
+        checkpoints_path.write_text(
+            json.dumps(checkpoints, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     def _write_stage_two_prerequisites(self, project_dir: Path):
+        self._mark_s0_done(project_dir)
         (project_dir / "plan" / "notes.md").write_text(
             "# Notes\n\n"
             "## Boundaries\n"
@@ -173,6 +186,7 @@ class WorkspaceMaterialTests(unittest.TestCase):
             )
 
             project_dir = workspace_dir / ".consulting-report"
+            self._mark_s0_done(project_dir)
             (project_dir / "plan" / "stage-gates.md").unlink()
             (project_dir / "plan" / "outline.md").write_text(
                 "# 澶х翰\n\n## 鎵ц鎽樿\n- 缁撹\n## 寤鸿\n- 涓嬩竴姝n",

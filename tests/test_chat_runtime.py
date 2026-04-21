@@ -6063,6 +6063,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_should_allow_non_plan_write_rejects_s2_even_with_outline_checkpoint(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
         self._write_stage_one_prerequisites(self.project_dir)
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
 
@@ -6073,6 +6074,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_build_turn_context_does_not_confirm_outline_without_effective_outline(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
 
         turn_context = handler._build_turn_context(self.project_id, "没问题，继续吧")
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
