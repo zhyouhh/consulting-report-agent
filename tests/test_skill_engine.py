@@ -1585,3 +1585,104 @@ class S0StageInferenceTests(unittest.TestCase):
         # Other S0 items NOT complete yet
         interview_item = SkillEngine.STAGE_CHECKLIST_ITEMS["S0"][0]  # "需求访谈完成"
         self.assertNotIn(interview_item, completed)
+
+
+class S0SchemaMigrationTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile, json
+        from pathlib import Path
+        from backend.skill import SkillEngine
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.projects_dir = Path(self.tmp.name) / "projects"
+        self.skill_dir = Path(self.tmp.name) / "skill"
+        self.projects_dir.mkdir()
+        self.skill_dir.mkdir()
+        self.engine = SkillEngine(self.projects_dir, self.skill_dir)
+        self.project_path = self.projects_dir / "proj-test"
+        (self.project_path / "plan").mkdir(parents=True)
+
+    def _write_stage_gates(self, stage_code):
+        (self.project_path / "plan" / "stage-gates.md").write_text(
+            f"# 项目阶段与门禁\n\n## 当前阶段\n\n**阶段**: {stage_code}\n",
+            encoding="utf-8",
+        )
+
+    def _write_checkpoints(self, data):
+        import json
+        (self.project_path / "stage_checkpoints.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _read_checkpoints(self):
+        import json
+        path = self.project_path / "stage_checkpoints.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+    def test_file_missing_stage_s0_creates_with_marker_no_s0(self):
+        self._write_stage_gates("S0")
+        self.engine._backfill_stage_checkpoints_if_missing(self.project_path)
+        raw = self._read_checkpoints()
+        self.assertIn("__migrated_at", raw)
+        self.assertNotIn("s0_interview_done_at", raw)  # stage=S0 does not backfill
+
+    def test_file_missing_stage_s1_backfills_s0(self):
+        self._write_stage_gates("S1")
+        self.engine._backfill_stage_checkpoints_if_missing(self.project_path)
+        raw = self._read_checkpoints()
+        self.assertIn("s0_interview_done_at", raw)
+        # outline_confirmed_at still gated at stage >= S2
+        self.assertNotIn("outline_confirmed_at", raw)
+
+    def test_file_missing_stage_s2_backfills_both_s0_and_outline(self):
+        self._write_stage_gates("S2")
+        self.engine._backfill_stage_checkpoints_if_missing(self.project_path)
+        raw = self._read_checkpoints()
+        self.assertIn("s0_interview_done_at", raw)
+        self.assertIn("outline_confirmed_at", raw)
+
+    def test_file_exists_missing_s0_stage_s1_backfills_s0(self):
+        # Simulates a 4-17 spec project: file exists with marker but no s0 key
+        self._write_checkpoints({"__migrated_at": "2026-04-17T10:00:00"})
+        self._write_stage_gates("S1")
+        self.engine._backfill_stage_checkpoints_if_missing(self.project_path)
+        raw = self._read_checkpoints()
+        self.assertIn("s0_interview_done_at", raw)
+
+    def test_file_exists_missing_s0_stage_s0_does_not_backfill(self):
+        self._write_checkpoints({"__migrated_at": "2026-04-17T10:00:00"})
+        self._write_stage_gates("S0")
+        self.engine._backfill_stage_checkpoints_if_missing(self.project_path)
+        raw = self._read_checkpoints()
+        self.assertNotIn("s0_interview_done_at", raw)
+
+    def test_file_exists_with_outline_confirmed_backfills_s0(self):
+        # outline is downstream → imply s0 done (4-17 spec project mid-stage)
+        self._write_checkpoints({
+            "__migrated_at": "2026-04-17T10:00:00",
+            "outline_confirmed_at": "2026-04-18T09:00:00",
+        })
+        # no stage-gates.md this time — rely on downstream-checkpoint heuristic
+        self.engine._backfill_stage_checkpoints_if_missing(self.project_path)
+        raw = self._read_checkpoints()
+        self.assertIn("s0_interview_done_at", raw)
+        self.assertEqual(raw["outline_confirmed_at"], "2026-04-18T09:00:00")
+
+    def test_file_exists_has_s0_noop(self):
+        ts = "2026-04-20T08:00:00"
+        self._write_checkpoints({
+            "__migrated_at": "2026-04-17T10:00:00",
+            "s0_interview_done_at": ts,
+        })
+        self._write_stage_gates("S2")
+        self.engine._backfill_stage_checkpoints_if_missing(self.project_path)
+        raw = self._read_checkpoints()
+        self.assertEqual(raw["s0_interview_done_at"], ts)
+
+    def test_idempotent_second_call_no_change(self):
+        self._write_stage_gates("S2")
+        self.engine._backfill_stage_checkpoints_if_missing(self.project_path)
+        first = self._read_checkpoints()
+        self.engine._backfill_stage_checkpoints_if_missing(self.project_path)
+        second = self._read_checkpoints()
+        self.assertEqual(first, second)

@@ -233,24 +233,64 @@ class SkillEngine:
         )
 
     def _backfill_stage_checkpoints_if_missing(self, project_path):
-        checkpoints_path = self._stage_checkpoints_path(project_path)
-        if checkpoints_path.exists():
-            return
+        """Schema-incremental migration for stage_checkpoints.json.
 
-        # No historical confirm event exists; migration records that backfill happened.
-        timestamp = datetime.now().isoformat(timespec="seconds")
-        migrated = {self.MIGRATION_MARKER_KEY: timestamp}
+        Runs idempotently on every project load. Scenarios:
+        1. File missing → create with __migrated_at; backfill by stage-gates.md
+        2. File exists, missing s0_interview_done_at:
+           - stage-gates.md shows stage ≥ S1, OR any downstream checkpoint set
+             → backfill s0
+           - otherwise (stage=S0, no downstream) → do NOT backfill
+        3. Key already present → no-op
+        4. outline_confirmed_at still backfills only at stage ≥ S2 (unchanged)
+        """
+        checkpoints_path = self._stage_checkpoints_path(project_path)
         stage_gates_path = Path(project_path) / "plan" / "stage-gates.md"
+        timestamp = datetime.now().isoformat(timespec="seconds")
+
+        raw = self._read_raw_stage_checkpoints(project_path)
+        file_existed_before = checkpoints_path.exists()
+        changed = False
+
+        if not file_existed_before:
+            raw = {self.MIGRATION_MARKER_KEY: timestamp}
+            changed = True
+
+        current_stage = None
         if stage_gates_path.exists():
             stage_text = stage_gates_path.read_text(encoding="utf-8")
             current_stage = self._extract_stage_code(stage_text)
-            if current_stage and self._stage_index(current_stage) >= self._stage_index("S2"):
-                migrated["outline_confirmed_at"] = timestamp
 
-        checkpoints_path.write_text(
-            json.dumps(migrated, indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        # Downstream = any checkpoint other than s0
+        has_downstream = any(
+            key in raw
+            for key in self._CASCADE_ORDER
+            if key != "s0_interview_done_at"
         )
+
+        # Backfill s0 when stage >= S1 OR downstream present
+        if "s0_interview_done_at" not in raw:
+            stage_ok = False
+            if current_stage:
+                try:
+                    stage_ok = self._stage_index(current_stage) >= self._stage_index("S1")
+                except ValueError:
+                    stage_ok = False  # malformed stage-gates; stay cautious
+            if stage_ok or has_downstream:
+                raw["s0_interview_done_at"] = timestamp
+                changed = True
+
+        # Preserve legacy outline backfill (stage >= S2)
+        if "outline_confirmed_at" not in raw and current_stage:
+            try:
+                if self._stage_index(current_stage) >= self._stage_index("S2"):
+                    raw["outline_confirmed_at"] = timestamp
+                    changed = True
+            except ValueError:
+                pass
+
+        if changed:
+            self._write_raw_stage_checkpoints(project_path, raw)
 
     def _clear_stage_checkpoint_cascade(self, project_path, key):
         if key not in self._CASCADE_ORDER:
