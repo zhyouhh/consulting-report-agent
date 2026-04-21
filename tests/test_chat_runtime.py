@@ -3422,7 +3422,7 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertFalse(handler._should_allow_non_plan_write(project["id"], "你开始写吧"))
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_allow_non_plan_write_when_content_final_report_exists_and_user_asks_to_continue(self, mock_openai):
+    def test_should_block_non_plan_write_when_content_final_report_exists_and_user_asks_to_continue_in_s0(self, mock_openai):
         del mock_openai
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -3443,12 +3443,9 @@ class ChatRuntimeTests(unittest.TestCase):
                 "# Final report\n\n## Executive summary\nA concrete section.\n",
                 encoding="utf-8",
             )
-            engine._save_stage_checkpoint(project_dir, "s0_interview_done_at")
-            self._write_stage_one_prerequisites(project_dir)
-            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
             handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
 
-            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "继续完善"))
+            self.assertFalse(handler._should_allow_non_plan_write(project["id"], "继续完善"))
 
     @mock.patch("backend.chat.OpenAI")
     def test_should_allow_non_plan_write_when_existing_report_exists_and_user_asks_to_expand(self, mock_openai):
@@ -6122,21 +6119,11 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_allow_non_plan_write_preserves_start_writing_fallback_after_outline_confirmed(
-        self, mock_openai
-    ):
+    def test_should_block_start_writing_in_fresh_s0(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
-        handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
-        self._write_stage_one_prerequisites(self.project_dir)
-        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
 
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value={"stage_code": "S2"},
-        ):
-            self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "开始写"))
+        self.assertFalse(handler._should_allow_non_plan_write(self.project_id, "开始写"))
 
 
 class KeywordTableRestructureTests(unittest.TestCase):
