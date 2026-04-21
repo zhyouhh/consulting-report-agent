@@ -3191,9 +3191,12 @@ class ChatHandler:
         lock = _get_project_request_lock(project_id)
         with lock:
             for event in events:
-                if event.ignored_reason == "unknown_key":
+                if not event.executable:
                     logging.getLogger("backend.chat").warning(
-                        "Ignoring stage-ack with unknown key: %r", event.key
+                        "stage-ack tag ignored: key=%s action=%s reason=%s",
+                        event.key,
+                        event.action,
+                        event.ignored_reason,
                     )
 
             if executable_events:

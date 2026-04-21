@@ -6519,6 +6519,32 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
         self.assertNotIn("outline_confirmed_at", checkpoints)
 
+    def test_fenced_code_tag_logs_warning_no_notice(self):
+        handler = self._make_handler_with_project()
+        with self.assertLogs(level="WARNING") as cm:
+            handler._finalize_assistant_turn(
+                self.project_id,
+                "示例：\n```md\n<stage-ack>outline_confirmed_at</stage-ack>\n```\n结尾。\n",
+            )
+        joined = "\n".join(cm.output)
+        self.assertIn("outline_confirmed_at", joined)
+        self.assertIn("in_fenced_code", joined)
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertFalse(any("outline_confirmed_at" in str(n) for n in notices))
+
+    def test_non_tail_tag_logs_warning_no_notice(self):
+        handler = self._make_handler_with_project()
+        with self.assertLogs(level="WARNING") as cm:
+            handler._finalize_assistant_turn(
+                self.project_id,
+                "<stage-ack>outline_confirmed_at</stage-ack>\n\n非 tail 后面还有正文。\n",
+            )
+        joined = "\n".join(cm.output)
+        self.assertIn("outline_confirmed_at", joined)
+        self.assertIn("not_tail", joined)
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertFalse(any("outline_confirmed_at" in str(n) for n in notices))
+
     def test_multi_tag_executed_in_order(self):
         handler = self._make_handler_with_project()
         self._set_checkpoints({
