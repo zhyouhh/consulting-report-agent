@@ -10,6 +10,8 @@ import {
   OPTION_KIND_INSERT_PROMPT,
   OPTION_KIND_CLEAR_CHECKPOINT,
   OPTION_KIND_NOOP,
+  ROLLBACK_HIDDEN_STAGES,
+  getAdvancedRollbackOptions,
 } from "../src/utils/rollbackMenuLogic.js";
 
 test("S0 — not shown (caller checks HIDDEN_STAGES)", () => {
@@ -93,4 +95,33 @@ test("Option kinds are mutually distinct", () => {
   assert.notEqual(OPTION_KIND_INSERT_PROMPT, OPTION_KIND_CLEAR_CHECKPOINT);
   assert.notEqual(OPTION_KIND_INSERT_PROMPT, OPTION_KIND_NOOP);
   assert.notEqual(OPTION_KIND_CLEAR_CHECKPOINT, OPTION_KIND_NOOP);
+});
+
+// ---- Task O: S2+ advanced rollback option (s0-interview-done) ----
+
+test("getAdvancedRollbackOptions returns empty array at S0 and S1", () => {
+  assert.deepEqual(getAdvancedRollbackOptions("S0"), []);
+  assert.deepEqual(getAdvancedRollbackOptions("S1"), []);
+});
+
+test("getAdvancedRollbackOptions at S2 contains s0 entry", () => {
+  const opts = getAdvancedRollbackOptions("S2");
+  const s0 = opts.find(o => o.checkpoint === "s0-interview-done");
+  assert.ok(s0, "S2 must expose s0 rollback option");
+  assert.equal(s0.kind, OPTION_KIND_CLEAR_CHECKPOINT);
+  assert.equal(s0.action, "clear");
+  assert.ok(s0.label.includes("需求访谈"));
+  assert.ok(s0.confirmBody.includes("表单信息不会删"));
+});
+
+for (const stage of ["S3", "S4", "S5", "S6", "S7"]) {
+  test(`getAdvancedRollbackOptions at ${stage} contains s0 entry`, () => {
+    const opts = getAdvancedRollbackOptions(stage);
+    assert.ok(opts.some(o => o.checkpoint === "s0-interview-done"));
+  });
+}
+
+test("ROLLBACK_HIDDEN_STAGES still hides menu at S0/S1", () => {
+  assert.ok(ROLLBACK_HIDDEN_STAGES.has("S0"));
+  assert.ok(ROLLBACK_HIDDEN_STAGES.has("S1"));
 });

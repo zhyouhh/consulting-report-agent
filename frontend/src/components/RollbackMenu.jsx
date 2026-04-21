@@ -5,6 +5,7 @@ import { showError } from '../utils/toast'
 import {
   ROLLBACK_HIDDEN_STAGES,
   getFirstLevelOption,
+  getAdvancedRollbackOptions,
   OPTION_KIND_INSERT_PROMPT,
   OPTION_KIND_CLEAR_CHECKPOINT,
   OPTION_KIND_NOOP,
@@ -68,6 +69,7 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
   const closeConfirm = () => setConfirmState(null)
 
   const firstLevel = getFirstLevelOption(stageCode)
+  const advancedOptions = getAdvancedRollbackOptions(stageCode)
 
   const handleFirstLevelClick = () => {
     if (!firstLevel) return
@@ -133,6 +135,33 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
 
             {advancedOpen && (
               <div className="mt-1">
+                {/* S2+: s0 interview rollback from getAdvancedRollbackOptions */}
+                {advancedOptions.map((opt) => (
+                  <button
+                    key={opt.checkpoint}
+                    onClick={() => {
+                      if (opt.kind === OPTION_KIND_CLEAR_CHECKPOINT) {
+                        openConfirm(
+                          opt.confirmTitle,
+                          opt.confirmBody,
+                          async () => {
+                            const ok = await postCheckpoint(opt.checkpoint, opt.action)
+                            if (ok) closeConfirm()
+                          }
+                        )
+                      }
+                    }}
+                    className="w-full text-left px-6 py-2 text-sm text-[#c8ccee] hover:bg-[#222645] transition-colors"
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+
+                {/* Divider before legacy advanced options */}
+                {advancedOptions.length > 0 && (
+                  <div className="mx-4 my-1 border-t border-[#2a2e52]" />
+                )}
+
                 {/* "完全重置大纲确认" */}
                 <button
                   onClick={() =>

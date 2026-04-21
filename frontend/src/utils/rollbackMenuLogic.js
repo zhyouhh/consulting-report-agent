@@ -55,3 +55,38 @@ export function getFirstLevelOption(stageCode) {
       return null
   }
 }
+
+const S0_ROLLBACK_OPTION = {
+  kind: OPTION_KIND_CLEAR_CHECKPOINT,
+  label: '回到需求访谈',
+  confirmTitle: '确认回到需求访谈？',
+  confirmBody:
+    '之前的表单信息不会删；回到 S0 继续补充澄清；' +
+    '当前大纲、研究计划、数据日志等下游产出也会被清空。',
+  checkpoint: 's0-interview-done',
+  action: 'clear',
+}
+
+/**
+ * Returns the advanced (secondary) rollback options for the given stage,
+ * rendered AFTER the first-level option. Currently exposes:
+ *   - s0 interview rollback for S2+ (cascades — clears all downstream
+ *     checkpoints when the user confirms)
+ * Empty array at S0 and S1 (menu is hidden there per ROLLBACK_HIDDEN_STAGES).
+ * @param {string} stageCode
+ * @returns {object[]}
+ */
+export function getAdvancedRollbackOptions(stageCode) {
+  if (ROLLBACK_HIDDEN_STAGES.has(stageCode)) return []
+  switch (stageCode) {
+    case 'S2':
+    case 'S3':
+    case 'S4':
+    case 'S5':
+    case 'S6':
+    case 'S7':
+      return [S0_ROLLBACK_OPTION]
+    default:
+      return []
+  }
+}
