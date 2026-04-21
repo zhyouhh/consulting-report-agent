@@ -4296,6 +4296,34 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("content/final-report.md", expected)
 
     @mock.patch("backend.chat.OpenAI")
+    def test_expected_plan_writes_include_content_report_draft_v1_when_assistant_claims_saved(self, mock_openai):
+        del mock_openai
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "expected-content-report-v1-projects", self.repo_skill_dir),
+        )
+
+        expected = handler._expected_plan_writes_for_message(
+            "第二章已完成，已同步至 `content/report_draft_v1.md`。"
+        )
+
+        self.assertIn("content/report_draft_v1.md", expected)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_expected_plan_writes_include_versioned_content_report_drafts_when_assistant_claims_saved(self, mock_openai):
+        del mock_openai
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "expected-content-report-v5-projects", self.repo_skill_dir),
+        )
+
+        expected = handler._expected_plan_writes_for_message(
+            "已同步至 `content/report_draft_v5.md`，后续可继续审查。"
+        )
+
+        self.assertIn("content/report_draft_v5.md", expected)
+
+    @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_warns_and_retries_when_assistant_claims_file_update_without_write(self, mock_openai):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"

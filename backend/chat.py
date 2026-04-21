@@ -1232,13 +1232,7 @@ class ChatHandler:
                 normalized_path = self._normalize_project_file_path(raw_path)
                 if normalized_path.startswith("plan/") and normalized_path.endswith(".md"):
                     expected.add(normalized_path)
-                if normalized_path in {
-                    "report_draft_v1.md",
-                    "content/report.md",
-                    "content/draft.md",
-                    "content/final-report.md",
-                    "output/final-report.md",
-                }:
+                if self._is_expected_report_write_path(normalized_path):
                     expected.add(normalized_path)
 
         if self._looks_like_outline_draft(normalized_text):
@@ -1257,6 +1251,12 @@ class ChatHandler:
             expected.add("plan/tasks.md")
 
         return expected
+
+    def _is_expected_report_write_path(self, normalized_path: str) -> bool:
+        return bool(
+            re.fullmatch(r"report_draft_v\d+\.md", normalized_path)
+            or re.fullmatch(r"(?:content|output)/[^/]+\.md", normalized_path)
+        )
 
     def _get_missing_expected_writes(self, assistant_message: str, successful_writes: set[str]) -> list[str]:
         expected = self._expected_plan_writes_for_message(assistant_message)
