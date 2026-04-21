@@ -56,12 +56,47 @@ CUSTOM_STREAM_READ_TIMEOUT_SECONDS = 90.0
 SLOW_MODEL_STREAM_READ_TIMEOUT_SECONDS = 180.0
 AUTO_COMPACT_TRIGGER_RATIO = 0.9
 POST_COMPACT_SIDECAR_TARGET_BYTES = 24_000
+_STAGE_ACK_MARKER = "<stage-ack"
 _CONVERSATION_STATE_LOCKS: dict[str, threading.RLock] = {}
 _CONVERSATION_STATE_LOCKS_GUARD = threading.Lock()
 _PROJECT_REQUEST_LOCKS: dict[str, threading.RLock] = {}
 _PROJECT_REQUEST_LOCKS_GUARD = threading.Lock()
 _SEARCH_ROUTER_SINGLETON: SearchRouter | None = None
 _SEARCH_ROUTER_GUARD = threading.Lock()
+
+
+def stream_split_safe_tail(buffer: str) -> tuple[str, str]:
+    """Split buffer into (safe_to_emit_now, held_until_stream_close).
+
+    Called by _chat_stream_unlocked after every new content delta is
+    accumulated. Held portion must NOT be sent to the frontend until stream
+    close and StageAckParser.strip() has scrubbed it.
+
+    Rules:
+      1. If "<stage-ack" occurs at position p, hold from p to end.
+      2. Otherwise, if buffer's suffix is a prefix of "<stage-ack"
+         (e.g., "<" / "<s" / "<stage-a"), hold that suffix.
+      3. Otherwise, emit the whole buffer.
+
+    Note: rule 1 uses `find`, not `rfind` - the earliest "<stage-ack"
+    anchors the hold. Using rfind would match the '<' in a closing
+    </stage-ack> and leak the opening "<stage-ack".
+    """
+    if not buffer:
+        return "", ""
+
+    idx = buffer.lower().find(_STAGE_ACK_MARKER)
+    if idx != -1:
+        return buffer[:idx], buffer[idx:]
+
+    marker_len = len(_STAGE_ACK_MARKER)
+    max_overlap = min(marker_len - 1, len(buffer))
+    for overlap in range(max_overlap, 0, -1):
+        suffix = buffer[-overlap:].lower()
+        if _STAGE_ACK_MARKER.startswith(suffix):
+            return buffer[:-overlap], buffer[-overlap:]
+
+    return buffer, ""
 
 
 def _get_project_request_lock(project_id: str) -> threading.RLock:
@@ -1362,6 +1397,8 @@ class ChatHandler:
             known_tool_names = {tool["function"]["name"] for tool in self._get_tools()}
             announced_tool_call_indexes: set[int] = set()
             stream_usage = None
+            accumulated = ""
+            stream_buffer = ""
             try:
                 for chunk in response:
                     if getattr(chunk, "usage", None) is not None:
@@ -1371,8 +1408,13 @@ class ChatHandler:
 
                     delta = chunk.choices[0].delta
                     if delta.content:
-                        collected_message["content"] += delta.content
-                        yield {"type": "content", "data": delta.content}
+                        accumulated += delta.content
+                        collected_message["content"] = accumulated
+                        stream_buffer += delta.content
+                        safe, held = stream_split_safe_tail(stream_buffer)
+                        if safe:
+                            yield {"type": "content", "data": safe}
+                        stream_buffer = held
 
                     if delta.tool_calls:
                         for tc_chunk in delta.tool_calls:

@@ -6375,3 +6375,79 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(S0WriteFileGateTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class StreamTailGuardHelperTests(unittest.TestCase):
+    """Unit tests for the pure stream_split_safe_tail helper.
+
+    Semantics:
+      stream_split_safe_tail(buffer) -> (safe_to_emit, held_tail)
+      - If buffer does NOT yet contain the substring "<stage-ack", returns
+        (buffer_without_possible_prefix_suffix, possible_prefix_suffix).
+        "possible prefix suffix" = longest suffix of buffer that is a prefix of
+        "<stage-ack" (i.e., the streaming split could be inside an incomplete
+        opening tag).
+      - If buffer contains "<stage-ack" at position p, returns
+        (buffer[:p], buffer[p:]).
+      - The held_tail is emitted by the caller only at stream close, after
+        StageAckParser.strip() has scrubbed it.
+    """
+
+    def test_no_tag_no_dangling_prefix(self):
+        from backend.chat import stream_split_safe_tail
+        safe, held = stream_split_safe_tail("纯正文没 tag 可能。")
+        self.assertEqual(safe, "纯正文没 tag 可能。")
+        self.assertEqual(held, "")
+
+    def test_chunk_cut_at_lt(self):
+        from backend.chat import stream_split_safe_tail
+        safe, held = stream_split_safe_tail("正文 <")
+        self.assertEqual(safe, "正文 ")
+        self.assertEqual(held, "<")
+
+    def test_chunk_cut_at_lt_s(self):
+        from backend.chat import stream_split_safe_tail
+        safe, held = stream_split_safe_tail("正文 <s")
+        self.assertEqual(held, "<s")
+
+    def test_chunk_cut_at_partial_stage(self):
+        from backend.chat import stream_split_safe_tail
+        safe, held = stream_split_safe_tail("正文 <stage-a")
+        self.assertEqual(held, "<stage-a")
+
+    def test_full_open_tag_held(self):
+        from backend.chat import stream_split_safe_tail
+        safe, held = stream_split_safe_tail(
+            "正文 <stage-ack>outline_confirmed_at"
+        )
+        self.assertEqual(safe, "正文 ")
+        self.assertTrue(held.startswith("<stage-ack>"))
+
+    def test_complete_tag_held(self):
+        from backend.chat import stream_split_safe_tail
+        safe, held = stream_split_safe_tail(
+            "正文 <stage-ack>outline_confirmed_at</stage-ack>"
+        )
+        self.assertEqual(safe, "正文 ")
+        # Full tag is held - caller strips it at stream close
+        self.assertIn("<stage-ack>", held)
+
+    def test_lt_without_stage_ack_not_held(self):
+        from backend.chat import stream_split_safe_tail
+        # "<" at end with no "<stage-ack" prefix possibility AFTER enough chars
+        safe, held = stream_split_safe_tail("正文 <div>")
+        self.assertEqual(safe, "正文 <div>")
+        self.assertEqual(held, "")
+
+    def test_multi_tag_tail_held(self):
+        from backend.chat import stream_split_safe_tail
+        tail = (
+            "<stage-ack>outline_confirmed_at</stage-ack>\n"
+            '<stage-ack action="clear">outline_confirmed_at</stage-ack>\n'
+            "<stage-ack>outline_confirmed_at</stage-ack>\n"
+        )
+        buffer = "正文段。\n" + tail
+        safe, held = stream_split_safe_tail(buffer)
+        self.assertEqual(safe, "正文段。\n")
+        self.assertEqual(held, tail)
+        self.assertGreater(len(tail.encode("utf-8")), 128)
