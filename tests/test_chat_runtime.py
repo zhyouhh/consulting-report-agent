@@ -4021,6 +4021,43 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertTrue(notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
+    def test_write_file_emits_data_log_format_notice_on_first_data_log_write(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        (self.project_dir / "plan" / "data-log.md").unlink()
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/data-log.md",
+                        "content": (
+                            "# Data log\n\n"
+                            "### [DL-2024-01] 财政部数据资源暂行规定\n"
+                            "- **来源**：财政部\n"
+                            "- **时间**：2024-01-01\n"
+                            "- **URL**：https://www.example.com/policy\n"
+                            "- **用途**：政策基石\n"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        notices = handler._turn_context.get("pending_system_notices", [])
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["category"], "data_log_format_hint")
+        self.assertEqual(notices[0]["path"], "plan/data-log.md")
+        self.assertIn("### [DL-YYYY-NN]", notices[0]["reason"])
+        self.assertIn("表格", notices[0]["user_action"])
+
+    @mock.patch("backend.chat.OpenAI")
     def test_system_notice_deduplicated_within_turn(self, mock_openai):
         handler = self._make_handler_with_project()
         first_call = self._make_stream_tool_call_chunk(

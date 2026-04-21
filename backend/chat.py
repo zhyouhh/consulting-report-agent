@@ -1183,6 +1183,24 @@ class ChatHandler:
             return None
         return self._normalize_project_file_path(file_path)
 
+    def _is_first_data_log_write(self, project_id: str, normalized_path: str) -> bool:
+        if normalized_path != "plan/data-log.md":
+            return False
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return False
+        data_log_path = project_path / "plan" / "data-log.md"
+        if not data_log_path.exists():
+            return True
+        try:
+            current_text = data_log_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        stripped = current_text.strip()
+        if len(stripped) < 50:
+            return True
+        return self.skill_engine._is_template_content(current_text, "data-log.md")
+
     def _looks_like_outline_draft(self, assistant_message: str) -> bool:
         text = (assistant_message or "").strip()
         if not text:
@@ -2168,8 +2186,19 @@ class ChatHandler:
                         user_action="请联系用户在右侧工作区完成对应的确认后再写入",
                     )
                     return {"status": "error", "message": signature_error}
+                should_emit_data_log_hint = self._is_first_data_log_write(project_id, normalized_path)
                 self.skill_engine.write_file(project_id, normalized_path, args["content"])
                 result = {"status": "success", "message": f"已写入文件: {normalized_path}"}
+                if should_emit_data_log_hint:
+                    self._emit_system_notice_once(
+                        category="data_log_format_hint",
+                        path=normalized_path,
+                        reason=(
+                            "data-log.md 每条事实必须写成 `### [DL-YYYY-NN] 事实标题`，"
+                            "下方带 URL / `material:xxx` / `访谈:` / `调研:` 来源标记。"
+                        ),
+                        user_action="不要用 Markdown 表格记录事实；请拆成独立 DL-id 条目后继续写入。",
+                    )
                 self._persist_successful_tool_result(
                     project_id,
                     func_name,
