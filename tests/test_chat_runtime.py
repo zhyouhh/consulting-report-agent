@@ -6078,6 +6078,33 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(turn_context["pending_system_notices"], [])
 
     @mock.patch("backend.chat.OpenAI")
+    def test_build_turn_context_strong_outline_keyword_without_effective_outline_emits_prereq_notice(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
+
+        turn_context = handler._build_turn_context(self.project_id, "确认大纲")
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+        self.assertIsNone(turn_context["checkpoint_event"])
+        self.assertEqual(
+            turn_context["pending_system_notices"],
+            [
+                {
+                    "type": "system_notice",
+                    "category": "checkpoint_prereq_missing",
+                    "path": "plan/outline.md",
+                    "reason": "需要先生成有效报告大纲，才能确认大纲并进入资料采集。",
+                    "user_action": "请先让助手补齐 `plan/outline.md`，再确认大纲。",
+                }
+            ],
+        )
+
+    @mock.patch("backend.chat.OpenAI")
     def test_build_turn_context_confirm_outline_turn_immediately_allows_non_plan_write(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
