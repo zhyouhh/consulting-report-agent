@@ -46,6 +46,26 @@ description: Use when writing consulting reports, strategy analysis, market rese
 - 把事实材料持续写入 `data-log.md`
 - 标记来源、时间和用途
 
+### S2 资料采集条目格式
+
+`data-log.md` 里的每条事实必须遵循以下格式，系统据此自动统计「有效来源」：
+
+### [DL-YYYY-NN] 事实标题
+- **来源**：[机构/网页标题]
+- **时间**：YYYY-MM-DD
+- **URL**：https://...（或 `material:<id>` / `访谈:受访者-日期` / `调研:对象-日期`）
+- **用途**：此条在报告中如何使用
+
+示例：
+
+### [DL-2024-01] 财政部数据资源暂行规定
+- **来源**：财政部
+- **时间**：2024-01-01
+- **URL**：https://www.mof.gov.cn/zhengwuxinxi/xxx
+- **用途**：政策基石，用于第一章背景部分
+
+每条至少带一个有效来源标记（URL / `material:xxx` / 访谈 / 调研标签），否则不计入「有效来源」数。表格形式不会被识别。
+
 **推进到 S3：** 当 `data-log.md` 中带有效来源（URL、material id、访谈/调研标记）的条目数达到目标阈值，由系统自动放行。无需用户确认。
 
 ### S3 分析沉淀
