@@ -64,7 +64,8 @@ test("summarizeWorkspace maps new Task 7 fields from api response", () => {
   });
   assert.equal(summary.stageCode, "S4");
   assert.equal(summary.nextStageHint, "S7");
-  assert.deepEqual(summary.flags, { outline_confirmed: true });
+  assert.equal(summary.flags.outline_confirmed, true);
+  assert.equal(summary.flags.s0InterviewDone, false);
   assert.equal(summary.checkpoints.outline_confirmed_at, "2026-04-21T10:00:00Z");
   assert.equal(summary.wordCount, 2500);
   assert.equal(summary.lengthTargets.expected_length, 4000);
@@ -84,7 +85,7 @@ test("summarizeWorkspace uses safe defaults when new fields are absent", () => {
   assert.equal(summary.stalledSince, null);
   assert.equal(summary.deliveryMode, "仅报告");
   assert.equal(summary.nextStageHint, null);
-  assert.deepEqual(summary.flags, {});
+  assert.equal(summary.flags.s0InterviewDone, false);
   assert.deepEqual(summary.checkpoints, {});
 });
 
@@ -261,4 +262,40 @@ test("summarizeWorkspace.stageLabel is never a raw stage code", () => {
     const s = summarizeWorkspace({ stage_code: code });
     assert.notEqual(s.stageLabel, code, `stageLabel for ${code} must be humanized`);
   }
+});
+
+// ── s0InterviewDone camelCase flag ────────────────────────────────────────────
+
+test("summarizeWorkspace surfaces s0InterviewDone from raw flags", () => {
+  const raw = {
+    stage_code: "S0",
+    flags: {
+      s0_interview_done: false,
+      outline_ready: false,
+      project_overview_ready: true,
+    },
+  };
+  const summary = summarizeWorkspace(raw);
+  assert.equal(summary.flags.s0InterviewDone, false);
+});
+
+test("summarizeWorkspace preserves raw flags (outline_ready, etc.)", () => {
+  const raw = {
+    stage_code: "S1",
+    flags: {
+      s0_interview_done: true,
+      outline_ready: true,
+      project_overview_ready: true,
+      other_flag: "value",
+    },
+  };
+  const summary = summarizeWorkspace(raw);
+  assert.equal(summary.flags.outline_ready, true, "raw snake_case flag kept");
+  assert.equal(summary.flags.other_flag, "value");
+  assert.equal(summary.flags.s0InterviewDone, true, "camelCase added");
+});
+
+test("summarizeWorkspace with no flags field returns empty-ish flags", () => {
+  const summary = summarizeWorkspace({ stage_code: "S0" });
+  assert.equal(summary.flags.s0InterviewDone, false);
 });

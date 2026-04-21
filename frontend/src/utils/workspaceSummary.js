@@ -33,7 +33,10 @@ export function summarizeWorkspace(apiSummary = {}) {
     // §9.1 stage-advance fields
     stageCode: source.stage_code || null,
     nextStageHint: source.next_stage_hint || null,
-    flags: source.flags || {},
+    flags: {
+      ...(source.flags || {}),
+      s0InterviewDone: Boolean((source.flags || {}).s0_interview_done),
+    },
     checkpoints: source.checkpoints || {},
     // §9.2 S4 word count / length targets
     wordCount: source.word_count ?? 0,
