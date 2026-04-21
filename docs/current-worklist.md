@@ -1,20 +1,75 @@
 # Current Worklist
 
-最后更新：2026-04-21（stage-advance-gates 整支 Task 1-8 + final review 全闭环；已重打包待实机 smoke）
+最后更新：2026-04-21（二轮 smoke 已打，又冒 3 处新问题 → 见 1b；A/B/D/F + 前端复制的修复生效，无回归）
 
 ## 当前未解决 / 待验证
 
-1. 新包实机 smoke test（**等用户人肉走查**）
-- 状态：`待用户验证`
-- 新包：`dist\咨询报告助手\` 91 MB（2026-04-21 清旧重打，前端含 Task 7 全部改动）
-- 重点检查：
-  - 默认渠道启动与基础聊天
-  - 内置搜索池是否正常工作
-  - 阶段推进（S0 → S1 → ... → S7 → done）全流程：新 `POST /api/projects/{id}/checkpoints/{name}` endpoint、右侧 `StageAdvanceControl` 的上下文感知按钮、S4 双按钮达标后"完成撰写，开始审查"出现、S5 双按钮、回退菜单 `⋯` + §9.5 确认对话框
-  - `system_notice` 拦截事件在聊天里以黄橙色警告块渲染
-  - `web_search → fetch_url → write_file` 门禁
-  - 打包后 `managed_client_token.txt` / `managed_search_pool.json` / `frontend/` / `skill/` 是否正确注入
-  - `length_fallback` chip 作为非交互提示展示（不可点击）
+1. 二轮重打包已完成，主链路已跑完
+- 状态：`已走二轮 smoke（暴露新 3 bug，见 1b）`
+- 二轮重点验回顾：
+  - Bug A/B/D/F 修复在新包里都生效（data-log.md 已按 `### [DL-YYYY-NN]` 格式写；非 plan 写入阶段门禁生效）
+  - 聊天气泡 + 文件预览原生框选复制可用
+- 二轮新暴露问题见 1b
+
+1a. **[BUG 串] stage-advance-gates 实机链条性失效 — A/B/D/F 已修**
+- 状态：`A/B/D/F 已修，C/G/H 待跟进`（2026-04-21 3 路并行 codex + general-purpose 派活，全部合 main）
+- 关联 plan：`docs/superpowers/plans/2026-04-21-smoke-test-bugfix.md`
+- 测试基线：403 passed / 1 skipped（基线 397 → 403，加 6 条新测试）
+
+**Bug A ✅** — `backend/chat.py` `_should_allow_non_plan_write` 已叠加阶段校验，仅在推断阶段 ≥ S4 时放行非 plan 写入。commit `cb15e4c fix(chat): gate non-plan writes by stage`。
+
+**Bug B ✅** — `backend/skill.py:record_stage_checkpoint` 在 `set` 前校验对应 plan 文件有效存在（outline/report_draft/review_checklist/presentation_plan/delivery_log），缺文件 raise ValueError。commit `7e262cf fix(skill): validate stage checkpoint prerequisites`。
+
+**Bug C ⏸** — 未修。S0 质量门槛缺失：`stage_zero_complete = project_overview_ready`，项目一创建就 S0 完成。需产品侧设计"访谈深度"判据（最少 N 轮真实问答？区分表单生成 vs 访谈补全？），暂挂。
+
+**Bug D ✅** — `skill/SKILL.md` §S2 明确 `### [DL-YYYY-NN]` 格式 + 完整示例，并写明"表格形式不会被识别"；首次写 `plan/data-log.md` 时通过 `_emit_system_notice_once` 注入格式提示。commits `7a50bb3` / `88f10d7` / `4a6a7da`。
+
+**Bug E ✅** — Bug A+D 修好后自消，不再独立追踪。
+
+**Bug F ✅** — `backend/chat.py:_expected_plan_writes_for_message` 白名单从硬编码 5 条路径改成正则匹配 `report_draft_v\d+\.md` 和 `(content|output)/*.md`，`_is_expected_report_write_path` 方法抽出可复用。+28 行测试。commit `1e180cc fix(chat): detect versioned report draft claims`。
+
+**Bug G ⏸** — 未修。回退 checkpoint 后 `content/*.md` 仍存在，状态不自洽。需要级联清理 or UI 标红提示，暂挂。
+
+**Bug H ⏸** — 未修。S1 回退后 UI「下一步建议」显示"暂无"，`next_stage_hint` S1 分支缺。暂挂。
+
+~~**Bug I**~~ — 已排除，黄色警告是当轮新触发。
+
+**派活记录**（作为项目默认工作法参考）：
+- 3 路并行：task-4（codex exec, Bug A+B+F）+ task-5（codex exec, Bug D）+ frontend-copy（general-purpose + sonnet, worklist #8）
+- 两个 codex 共享 main working tree，Bug F 先手被 task-4 commit，task-5 跑完看到存在不覆盖，零冲突
+- 监控从 30 min cron → 5 min cron（监控到 task-5 越界迹象）→ 20 min cron（兜底挂掉），bash 完成靠系统 notification，无需频繁自查
+
+1b. **[二轮 smoke] 新发现三处问题**
+- 状态：`待讨论方向 + 待修`（2026-04-21 二次 smoke）
+- 测试项目：`D:\MyProject\CodeProject\JustTest\.consulting-report\`
+- 已走 systematic-debugging Phase 1，根因定位完毕，未下修
+
+**新 Bug 1（S0 门槛回归，关联旧 1a#Bug C）** — 图5
+- 现象：填完新建项目表单 → 右侧「已完成」直接显示 "需求访谈完成 / 范围界定明确 / project-overview.md 创建 / 交付形式确认" 四项全勾，对话一句没说
+- 实证：`backend/skill.py:1257` `stage_zero_complete = project_overview_ready`；`STAGE_CHECKLIST_ITEMS["S0"]` 正是这 4 项；表单创建项目时直接写 `plan/project-overview.md` → `_is_effective_plan_file` 立即 True → stage 跳 S1 → `_build_completed_items` 把 S0 全部塞入完成
+- 用户澄清（2026-04-21）：原设计意图是「表单 → 模型基于信息（可选加一轮 web_search 了解主题）→ 主动需求访谈 → 写 outline → 再确认」。当前行为跳过了访谈步骤
+- 决策点（需讨论）：
+  - 访谈「完成」的判据（最少 N 轮真实 Q&A？必答字段清单？模型自判 + 用户点"访谈够了"？）
+  - `project-overview.md` 模型还需不需要主动补全/修订？还是表单已经生成的版本即终稿？
+  - S0 checklist 4 项怎么映射（哪项来自表单、哪项来自访谈、哪项由模型判定）
+
+**新 Bug 2 ✅（tool 结果气泡吞 assistant 正文）** — 图6
+- 现象：`✅ 结果: {...}` 气泡把紧跟的 assistant 正文首段一起吞入同一个气泡
+- 根因：`frontend/src/components/ChatPanel.jsx:509` 流式拼接 tool 事件时只在前面加 `\n`、尾部不加；后续 `content` 块直接 append 同一行；`utils/chatPresentation.js:64` `splitAssistantMessageBlocks` 按行识别整行以 `✅ 结果:` 开头为 tool block → 把吞进去的正文也算 tool
+- 修法：抽 `appendToolEventContent(prev, toolText)` 纯函数（chatPresentation.js），自动补尾 `\n`；ChatPanel.jsx 调用
+- commit：`73b345d fix(chat): preserve text after tool events`；前端测试 139→140 passed，`npm run build` 零错
+- 附带：codex 多加了 `frontend/tests/index.js`（为让 `node --test tests/` 做显式目录入口，可保留）
+
+**新 Bug 3（口头"确认"不推进阶段）** — 图8
+- 现象：用户回"确认"（响应模型"请回复'确认大纲'或'按此大纲执行'"），`stage_checkpoints.json` 未写入 `outline_confirmed_at`
+- 实证：`conversation.json[2]` 用户原话 = `"确认"`；`stage_checkpoints.json` 只有 `__migrated_at`
+- 根因：`backend/chat.py` `_STRONG_ADVANCE_KEYWORDS["outline_confirmed_at"]` = `["确认大纲","大纲没问题","按这个大纲写","就这个大纲","就按这个版本"]` — **没单独"确认"**；`_WEAK_ADVANCE_BY_STAGE["S1"]` = `["行","可以","同意","没问题","OK","ok","好的","挺好的"]` — **也没"确认"**。`_detect_stage_keyword` 直接返回 None，没调 `record_stage_checkpoint`
+- 反讽：模型自己在回复里引导"请回复'**确认大纲**'或'按此大纲执行'"，用户简写"确认"最自然，关键词表漏了
+- 更深问题：整个「后端用 regex 猜对话意图」的方案是否合适？LLM 本身在回路内最懂上下文，层级颠倒
+- 决策点（需讨论）：
+  - (a) 短期打补丁：`_WEAK_ADVANCE_BY_STAGE["S1"]` 加 `"确认"`，同步改 SKILL.md §S1 白名单
+  - (b) 中期重构：让 LLM 在 assistant 尾部输出结构化信号（如 `<stage-ack>outline_confirmed</stage-ack>`），后端校验前置文件后 set checkpoint，剥掉标签再返回前端。五个 checkpoint 通吃
+  - (c) 加轻量意图分类（调一次小模型判断）— 成本 + 延迟
 
 2. 流式输出体感
 - 状态：`待验证`
@@ -54,15 +109,16 @@
   - `pydantic` deprecation warning 仍存在
   - 需要再看是否有可以从打包里继续排除的非必需依赖
 
-8. 聊天与文件预览复制体验
-- 状态：`待开始`
-- 现象：
-  - 聊天对话框里的消息正文不可框选复制（只能用消息右上角的复制按钮）
-  - 文件内容预览面板完全不可复制，只能看
-- 目标：聊天与文件预览都支持原生框选复制；保留现有复制按钮作为显式入口。
-- 约束：不引入额外的富文本复杂度，只处理 CSS 层面的 `user-select` 与事件拦截。
+8. ~~聊天与文件预览复制体验~~ — ✅ 已修，commit `341de44`。根因：PyWebView 的 WebView2 在 Win 下对非输入元素默认禁选；通过 `.selectable-content` 工具类（`-webkit-user-select: text` + `*` 子选择器）在 ChatPanel 气泡 + FilePreviewPanel 预览区放开。右上角复制按钮保留。已进"最近已解决"。
 
 ## 最近已解决
+
+0. ⭐ **stage-advance-gates smoke-test bugfix（Bug A/B/D/F + 前端复制）**
+- 状态：`已完成`（2026-04-21 3 路并行派活，全部合 main）
+- 5 个 commit：`cb15e4c` / `7e262cf` / `1e180cc`（task-4 Bug A/B/F）+ `4a6a7da` / `88f10d7` / `7a50bb3`（task-5 Bug D）+ `341de44`（frontend-copy 复制体验）
+- 测试：后端 403 passed（397→403，+6 新测试）；前端 139 passed；`npm run build` 零错
+- 详情见"当前未解决/待验证"第 1a 条（保留在那里以便追 C/G/H 跟进）
+- 下一步：**重打包 `dist\咨询报告助手\` → 用户二轮 smoke test**
 
 1. ⭐ **阶段推进门禁重构（stage-advance-gates，Task 1-8 全闭环）**
 - 状态：`已完成`（2026-04-21 分支 `feat/stage-advance-gates` 合 main）
