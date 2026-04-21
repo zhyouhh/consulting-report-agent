@@ -6050,6 +6050,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_should_allow_non_plan_write_blocking_message_beats_outline_blanket_pass(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
 
         self.assertFalse(handler._should_allow_non_plan_write(self.project_id, "先别写正文"))
@@ -6059,13 +6060,14 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_allow_non_plan_write_outline_blanket_pass_returns_on_next_turn(self, mock_openai):
+    def test_should_allow_non_plan_write_rejects_s2_even_with_outline_checkpoint(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
 
-        self.assertFalse(handler._should_allow_non_plan_write(self.project_id, "先别写正文"))
-        self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "继续"))
+        self.assertEqual(handler.skill_engine._infer_stage_state(self.project_dir)["stage_code"], "S2")
+        self.assertFalse(handler._should_allow_non_plan_write(self.project_id, "继续"))
 
     @mock.patch("backend.chat.OpenAI")
     def test_build_turn_context_does_not_confirm_outline_without_effective_outline(self, mock_openai):

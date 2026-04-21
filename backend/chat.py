@@ -118,6 +118,7 @@ class ChatHandler:
         "已经入档",
     )
     MAX_MISSING_WRITE_RETRIES = 2
+    NON_PLAN_WRITE_ALLOWED_STAGE_CODES = {"S4", "S5", "S6", "S7", "done"}
 
     NON_PLAN_WRITE_ALLOW_KEYWORDS = [
         "确认大纲",
@@ -3102,7 +3103,9 @@ class ChatHandler:
         if project_path:
             checkpoints = self.skill_engine._load_stage_checkpoints(project_path)
             if "outline_confirmed_at" in checkpoints:
-                return True
+                stage_state = self.skill_engine._infer_stage_state(project_path)
+                if stage_state.get("stage_code") in self.NON_PLAN_WRITE_ALLOWED_STAGE_CODES:
+                    return True
 
         if any(keyword in normalized for keyword in self.NON_PLAN_WRITE_ALLOW_KEYWORDS):
             return True
