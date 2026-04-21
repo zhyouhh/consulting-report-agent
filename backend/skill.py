@@ -166,6 +166,38 @@ class SkillEngine:
         "content/final-report.md",
         "output/final-report.md",
     )
+    CHECKPOINT_PREREQ = {
+        "outline_confirmed_at": (
+            "_has_effective_outline",
+            "plan/outline.md",
+            "需要先生成有效报告大纲，才能确认大纲并进入资料采集。",
+            "请先让助手补齐 `plan/outline.md`，再确认大纲。",
+        ),
+        "review_started_at": (
+            "_has_effective_report_draft",
+            "report_draft_v1.md",
+            "需要先形成有效报告正文，才能进入质量审查。",
+            "请先让助手写入有效正文草稿，再开始审查。",
+        ),
+        "review_passed_at": (
+            "_has_effective_review_checklist",
+            "plan/review-checklist.md",
+            "需要先完成有效审查清单，才能标记审查通过。",
+            "请先让助手补齐 `plan/review-checklist.md`，再确认审查通过。",
+        ),
+        "presentation_ready_at": (
+            "_has_effective_presentation_plan",
+            "plan/presentation-plan.md",
+            "需要先完成有效演示方案，才能标记演示准备完成。",
+            "请先让助手补齐 `plan/presentation-plan.md`，再确认演示准备完成。",
+        ),
+        "delivery_archived_at": (
+            "_has_effective_delivery_log",
+            "plan/delivery-log.md",
+            "需要先记录有效交付归档信息，才能结束项目。",
+            "请先让助手补齐 `plan/delivery-log.md`，再归档结束项目。",
+        ),
+    }
 
     def _stage_checkpoints_path(self, project_path):
         return Path(project_path) / self.STAGE_CHECKPOINTS_FILENAME
@@ -261,6 +293,22 @@ class SkillEngine:
 
         raw.pop(key, None)
         self._write_raw_stage_checkpoints(project_path, raw)
+
+    def get_stage_checkpoint_prereq_notice(self, key: str) -> dict | None:
+        prereq = self.CHECKPOINT_PREREQ.get(key)
+        if not prereq:
+            return None
+        _, path, reason, user_action = prereq
+        return {"path": path, "reason": reason, "user_action": user_action}
+
+    def _validate_stage_checkpoint_prereq(self, project_path: Path, key: str) -> None:
+        prereq = self.CHECKPOINT_PREREQ.get(key)
+        if not prereq:
+            return
+        validator_name, path, reason, _ = prereq
+        validator = getattr(self, validator_name)
+        if not validator(project_path):
+            raise ValueError(f"{reason} 缺少前置文件: {path}")
 
     def _resolve_length_targets(self, project_path):
         overview_path = project_path / "plan" / "project-overview.md"
@@ -1071,6 +1119,7 @@ class SkillEngine:
         lock = _get_project_request_lock(project_id)
         with lock:
             if action == "set":
+                self._validate_stage_checkpoint_prereq(project_path, key)
                 timestamp = self._save_stage_checkpoint(project_path, key)
                 self._sync_stage_tracking_files(project_path)
                 return {"status": "ok", "key": key, "timestamp": timestamp}

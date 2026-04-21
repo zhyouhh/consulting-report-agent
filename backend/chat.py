@@ -3051,13 +3051,20 @@ class ChatHandler:
             detected = self._detect_stage_keyword(user_message, current_stage)
             if detected:
                 action, key = detected
-                lock = self._get_project_request_lock(project_id)
-                with lock:
-                    if action == "set":
-                        self.skill_engine._save_stage_checkpoint(project_path, key)
+                try:
+                    self.skill_engine.record_stage_checkpoint(project_id, key, action)
+                except ValueError as exc:
+                    notice = self.skill_engine.get_stage_checkpoint_prereq_notice(key)
+                    if action == "set" and notice:
+                        self._emit_system_notice_once(
+                            category="checkpoint_prereq_missing",
+                            path=notice["path"],
+                            reason=notice["reason"],
+                            user_action=notice["user_action"],
+                        )
                     else:
-                        self.skill_engine._clear_stage_checkpoint_cascade(project_path, key)
-                    self.skill_engine._sync_stage_tracking_files(project_path)
+                        raise exc
+                else:
                     self._turn_context["checkpoint_event"] = {"action": action, "key": key}
         self._turn_context["can_write_non_plan"] = self._should_allow_non_plan_write(project_id, user_message)
         return self._turn_context

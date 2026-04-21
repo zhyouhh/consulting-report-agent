@@ -1450,6 +1450,7 @@ class SkillEngineTests(unittest.TestCase):
 
     def test_record_stage_checkpoint_set_and_clear_roundtrip(self):
         project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
 
         result = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
         self.assertEqual(result["status"], "ok")
@@ -1459,3 +1460,12 @@ class SkillEngineTests(unittest.TestCase):
         cleared = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "clear")
         self.assertEqual(cleared, {"status": "ok", "key": "outline_confirmed_at", "cleared": True})
         self.assertNotIn("outline_confirmed_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_record_stage_checkpoint_rejects_outline_confirmation_without_effective_outline(self):
+        project_dir = self._make_project()
+
+        with self.assertRaises(ValueError):
+            self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+
+        self.assertNotIn("outline_confirmed_at", self.engine._read_raw_stage_checkpoints(project_dir))
+        self.assertEqual(self.engine._load_stage_checkpoints(project_dir), {})

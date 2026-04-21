@@ -67,6 +67,29 @@ class ChatRuntimeTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _write_stage_one_prerequisites(self, project_dir: Path):
+        self._write_evidence_gate_prerequisites(project_dir)
+        (project_dir / "plan" / "outline.md").write_text(
+            "# Report outline\n\n"
+            "## Executive summary\n"
+            "- Summarize the AI strategy recommendation.\n"
+            "## Market context\n"
+            "- Explain adoption pressure and executive tradeoffs.\n"
+            "## Recommendations\n"
+            "- Prioritize operating model changes and governance steps.\n",
+            encoding="utf-8",
+        )
+        (project_dir / "plan" / "research-plan.md").write_text(
+            "# Research plan\n\n"
+            "## Research methods\n"
+            "- Interview department owners and review internal adoption metrics.\n"
+            "## Data sources\n"
+            "- Use CRM exports, operating reports, and external benchmark studies.\n"
+            "## Execution steps\n"
+            "- Collect evidence, map themes, and synthesize findings.\n",
+            encoding="utf-8",
+        )
+
     def _make_chunk(self, *, content=None, tool_calls=None):
         delta = SimpleNamespace(content=content, tool_calls=tool_calls)
         return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
@@ -2793,6 +2816,7 @@ class ChatRuntimeTests(unittest.TestCase):
         from backend.chat import _get_project_request_lock as module_lock
 
         handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
 
         module_obj = module_lock(self.project_id)
         instance_obj = handler._get_project_request_lock(self.project_id)
@@ -5958,6 +5982,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_build_turn_context_sets_outline_checkpoint_from_keyword(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
 
         handler._build_turn_context(self.project_id, "确认大纲，开始写")
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
@@ -5968,6 +5993,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_build_turn_context_records_checkpoint_event_on_set(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
 
         handler._turn_context = handler._build_turn_context(self.project_id, "确认大纲")
 
@@ -6042,9 +6068,33 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "继续"))
 
     @mock.patch("backend.chat.OpenAI")
+    def test_build_turn_context_does_not_confirm_outline_without_effective_outline(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        turn_context = handler._build_turn_context(self.project_id, "没问题，继续吧")
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+
+        self.assertNotIn("outline_confirmed_at", checkpoints)
+        self.assertIsNone(turn_context["checkpoint_event"])
+        self.assertEqual(
+            turn_context["pending_system_notices"],
+            [
+                {
+                    "type": "system_notice",
+                    "category": "checkpoint_prereq_missing",
+                    "path": "plan/outline.md",
+                    "reason": "需要先生成有效报告大纲，才能确认大纲并进入资料采集。",
+                    "user_action": "请先让助手补齐 `plan/outline.md`，再确认大纲。",
+                }
+            ],
+        )
+
+    @mock.patch("backend.chat.OpenAI")
     def test_build_turn_context_confirm_outline_turn_immediately_allows_non_plan_write(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
 
         turn_context = handler._build_turn_context(self.project_id, "确认大纲")
 
