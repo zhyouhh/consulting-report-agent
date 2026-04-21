@@ -9,6 +9,7 @@ import {
   shouldContinueSseStream,
   splitAssistantMessageBlocks,
   shouldFlushStreamingQueueImmediately,
+  stripStageAckTags,
   takeStreamingTextSlice,
 } from "../src/utils/chatPresentation.js";
 
@@ -121,5 +122,42 @@ test("getStreamResponseError extracts json error detail for non-ok responses", a
   assert.equal(
     await getStreamResponseError(response),
     "transient_attachments 只允许图片类型",
+  );
+});
+
+test("stripStageAckTags removes valid-key assistant tag", () => {
+  assert.equal(
+    stripStageAckTags('<stage-ack action="set">interview_done</stage-ack>\n正文继续'),
+    "正文继续",
+  );
+});
+
+test("stripStageAckTags removes unknown-key tag too", () => {
+  assert.equal(
+    stripStageAckTags('<stage-ack action="set">unknown_key_xyz</stage-ack>\n正文继续'),
+    "正文继续",
+  );
+});
+
+test("stripStageAckTags removes clear-action tag", () => {
+  assert.equal(
+    stripStageAckTags('<stage-ack action="clear">interview_done</stage-ack>'),
+    "",
+  );
+});
+
+test("stripStageAckTags preserves no-tag content", () => {
+  assert.equal(
+    stripStageAckTags("这是普通正文，没有任何 tag。"),
+    "这是普通正文，没有任何 tag。",
+  );
+});
+
+test("splitAssistantMessageBlocks applies stripStageAckTags first", () => {
+  assert.deepEqual(
+    splitAssistantMessageBlocks(
+      '<stage-ack action="set">interview_done</stage-ack>\n正文段落',
+    ),
+    [{ type: "text", content: "正文段落" }],
   );
 });

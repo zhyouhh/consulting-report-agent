@@ -52,8 +52,18 @@ export async function getStreamResponseError(response) {
   }
 }
 
+const STAGE_ACK_TAG_RE = /<stage-ack(?:\s+action="(?:set|clear)")?>[a-z_0-9]+<\/stage-ack>/gi;
+
+export function stripStageAckTags(content = "") {
+  if (!content.toLowerCase().includes("<stage-ack")) {
+    return content;
+  }
+  return content.replace(STAGE_ACK_TAG_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function splitAssistantMessageBlocks(content = "") {
-  const lines = content.split("\n");
+  const safeContent = stripStageAckTags(content);
+  const lines = safeContent.split("\n");
   const blocks = [];
   let textBuffer = [];
 
