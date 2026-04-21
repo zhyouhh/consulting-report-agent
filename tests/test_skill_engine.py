@@ -923,6 +923,55 @@ class SkillEngineTests(unittest.TestCase):
             self._assert_items_include(summary["completed_items"], "data-log.md")
             self._assert_items_include(summary["next_actions"], "analysis-notes.md")
 
+    def test_count_valid_data_log_sources_accepts_dl_id_entries_with_source_markers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            (project_dir / "plan" / "data-log.md").write_text(
+                "# Data log\n\n"
+                "### [DL-2024-01] 财政部数据资源暂行规定\n"
+                "- **来源**：财政部\n"
+                "- **时间**：2024-01-01\n"
+                "- **URL**：https://www.example.com/policy\n"
+                "- **用途**：政策基石，用于第一章背景部分\n\n"
+                "### [DL-2024-02] 内部材料中的预算口径\n"
+                "- **来源**：预算模型\n"
+                "- **时间**：2024-01-02\n"
+                "- **URL**：material:mat-123\n"
+                "- **用途**：用于测算假设\n\n"
+                "### [DL-2024-03] 运营负责人访谈\n"
+                "- **来源**：运营负责人\n"
+                "- **时间**：2024-01-03\n"
+                "访谈:运营负责人-2024-01-03\n"
+                "- **用途**：用于识别执行阻力\n\n"
+                "### [DL-2024-04] 客户调研反馈\n"
+                "- **来源**：客户问卷\n"
+                "- **时间**：2024-01-04\n"
+                "调研:客户问卷-2024-01-04\n"
+                "- **用途**：用于需求优先级判断\n",
+                encoding="utf-8",
+            )
+
+            count = engine._count_valid_data_log_sources(project_dir)
+
+        self.assertEqual(count, 4)
+
+    def test_count_valid_data_log_sources_ignores_markdown_table_rows_even_with_source_urls(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine, project_dir = self._create_engine_and_project(tmpdir)
+            (project_dir / "plan" / "data-log.md").write_text(
+                "# Data log\n\n"
+                "| 时间 | 来源 | 事实描述 | 用途 |\n"
+                "| --- | --- | --- | --- |\n"
+                "| 2024-01-01 | https://www.example.com/policy | 政策发布 | 背景 |\n"
+                "| 2024-01-02 | material:mat-123 | 内部预算口径 | 测算 |\n"
+                "| 2024-01-03 | 访谈:运营负责人-2024-01-03 | 执行阻力 | 访谈证据 |\n",
+                encoding="utf-8",
+            )
+
+            count = engine._count_valid_data_log_sources(project_dir)
+
+        self.assertEqual(count, 0)
+
     def test_workspace_summary_keeps_stage_at_s2_when_data_log_only_contains_placeholder_rows_after_small_edit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
