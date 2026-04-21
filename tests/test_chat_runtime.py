@@ -3543,7 +3543,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("fetch_url", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_handler_write_file_rejects_outline_before_evidence_gate_is_satisfied(self, mock_openai):
+    def test_handler_write_file_rejects_outline_in_s0_before_evidence_gate(self, mock_openai):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
             workspace_dir = Path(tmpdir) / "workspace"
@@ -3576,12 +3576,10 @@ class ChatRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("notes.md", result["message"])
-        self.assertIn("references.md", result["message"])
-        self.assertIn("2-source", result["message"])
+        self.assertIn("S0 阶段", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_handler_write_file_rejects_outline_when_references_have_only_one_source(self, mock_openai):
+    def test_handler_write_file_rejects_outline_in_s0_with_one_reference_source(self, mock_openai):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
             workspace_dir = Path(tmpdir) / "workspace"
@@ -3615,10 +3613,10 @@ class ChatRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("2-source", result["message"])
+        self.assertIn("S0 阶段", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_handler_write_file_rejects_research_plan_before_evidence_gate_is_satisfied(self, mock_openai):
+    def test_handler_write_file_rejects_research_plan_in_s0_before_evidence_gate(self, mock_openai):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
             workspace_dir = Path(tmpdir) / "workspace"
@@ -3651,12 +3649,10 @@ class ChatRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("notes.md", result["message"])
-        self.assertIn("references.md", result["message"])
-        self.assertIn("2-source", result["message"])
+        self.assertIn("S0 阶段", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_handler_write_file_rejects_research_plan_when_references_have_only_one_source(self, mock_openai):
+    def test_handler_write_file_rejects_research_plan_in_s0_with_one_reference_source(self, mock_openai):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
             workspace_dir = Path(tmpdir) / "workspace"
@@ -3690,7 +3686,7 @@ class ChatRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("2-source", result["message"])
+        self.assertIn("S0 阶段", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_handler_write_file_allows_outline_after_evidence_gate_is_satisfied(self, mock_openai):
@@ -4045,7 +4041,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertTrue(notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_write_file_emits_data_log_format_notice_on_first_data_log_write(self, mock_openai):
+    def test_write_file_blocks_data_log_format_hint_write_in_s0(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
         (self.project_dir / "plan" / "data-log.md").unlink()
@@ -4074,12 +4070,13 @@ class ChatRuntimeTests(unittest.TestCase):
 
         notices = handler._turn_context.get("pending_system_notices", [])
 
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("S0 阶段", result["message"])
         self.assertEqual(len(notices), 1)
-        self.assertEqual(notices[0]["category"], "data_log_format_hint")
+        self.assertEqual(notices[0]["category"], "s0_write_blocked")
         self.assertEqual(notices[0]["path"], "plan/data-log.md")
-        self.assertIn("### [DL-YYYY-NN]", notices[0]["reason"])
-        self.assertIn("表格", notices[0]["user_action"])
+        self.assertIn("资料清单", notices[0]["reason"])
+        self.assertIn("SKILL.md §S0", notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_notice_deduplicated_within_turn(self, mock_openai):
@@ -6291,4 +6288,86 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in NonPlanWriteS0S1PatchTests.__dict__
     ):
         setattr(NonPlanWriteS0S1PatchTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class S0WriteFileGateTests(ChatRuntimeTests):
+    S0_BLOCKED = [
+        "plan/outline.md",
+        "plan/research-plan.md",
+        "plan/data-log.md",
+        "plan/analysis-notes.md",
+    ]
+    S0_ALLOWED = [
+        "plan/notes.md",
+        "plan/references.md",
+        "plan/project-overview.md",
+    ]
+
+    def _make_tool_call(self, file_path, content):
+        import json
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            id="call-test",
+            function=SimpleNamespace(
+                name="write_file",
+                arguments=json.dumps({"file_path": file_path, "content": content}),
+            ),
+        )
+
+    def test_s0_blocks_each_of_four_files(self):
+        handler = self._make_handler_with_project()
+        for path in self.S0_BLOCKED:
+            tool_call = self._make_tool_call(path, "# content\n" * 5)
+            result = handler._execute_tool(self.project_id, tool_call)
+            self.assertEqual(result["status"], "error", f"{path} should be blocked")
+            self.assertIn("S0 阶段", result["message"])
+
+    def test_s0_allows_non_blocked_plan_files(self):
+        handler = self._make_handler_with_project()
+        for path in self.S0_ALLOWED:
+            tool_call = self._make_tool_call(path, "# content\n" * 5)
+            result = handler._execute_tool(self.project_id, tool_call)
+            self.assertEqual(
+                result["status"], "success", f"{path} should be allowed"
+            )
+
+    def test_s0_write_emits_system_notice(self):
+        handler = self._make_handler_with_project()
+        tool_call = self._make_tool_call("plan/outline.md", "# x\n")
+        handler._execute_tool(self.project_id, tool_call)
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertTrue(any(
+            "S0 阶段" in n.get("reason", "") for n in notices
+        ))
+
+    def test_s0_write_notice_mentions_analysis_notes(self):
+        handler = self._make_handler_with_project()
+        tool_call = self._make_tool_call("plan/analysis-notes.md", "# x\n")
+        handler._execute_tool(self.project_id, tool_call)
+        notices = handler._turn_context.get("pending_system_notices", [])
+        # Reason must list all four file categories per §1 spec
+        reason_text = " ".join(n.get("reason", "") for n in notices)
+        self.assertIn("分析笔记", reason_text)
+
+    def test_post_s0_outline_write_not_blocked(self):
+        import json
+        handler = self._make_handler_with_project()
+        (self.project_dir / "stage_checkpoints.json").write_text(
+            json.dumps({"s0_interview_done_at": "2026-04-21T10:00:00"}),
+            encoding="utf-8",
+        )
+        self._write_evidence_gate_prerequisites(self.project_dir)
+        tool_call = self._make_tool_call("plan/outline.md", "# 大纲\n## 章节\n" * 3)
+        result = handler._execute_tool(self.project_id, tool_call)
+        # S1 stage — outline.md is the expected write, should succeed
+        self.assertEqual(result["status"], "success")
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in S0WriteFileGateTests.__dict__
+    ):
+        setattr(S0WriteFileGateTests, _inherited_test_name, None)
 del _inherited_test_name

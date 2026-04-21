@@ -155,6 +155,12 @@ class ChatHandler:
         "补写",
         "丰富",
     ]
+    _S0_BLOCKED_PLAN_FILES = frozenset({
+        "plan/outline.md",
+        "plan/research-plan.md",
+        "plan/data-log.md",
+        "plan/analysis-notes.md",
+    })
     _STRONG_ADVANCE_KEYWORDS = {
         "s0_interview_done_at": ["跳过访谈", "不用问了", "先写大纲吧", "够了开始吧", "直接开始"],
         "outline_confirmed_at": ["确认大纲", "大纲没问题", "按这个大纲写", "就这个大纲", "就按这个版本"],
@@ -2131,6 +2137,30 @@ class ChatHandler:
             args = json.loads(tool_call.function.arguments)
 
             if func_name == "write_file":
+                normalized_early = self.skill_engine._to_posix(
+                    args["file_path"]
+                ).lstrip("/")
+                project_path = self.skill_engine.get_project_path(project_id)
+                if (
+                    project_path
+                    and normalized_early in self._S0_BLOCKED_PLAN_FILES
+                ):
+                    stage_state = self.skill_engine._infer_stage_state(project_path)
+                    if stage_state.get("stage_code") == "S0":
+                        reason = (
+                            "S0 阶段：请先对 seed 做一轮澄清，"
+                            "再写大纲/研究计划/资料清单/分析笔记"
+                        )
+                        self._emit_system_notice_once(
+                            category="s0_write_blocked",
+                            path=normalized_early,
+                            reason=reason,
+                            user_action=(
+                                "请先按 SKILL.md §S0 发一轮 3-5 个打包追问，"
+                                "用户回答或跳过后再写正式产出文件。"
+                            ),
+                        )
+                        return {"status": "error", "message": reason}
                 if self._should_block_non_plan_write(project_id, args["file_path"]):
                     reason = "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。"
                     self._emit_system_notice_once(
