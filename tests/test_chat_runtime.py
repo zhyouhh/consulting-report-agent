@@ -3402,7 +3402,7 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertFalse(handler._should_allow_non_plan_write(project["id"], "继续"))
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_allow_non_plan_write_when_user_says_start_writing_plainly(self, mock_openai):
+    def test_should_block_non_plan_write_when_user_says_start_writing_plainly_in_s0(self, mock_openai):
         del mock_openai
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -3419,7 +3419,7 @@ class ChatRuntimeTests(unittest.TestCase):
             )
             handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
 
-            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "你开始写吧"))
+            self.assertFalse(handler._should_allow_non_plan_write(project["id"], "你开始写吧"))
 
     @mock.patch("backend.chat.OpenAI")
     def test_should_allow_non_plan_write_when_content_final_report_exists_and_user_asks_to_continue(self, mock_openai):
@@ -3443,6 +3443,9 @@ class ChatRuntimeTests(unittest.TestCase):
                 "# Final report\n\n## Executive summary\nA concrete section.\n",
                 encoding="utf-8",
             )
+            engine._save_stage_checkpoint(project_dir, "s0_interview_done_at")
+            self._write_stage_one_prerequisites(project_dir)
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
             handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
 
             self.assertTrue(handler._should_allow_non_plan_write(project["id"], "继续完善"))
@@ -6119,11 +6122,21 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_allow_non_plan_write_preserves_existing_start_writing_fallback(self, mock_openai):
+    def test_should_allow_non_plan_write_preserves_start_writing_fallback_after_outline_confirmed(
+        self, mock_openai
+    ):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
+        self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
 
-        self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "开始写"))
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value={"stage_code": "S2"},
+        ):
+            self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "开始写"))
 
 
 class KeywordTableRestructureTests(unittest.TestCase):
@@ -6236,4 +6249,59 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in S0SoftGateTests.__dict__
     ):
         setattr(S0SoftGateTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class NonPlanWriteS0S1PatchTests(ChatRuntimeTests):
+    def _set_checkpoints(self, checkpoints):
+        import json
+        (self.project_dir / "stage_checkpoints.json").write_text(
+            json.dumps(checkpoints), encoding="utf-8"
+        )
+
+    def test_s0_stage_direct_start_keyword_blocked(self):
+        handler = self._make_handler_with_project()
+        # project is fresh — stage should be S0 (no s0_interview_done_at yet)
+        self.assertFalse(
+            handler._should_allow_non_plan_write(self.project_id, "开始写")
+        )
+
+    def test_s1_without_outline_confirmed_blocked(self):
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        # S1 (s0 done, no outline yet) should still block
+        self.assertFalse(
+            handler._should_allow_non_plan_write(self.project_id, "开始写报告")
+        )
+
+    def test_s4_with_outline_confirmed_allows_direct_start(self):
+        handler = self._make_handler_with_project()
+        # Advance to S4 by setting the relevant checkpoints
+        self._set_checkpoints({
+            "s0_interview_done_at": "2026-04-21T10:00:00",
+            "outline_confirmed_at": "2026-04-21T11:00:00",
+        })
+        # Also create the effective outline / research-plan etc. to pass
+        # _infer_stage_state — or just assert the S0/S1 patch: the patch
+        # checks `stage_code in {S0, S1}` — so any stage outside that
+        # set passes the patch. We need to set up enough fixture to reach
+        # S4 in _infer_stage_state. The simplest way is to set outline
+        # confirmed AND enough downstream flags. For this unit test we
+        # test the PATCH, not _infer_stage_state itself: mock it.
+        from unittest import mock
+        with mock.patch.object(
+            handler.skill_engine, "_infer_stage_state",
+            return_value={"stage_code": "S4"},
+        ):
+            self.assertTrue(
+                handler._should_allow_non_plan_write(self.project_id, "开始写正文")
+            )
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in NonPlanWriteS0S1PatchTests.__dict__
+    ):
+        setattr(NonPlanWriteS0S1PatchTests, _inherited_test_name, None)
 del _inherited_test_name

@@ -3128,6 +3128,17 @@ class ChatHandler:
                     return True
 
         if any(keyword in normalized for keyword in self.NON_PLAN_WRITE_ALLOW_KEYWORDS):
+            # §7 patch: S0/S1 without outline_confirmed_at must not bypass via
+            # generic "开始写" allow-keyword; otherwise user's innocuous
+            # "开始写" would both set s0 and open non-plan writes, skipping
+            # outline confirmation entirely.
+            if project_path:
+                stage_state = self.skill_engine._infer_stage_state(project_path)
+                stage_code = stage_state.get("stage_code")
+                if stage_code in {"S0", "S1"}:
+                    checkpoints = self.skill_engine._load_stage_checkpoints(project_path)
+                    if "outline_confirmed_at" not in checkpoints:
+                        return False
             return True
 
         if self._looks_like_follow_up_non_plan_request(normalized):
