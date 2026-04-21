@@ -3008,6 +3008,24 @@ class ChatHandler:
                 idx = text.find(phrase, idx + 1)
         return False
 
+    def _has_prior_s0_assistant_turn(self, project_id: str) -> bool:
+        """Return True if the project's conversation history contains at
+        least one role=='assistant' message.
+
+        Per spec §3 S0 soft gate: s0_interview_done_at strong keyword /
+        stage-ack tag only fires after the assistant has already delivered
+        at least one turn (typically the mandatory S0 clarification block).
+        Frontend-assembled welcome messages are role=user and don't count.
+        Tool role also doesn't count.
+        """
+        if not project_id:
+            return False
+        try:
+            conv = self._load_conversation(project_id)
+        except Exception:
+            return False
+        return any(m.get("role") == "assistant" for m in conv)
+
     def _detect_stage_keyword(
         self,
         user_message: str,
@@ -3035,6 +3053,12 @@ class ChatHandler:
 
         if advance_hits:
             key = max(advance_hits, key=lambda k: self._STAGE_RANK.get(k, 0))
+            # S0 soft gate: reject s0 set unless at least one assistant turn exists
+            if (
+                key == "s0_interview_done_at"
+                and not self._has_prior_s0_assistant_turn(project_id)
+            ):
+                return None
             return ("set", key)
 
         return None

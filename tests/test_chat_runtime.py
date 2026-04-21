@@ -6173,3 +6173,67 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(WeakKeywordNoLongerTriggersTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class S0SoftGateTests(ChatRuntimeTests):
+    def _write_conversation(self, messages):
+        import json
+        (self.project_dir / "conversation.json").write_text(
+            json.dumps(messages, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def test_has_prior_assistant_true_when_assistant_exists(self):
+        handler = self._make_handler_with_project()
+        self._write_conversation([
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "请回答：1) 读者是谁？"},
+        ])
+        self.assertTrue(handler._has_prior_s0_assistant_turn(self.project_id))
+
+    def test_has_prior_assistant_false_when_only_user(self):
+        handler = self._make_handler_with_project()
+        self._write_conversation([{"role": "user", "content": "你好"}])
+        self.assertFalse(handler._has_prior_s0_assistant_turn(self.project_id))
+
+    def test_tool_role_does_not_count(self):
+        handler = self._make_handler_with_project()
+        self._write_conversation([
+            {"role": "user", "content": "你好"},
+            {"role": "tool", "content": "..."},
+        ])
+        self.assertFalse(handler._has_prior_s0_assistant_turn(self.project_id))
+
+    def test_s0_strong_keyword_before_any_assistant_ignored(self):
+        handler = self._make_handler_with_project()
+        self._write_conversation([{"role": "user", "content": "你好"}])
+        result = handler._detect_stage_keyword(
+            "直接开始", "S0", self.project_id
+        )
+        self.assertIsNone(result)
+
+    def test_s0_strong_keyword_after_assistant_triggers(self):
+        handler = self._make_handler_with_project()
+        self._write_conversation([
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "请回答：1) 读者是谁？"},
+        ])
+        result = handler._detect_stage_keyword(
+            "不用问了", "S0", self.project_id
+        )
+        self.assertEqual(result, ("set", "s0_interview_done_at"))
+
+    def test_s0_without_project_id_rejects_s0_set(self):
+        # Safety: if caller forgets project_id, s0 soft gate must err on the
+        # side of not triggering (better to miss a set than to bypass the gate).
+        handler = self._make_handler_with_project()
+        result = handler._detect_stage_keyword("直接开始", "S0", None)
+        self.assertIsNone(result)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in S0SoftGateTests.__dict__
+    ):
+        setattr(S0SoftGateTests, _inherited_test_name, None)
+del _inherited_test_name
