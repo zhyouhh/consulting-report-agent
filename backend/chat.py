@@ -156,17 +156,12 @@ class ChatHandler:
         "丰富",
     ]
     _STRONG_ADVANCE_KEYWORDS = {
+        "s0_interview_done_at": ["跳过访谈", "不用问了", "先写大纲吧", "够了开始吧", "直接开始"],
         "outline_confirmed_at": ["确认大纲", "大纲没问题", "按这个大纲写", "就这个大纲", "就按这个版本"],
         "review_started_at": ["开始审查", "进入审查", "可以审查了", "开始 review"],
         "review_passed_at": ["审查通过", "审查没问题", "报告可以交付"],
         "presentation_ready_at": ["演示准备好了", "演示准备完成", "PPT 完成", "讲稿完成"],
         "delivery_archived_at": ["归档结束项目", "项目交付完成", "交付归档"],
-    }
-    _WEAK_ADVANCE_BY_STAGE = {
-        "S1": (["行", "可以", "同意", "没问题", "OK", "ok", "好的", "挺好的"], "outline_confirmed_at"),
-        "S5": (["行", "可以", "挺好", "通过", "没问题"], "review_passed_at"),
-        "S6": (["行", "可以", "OK", "ok"], "presentation_ready_at"),
-        "S7": (["行", "可以", "归档吧"], "delivery_archived_at"),
     }
     _ROLLBACK_KEYWORDS = {
         "outline_confirmed_at": ["大纲再改下", "大纲还要调整", "回去改大纲", "先别写了，大纲有问题"],
@@ -3013,7 +3008,12 @@ class ChatHandler:
                 idx = text.find(phrase, idx + 1)
         return False
 
-    def _detect_stage_keyword(self, user_message: str, current_stage: str) -> tuple[str, str] | None:
+    def _detect_stage_keyword(
+        self,
+        user_message: str,
+        current_stage: str,
+        project_id: str | None = None,  # For Task I S0 soft gate
+    ) -> tuple[str, str] | None:
         if not user_message:
             return None
         trimmed = user_message.strip()
@@ -3032,11 +3032,6 @@ class ChatHandler:
         for key, phrases in self._STRONG_ADVANCE_KEYWORDS.items():
             if self._phrase_hits(trimmed, phrases):
                 advance_hits.append(key)
-        weak_entry = self._WEAK_ADVANCE_BY_STAGE.get(current_stage)
-        if weak_entry:
-            phrases, target_key = weak_entry
-            if self._phrase_hits(trimmed, phrases):
-                advance_hits.append(target_key)
 
         if advance_hits:
             key = max(advance_hits, key=lambda k: self._STAGE_RANK.get(k, 0))
@@ -3050,7 +3045,7 @@ class ChatHandler:
         if project_path:
             summary = self.skill_engine.get_workspace_summary(project_id)
             current_stage = summary.get("stage_code", "S0")
-            detected = self._detect_stage_keyword(user_message, current_stage)
+            detected = self._detect_stage_keyword(user_message, current_stage, project_id)
             if detected:
                 action, key = detected
                 try:

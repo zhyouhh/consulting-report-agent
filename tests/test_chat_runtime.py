@@ -5872,14 +5872,11 @@ class ChatRuntimeTests(unittest.TestCase):
             )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_detect_stage_keyword_weak_can_only_advances_on_allowed_stage(self, mock_openai):
+    def test_detect_stage_keyword_weak_can_no_longer_advances_on_any_stage(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
 
-        self.assertEqual(
-            handler._detect_stage_keyword("可以", "S1"),
-            ("set", "outline_confirmed_at"),
-        )
+        self.assertIsNone(handler._detect_stage_keyword("可以", "S1"))
         self.assertIsNone(handler._detect_stage_keyword("可以", "S4"))
 
     @mock.patch("backend.chat.OpenAI")
@@ -5891,14 +5888,11 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertIsNone(handler._detect_stage_keyword(message, "S4"))
 
     @mock.patch("backend.chat.OpenAI")
-    def test_detect_stage_keyword_s5_weak_can_advances_review_passed(self, mock_openai):
+    def test_detect_stage_keyword_s5_weak_can_no_longer_advances_review_passed(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
 
-        self.assertEqual(
-            handler._detect_stage_keyword("可以", "S5"),
-            ("set", "review_passed_at"),
-        )
+        self.assertIsNone(handler._detect_stage_keyword("可以", "S5"))
 
     @mock.patch("backend.chat.OpenAI")
     def test_detect_stage_keyword_question_does_not_trigger(self, mock_openai):
@@ -5919,13 +5913,13 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_detect_stage_keyword_strong_plus_weak_takes_highest_stage_rank(self, mock_openai):
+    def test_detect_stage_keyword_weak_suffix_no_longer_overrides_strong_hit(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
 
         self.assertEqual(
             handler._detect_stage_keyword("审查通过归档吧", "S7"),
-            ("set", "delivery_archived_at"),
+            ("set", "review_passed_at"),
         )
 
     @mock.patch("backend.chat.OpenAI")
@@ -6071,7 +6065,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertFalse(handler._should_allow_non_plan_write(self.project_id, "继续"))
 
     @mock.patch("backend.chat.OpenAI")
-    def test_build_turn_context_does_not_confirm_outline_without_effective_outline(self, mock_openai):
+    def test_build_turn_context_weak_affirmation_has_no_checkpoint_side_effect(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
@@ -6081,18 +6075,7 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertNotIn("outline_confirmed_at", checkpoints)
         self.assertIsNone(turn_context["checkpoint_event"])
-        self.assertEqual(
-            turn_context["pending_system_notices"],
-            [
-                {
-                    "type": "system_notice",
-                    "category": "checkpoint_prereq_missing",
-                    "path": "plan/outline.md",
-                    "reason": "需要先生成有效报告大纲，才能确认大纲并进入资料采集。",
-                    "user_action": "请先让助手补齐 `plan/outline.md`，再确认大纲。",
-                }
-            ],
-        )
+        self.assertEqual(turn_context["pending_system_notices"], [])
 
     @mock.patch("backend.chat.OpenAI")
     def test_build_turn_context_confirm_outline_turn_immediately_allows_non_plan_write(self, mock_openai):
@@ -6114,3 +6097,52 @@ class ChatRuntimeTests(unittest.TestCase):
         handler = self._make_handler_with_project()
 
         self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "开始写"))
+
+
+class KeywordTableRestructureTests(unittest.TestCase):
+    def test_weak_advance_table_absent(self):
+        from backend.chat import ChatHandler
+        self.assertFalse(
+            hasattr(ChatHandler, "_WEAK_ADVANCE_BY_STAGE"),
+            "_WEAK_ADVANCE_BY_STAGE must be removed per spec",
+        )
+
+    def test_s0_strong_keywords_present(self):
+        from backend.chat import ChatHandler
+        self.assertIn("s0_interview_done_at", ChatHandler._STRONG_ADVANCE_KEYWORDS)
+        for phrase in ["跳过访谈", "不用问了", "先写大纲吧", "够了开始吧", "直接开始"]:
+            self.assertIn(
+                phrase,
+                ChatHandler._STRONG_ADVANCE_KEYWORDS["s0_interview_done_at"],
+            )
+
+    def test_stage_rank_has_s0_first(self):
+        from backend.chat import ChatHandler
+        self.assertEqual(ChatHandler._STAGE_RANK["s0_interview_done_at"], 0)
+        self.assertEqual(ChatHandler._STAGE_RANK["outline_confirmed_at"], 1)
+
+
+class WeakKeywordNoLongerTriggersTests(ChatRuntimeTests):
+    def test_ok_in_s1_returns_none(self):
+        handler = self._make_handler_with_project()
+        result = handler._detect_stage_keyword("OK", "S1", self.project_id)
+        self.assertIsNone(result)
+
+    def test_keyi_in_s5_returns_none(self):
+        handler = self._make_handler_with_project()
+        result = handler._detect_stage_keyword("可以", "S5", self.project_id)
+        self.assertIsNone(result)
+
+    def test_strong_keyword_still_works(self):
+        handler = self._make_handler_with_project()
+        result = handler._detect_stage_keyword("确认大纲", "S1", self.project_id)
+        self.assertEqual(result, ("set", "outline_confirmed_at"))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in WeakKeywordNoLongerTriggersTests.__dict__
+    ):
+        setattr(WeakKeywordNoLongerTriggersTests, _inherited_test_name, None)
+del _inherited_test_name
