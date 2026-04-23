@@ -406,6 +406,45 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertNotIn("The read operation timed out", error_events[0]["data"])
 
     @mock.patch("backend.chat.OpenAI")
+    def test_stream_provider_error_redacts_request_body_when_stream_creation_fails(self, mock_openai):
+        handler = self._make_handler_with_project()
+        secret_message = "SECRET_STREAM_REPORT_TEXT"
+        mock_openai.return_value.chat.completions.create.side_effect = RuntimeError(
+            f"provider echoed request body: {secret_message}"
+        )
+
+        with mock.patch("backend.chat.time.sleep"):
+            events = list(handler.chat_stream(self.project_id, secret_message))
+
+        error_events = [event for event in events if event["type"] == "error"]
+        self.assertEqual(len(error_events), 1)
+        self.assertIn("API调用失败", error_events[0]["data"])
+        self.assertIn("provider echoed request body", error_events[0]["data"])
+        self.assertIn("[redacted]", error_events[0]["data"])
+        self.assertNotIn(secret_message, error_events[0]["data"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_stream_provider_error_redacts_request_body_when_stream_iteration_fails(self, mock_openai):
+        handler = self._make_handler_with_project()
+        secret_message = "SECRET_STREAM_REPORT_TEXT"
+
+        def failing_stream():
+            yield self._make_chunk(content="第一段")
+            raise RuntimeError(f"provider echoed request body: {secret_message}")
+
+        mock_openai.return_value.chat.completions.create.return_value = failing_stream()
+
+        events = list(handler.chat_stream(self.project_id, secret_message))
+
+        self.assertEqual(events[0], {"type": "content", "data": "第一段"})
+        error_events = [event for event in events if event["type"] == "error"]
+        self.assertEqual(len(error_events), 1)
+        self.assertIn("API调用失败", error_events[0]["data"])
+        self.assertIn("provider echoed request body", error_events[0]["data"])
+        self.assertIn("[redacted]", error_events[0]["data"])
+        self.assertNotIn(secret_message, error_events[0]["data"])
+
+    @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_emits_tool_start_as_soon_as_tool_name_arrives(self, mock_openai):
         consumed_chunks = []
 
@@ -3263,7 +3302,7 @@ class ChatRuntimeTests(unittest.TestCase):
                         (),
                         {
                             "name": "write_file",
-                            "arguments": '{"file_path":"report_draft_v1.md","content":"# 正文"}',
+                            "arguments": '{"file_path":"content/report_draft_v1.md","content":"# 正文"}',
                         },
                     )(),
                 },
@@ -3465,14 +3504,1942 @@ class ChatRuntimeTests(unittest.TestCase):
             )
             project_dir = Path(project["project_dir"])
             (project_dir / "content").mkdir(exist_ok=True)
-            (project_dir / "content" / "final-report.md").write_text(
-                "# Final report\n\n## Executive summary\nA concrete section.\n",
+            (project_dir / "content" / "report_draft_v1.md").write_text(
+                "# Draft\n\n## Executive summary\nA concrete section.\n",
                 encoding="utf-8",
             )
             handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
 
             self.assertTrue(handler._should_allow_non_plan_write(project["id"], "请扩写到5000字"))
             self.assertTrue(handler._should_allow_non_plan_write(project["id"], "帮我润色一下现有正文"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_write_file_rejects_legacy_report_draft_paths_with_canonical_hint(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        for legacy_path in (
+            "report_draft_v1.md",
+            "content/report.md",
+            "content/draft.md",
+            "content/final-report.md",
+            "output/final-report.md",
+            "content/report_draft_v5.md",
+        ):
+            with self.subTest(legacy_path=legacy_path):
+                result = handler._execute_tool(
+                    self.project_id,
+                    self._make_tool_call(
+                        "write_file",
+                        json.dumps(
+                            {"file_path": legacy_path, "content": "# Legacy draft"},
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+
+                self.assertEqual(result["status"], "error")
+                self.assertIn("content/report_draft_v1.md", result["message"])
+                self.assertFalse((self.project_dir / legacy_path).exists())
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_append_report_draft_creates_canonical_draft_via_write_gate(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "append_report_draft",
+                json.dumps({"content": "## 第三章：IP 强度对比\n\n" + ("正文" * 80)}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["path"], "content/report_draft_v1.md")
+        self.assertTrue((self.project_dir / "content" / "report_draft_v1.md").exists())
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_append_report_draft_appends_with_clean_blank_line_boundary(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text("# Draft\n\n## 第一章\n\n已有正文\n", encoding="utf-8")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "append_report_draft",
+                json.dumps({"content": "## 第二章\n\n" + ("新增正文" * 60)}, ensure_ascii=False),
+            ),
+        )
+
+        text = draft_path.read_text(encoding="utf-8")
+        self.assertEqual(result["status"], "success")
+        self.assertIn("已有正文\n\n## 第二章", text)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_append_report_draft_rejects_short_content(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "append_report_draft",
+                json.dumps({"content": "## 小结\n\n太短"}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("至少 80", result["message"])
+        self.assertFalse((self.project_dir / "content" / "report_draft_v1.md").exists())
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_append_report_draft_blocked_when_non_plan_write_disallowed(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=False)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "append_report_draft",
+                json.dumps({"content": "## 第三章：IP 强度对比\n\n" + ("正文" * 80)}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("先确认大纲", result["message"])
+        self.assertFalse((self.project_dir / "content" / "report_draft_v1.md").exists())
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_append_report_draft_updates_canonical_workspace_memory(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "append_report_draft",
+                json.dumps({"content": "## 第三章：IP 强度对比\n\n" + ("正文" * 80)}, ensure_ascii=False),
+            ),
+        )
+        state_path = self.project_dir / "conversation_state.json"
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(persisted["memory_entries"]), 1)
+        self.assertEqual(
+            persisted["memory_entries"][0]["source_key"],
+            "file:content/report_draft_v1.md",
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_append_report_draft_success_maps_to_current_turn_source_key(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        current_turn_messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-append",
+                        "type": "function",
+                        "function": {
+                            "name": "append_report_draft",
+                            "arguments": json.dumps(
+                                {"content": "## 第三章：IP 强度对比\n\n" + ("正文" * 80)},
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-append",
+                "content": json.dumps(
+                    {"status": "success", "path": "content/report_draft_v1.md"},
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+        self.assertEqual(
+            handler._current_turn_successful_tool_source_keys(
+                self.project_id,
+                current_turn_messages,
+            ),
+            {"file:content/report_draft_v1.md"},
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_current_turn_successful_tool_source_keys_include_edit_file_success(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        current_turn_messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-edit",
+                        "type": "function",
+                        "function": {
+                            "name": "edit_file",
+                            "arguments": json.dumps(
+                                {
+                                    "file_path": "plan\\notes.md",
+                                    "old_string": "旧内容",
+                                    "new_string": "新内容",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-edit",
+                "content": json.dumps(
+                    {"status": "success", "message": "已写入文件: plan/notes.md"},
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+        self.assertEqual(
+            handler._current_turn_successful_tool_source_keys(
+                self.project_id,
+                current_turn_messages,
+            ),
+            {"file:plan/notes.md"},
+        )
+
+    def _required_write_paths_for_stage(
+        self,
+        handler: ChatHandler,
+        stage_code: str,
+        user_message: str,
+        *,
+        can_write_non_plan: bool = True,
+    ) -> set[str]:
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=can_write_non_plan)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value={"stage_code": stage_code},
+        ):
+            return set(handler._build_required_write_snapshots(self.project_id, user_message))
+
+    def _mock_stage_state(self, stage_code: str) -> dict:
+        return {
+            "stage_code": stage_code,
+            "stage_status": "进行中",
+            "completed_items": [],
+            "skipped_items": [],
+            "checkpoints": {
+                "outline_confirmed_at": "2026-04-23T10:00:00",
+            },
+            "length_targets": {
+                "report_word_floor": 3000,
+                "data_log_min": 0,
+                "analysis_refs_min": 0,
+                "fallback_used": False,
+            },
+            "flags": {},
+        }
+
+    def _write_partial_report_draft(self, body: str = "已有正文") -> Path:
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text("# Draft\n\n## 第一章\n\n" + body + "\n", encoding="utf-8")
+        return draft_path
+
+    def _make_non_stream_response(self, content: str, *, total_tokens: int = 32):
+        return SimpleNamespace(
+            usage=SimpleNamespace(total_tokens=total_tokens),
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=content,
+                        tool_calls=[],
+                    )
+                )
+            ],
+        )
+
+    def _make_non_stream_tool_response(self, tool_call):
+        return SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="",
+                        tool_calls=[tool_call],
+                    )
+                )
+            ],
+        )
+
+    def _make_append_report_tool_call(self, call_id: str = "call-append", content: str | None = None):
+        append_content = content
+        if append_content is None:
+            append_content = "## 第二章：策略建议\n\n" + ("新增正文" * 80)
+        return SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(
+                name="append_report_draft",
+                arguments=json.dumps(
+                    {"content": append_content},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+    def _make_edit_report_tool_call(
+        self,
+        *,
+        old_string: str = "旧结论",
+        new_string: str = "新结论",
+        call_id: str = "call-edit-report",
+    ):
+        return SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(
+                name="edit_file",
+                arguments=json.dumps(
+                    {
+                        "file_path": "content/report_draft_v1.md",
+                        "old_string": old_string,
+                        "new_string": new_string,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+    def _make_write_report_tool_call(
+        self,
+        *,
+        content: str,
+        file_path: str = "content/report_draft_v1.md",
+        call_id: str = "call-write-report",
+    ):
+        return SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(
+                name="write_file",
+                arguments=json.dumps(
+                    {
+                        "file_path": file_path,
+                        "content": content,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+    def _make_append_report_stream_chunk(self, call_id: str = "call-append"):
+        return self._make_chunk(
+            tool_calls=[
+                self._make_stream_tool_call_chunk(
+                    0,
+                    id=call_id,
+                    name="append_report_draft",
+                    arguments=json.dumps(
+                        {"content": "## 第二章：策略建议\n\n" + ("新增正文" * 80)},
+                        ensure_ascii=False,
+                    ),
+                )
+            ]
+        )
+
+    def _make_edit_report_stream_chunk(
+        self,
+        *,
+        old_string: str = "旧结论",
+        new_string: str = "新结论",
+        call_id: str = "call-edit-report",
+    ):
+        return self._make_chunk(
+            tool_calls=[
+                self._make_stream_tool_call_chunk(
+                    0,
+                    id=call_id,
+                    name="edit_file",
+                    arguments=json.dumps(
+                        {
+                            "file_path": "content/report_draft_v1.md",
+                            "old_string": old_string,
+                            "new_string": new_string,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            ]
+        )
+
+    def _read_saved_conversation(self) -> list[dict]:
+        return json.loads(
+            (self.project_dir / "conversation.json").read_text(encoding="utf-8")
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_snapshots_include_canonical_path_for_s4_body_intent(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        for message in ("继续写吧", "写第三章"):
+            with self.subTest(message=message):
+                handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+                self.assertTrue(
+                    handler._message_has_report_body_write_intent(self.project_id, message, "S4")
+                )
+                self.assertEqual(
+                    self._required_write_paths_for_stage(handler, "S4", message),
+                    {"content/report_draft_v1.md"},
+                )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_snapshots_include_contextual_s4_short_continue(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._save_conversation(
+            self.project_id,
+            [
+                {
+                    "role": "assistant",
+                    "content": "若无问题，请回复“继续”，我将补全剩余章节",
+                }
+            ],
+        )
+
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        self.assertTrue(handler._message_has_report_body_write_intent(self.project_id, "继续", "S4"))
+        self.assertEqual(
+            self._required_write_paths_for_stage(handler, "S4", "继续"),
+            {"content/report_draft_v1.md"},
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_report_body_write_intent_ignores_generic_s4_short_continue_prompt(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        for assistant_message in (
+            "如果需要我继续检查资料，请回复“继续”。",
+            "请回复“继续”。",
+            "报告正文已经生成。若无问题，请回复“继续”开始审查。",
+        ):
+            with self.subTest(assistant_message=assistant_message):
+                handler._save_conversation(
+                    self.project_id,
+                    [{"role": "assistant", "content": assistant_message}],
+                )
+                handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+                self.assertFalse(
+                    handler._message_has_report_body_write_intent(self.project_id, "继续", "S4")
+                )
+                self.assertEqual(
+                    self._required_write_paths_for_stage(handler, "S4", "继续"),
+                    set(),
+                )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_report_body_write_intent_uses_latest_s4_short_continue_prompt(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._save_conversation(
+            self.project_id,
+            [
+                {
+                    "role": "assistant",
+                    "content": "若无问题，请回复“继续”，我将补全剩余章节。",
+                },
+                {
+                    "role": "assistant",
+                    "content": "报告正文已写完。若无问题，请回复“继续”开始审查。",
+                },
+            ],
+        )
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        self.assertFalse(handler._message_has_report_body_write_intent(self.project_id, "继续", "S4"))
+        self.assertEqual(
+            self._required_write_paths_for_stage(handler, "S4", "继续"),
+            set(),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_report_body_write_intent_ignores_past_tense_s4_short_continue_prompt(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._save_conversation(
+            self.project_id,
+            [
+                {
+                    "role": "assistant",
+                    "content": "我已经继续写正文。若无问题，请回复“继续”开始审查。",
+                }
+            ],
+        )
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        self.assertFalse(handler._message_has_report_body_write_intent(self.project_id, "继续", "S4"))
+        self.assertEqual(
+            self._required_write_paths_for_stage(handler, "S4", "继续"),
+            set(),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_report_body_write_intent_ignores_s4_questions_and_review_transition(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        for message in ("现在字数多少？", "开始审查"):
+            with self.subTest(message=message):
+                handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+                self.assertFalse(
+                    handler._message_has_report_body_write_intent(self.project_id, message, "S4")
+                )
+                self.assertEqual(
+                    self._required_write_paths_for_stage(handler, "S4", message),
+                    set(),
+                )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_is_not_created_when_non_plan_write_disallowed(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=False)
+
+        self.assertFalse(
+            handler._message_has_report_body_write_intent(self.project_id, "先别继续写", "S4")
+        )
+        self.assertEqual(
+            self._required_write_paths_for_stage(
+                handler,
+                "S4",
+                "先别继续写",
+                can_write_non_plan=False,
+            ),
+            set(),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_report_body_write_intent_for_s5_plus_requires_explicit_body_edit(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        cases = [
+            ("S5", "开始审查", False),
+            ("S5", "开始第三章质量检查", False),
+            ("S5", "扩写第三章", True),
+            ("S5", "把报告里 X 改成 Y", True),
+            ("S6", "把报告里 X 改成 Y", True),
+            ("S7", "继续写报告正文", True),
+            ("done", "继续写报告正文", True),
+            ("S6", "导出可审草稿", False),
+            ("S7", "归档", False),
+        ]
+        for stage_code, message, expected in cases:
+            with self.subTest(stage_code=stage_code, message=message):
+                handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+                self.assertEqual(
+                    handler._message_has_report_body_write_intent(self.project_id, message, stage_code),
+                    expected,
+                )
+                expected_paths = {"content/report_draft_v1.md"} if expected else set()
+                self.assertEqual(
+                    self._required_write_paths_for_stage(handler, stage_code, message),
+                    expected_paths,
+                )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_is_never_created_before_s4(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        for stage_code in ("S0", "S1", "S2", "S3"):
+            with self.subTest(stage_code=stage_code):
+                handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+                self.assertFalse(
+                    handler._message_has_report_body_write_intent(self.project_id, "继续写吧", stage_code)
+                )
+                self.assertEqual(
+                    self._required_write_paths_for_stage(handler, stage_code, "继续写吧"),
+                    set(),
+                )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_snapshots_use_hash_and_substantive_new_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        normalized_path = "content/report_draft_v1.md"
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+
+        initial = handler._snapshot_project_file(self.project_id, normalized_path)
+
+        self.assertEqual(initial["path"], normalized_path)
+        self.assertFalse(initial["exists"])
+        self.assertIsNone(initial["sha256"])
+        self.assertIsNone(initial["mtime"])
+        self.assertEqual(initial["word_count"], 0)
+
+        draft_path.write_text("## 小结\n\n太短", encoding="utf-8")
+        satisfied, missing = handler._required_writes_satisfied(self.project_id, {normalized_path: initial})
+        self.assertFalse(satisfied)
+        self.assertEqual(missing, [normalized_path])
+
+        draft_path.write_text("## 第三章\n\n" + ("正文" * 80), encoding="utf-8")
+        satisfied, missing = handler._required_writes_satisfied(self.project_id, {normalized_path: initial})
+        self.assertTrue(satisfied)
+        self.assertEqual(missing, [])
+
+        changed_initial = handler._snapshot_project_file(self.project_id, normalized_path)
+        original_hash = changed_initial["sha256"]
+        draft_path.write_text("## 第三章\n\n" + ("更新正文" * 80), encoding="utf-8")
+        changed, missing = handler._required_writes_satisfied(
+            self.project_id,
+            {normalized_path: changed_initial},
+        )
+        self.assertTrue(changed)
+        self.assertEqual(missing, [])
+        self.assertNotEqual(
+            handler._snapshot_project_file(self.project_id, normalized_path)["sha256"],
+            original_hash,
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_rejects_destructive_short_rewrite_for_existing_non_replace(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        normalized_path = "content/report_draft_v1.md"
+        draft_path = self._write_partial_report_draft("既有正文" * 120)
+        before = handler._snapshot_project_file(self.project_id, normalized_path)
+
+        draft_path.write_text("# Draft\n\n太短", encoding="utf-8")
+        current = handler._snapshot_project_file(self.project_id, normalized_path)
+        satisfied, missing = handler._required_writes_satisfied(
+            self.project_id,
+            {normalized_path: before},
+        )
+
+        self.assertNotEqual(current["sha256"], before["sha256"])
+        self.assertLess(current["word_count"], before["word_count"])
+        self.assertFalse(satisfied)
+        self.assertEqual(missing, [normalized_path])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_tool_rejects_destructive_write_file_before_disk_mutation(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("既有正文" * 120)
+        before = draft_path.read_text(encoding="utf-8")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            snapshots = handler._build_required_write_snapshots(self.project_id, "继续写吧")
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_write_report_tool_call(content="# Draft\n\n太短"),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("write_file", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_tool_rejects_destructive_edit_file_before_disk_mutation(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("既有正文" * 120)
+        before = draft_path.read_text(encoding="utf-8")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            snapshots = handler._build_required_write_snapshots(self.project_id, "继续写吧")
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(old_string=before, new_string="# Draft\n\n太短"),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("edit_file", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_rejects_replace_text_write_file_before_disk_mutation(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        before = draft_path.read_text(encoding="utf-8")
+        destructive_content = (
+            "# Draft\n\n## 第一章\n\n"
+            "新结论\n\n"
+            + ("看似完整但不是精确替换的正文。" * 80)
+        )
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_write_report_tool_call(content=destructive_content),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("write_file", result["message"])
+        self.assertIn("edit_file", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_rejects_replace_text_append_report_draft_before_disk_mutation(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        before = draft_path.read_text(encoding="utf-8")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(
+                content="## 追加说明\n\n" + ("新结论" * 80),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("append_report_draft", result["message"])
+        self.assertIn("edit_file", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_rejects_replace_text_oversized_edit_file_before_disk_mutation(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft(
+            "旧结论\n\n"
+            + "\n".join(f"第 {index} 条原始段落包含稳定上下文。" for index in range(180))
+        )
+        before = draft_path.read_text(encoding="utf-8")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=before,
+                new_string=before.replace("旧结论", "新结论", 1),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("old_string", result["message"])
+        self.assertIn("局部", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_rejects_replace_text_short_full_draft_edit_before_disk_mutation(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft(
+            "旧结论\n\n"
+            + "\n".join(f"短草稿第 {index} 段仍需保留。" for index in range(35))
+        )
+        before = draft_path.read_text(encoding="utf-8")
+        self.assertLess(len(before), 1000)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=before,
+                new_string="新结论",
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("old_string", result["message"])
+        self.assertIn("局部", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_rejects_replace_text_short_full_draft_edit_with_large_locality_before_disk_mutation(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        old_string = (
+            "本段承接前文，说明渠道转型已经进入深水区，管理层需要先统一增长口径，再配置样板市场资源。"
+            "旧结论仍停留在经验判断，没有区分存量客户维护、新增客户获取和区域伙伴协同，"
+            "也没有解释组织能力、激励机制、数据口径之间的缺口。"
+            "该段还把短期促销误写成长期战略，容易误导管理层判断，并弱化了总部与一线之间的责任边界。"
+            "因此需要只替换结论词，不得吞掉上下文，避免报告在审查时丢失证据链。"
+        )
+        draft_path = self._write_partial_report_draft(
+            "# 报告草稿\n\n"
+            "第一段说明项目背景、访谈范围、样本口径和数据来源，保留客户当前战略语境，"
+            "并引出后续渠道诊断。这里还记录了董事会关注的问题、历史增长曲线和关键假设，"
+            "作为后文判断依据。\n\n"
+            f"{old_string}\n\n"
+            "第三段继续讨论落地节奏、组织分工、预算安排、风险预案和后续审查安排，"
+            "保持原有逻辑，不应被本次替换影响。最后一段保留复盘口径和下一步资料清单。"
+        )
+        before = draft_path.read_text(encoding="utf-8")
+        self.assertGreaterEqual(len(before), 330)
+        self.assertLessEqual(len(before), 370)
+        self.assertGreaterEqual(len(old_string), 180)
+        self.assertLessEqual(len(old_string), 200)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=old_string,
+                new_string="新结论",
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("old_string", result["message"])
+        self.assertIn("局部", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_rejects_replace_text_oversized_new_string_before_disk_mutation(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft(
+            "旧结论\n\n"
+            + "\n".join(f"中等草稿第 {index} 段需要完整保留。" for index in range(20))
+        )
+        before = draft_path.read_text(encoding="utf-8")
+        unrelated_content = "\n".join(
+            f"无关扩写段落 {index}，不属于本次局部替换，应被门禁拦截。"
+            for index in range(30)
+        )
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string="旧结论",
+                new_string=f"新结论\n\n{unrelated_content}",
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("new_string", result["message"])
+        self.assertIn("局部", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_accepts_replace_text_local_edit_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string="旧结论",
+                new_string="新结论",
+            ),
+        )
+
+        updated = draft_path.read_text(encoding="utf-8")
+        self.assertEqual(result["status"], "success")
+        self.assertIn("新结论", updated)
+        self.assertNotIn("旧结论", updated)
+        self.assertIn("原始段落", updated)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_accepts_existing_draft_append_growth(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        normalized_path = "content/report_draft_v1.md"
+        draft_path = self._write_partial_report_draft("既有正文" * 80)
+        before = handler._snapshot_project_file(self.project_id, normalized_path)
+
+        draft_path.write_text(
+            draft_path.read_text(encoding="utf-8")
+            + "\n\n## 第二章\n\n"
+            + ("新增正文" * 80),
+            encoding="utf-8",
+        )
+        current = handler._snapshot_project_file(self.project_id, normalized_path)
+        satisfied, missing = handler._required_writes_satisfied(
+            self.project_id,
+            {normalized_path: before},
+        )
+
+        self.assertNotEqual(current["sha256"], before["sha256"])
+        self.assertGreater(current["word_count"], before["word_count"])
+        self.assertTrue(satisfied)
+        self.assertEqual(missing, [])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_accepts_existing_draft_same_word_count_hash_change(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        normalized_path = "content/report_draft_v1.md"
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text("# Draft\n\n## 第一章\n\n" + ("甲" * 120), encoding="utf-8")
+        before = handler._snapshot_project_file(self.project_id, normalized_path)
+
+        draft_path.write_text("# Draft\n\n## 第一章\n\n" + ("乙" * 120), encoding="utf-8")
+        current = handler._snapshot_project_file(self.project_id, normalized_path)
+        satisfied, missing = handler._required_writes_satisfied(
+            self.project_id,
+            {normalized_path: before},
+        )
+
+        self.assertNotEqual(current["sha256"], before["sha256"])
+        self.assertEqual(current["word_count"], before["word_count"])
+        self.assertTrue(satisfied)
+        self.assertEqual(missing, [])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_snapshot_carries_inline_replacement_intent(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("旧结论\n\n原始段落")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        for message in (
+            "把报告里旧结论改成新结论",
+            "把正文中旧结论改为新结论",
+            "把报告里的旧结论替换成新结论",
+            "把报告里旧结论，换成新结论",
+            "把报告里旧结论 换成 新结论",
+        ):
+            with self.subTest(message=message), mock.patch.object(
+                handler.skill_engine,
+                "_infer_stage_state",
+                return_value=self._mock_stage_state("S5"),
+            ):
+                snapshots = handler._build_required_write_snapshots(self.project_id, message)
+
+            snapshot = snapshots["content/report_draft_v1.md"]
+            self.assertEqual(snapshot["intent_kind"], "replace_text")
+            self.assertEqual(snapshot["old_text"], "旧结论")
+            self.assertEqual(snapshot["new_text"], "新结论")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_rejects_append_that_leaves_replaced_text_in_place(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+            )
+
+        draft_path.write_text(
+            draft_path.read_text(encoding="utf-8") + "\n\n## 追加说明\n\n" + ("新结论" * 80),
+            encoding="utf-8",
+        )
+
+        satisfied, missing = handler._required_writes_satisfied(
+            self.project_id,
+            snapshots,
+            {"content/report_draft_v1.md": {"append_report_draft"}},
+        )
+
+        self.assertFalse(satisfied)
+        self.assertEqual(missing, ["content/report_draft_v1.md"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_rejects_destructive_tiny_rewrite_for_replacement(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+            )
+
+        draft_path.write_text("新结论", encoding="utf-8")
+
+        satisfied, missing = handler._required_writes_satisfied(
+            self.project_id,
+            snapshots,
+            {"content/report_draft_v1.md": {"write_file"}},
+        )
+
+        self.assertFalse(satisfied)
+        self.assertEqual(missing, ["content/report_draft_v1.md"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_rejects_alias_destructive_write_after_valid_edit(self, mock_openai):
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        final_message = "已完成替换。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_tool_response(self._make_edit_report_tool_call()),
+            self._make_non_stream_tool_response(
+                self._make_write_report_tool_call(
+                    file_path="content/./report_draft_v1.md",
+                    content="新结论",
+                    call_id="call-alias-destructive-write",
+                )
+            ),
+            self._make_non_stream_response(final_message),
+            self._make_non_stream_response(final_message),
+            self._make_non_stream_response(final_message),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            result = handler.chat(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+                max_iterations=6,
+            )
+
+        saved = self._read_saved_conversation()
+        final_request_messages = mock_openai.return_value.chat.completions.create.call_args_list[2].kwargs["messages"]
+        tool_results = [
+            json.loads(message["content"])
+            for message in final_request_messages
+            if message.get("role") == "tool"
+        ]
+        updated = draft_path.read_text(encoding="utf-8")
+
+        self.assertTrue(
+            any(
+                item.get("status") == "error"
+                and "write_file" in item.get("message", "")
+                for item in tool_results
+            )
+        )
+        self.assertEqual(result["content"], final_message)
+        self.assertEqual(saved[-1]["content"], result["content"])
+        self.assertIn("新结论", updated)
+        self.assertIn("原始段落", updated)
+        self.assertNotIn("旧结论", updated)
+        self.assertNotEqual(updated, "新结论")
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_punctuation_replace_intent_rejects_append_only(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论，换成新结论",
+            )
+
+        snapshot = snapshots["content/report_draft_v1.md"]
+        self.assertEqual(snapshot["intent_kind"], "replace_text")
+        self.assertEqual(snapshot["old_text"], "旧结论")
+        self.assertEqual(snapshot["new_text"], "新结论")
+
+        draft_path.write_text(
+            draft_path.read_text(encoding="utf-8") + "\n\n## 追加说明\n\n" + ("新结论" * 80),
+            encoding="utf-8",
+        )
+
+        satisfied, missing = handler._required_writes_satisfied(
+            self.project_id,
+            snapshots,
+            {"content/report_draft_v1.md": {"append_report_draft"}},
+        )
+
+        self.assertFalse(satisfied)
+        self.assertEqual(missing, ["content/report_draft_v1.md"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_snapshot_rejects_unvalidated_paths(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        outside_path = self.project_dir.parent / "outside.txt"
+        outside_path.write_text("## 外部文件\n\n" + ("外部正文" * 80), encoding="utf-8")
+
+        snapshot = handler._snapshot_project_file(self.project_id, "../outside.txt")
+
+        self.assertEqual(snapshot["path"], "../outside.txt")
+        self.assertFalse(snapshot["exists"])
+        self.assertIsNone(snapshot["sha256"])
+        self.assertEqual(snapshot["word_count"], 0)
+        self.assertFalse(
+            handler._project_file_has_substantive_required_write(
+                self.project_id,
+                "../outside.txt",
+            )
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_chat_stream_retries_text_only_completion_until_append_tool_mutates_draft(self, mock_openai):
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft()
+        before = draft_path.read_text(encoding="utf-8")
+        false_completion = "报告全文已存入 content/report_draft_v1.md。"
+        final_message = "已追加第二章正文。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            iter([self._make_chunk(content=false_completion)]),
+            iter([self._make_append_report_stream_chunk()]),
+            iter([self._make_chunk(content=final_message)]),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            events = list(handler.chat_stream(self.project_id, "继续写吧", max_iterations=4))
+
+        content = "".join(event["data"] for event in events if event["type"] == "content")
+        tool_messages = [event["data"] for event in events if event["type"] == "tool"]
+        saved = self._read_saved_conversation()
+
+        self.assertTrue(
+            any("报告正文" in message and "未检测到" in message for message in tool_messages)
+        )
+        self.assertNotIn(false_completion, content)
+        self.assertIn(final_message, content)
+        self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(saved[-1]["role"], "assistant")
+        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertNotIn(false_completion, saved[-1]["content"])
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_chat_stream_accepts_append_report_draft_success_without_retry(self, mock_openai):
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft()
+        before = draft_path.read_text(encoding="utf-8")
+        final_message = "已追加第二章正文。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            iter([self._make_append_report_stream_chunk()]),
+            iter([self._make_chunk(content=final_message)]),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            events = list(handler.chat_stream(self.project_id, "继续写吧", max_iterations=3))
+
+        tool_messages = [event["data"] for event in events if event["type"] == "tool"]
+        saved = self._read_saved_conversation()
+
+        self.assertFalse(
+            any("报告正文" in message and "未检测到" in message for message in tool_messages)
+        )
+        self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_chat_stream_allows_s5_start_review_text_only(self, mock_openai):
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft()
+        before = draft_path.read_text(encoding="utf-8")
+        final_message = "开始审查，我会按清单检查事实、逻辑和语言。"
+        mock_openai.return_value.chat.completions.create.return_value = iter(
+            [self._make_chunk(content=final_message)]
+        )
+
+        with mock.patch.object(
+            handler,
+            "_detect_stage_keyword",
+            return_value=None,
+        ), mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            events = list(handler.chat_stream(self.project_id, "开始审查", max_iterations=2))
+
+        content = "".join(event["data"] for event in events if event["type"] == "content")
+        tool_messages = [event["data"] for event in events if event["type"] == "tool"]
+
+        self.assertIn(final_message, content)
+        self.assertFalse(
+            any("报告正文" in message and "未检测到" in message for message in tool_messages)
+        )
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 1)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_chat_stream_retries_s5_text_only_edit_until_edit_file_replaces_target(self, mock_openai):
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        false_completion = "已把报告里的旧结论改成新结论。"
+        final_message = "已将报告中的旧结论改成新结论。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            iter([self._make_chunk(content=false_completion)]),
+            iter([self._make_edit_report_stream_chunk()]),
+            iter([self._make_chunk(content=final_message)]),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            events = list(
+                handler.chat_stream(
+                    self.project_id,
+                    "把报告里旧结论改成新结论",
+                    max_iterations=4,
+                )
+            )
+
+        content = "".join(event["data"] for event in events if event["type"] == "content")
+        updated = draft_path.read_text(encoding="utf-8")
+        retry_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        retry_feedback = [
+            message.get("content", "")
+            for message in retry_messages
+            if message.get("role") == "user" and "未检测到" in message.get("content", "")
+        ]
+
+        self.assertTrue(retry_feedback)
+        self.assertIn("edit_file", retry_feedback[-1])
+        self.assertIn("append_report_draft", retry_feedback[-1])
+        self.assertNotRegex(retry_feedback[-1], r"请先调用\s*`append_report_draft`")
+        self.assertIn(final_message, content)
+        self.assertNotIn(false_completion, content)
+        self.assertIn("新结论", updated)
+        self.assertNotIn("旧结论", updated)
+        self.assertNotIn("旧结论\n\n新结论", updated)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_non_stream_accepts_edit_when_new_text_contains_old_text(self, mock_openai):
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
+        draft_path = self._write_partial_report_draft("2024\n\n原始段落")
+        final_message = "已将报告中的 2024 改成 2024年。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_tool_response(
+                self._make_edit_report_tool_call(old_string="2024", new_string="2024年")
+            ),
+            self._make_non_stream_response(final_message),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            result = handler.chat(
+                self.project_id,
+                "把报告里2024改成2024年",
+                max_iterations=4,
+        )
+
+        updated = draft_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["content"], final_message)
+        saved = self._read_saved_conversation()
+        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertIn("2024年", updated)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_non_stream_retries_text_only_completion_until_append_tool_mutates_draft(self, mock_openai):
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft()
+        before = draft_path.read_text(encoding="utf-8")
+        false_completion = "报告全文已存入 content/report_draft_v1.md。"
+        final_message = "已追加第二章正文。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_response(false_completion),
+            self._make_non_stream_tool_response(self._make_append_report_tool_call()),
+            self._make_non_stream_response(final_message),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            result = handler.chat(self.project_id, "继续写吧", max_iterations=4)
+
+        self.assertGreaterEqual(
+            mock_openai.return_value.chat.completions.create.call_count,
+            2,
+        )
+        retry_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        saved = self._read_saved_conversation()
+
+        self.assertTrue(
+            any(
+                message.get("role") == "user"
+                and "append_report_draft" in message.get("content", "")
+                and "未检测到" in message.get("content", "")
+                for message in retry_messages
+            )
+        )
+        self.assertEqual(result["content"], final_message)
+        self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertNotIn(false_completion, saved[-1]["content"])
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_non_stream_blocks_destructive_write_file_before_append_retry(self, mock_openai):
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("既有正文" * 80)
+        before = draft_path.read_text(encoding="utf-8")
+        final_message = "已追加第二章正文。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_tool_response(
+                self._make_write_report_tool_call(content="# Draft\n\n太短")
+            ),
+            self._make_non_stream_tool_response(
+                self._make_append_report_tool_call(
+                    content="## 第二章：策略建议\n\n" + ("新增正文" * 160),
+                )
+            ),
+            self._make_non_stream_response(final_message),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            result = handler.chat(self.project_id, "继续写吧", max_iterations=4)
+
+        retry_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        tool_results = [
+            json.loads(message["content"])
+            for message in retry_messages
+            if message.get("role") == "tool"
+        ]
+        final_draft = draft_path.read_text(encoding="utf-8")
+        saved = self._read_saved_conversation()
+
+        self.assertTrue(
+            any(
+                item.get("status") == "error"
+                and "write_file" in item.get("message", "")
+                for item in tool_results
+            )
+        )
+        self.assertEqual(result["content"], final_message)
+        self.assertTrue(final_draft.startswith(before.rstrip()))
+        self.assertIn("既有正文", final_draft)
+        self.assertIn("新增正文", final_draft)
+        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_non_stream_retries_s5_text_only_edit_until_edit_file_replaces_target(self, mock_openai):
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        false_completion = "已把报告里的旧结论改成新结论。"
+        final_message = "已将报告中的旧结论改成新结论。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_response(false_completion),
+            self._make_non_stream_tool_response(self._make_edit_report_tool_call()),
+            self._make_non_stream_response(final_message),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            result = handler.chat(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+                max_iterations=4,
+            )
+
+        updated = draft_path.read_text(encoding="utf-8")
+        retry_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        retry_feedback = [
+            message.get("content", "")
+            for message in retry_messages
+            if message.get("role") == "user" and "未检测到" in message.get("content", "")
+        ]
+        saved = self._read_saved_conversation()
+
+        self.assertTrue(retry_feedback)
+        self.assertIn("edit_file", retry_feedback[-1])
+        self.assertIn("append_report_draft", retry_feedback[-1])
+        self.assertNotRegex(retry_feedback[-1], r"请先调用\s*`append_report_draft`")
+        self.assertEqual(result["content"], final_message)
+        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertNotIn(false_completion, saved[-1]["content"])
+        self.assertIn("新结论", updated)
+        self.assertNotIn("旧结论", updated)
+        self.assertNotIn("旧结论\n\n新结论", updated)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_non_stream_rejects_unrelated_edit_then_destructive_write_file_for_replace_text(self, mock_openai):
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        before = draft_path.read_text(encoding="utf-8")
+        false_completion = "已把报告里的旧结论改成新结论。"
+        destructive_content = "# Draft\n\n" + ("新结论" * 120)
+        final_message = "已完成替换。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_response(false_completion),
+            self._make_non_stream_tool_response(
+                self._make_edit_report_tool_call(
+                    old_string="原始段落",
+                    new_string="原始段落（无关补充）",
+                    call_id="call-unrelated-edit",
+                )
+            ),
+            self._make_non_stream_tool_response(
+                self._make_write_report_tool_call(content=destructive_content)
+            ),
+            self._make_non_stream_response(final_message),
+            self._make_non_stream_response(final_message),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            result = handler.chat(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+                max_iterations=6,
+            )
+
+        saved = self._read_saved_conversation()
+        updated = draft_path.read_text(encoding="utf-8")
+
+        self.assertIn("这轮没有检测到报告草稿", result["content"])
+        self.assertNotEqual(result["content"], final_message)
+        self.assertEqual(saved[-1]["content"], result["content"])
+        self.assertIn("旧结论", updated)
+        self.assertNotIn("原始段落（无关补充）", updated)
+        self.assertNotIn("新结论", updated)
+        self.assertEqual(updated, before)
+        self.assertNotEqual(updated, destructive_content)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 5)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_non_stream_retries_s5_inline_edit_when_append_report_draft_leaves_old_text(self, mock_openai):
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
+        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
+        false_completion = "已把报告里的旧结论改成新结论。"
+        wrong_append_completion = "已追加新结论。"
+        final_message = "已将报告中的旧结论改成新结论。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_response(false_completion),
+            self._make_non_stream_tool_response(
+                self._make_append_report_tool_call(
+                    content="## 追加说明\n\n" + ("新结论" * 80),
+                )
+            ),
+            self._make_non_stream_response(wrong_append_completion),
+            self._make_non_stream_tool_response(self._make_edit_report_tool_call()),
+            self._make_non_stream_response(final_message),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            result = handler.chat(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+                max_iterations=6,
+            )
+
+        updated = draft_path.read_text(encoding="utf-8")
+        post_append_retry_messages = mock_openai.return_value.chat.completions.create.call_args_list[3].kwargs["messages"]
+        saved = self._read_saved_conversation()
+
+        self.assertTrue(
+            any(
+                message.get("role") == "user"
+                and "edit_file" in message.get("content", "")
+                and "append_report_draft" in message.get("content", "")
+                for message in post_append_retry_messages
+            )
+        )
+        self.assertEqual(result["content"], final_message)
+        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertNotIn(false_completion, saved[-1]["content"])
+        self.assertNotIn(wrong_append_completion, saved[-1]["content"])
+        self.assertIn("新结论", updated)
+        self.assertNotIn("旧结论", updated)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 5)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_non_stream_accepts_append_report_draft_success_without_retry(self, mock_openai):
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft()
+        before = draft_path.read_text(encoding="utf-8")
+        final_message = "已追加第二章正文。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_tool_response(self._make_append_report_tool_call()),
+            self._make_non_stream_response(final_message),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            result = handler.chat(self.project_id, "继续写吧", max_iterations=3)
+
+        second_call_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        saved = self._read_saved_conversation()
+
+        self.assertFalse(
+            any(
+                message.get("role") == "user"
+                and "append_report_draft" in message.get("content", "")
+                and "未检测到" in message.get("content", "")
+                for message in second_call_messages
+            )
+        )
+        self.assertEqual(result["content"], final_message)
+        self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_debug_dump_request_skips_when_env_flag_disabled(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        request_kwargs = {
+            "model": "gemini-3-flash",
+            "messages": [{"role": "user", "content": "SECRET_REPORT_TEXT"}],
+            "tools": [{"type": "function", "function": {"name": "write_file"}}],
+            "tool_choice": "auto",
+            "stream": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            debug_dir = home / ".consulting-report" / "debug"
+            with mock.patch("pathlib.Path.home", return_value=home), mock.patch.dict(
+                "os.environ",
+                {},
+                clear=True,
+            ):
+                handler._debug_dump_request(request_kwargs, label="stream")
+
+            self.assertFalse(debug_dir.exists())
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_debug_dump_request_redacts_messages_when_env_flag_enabled(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        request_kwargs = {
+            "model": "gemini-3-flash",
+            "messages": [
+                {"role": "user", "content": "SECRET_REPORT_TEXT"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-write",
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": json.dumps(
+                                    {
+                                        "file_path": "content/report_draft_v1.md",
+                                        "content": "SECRET_REPORT_TEXT",
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                },
+            ],
+            "tools": [
+                {"type": "function", "function": {"name": "write_file"}},
+                {"type": "function", "function": {"name": "append_report_draft"}},
+            ],
+            "tool_choice": "auto",
+            "stream": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            debug_dir = home / ".consulting-report" / "debug"
+            with mock.patch("pathlib.Path.home", return_value=home), mock.patch.dict(
+                "os.environ",
+                {"CONSULTING_REPORT_DEBUG_DUMP": "1"},
+                clear=True,
+            ):
+                handler._debug_dump_request(
+                    request_kwargs,
+                    label="stream",
+                    note="iteration=1",
+                    error=RuntimeError("provider echoed request body: SECRET_REPORT_TEXT"),
+                )
+
+            payload_path = debug_dir / "payload-latest.json"
+            payload_exists = payload_path.exists()
+            raw_payload = payload_path.read_text(encoding="utf-8")
+            payload = json.loads(raw_payload)
+
+        self.assertTrue(payload_exists)
+        self.assertNotIn("SECRET_REPORT_TEXT", raw_payload)
+        self.assertEqual(payload["model"], "gemini-3-flash")
+        self.assertEqual(payload["tool_choice"], "auto")
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["tools"], ["write_file", "append_report_draft"])
+        self.assertEqual(payload["error"]["type"], "RuntimeError")
+        self.assertNotIn("SECRET_REPORT_TEXT", payload["error"]["message"])
+        self.assertLessEqual(len(payload["error"]["message"]), 240)
+        self.assertEqual(payload["messages"][0]["role"], "user")
+        self.assertEqual(payload["messages"][0]["content"], "[redacted]")
+        self.assertEqual(payload["messages"][0]["content_length"], len("SECRET_REPORT_TEXT"))
+        self.assertEqual(
+            payload["messages"][1]["tool_calls"][0]["function"]["arguments"],
+            "[redacted]",
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_debug_dump_request_redacts_non_stream_failure_when_env_flag_enabled(self, mock_openai):
+        handler = self._make_handler_with_project()
+        secret_message = "SECRET_NOSTREAM_REPORT_TEXT"
+        mock_openai.return_value.chat.completions.create.side_effect = RuntimeError(
+            f"provider echoed request body: {secret_message}"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            debug_dir = home / ".consulting-report" / "debug"
+            with mock.patch("pathlib.Path.home", return_value=home), mock.patch.dict(
+                "os.environ",
+                {"CONSULTING_REPORT_DEBUG_DUMP": "1"},
+                clear=True,
+            ):
+                result = handler.chat(self.project_id, secret_message)
+
+            payload_path = debug_dir / "payload-latest.json"
+            error_paths = list(debug_dir.glob("error-*-nostream.json"))
+
+            self.assertTrue(payload_path.exists())
+            self.assertTrue(error_paths)
+            raw_payload = payload_path.read_text(encoding="utf-8")
+            raw_error_dump = error_paths[0].read_text(encoding="utf-8")
+            payload = json.loads(raw_payload)
+
+        combined_dump = raw_payload + "\n" + raw_error_dump
+        self.assertIn("API调用失败", result["content"])
+        self.assertIn("provider echoed request body", result["content"])
+        self.assertIn("[redacted]", result["content"])
+        self.assertNotIn(secret_message, result["content"])
+        self.assertNotIn(secret_message, combined_dump)
+        self.assertEqual(payload["label"], "nostream")
+        self.assertFalse(payload["stream"])
+        self.assertEqual(payload["error"]["type"], "RuntimeError")
+        self.assertNotIn(secret_message, payload["error"]["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_debug_dump_request_redacts_image_url_data_url_from_error_dump(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        secret_fragment = "UNIQUE_IMAGE_SECRET_FRAGMENT_7f3b64"
+        data_url = f"data:image/png;base64,AAA{secret_fragment}BBB"
+        request_kwargs = {
+            "model": "gemini-3-flash",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请看这张图"},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+            "tools": [{"type": "function", "function": {"name": "write_file"}}],
+            "tool_choice": "auto",
+            "stream": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            debug_dir = home / ".consulting-report" / "debug"
+            with mock.patch("pathlib.Path.home", return_value=home), mock.patch.dict(
+                "os.environ",
+                {"CONSULTING_REPORT_DEBUG_DUMP": "1"},
+                clear=True,
+            ):
+                handler._debug_dump_request(
+                    request_kwargs,
+                    label="stream",
+                    error=RuntimeError(f"provider echoed request body: {data_url}"),
+                )
+
+            payload_path = debug_dir / "payload-latest.json"
+            error_paths = list(debug_dir.glob("error-*-stream.json"))
+            raw_payload = payload_path.read_text(encoding="utf-8")
+            raw_error_dump = error_paths[0].read_text(encoding="utf-8")
+            payload = json.loads(raw_payload)
+
+        combined_dump = raw_payload + "\n" + raw_error_dump
+        self.assertTrue(error_paths)
+        self.assertNotIn(data_url, combined_dump)
+        self.assertNotIn(secret_fragment, combined_dump)
+        self.assertIn("[redacted]", payload["error"]["message"])
+        self.assertLessEqual(len(payload["error"]["message"]), 240)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_debug_dump_request_redacts_truncated_image_data_url_payload_from_error_dump(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        payload_secret = "AAAUNIQUE_IMAGE_SECRET_FRAGMENT_7f3b64BBB"
+        truncated_payload = "AAAUNIQUE_IMAGE_SECRET_FRAGMENT_7f3b64"
+        data_url = f"data:image/png;base64,{payload_secret}"
+        request_kwargs = {
+            "model": "gemini-3-flash",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请看这张图"},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+            "tools": [{"type": "function", "function": {"name": "write_file"}}],
+            "tool_choice": "auto",
+            "stream": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            debug_dir = home / ".consulting-report" / "debug"
+            with mock.patch("pathlib.Path.home", return_value=home), mock.patch.dict(
+                "os.environ",
+                {"CONSULTING_REPORT_DEBUG_DUMP": "1"},
+                clear=True,
+            ):
+                handler._debug_dump_request(
+                    request_kwargs,
+                    label="stream",
+                    error=RuntimeError(f"provider echoed truncated payload: {truncated_payload}"),
+                )
+
+            payload_path = debug_dir / "payload-latest.json"
+            error_paths = list(debug_dir.glob("error-*-stream.json"))
+            raw_payload = payload_path.read_text(encoding="utf-8")
+            raw_error_dump = error_paths[0].read_text(encoding="utf-8")
+            payload = json.loads(raw_payload)
+
+        combined_dump = raw_payload + "\n" + raw_error_dump
+        self.assertTrue(error_paths)
+        self.assertNotIn("UNIQUE_IMAGE_SECRET_FRAGMENT", combined_dump)
+        self.assertNotIn(truncated_payload, combined_dump)
+        self.assertIn("[redacted]", payload["error"]["message"])
+        self.assertLessEqual(len(payload["error"]["message"]), 240)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_debug_dump_request_redacts_truncated_base64url_image_payload_with_hyphen(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        hyphenated_fragment = "UNIQUESECRET7f3B-URLSAFEPAYLOAD9z"
+        data_url = f"data:image/png;base64,AAA{hyphenated_fragment}BBB"
+        request_kwargs = {
+            "model": "gemini-3-flash",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "please inspect this image"},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+            "tools": [{"type": "function", "function": {"name": "write_file"}}],
+            "tool_choice": "auto",
+            "stream": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            debug_dir = home / ".consulting-report" / "debug"
+            with mock.patch("pathlib.Path.home", return_value=home), mock.patch.dict(
+                "os.environ",
+                {"CONSULTING_REPORT_DEBUG_DUMP": "1"},
+                clear=True,
+            ):
+                handler._debug_dump_request(
+                    request_kwargs,
+                    label="stream",
+                    error=RuntimeError(f"provider echoed truncated payload: {hyphenated_fragment}"),
+                )
+
+            payload_path = debug_dir / "payload-latest.json"
+            error_paths = list(debug_dir.glob("error-*-stream.json"))
+            raw_payload = payload_path.read_text(encoding="utf-8")
+            raw_error_dump = error_paths[0].read_text(encoding="utf-8")
+            payload = json.loads(raw_payload)
+
+        combined_dump = raw_payload + "\n" + raw_error_dump
+        self.assertTrue(error_paths)
+        self.assertNotIn(hyphenated_fragment, combined_dump)
+        self.assertIn("[redacted]", payload["error"]["message"])
+        self.assertLessEqual(len(payload["error"]["message"]), 240)
 
     @mock.patch("backend.chat.OpenAI")
     def test_should_allow_non_plan_write_uses_expand_request_as_history_approval(self, mock_openai):
@@ -4083,6 +6050,54 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("SKILL.md §S0", notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
+    def test_write_file_rejects_analysis_notes_without_dl_refs_after_data_log_ready(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        (self.project_dir / "plan" / "data-log.md").write_text(
+            "\n\n".join(
+                f"### [DL-2026-{index:02d}] 事实 {index}\n- **URL**：https://example.com/{index}"
+                for index in range(1, 9)
+            ),
+            encoding="utf-8",
+        )
+        handler._turn_context = {
+            "can_write_non_plan": True,
+            "web_search_disabled": False,
+            "pending_system_notices": [],
+            "system_notice_emitted": False,
+        }
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/analysis-notes.md",
+                        "content": (
+                            "# 分析笔记\n\n"
+                            "### 战斗力天花板对比\n"
+                            "- **发现**：猪猪侠具备五灵封印，蝙蝠侠依赖地狱蝙蝠装甲。\n"
+                            "- **推论**：胜负关键是能否拖过 10 分钟。\n"
+                            "- **影响**：报告正文应突出非对称博弈。\n"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        notices = handler._turn_context.get("pending_system_notices", [])
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("analysis-notes.md", result["message"])
+        self.assertIn("[DL-2026-01]", result["message"])
+        self.assertEqual(notices[0]["category"], "analysis_refs_missing")
+
+    @mock.patch("backend.chat.OpenAI")
     def test_system_notice_deduplicated_within_turn(self, mock_openai):
         handler = self._make_handler_with_project()
         first_call = self._make_stream_tool_call_chunk(
@@ -4306,7 +6321,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("plan/tasks.md", expected)
 
     @mock.patch("backend.chat.OpenAI")
-    def test_expected_plan_writes_include_report_draft_targets_when_assistant_claims_report_saved(self, mock_openai):
+    def test_expected_plan_writes_include_only_canonical_report_draft_when_assistant_claims_report_saved(self, mock_openai):
         del mock_openai
         handler = ChatHandler(
             self._make_settings(),
@@ -4314,11 +6329,10 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         expected = handler._expected_plan_writes_for_message(
-            "我已写入 `report_draft_v1.md` 和 `content/final-report.md`，并完成正文初稿。"
+            "我已写入 `content/report_draft_v1.md`，并完成正文初稿。"
         )
 
-        self.assertIn("report_draft_v1.md", expected)
-        self.assertIn("content/final-report.md", expected)
+        self.assertEqual(expected, {"content/report_draft_v1.md"})
 
     @mock.patch("backend.chat.OpenAI")
     def test_expected_plan_writes_include_content_report_draft_v1_when_assistant_claims_saved(self, mock_openai):
@@ -4335,7 +6349,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("content/report_draft_v1.md", expected)
 
     @mock.patch("backend.chat.OpenAI")
-    def test_expected_plan_writes_include_versioned_content_report_drafts_when_assistant_claims_saved(self, mock_openai):
+    def test_expected_plan_writes_ignore_legacy_or_versioned_report_draft_paths(self, mock_openai):
         del mock_openai
         handler = ChatHandler(
             self._make_settings(),
@@ -4343,10 +6357,211 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         expected = handler._expected_plan_writes_for_message(
-            "已同步至 `content/report_draft_v5.md`，后续可继续审查。"
+            "已同步至 `report_draft_v1.md`、`content/report.md`、`content/report_draft_v5.md` 和 `output/final-report.md`。"
         )
 
-        self.assertIn("content/report_draft_v5.md", expected)
+        self.assertEqual(expected, set())
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_expected_plan_writes_include_literal_file_tool_calls_and_data_log_entries(self, mock_openai):
+        del mock_openai
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "expected-pseudo-tool-projects", self.repo_skill_dir),
+        )
+
+        expected = handler._expected_plan_writes_for_message(
+            "以下是新采集的事实条目，我将立即通过 `edit_file` 将其追加至 `plan/data-log.md`：\n\n"
+            "### [DL-2026-03] 咏声动漫营收结构\n"
+            "- **URL**：https://example.com/revenue\n\n"
+            "*(工具调用)*\n"
+            "edit_file(file_path=\"plan/data-log.md\", old_string=\"...\", new_string=\"...\")\n"
+            "edit_file(file_path=\"plan/analysis-notes.md\", old_string=\"...\", new_string=\"...\")\n"
+        )
+
+        self.assertIn("plan/data-log.md", expected)
+        self.assertIn("plan/analysis-notes.md", expected)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_extract_successful_write_path_accepts_edit_file_success(self, mock_openai):
+        del mock_openai
+        handler = ChatHandler(
+            self._make_settings(),
+            SkillEngine(Path(tempfile.gettempdir()) / "edit-write-path-projects", self.repo_skill_dir),
+        )
+
+        path = handler._extract_successful_write_path(
+            "edit_file",
+            '{"file_path":"plan/data-log.md","old_string":"a","new_string":"ab"}',
+            {"status": "success", "message": "已写入文件: plan/data-log.md"},
+        )
+
+        self.assertEqual(path, "plan/data-log.md")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_retries_when_assistant_prints_pseudo_edit_file_instead_of_calling_tool(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="消费品牌战略研究",
+                target_audience="管理层",
+                deadline="2026-04-01",
+                expected_length="5000字",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            first_response = SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                "### [DL-2026-03] 新来源\n"
+                                "- **URL**：https://example.com/source\n\n"
+                                "edit_file(file_path=\"plan/data-log.md\", old_string=\"...\", new_string=\"...\")"
+                            ),
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            )
+            tool_call = SimpleNamespace(
+                id="call-edit",
+                function=SimpleNamespace(
+                    name="edit_file",
+                    arguments=json.dumps(
+                        {
+                            "file_path": "plan/data-log.md",
+                            "old_string": "# 事实记录 (Data Log)\n",
+                            "new_string": "# 事实记录 (Data Log)\n\n### [DL-2026-03] 新来源\n- **URL**：https://example.com/source\n",
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            second_response = SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="",
+                            tool_calls=[tool_call],
+                        )
+                    )
+                ],
+            )
+            final_response = SimpleNamespace(
+                usage=SimpleNamespace(total_tokens=128),
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="已真实写入 `plan/data-log.md`。",
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            )
+            mock_openai.return_value.chat.completions.create.side_effect = [
+                first_response,
+                second_response,
+                final_response,
+            ]
+
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "message": "已写入文件: plan/data-log.md"},
+            ) as execute_tool:
+                result = handler.chat(project["id"], "补来源", max_iterations=4)
+
+        self.assertEqual(result["content"], "已真实写入 `plan/data-log.md`。")
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+        self.assertEqual(execute_tool.call_count, 1)
+        retry_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        self.assertTrue(
+            any(
+                message.get("role") == "user"
+                and "不要把 `edit_file(...)`" in message.get("content", "")
+                for message in retry_messages
+            )
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_retries_self_correction_loop_before_saving_assistant_message(self, mock_openai):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="消费品牌战略研究",
+                target_audience="管理层",
+                deadline="2026-04-01",
+                expected_length="3000字",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            loop_response = SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                "（修正：我将直接开始。）\n"
+                                "（纠正：我需要等待确认。）\n"
+                                "（修正：由于之前已经确认，我继续。）\n"
+                                "（对不起，我需要停止自言自语。）"
+                            ),
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            )
+            final_response = SimpleNamespace(
+                usage=SimpleNamespace(total_tokens=64),
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="我会先补齐 data-log.md 的来源，不开始正文。",
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            )
+            mock_openai.return_value.chat.completions.create.side_effect = [
+                loop_response,
+                final_response,
+            ]
+
+            result = handler.chat(project["id"], "继续", max_iterations=3)
+            saved = json.loads(
+                (Path(project["project_dir"]) / "conversation.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result["content"], "我会先补齐 data-log.md 的来源，不开始正文。")
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
+        self.assertNotIn("停止自言自语", saved[-1]["content"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_warns_and_retries_when_assistant_claims_file_update_without_write(self, mock_openai):
@@ -6641,7 +8856,7 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         })
         # Build effective report draft so review_started_at prereq passes
         (self.project_dir / "content").mkdir(exist_ok=True)
-        (self.project_dir / "content" / "report.md").write_text(
+        (self.project_dir / "content" / "report_draft_v1.md").write_text(
             "# Report\n\n" + ("数据资产核算。" * 400),
             encoding="utf-8",
         )

@@ -16,7 +16,7 @@
 | S1 研究设计 | 形成研究边界与执行方案 | 初步搜集、沉淀备注、列出来源、确定大纲和研究计划 | `notes.md` `references.md` `outline.md` `research-plan.md` |
 | S2 资料采集 | 沉淀事实材料 | 访谈、网页抓取、附件阅读、事实摘录 | `data-log.md` |
 | S3 分析沉淀 | 提炼洞察与判断 | 归纳发现、区分事实与假设、形成主线 | `analysis-notes.md` |
-| S4 报告撰写 | 形成有效报告草稿 | 撰写正文、补充图表、同步摘要 | `report_draft_v1.md` 或等效草稿 |
+| S4 报告撰写 | 形成有效报告草稿 | 撰写正文、补充图表、同步摘要 | `content/report_draft_v1.md` |
 | S5 质量审查 | 完成系统复核 | 勾选审查清单、必要时记录修订意见 | `review-checklist.md` `review.md`(可选) |
 | S6 演示准备 | 为汇报场景准备材料 | 仅当交付形式 = `报告+演示` 时启用，准备 PPT / 讲稿 / Q&A | `presentation-plan.md` |
 | S7 交付归档 | 记录交付与后续动作 | 更新交付记录、沉淀反馈和归档 | `delivery-log.md` |

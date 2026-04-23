@@ -116,6 +116,34 @@ def test_has_enough_analysis_refs_deduplicates_and_requires_dl_match():
         assert engine._has_enough_analysis_refs(project_dir, min_refs=3) is False
 
 
+def test_has_enough_analysis_refs_expands_grouped_dl_ids():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        engine = SkillEngine(projects_dir=tmp_path, skill_dir=Path('skill'))
+        project_dir = _make_project(tmp_path)
+        (project_dir / 'plan' / 'data-log.md').write_text(
+            '### [DL-2026-01]\n来源: https://example.com/1\n\n'
+            '### [DL-2026-02]\n来源: https://example.com/2\n\n'
+            '### [DL-2026-03]\n来源: https://example.com/3\n\n'
+            '### [DL-2026-04]\n来源: https://example.com/4\n\n'
+            '### [DL-2026-05]\n来源: https://example.com/5\n\n'
+            '### [DL-2026-06]\n来源: https://example.com/6\n\n'
+            '### [DL-2026-07]\n来源: https://example.com/7\n\n'
+            '### [DL-2026-08]\n来源: https://example.com/8\n',
+            encoding='utf-8',
+        )
+        (project_dir / 'plan' / 'analysis-notes.md').write_text(
+            '证据库现状：\n'
+            '- [DL-2026-01/06] 猪猪侠巅峰战力。\n'
+            '- [DL-2026-02/05/07] 蝙蝠侠巅峰装备。\n'
+            '- [DL-2026-03/08] 猪猪侠商业表现。\n'
+            '- [DL-2026-04] 量化数值。\n',
+            encoding='utf-8',
+        )
+        assert engine._count_analysis_refs(project_dir) == 8
+        assert engine._has_enough_analysis_refs(project_dir, min_refs=4) is True
+
+
 def test_resolve_length_targets_ignores_parenthetical_commentary():
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)

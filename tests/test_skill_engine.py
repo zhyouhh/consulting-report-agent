@@ -227,7 +227,7 @@ class SkillEngineTests(unittest.TestCase):
 
     def _write_report(self, project_dir: Path, word_count: int):
         body = "研" * word_count
-        (project_dir / "report_draft_v1.md").write_text(
+        (project_dir / "content" / "report_draft_v1.md").write_text(
             "# Draft\n\n"
             "## Executive summary\n"
             f"{body}\n",
@@ -236,7 +236,7 @@ class SkillEngineTests(unittest.TestCase):
 
     def _write_report_draft(self, project_dir: Path, words: int):
         body = " ".join(f"word{idx}" for idx in range(words))
-        (project_dir / "report_draft_v1.md").write_text(
+        (project_dir / "content" / "report_draft_v1.md").write_text(
             "# Draft\n\n"
             "## Executive summary\n"
             f"{body}\n",
@@ -446,11 +446,11 @@ class SkillEngineTests(unittest.TestCase):
         self.assertIn("data-log.md 更新", template_text)
         self.assertIn("analysis-notes.md 创建/更新", template_text)
         self.assertIn("review-checklist.md 完成", template_text)
-        self.assertIn("report_draft_v1.md", template_text)
-        self.assertIn("content/report.md", template_text)
-        self.assertIn("content/draft.md", template_text)
-        self.assertIn("content/final-report.md", template_text)
-        self.assertIn("output/final-report.md", template_text)
+        self.assertIn("content/report_draft_v1.md 形成有效草稿", template_text)
+        self.assertNotIn("content/report.md", template_text)
+        self.assertNotIn("content/draft.md", template_text)
+        self.assertNotIn("content/final-report.md", template_text)
+        self.assertNotIn("output/final-report.md", template_text)
         self.assertIn("交付形式 = 报告+演示", template_text)
         self.assertIn("presentation-plan.md 完成", template_text)
         self.assertIn("仅报告", template_text)
@@ -543,7 +543,7 @@ class SkillEngineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 engine.get_workspace_summary("missing")
 
-    def test_primary_report_path_prefers_report_file_over_outline_file(self):
+    def test_primary_report_path_uses_content_report_draft_v1_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
             engine = SkillEngine(projects_dir, self.repo_skill_dir)
@@ -560,9 +560,38 @@ class SkillEngineTests(unittest.TestCase):
             content_dir.mkdir(parents=True, exist_ok=True)
             (content_dir / "outline.md").write_text("# 澶х翰", encoding="utf-8")
             (content_dir / "report.md").write_text("# 姝ｆ枃", encoding="utf-8")
+            (projects_dir / "demo" / ".consulting-report" / "output" / "final-report.md").write_text(
+                "# legacy final",
+                encoding="utf-8",
+            )
+            (content_dir / "report_draft_v1.md").write_text("# Canonical draft", encoding="utf-8")
             report_path = engine.get_primary_report_path("demo")
 
-            self.assertTrue(report_path.endswith("report.md"))
+            self.assertEqual(
+                Path(report_path).relative_to(projects_dir / "demo" / ".consulting-report").as_posix(),
+                "content/report_draft_v1.md",
+            )
+
+    def test_primary_report_path_rejects_legacy_report_paths_without_canonical_draft(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            engine.create_project(
+                "demo",
+                "strategy-consulting",
+                "theme",
+                "executive audience",
+                "2026-04-01",
+                "3000 words",
+                "existing notes",
+            )
+            project_dir = projects_dir / "demo" / ".consulting-report"
+            (project_dir / "report_draft_v1.md").write_text("# Legacy root draft", encoding="utf-8")
+            (project_dir / "content" / "report.md").write_text("# Legacy content report", encoding="utf-8")
+            (project_dir / "output" / "final-report.md").write_text("# Legacy output", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "content/report_draft_v1.md"):
+                engine.get_primary_report_path("demo")
 
     def test_write_file_rejects_unregistered_plan_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1056,7 +1085,9 @@ class SkillEngineTests(unittest.TestCase):
 
             self.assertEqual(summary["stage_code"], "S4")
             self._assert_items_include(summary["completed_items"], "analysis-notes.md")
-            self._assert_items_include(summary["next_actions"], "report_draft_v1.md")
+            self.assertIn("content/report_draft_v1.md 形成有效草稿", summary["next_actions"])
+            self._assert_items_exclude(summary["next_actions"], "content/report.md")
+            self._assert_items_exclude(summary["next_actions"], "output/final-report.md")
 
     def test_workspace_summary_advances_to_s4_with_bracketed_references_and_structured_research_plan(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1185,7 +1216,7 @@ class SkillEngineTests(unittest.TestCase):
             self._write_stage_two_prerequisites(project_dir)
             engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
             self._write_data_log_with_n_sources(project_dir, n=8)
-            (project_dir / "report_draft_v1.md").write_text(
+            (project_dir / "content" / "report_draft_v1.md").write_text(
                 "# Draft\n\n## Executive summary\nA concrete report section.\n",
                 encoding="utf-8",
             )
@@ -1240,7 +1271,7 @@ class SkillEngineTests(unittest.TestCase):
             self._write_stage_two_prerequisites(project_dir)
             self._write_data_log(project_dir)
             self._write_analysis_notes(project_dir)
-            (project_dir / "report_draft_v1.md").write_text(
+            (project_dir / "content" / "report_draft_v1.md").write_text(
                 "# Draft\n\n## Executive summary\nA concrete report section.\n",
                 encoding="utf-8",
             )
@@ -1311,8 +1342,12 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertIsNone(summary["next_stage_hint"])
 
-    def test_workspace_summary_word_count_uses_max_report_candidate_count(self):
+    def test_workspace_summary_word_count_uses_content_report_draft_v1_only(self):
         project_dir = self._make_project()
+        (project_dir / "report_draft_v1.md").write_text(
+            ("根" * 5000) + "\n",
+            encoding="utf-8",
+        )
         (project_dir / "content" / "report.md").write_text(
             ("短" * 800) + "\n",
             encoding="utf-8",
@@ -1321,10 +1356,31 @@ class SkillEngineTests(unittest.TestCase):
             ("长" * 5000) + "\n",
             encoding="utf-8",
         )
+        (project_dir / "content" / "report_draft_v1.md").write_text(
+            ("正" * 1200) + "\n",
+            encoding="utf-8",
+        )
 
         summary = self.engine.get_workspace_summary("demo")
 
-        self.assertEqual(summary["word_count"], 5000)
+        self.assertEqual(summary["word_count"], 1200)
+
+    def test_workspace_summary_word_count_ignores_legacy_report_paths(self):
+        project_dir = self._make_project()
+        for legacy_path in (
+            "report_draft_v1.md",
+            "content/report.md",
+            "content/draft.md",
+            "content/final-report.md",
+            "output/final-report.md",
+        ):
+            path = project_dir / legacy_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(("旧" * 5000) + "\n", encoding="utf-8")
+
+        summary = self.engine.get_workspace_summary("demo")
+
+        self.assertEqual(summary["word_count"], 0)
 
     def test_workspace_summary_sets_stalled_since_when_s2_evidence_is_old(self):
         project_dir = self._make_project_past_outline_confirm()

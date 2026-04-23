@@ -33,7 +33,7 @@
 
 ### S4 报告撰写 ⬜
 - [ ] 报告结构确定
-- [ ] report_draft_v1.md / content/report.md / content/draft.md / content/final-report.md / output/final-report.md 任一形成有效草稿
+- [ ] content/report_draft_v1.md 形成有效草稿
 - [ ] 各章节内容持续完善
 - [ ] 执行摘要与图表同步更新
 
@@ -60,7 +60,7 @@
 **S1→S2**: notes.md、references.md、outline.md、research-plan.md 均形成有效内容
 **S2→S3**: data-log.md 已沉淀关键资料与记录
 **S3→S4**: analysis-notes.md 已形成结构化洞察
-**S4→S5**: 至少一个正式报告草稿文件已形成
+**S4→S5**: `content/report_draft_v1.md` 已形成有效草稿
 **S5→S6**: 若交付形式 = 报告+演示，则 presentation-plan.md 完成
 **S5→S7**: 若交付形式 = 仅报告，则跳过 S6 并直接进入 delivery-log.md 更新
 **S6→S7**: 演示方案确认后，delivery-log.md 更新

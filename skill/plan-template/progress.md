@@ -38,7 +38,7 @@
 | S1 | 研究设计 | `notes.md` / `references.md` / `outline.md` / `research-plan.md` | | |
 | S2 | 资料采集 | `data-log.md` | | |
 | S3 | 分析沉淀 | `analysis-notes.md` | | |
-| S4 | 报告撰写 | `report_draft_v1.md` 或等效草稿 | | |
+| S4 | 报告撰写 | `content/report_draft_v1.md` | | |
 | S5 | 质量审查 | `review-checklist.md` / `review.md` | | |
 | S6 | 演示准备 | `presentation-plan.md` | | |
 | S7 | 交付归档 | `delivery-log.md` | | |

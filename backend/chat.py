@@ -1,7 +1,9 @@
 import base64
+import hashlib
 import ipaddress
 import json
 import logging
+import os
 import re
 import requests
 import socket
@@ -152,8 +154,77 @@ class ChatHandler:
         "已入档",
         "已经入档",
     )
+    PSEUDO_FILE_TOOL_CALL_RE = re.compile(
+        r"\b(?:write_file|edit_file)\s*\(\s*file_path\s*=\s*(?P<quote>['\"])(?P<path>[^'\"]+)(?P=quote)",
+        re.IGNORECASE,
+    )
+    INLINE_DATA_LOG_ENTRY_RE = re.compile(
+        r"^#{3,4}\s*\*{0,2}\s*\[DL-[^\]]+\]",
+        re.MULTILINE,
+    )
+    DEBUG_DATA_URL_BASE64_RE = re.compile(
+        r"(?i)data:[^\s\"'<>)]*;base64,[A-Za-z0-9+/=_-]+"
+    )
+    DEBUG_LONG_BASE64_FRAGMENT_RE = re.compile(
+        r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{24,}(?![A-Za-z0-9+/=_-])"
+    )
+    SELF_CORRECTION_LOOP_MARKERS = (
+        "（修正",
+        "(修正",
+        "（纠正",
+        "(纠正",
+        "停止自言自语",
+    )
     MAX_MISSING_WRITE_RETRIES = 2
+    MAX_SELF_CORRECTION_RETRIES = 1
     NON_PLAN_WRITE_ALLOWED_STAGE_CODES = {"S4", "S5", "S6", "S7", "done"}
+    LEGACY_REPORT_DRAFT_PATHS = frozenset({
+        "report_draft_v1.md",
+        "content/report.md",
+        "content/draft.md",
+        "content/final-report.md",
+        "output/final-report.md",
+    })
+    APPEND_REPORT_DRAFT_MIN_SUBSTANTIVE_CHARS = 80
+    REPORT_BODY_EXPLICIT_WRITE_KEYWORDS = (
+        "继续写",
+        "继续写吧",
+        "继续写报告",
+        "继续写正文",
+        "接着写",
+        "补全剩余章节",
+        "续写",
+        "扩写正文",
+        "写下一章",
+        "补正文",
+        "完善正文",
+        "修改正文",
+        "补一段报告",
+        "重写结论",
+    )
+    REPORT_BODY_SHORT_CONTINUATION_KEYWORDS = ("继续", "可以继续", "接着", "往下写")
+    REPORT_BODY_REVIEW_OR_DELIVERY_KEYWORDS = (
+        "开始审查",
+        "继续审查",
+        "质量检查",
+        "运行质量检查",
+        "导出",
+        "归档",
+        "交付",
+    )
+    REPORT_BODY_CHAPTER_WRITE_RE = re.compile(
+        r"(?:继续|接着|补写|撰写|写|扩写|续写|重写|改写|修改|完善)\s*第?\s*[一二三四五六七八九十百\d]+\s*章"
+    )
+    REPORT_BODY_INLINE_EDIT_RE = re.compile(
+        r"把[^\n。！？!?]{0,20}(?:报告|正文)[^\n。！？!?]{0,80}(?:改成|改为|替换成|换成)"
+    )
+    REPORT_BODY_REPLACE_TEXT_INTENT_RE = re.compile(
+        r"把(?:报告|正文)(?:里的|中的|里|中)?"
+        r"(?P<old_text>[^，,、。！？!?；;：:\n]{1,80}?)"
+        r"\s*[，,、：:]?\s*"
+        r"(?:改成|改为|替换成|换成)"
+        r"\s*(?P<new_text>[^，,、。！？!?；;：:\n]{1,80})"
+    )
 
     NON_PLAN_WRITE_ALLOW_KEYWORDS = [
         "确认大纲",
@@ -258,7 +329,13 @@ class ChatHandler:
             pool=STREAM_POOL_TIMEOUT_SECONDS,
         )
 
-    def _format_provider_error(self, error: Exception, *, stream: bool) -> str:
+    def _format_provider_error(
+        self,
+        error: Exception,
+        *,
+        stream: bool,
+        request_kwargs: Dict | None = None,
+    ) -> str:
         raw_message = str(error or "").strip()
         lowered = raw_message.lower()
         timeout_markers = ("timed out", "timeout", "readtimeout")
@@ -273,6 +350,8 @@ class ChatHandler:
                 return "上游模型在返回流式结果时超时了，请稍后重试。"
             return "上游模型响应超时，请稍后重试。"
 
+        if request_kwargs is not None:
+            raw_message = self._debug_redact_error_message(raw_message, request_kwargs)
         if not raw_message:
             return "API调用失败"
         return f"API调用失败: {raw_message}"
@@ -1209,8 +1288,41 @@ class ChatHandler:
     def _normalize_project_file_path(self, file_path: str) -> str:
         return file_path.replace("\\", "/").lstrip("/").strip()
 
-    def _extract_successful_write_path(self, func_name: str, arguments: str, result: Dict) -> str | None:
-        if func_name != "write_file" or result.get("status") != "success":
+    def _extract_successful_write_path(
+        self,
+        func_name: str,
+        arguments: str,
+        result: Dict,
+        *,
+        project_id: str | None = None,
+    ) -> str | None:
+        event = self._extract_successful_write_event(
+            func_name,
+            arguments,
+            result,
+            project_id=project_id,
+        )
+        if not event:
+            return None
+        path = event.get("path")
+        return path if isinstance(path, str) else None
+
+    def _extract_successful_write_event(
+        self,
+        func_name: str,
+        arguments: str,
+        result: Dict,
+        *,
+        project_id: str | None = None,
+    ) -> dict | None:
+        if func_name == "append_report_draft" and result.get("status") == "success":
+            return {
+                "path": self.skill_engine.REPORT_DRAFT_PATH,
+                "tool": "append_report_draft",
+                "arguments": {},
+                "raw_arguments": arguments,
+            }
+        if func_name not in {"write_file", "edit_file"} or result.get("status") != "success":
             return None
         try:
             payload = json.loads(arguments)
@@ -1219,7 +1331,29 @@ class ChatHandler:
         file_path = payload.get("file_path")
         if not isinstance(file_path, str) or not file_path.strip():
             return None
-        return self._normalize_project_file_path(file_path)
+        return {
+            "path": self._canonical_successful_write_path(file_path, project_id=project_id),
+            "tool": func_name,
+            "arguments": payload,
+            "raw_arguments": arguments,
+        }
+
+    def _canonical_successful_write_path(
+        self,
+        file_path: str,
+        *,
+        project_id: str | None = None,
+    ) -> str:
+        if project_id:
+            try:
+                normalized = self.skill_engine.normalize_file_path(project_id, file_path)
+            except ValueError:
+                normalized = self._normalize_project_file_path(file_path)
+        else:
+            normalized = self._normalize_project_file_path(file_path)
+        if self._is_canonical_report_draft_path(normalized):
+            return self.skill_engine.REPORT_DRAFT_PATH
+        return normalized
 
     def _is_first_data_log_write(self, project_id: str, normalized_path: str) -> bool:
         if normalized_path != "plan/data-log.md":
@@ -1276,6 +1410,11 @@ class ChatHandler:
         if self._looks_like_outline_draft(normalized_text):
             expected.add("plan/outline.md")
 
+        expected.update(self._pseudo_file_tool_paths_for_message(normalized_text))
+
+        if self.INLINE_DATA_LOG_ENTRY_RE.search(normalized_text):
+            expected.add("plan/data-log.md")
+
         if self._message_mentions_file_update(normalized_text, ("plan/progress.md", "progress.md", "当前任务", "项目进度")):
             expected.add("plan/progress.md")
 
@@ -1290,11 +1429,448 @@ class ChatHandler:
 
         return expected
 
+    def _pseudo_file_tool_paths_for_message(self, assistant_message: str) -> set[str]:
+        expected: set[str] = set()
+        for match in self.PSEUDO_FILE_TOOL_CALL_RE.finditer(assistant_message or ""):
+            normalized_path = self._normalize_project_file_path(match.group("path"))
+            if normalized_path.startswith("plan/") and normalized_path.endswith(".md"):
+                expected.add(normalized_path)
+            if self._is_expected_report_write_path(normalized_path):
+                expected.add(normalized_path)
+        return expected
+
+    def _looks_like_self_correction_loop(self, assistant_message: str) -> bool:
+        text = assistant_message or ""
+        marker_hits = sum(text.count(marker) for marker in self.SELF_CORRECTION_LOOP_MARKERS)
+        return marker_hits >= 3
+
     def _is_expected_report_write_path(self, normalized_path: str) -> bool:
+        return self._normalize_project_file_path(normalized_path).lower() == self.skill_engine.REPORT_DRAFT_PATH
+
+    def _is_canonical_report_draft_path(self, normalized_path: str) -> bool:
+        return self._normalize_project_file_path(normalized_path).lower() == self.skill_engine.REPORT_DRAFT_PATH
+
+    def _is_noncanonical_report_draft_path(self, normalized_path: str) -> bool:
+        candidate = self._normalize_project_file_path(normalized_path).lower()
+        if candidate == self.skill_engine.REPORT_DRAFT_PATH:
+            return False
+        if candidate in self.LEGACY_REPORT_DRAFT_PATHS:
+            return True
         return bool(
-            re.fullmatch(r"report_draft_v\d+\.md", normalized_path)
-            or re.fullmatch(r"(?:content|output)/[^/]+\.md", normalized_path)
+            re.fullmatch(r"report_draft_v\d+\.md", candidate)
+            or re.fullmatch(r"content/report_draft_v\d+\.md", candidate)
         )
+
+    def _build_report_draft_path_error(self, normalized_path: str) -> str:
+        return (
+            f"报告正文草稿路径已统一为 `{self.skill_engine.REPORT_DRAFT_PATH}`，"
+            f"不要写入旧路径 `{normalized_path}`。"
+        )
+
+    def _message_has_report_body_write_intent(
+        self,
+        project_id: str,
+        user_message: str,
+        stage_code: str,
+    ) -> bool:
+        if not self._turn_context.get("can_write_non_plan", True):
+            return False
+
+        normalized_stage = (stage_code or "").strip()
+        if normalized_stage in {"S0", "S1", "S2", "S3"}:
+            return False
+
+        text = (user_message or "").strip()
+        if not text:
+            return False
+
+        explicit_body_write = self._has_explicit_report_body_write_intent(text)
+        review_or_delivery = self._phrase_hits(
+            text,
+            list(self.REPORT_BODY_REVIEW_OR_DELIVERY_KEYWORDS),
+        )
+        if review_or_delivery and not explicit_body_write:
+            return False
+
+        if normalized_stage == "S4":
+            if explicit_body_write:
+                return True
+            return (
+                self._is_short_report_body_continuation(text)
+                and self._recent_assistant_prompted_report_body_continuation(project_id)
+            )
+
+        if normalized_stage in {"S5", "S6", "S7", "done"}:
+            return explicit_body_write
+
+        return False
+
+    def _has_explicit_report_body_write_intent(self, user_message: str) -> bool:
+        if self._phrase_hits(user_message, list(self.REPORT_BODY_EXPLICIT_WRITE_KEYWORDS)):
+            return True
+        return self._regex_has_clean_report_body_intent(user_message)
+
+    def _regex_has_clean_report_body_intent(self, user_message: str) -> bool:
+        for pattern in (
+            self.REPORT_BODY_CHAPTER_WRITE_RE,
+            self.REPORT_BODY_INLINE_EDIT_RE,
+        ):
+            for match in pattern.finditer(user_message):
+                preceding = user_message[max(0, match.start() - self._NEGATION_WINDOW_CHARS): match.start()]
+                if not self._NEGATION_RE.search(preceding):
+                    return True
+        return False
+
+    def _is_short_report_body_continuation(self, user_message: str) -> bool:
+        compact = re.sub(r"[\s。！？!?，,、；;：:]+", "", user_message or "")
+        return compact in self.REPORT_BODY_SHORT_CONTINUATION_KEYWORDS
+
+    def _recent_assistant_prompted_report_body_continuation(self, project_id: str) -> bool:
+        writing_action_markers = (
+            "我将补全剩余章节",
+            "将补全剩余章节",
+            "我会补全剩余章节",
+            "会补全剩余章节",
+            "补全剩余章节",
+            "继续写报告",
+            "继续写正文",
+            "继续撰写",
+            "补全报告正文",
+            "将补全报告正文",
+            "会补全报告正文",
+            "完成剩余章节",
+            "将完成剩余章节",
+            "会完成剩余章节",
+            "撰写报告",
+            "撰写正文",
+            "写报告",
+            "写正文",
+            "开始撰写正文",
+            "继续撰写正文",
+        )
+        try:
+            history = self._load_conversation(project_id)
+        except Exception:
+            return False
+
+        for message in reversed(history):
+            if message.get("role") != "assistant":
+                continue
+            text = self._extract_message_text(message.get("content", "")).strip()
+            if not text:
+                continue
+            has_writing_action = self._text_has_non_past_marker(
+                text,
+                writing_action_markers,
+            )
+            has_review_or_delivery = self._phrase_hits(
+                text,
+                list(self.REPORT_BODY_REVIEW_OR_DELIVERY_KEYWORDS),
+            )
+            if has_review_or_delivery and not has_writing_action:
+                return False
+            return has_writing_action
+        return False
+
+    def _text_has_non_past_marker(self, text: str, markers: tuple[str, ...]) -> bool:
+        past_marker_re = re.compile(r"(已经|已|刚刚|刚|完成|写完|生成)[^。！？!?\n]{0,8}$")
+        for marker in markers:
+            idx = text.find(marker)
+            while idx != -1:
+                preceding = text[max(0, idx - 12): idx]
+                if not past_marker_re.search(preceding):
+                    return True
+                idx = text.find(marker, idx + 1)
+        return False
+
+    def _required_write_paths_for_turn(self, project_id: str, user_message: str) -> set[str]:
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return set()
+        stage_state = self.skill_engine._infer_stage_state(project_path)
+        stage_code = stage_state.get("stage_code", "S0")
+        if not self._message_has_report_body_write_intent(project_id, user_message, stage_code):
+            return set()
+        return {self.skill_engine.REPORT_DRAFT_PATH}
+
+    def _build_required_write_snapshots(self, project_id: str, user_message: str) -> dict[str, dict]:
+        snapshots = {
+            path: self._snapshot_project_file(project_id, path)
+            for path in self._required_write_paths_for_turn(project_id, user_message)
+        }
+        replacement_intent = self._parse_report_body_replacement_intent(user_message)
+        if replacement_intent:
+            for path, snapshot in snapshots.items():
+                if self._is_canonical_report_draft_path(path):
+                    snapshot.update(replacement_intent)
+                    before_text = self._read_project_file_text(project_id, path)
+                    snapshot["old_text_present"] = (
+                        before_text is not None
+                        and replacement_intent["old_text"] in before_text
+                    )
+        return snapshots
+
+    def _parse_report_body_replacement_intent(self, user_message: str) -> dict[str, str] | None:
+        match = self.REPORT_BODY_REPLACE_TEXT_INTENT_RE.search(user_message or "")
+        if not match:
+            return None
+        old_text = self._clean_inline_replacement_text(match.group("old_text"))
+        new_text = self._clean_inline_replacement_text(match.group("new_text"))
+        if not old_text or not new_text:
+            return None
+        return {
+            "intent_kind": "replace_text",
+            "old_text": old_text,
+            "new_text": new_text,
+        }
+
+    def _clean_inline_replacement_text(self, value: str) -> str:
+        return (value or "").strip().strip("`'\"“”‘’《》")
+
+    def _snapshot_project_file(self, project_id: str, normalized_path: str) -> dict:
+        normalized = self._normalize_project_file_path(normalized_path)
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return {
+                "path": normalized,
+                "exists": False,
+                "sha256": None,
+                "word_count": 0,
+                "mtime": None,
+            }
+
+        try:
+            normalized = self.skill_engine.normalize_file_path(project_id, normalized)
+        except ValueError:
+            return {
+                "path": normalized,
+                "exists": False,
+                "sha256": None,
+                "word_count": 0,
+                "mtime": None,
+            }
+        if self._is_canonical_report_draft_path(normalized):
+            normalized = self.skill_engine.REPORT_DRAFT_PATH
+
+        target = project_path / normalized
+        if not target.exists() or not target.is_file():
+            return {
+                "path": normalized,
+                "exists": False,
+                "sha256": None,
+                "word_count": 0,
+                "mtime": None,
+            }
+
+        try:
+            raw = target.read_bytes()
+        except OSError:
+            return {
+                "path": normalized,
+                "exists": False,
+                "sha256": None,
+                "word_count": 0,
+                "mtime": None,
+            }
+        text = raw.decode("utf-8", errors="ignore")
+        stat = target.stat()
+        return {
+            "path": normalized,
+            "exists": True,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "word_count": self.skill_engine._count_words(text),
+            "mtime": stat.st_mtime,
+        }
+
+    def _required_writes_satisfied(
+        self,
+        project_id: str,
+        snapshots: dict[str, dict],
+        successful_write_events: dict[str, list[dict]] | None = None,
+    ) -> tuple[bool, list[str]]:
+        successful_write_events = successful_write_events or {}
+        missing: list[str] = []
+        for path, before in snapshots.items():
+            current = self._snapshot_project_file(project_id, path)
+            if before.get("intent_kind") == "replace_text":
+                if self._required_replacement_write_satisfied(
+                    project_id,
+                    path,
+                    before,
+                    current,
+                    successful_write_events,
+                ):
+                    continue
+                missing.append(path)
+                continue
+            before_exists = bool(before.get("exists"))
+            current_exists = bool(current.get("exists"))
+            if self._required_existing_write_satisfied(
+                project_id,
+                path,
+                before,
+                current,
+            ):
+                continue
+            if (
+                not before_exists
+                and current_exists
+                and self._project_file_has_substantive_required_write(project_id, path)
+            ):
+                continue
+            missing.append(path)
+        return not missing, missing
+
+    def _required_existing_write_satisfied(
+        self,
+        project_id: str,
+        normalized_path: str,
+        before: dict,
+        current: dict,
+    ) -> bool:
+        if not (
+            before.get("exists")
+            and current.get("exists")
+            and current.get("sha256") != before.get("sha256")
+        ):
+            return False
+        if not self._is_canonical_report_draft_path(normalized_path):
+            return True
+
+        before_word_count = int(before.get("word_count") or 0)
+        current_word_count = int(current.get("word_count") or 0)
+        if current_word_count < before_word_count:
+            return False
+        return self._project_file_has_substantive_required_write(project_id, normalized_path)
+
+    def _required_replacement_write_satisfied(
+        self,
+        project_id: str,
+        normalized_path: str,
+        before: dict,
+        current: dict,
+        successful_write_events: dict[str, list[dict]],
+    ) -> bool:
+        canonical_path = self._canonical_successful_write_path(normalized_path, project_id=project_id)
+        if canonical_path != self.skill_engine.REPORT_DRAFT_PATH:
+            return False
+        if not (
+            before.get("exists")
+            and current.get("exists")
+            and current.get("sha256") != before.get("sha256")
+        ):
+            return False
+        old_text = str(before.get("old_text") or "")
+        new_text = str(before.get("new_text") or "")
+        if not old_text or not new_text:
+            return False
+        if before.get("old_text_present") is False:
+            return False
+        if not self._last_successful_write_is_matching_replacement_edit(
+            project_id,
+            successful_write_events,
+            canonical_path,
+            old_text,
+            new_text,
+        ):
+            return False
+        current_text = self._read_project_file_text(project_id, normalized_path)
+        if current_text is None:
+            return False
+        if new_text not in current_text:
+            return False
+        if old_text in new_text:
+            return True
+        return old_text not in current_text
+
+    def _last_successful_write_is_matching_replacement_edit(
+        self,
+        project_id: str,
+        successful_write_events: dict[str, list[dict]],
+        canonical_path: str,
+        old_text: str,
+        new_text: str,
+    ) -> bool:
+        events = successful_write_events.get(canonical_path) or []
+        if not isinstance(events, list):
+            return False
+        if not events:
+            return False
+        last_event = events[-1]
+        if not isinstance(last_event, dict):
+            return False
+        if last_event.get("path") != self.skill_engine.REPORT_DRAFT_PATH:
+            return False
+        if last_event.get("tool") != "edit_file":
+            return False
+        arguments = last_event.get("arguments")
+        if not isinstance(arguments, dict):
+            return False
+        file_path = arguments.get("file_path")
+        if not isinstance(file_path, str):
+            return False
+        if (
+            self._canonical_successful_write_path(file_path, project_id=project_id)
+            != self.skill_engine.REPORT_DRAFT_PATH
+        ):
+            return False
+        old_string = arguments.get("old_string")
+        new_string = arguments.get("new_string")
+        if not isinstance(old_string, str) or not isinstance(new_string, str):
+            return False
+        return (
+            self._text_contains_meaningful_reference(old_string, old_text)
+            and new_text in new_string
+        )
+
+    def _text_contains_meaningful_reference(self, container: str, needle: str) -> bool:
+        if needle in container:
+            return True
+        compact_container = re.sub(r"\s+", "", container or "")
+        compact_needle = re.sub(r"\s+", "", needle or "")
+        return bool(compact_needle and compact_needle in compact_container)
+
+    def _read_project_file_text(self, project_id: str, normalized_path: str) -> str | None:
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return None
+        try:
+            normalized = self.skill_engine.normalize_file_path(project_id, normalized_path)
+        except ValueError:
+            return None
+        if self._is_canonical_report_draft_path(normalized):
+            normalized = self.skill_engine.REPORT_DRAFT_PATH
+        target = project_path / normalized
+        if not target.exists() or not target.is_file():
+            return None
+        try:
+            return target.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+
+    def _project_file_has_substantive_required_write(self, project_id: str, normalized_path: str) -> bool:
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return False
+        try:
+            normalized = self.skill_engine.normalize_file_path(project_id, normalized_path)
+        except ValueError:
+            return False
+        if self._is_canonical_report_draft_path(normalized):
+            normalized = self.skill_engine.REPORT_DRAFT_PATH
+        target = project_path / normalized
+        if not target.exists() or not target.is_file():
+            return False
+        try:
+            text = target.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        if self._is_canonical_report_draft_path(normalized):
+            return (
+                self._count_report_append_substantive_chars(text)
+                >= self.APPEND_REPORT_DRAFT_MIN_SUBSTANTIVE_CHARS
+            )
+        return self.skill_engine._has_substantive_body(text)
 
     def _get_missing_expected_writes(self, assistant_message: str, successful_writes: set[str]) -> list[str]:
         expected = self._expected_plan_writes_for_message(assistant_message)
@@ -1303,9 +1879,40 @@ class ChatHandler:
     def _build_missing_write_feedback(self, missing_files: list[str]) -> str:
         joined = "、".join(f"`{path}`" for path in missing_files)
         return (
-            f"你刚刚声称已更新或已经给出了需要入档的内容，但本轮并未成功调用 `write_file` 写入 {joined}。"
+            f"你刚刚声称已更新或已经给出了需要入档的内容，但本轮并未成功调用真实文件工具写入 {joined}。"
             "不要口头汇报，也不要继续推进下一阶段。"
-            "请先用 `write_file` 完成这些文件落盘，再用一句话说明实际已写入哪些文件。"
+            "请先用真实文件工具完成这些文件落盘：新建或整体重写用 `write_file`，局部追加或替换用 `edit_file`。"
+            "不要把 `edit_file(...)` 或 `write_file(...)` 写在聊天正文里，那不是工具调用。"
+            "落盘成功后，再用一句话说明实际已写入哪些文件。"
+        )
+
+    def _build_required_write_feedback(self, missing_paths: list[str]) -> str:
+        joined = "、".join(f"`{path}`" for path in missing_paths)
+        return (
+            f"用户本轮要求更新报告正文，因此必须真实更新 {joined}。"
+            "刚才未检测到该文件按用户意图完成更新。"
+            "请根据用户意图选择真实文件工具："
+            "`append_report_draft` 仅用于继续撰写、补全或新增章节；"
+            "`edit_file` 用于替换、改写或修正现有报告中的局部文字；"
+            "`write_file` 仅用于整体重写整份草稿。"
+            "不要只口头说明已完成，也不要把工具调用写在聊天正文里。"
+        )
+
+    def _build_required_write_failure_message(self, missing_paths: list[str]) -> str:
+        joined = "、".join(f"`{path}`" for path in missing_paths)
+        return (
+            f"这轮没有检测到报告草稿 {joined} 被实际更新。"
+            "请重新发送更新报告正文的请求；我会要求模型按意图选择真实文件工具："
+            "续写或新增章节用 `append_report_draft`，局部替换用 `edit_file`，"
+            "整份草稿重写才用 `write_file`。"
+        )
+
+    def _build_self_correction_loop_feedback(self) -> str:
+        return (
+            "你刚刚进入了反复“修正/纠正”的自我循环。"
+            "停止输出反思过程，也不要继续重复确认。"
+            "请只执行下一步真实动作：如果资料不足就调用搜索/读取/文件工具补齐；"
+            "如果需要用户操作，只用一句话说明用户下一步要做什么。"
         )
 
     def _chat_stream_unlocked(
@@ -1332,13 +1939,19 @@ class ChatHandler:
             "transient_attachments": transient_attachments or [],
         }
         active_model = self._get_active_model_name()
+        required_write_snapshots = self._build_required_write_snapshots(project_id, user_message)
+        self._turn_context["required_write_snapshots"] = required_write_snapshots
 
         iterations = 0
         missing_write_retries = 0
+        required_write_retries = 0
+        self_correction_retries = 0
         assistant_message = ""
+        buffer_required_write_content = bool(required_write_snapshots)
         compressed = False
         policy = self._resolve_context_policy()
         successful_writes: set[str] = set()
+        successful_write_events: dict[str, list[dict]] = {}
         current_turn_messages: List[Dict] = []
         token_usage = self._normalize_provider_usage(
             None,
@@ -1380,6 +1993,7 @@ class ChatHandler:
                 }
                 if include_usage_requested:
                     request_kwargs["stream_options"] = {"include_usage": True}
+                self._debug_dump_request(request_kwargs, label="stream", note=f"iteration={iterations}")
                 try:
                     response = self.client.chat.completions.create(**request_kwargs)
                     break
@@ -1390,7 +2004,15 @@ class ChatHandler:
                     if retry < 1:
                         time.sleep(2)
                         continue
-                    yield {"type": "error", "data": self._format_provider_error(e, stream=True)}
+                    self._debug_dump_request(request_kwargs, label="stream", error=e, note=f"iteration={iterations}")
+                    yield {
+                        "type": "error",
+                        "data": self._format_provider_error(
+                            e,
+                            stream=True,
+                            request_kwargs=request_kwargs,
+                        ),
+                    }
                     return
 
             collected_message = {"role": "assistant", "content": "", "tool_calls": []}
@@ -1399,6 +2021,7 @@ class ChatHandler:
             stream_usage = None
             accumulated = ""
             stream_buffer = ""
+            self_correction_loop_detected = False
             try:
                 for chunk in response:
                     if getattr(chunk, "usage", None) is not None:
@@ -1411,10 +2034,14 @@ class ChatHandler:
                         accumulated += delta.content
                         collected_message["content"] = accumulated
                         stream_buffer += delta.content
-                        safe, held = stream_split_safe_tail(stream_buffer)
-                        if safe:
-                            yield {"type": "content", "data": safe}
-                        stream_buffer = held
+                        if not buffer_required_write_content:
+                            safe, held = stream_split_safe_tail(stream_buffer)
+                            if safe:
+                                yield {"type": "content", "data": safe}
+                            stream_buffer = held
+                        if self._looks_like_self_correction_loop(accumulated):
+                            self_correction_loop_detected = True
+                            break
 
                     if delta.tool_calls:
                         for tc_chunk in delta.tool_calls:
@@ -1440,10 +2067,60 @@ class ChatHandler:
                                 announced_tool_call_indexes.add(tc_chunk.index)
                                 yield {"type": "tool", "data": f"🔧 准备调用工具: {tc['function']['name']}"}
             except Exception as e:
-                yield {"type": "error", "data": self._format_provider_error(e, stream=True)}
+                self._debug_dump_request(request_kwargs, label="stream-iter", error=e, note=f"iteration={iterations}")
+                yield {
+                    "type": "error",
+                    "data": self._format_provider_error(
+                        e,
+                        stream=True,
+                        request_kwargs=request_kwargs,
+                    ),
+                }
                 return
 
             if collected_message["tool_calls"]:
+                # 上游（newapi → Gemini OpenAI 兼容层）偶发会把并行 functionCall 的流式
+                # chunk 全部塞到 index=0，导致 name/arguments 被首尾拼接成
+                # "write_filewrite_file" + "{...}{...}"。直接回传给上游会触发 400
+                # INVALID_ARGUMENT（工具名不在声明列表），因此本轮作废、不落入历史，
+                # 让模型在下一轮重新发起。
+                malformed_reasons: List[str] = []
+                for tc in collected_message["tool_calls"]:
+                    fn = tc.get("function") or {}
+                    fn_name = fn.get("name", "") or ""
+                    fn_args = fn.get("arguments", "") or ""
+                    if fn_name not in known_tool_names:
+                        malformed_reasons.append(f"未知工具名: {fn_name!r}")
+                        continue
+                    if fn_args:
+                        try:
+                            json.loads(fn_args)
+                        except json.JSONDecodeError as exc:
+                            malformed_reasons.append(f"{fn_name} 参数 JSON 异常: {exc.msg}")
+
+                if malformed_reasons:
+                    yield {
+                        "type": "tool",
+                        "data": "⚠️ 上条 tool_calls 被上游合并成畸形条目，本轮作废并让模型重发。",
+                    }
+                    # 用一条纯文本 assistant + 一条 user 反馈做"合规隔板"，保持 user/model
+                    # 严格交替——直接 append 一条 user 会导致连续两条 user（前面本轮原始
+                    # 用户消息），触发 Gemini 的角色交替校验 400。
+                    current_turn_messages.append({
+                        "role": "assistant",
+                        "content": "（上条工具调用被上游合并成畸形条目，已作废本轮调用。）",
+                    })
+                    current_turn_messages.append({
+                        "role": "user",
+                        "content": (
+                            "刚才的 tool_calls 格式异常（"
+                            + "；".join(malformed_reasons)
+                            + "）。请重新发起：每次只调用一个工具，等该工具返回后再发下一个。"
+                        ),
+                    })
+                    iterations += 1
+                    continue
+
                 current_turn_messages.append(collected_message)
                 for index, tool_call in enumerate(collected_message["tool_calls"]):
                     func_name = tool_call["function"]["name"]
@@ -1462,9 +2139,16 @@ class ChatHandler:
                             })()
 
                     result = self._execute_tool(project_id, ToolCall(tool_call))
-                    write_path = self._extract_successful_write_path(func_name, func_args, result)
-                    if write_path:
+                    write_event = self._extract_successful_write_event(
+                        func_name,
+                        func_args,
+                        result,
+                        project_id=project_id,
+                    )
+                    if write_event:
+                        write_path = write_event["path"]
                         successful_writes.add(write_path)
+                        successful_write_events.setdefault(write_path, []).append(write_event)
                     for notice in self._turn_context.pop("pending_system_notices", []):
                         yield {
                             "type": "system_notice",
@@ -1483,6 +2167,21 @@ class ChatHandler:
                 iterations += 1
             else:
                 candidate_message = collected_message["content"]
+                if (
+                    (self_correction_loop_detected or self._looks_like_self_correction_loop(candidate_message))
+                    and self_correction_retries < self.MAX_SELF_CORRECTION_RETRIES
+                ):
+                    self_correction_retries += 1
+                    yield {
+                        "type": "tool",
+                        "data": "⚠️ 检测到助手进入自我修正循环，正在要求它停止反思文本并重试。",
+                    }
+                    current_turn_messages.append({"role": "assistant", "content": candidate_message})
+                    current_turn_messages.append({
+                        "role": "user",
+                        "content": self._build_self_correction_loop_feedback(),
+                    })
+                    continue
                 missing_writes = self._get_missing_expected_writes(candidate_message, successful_writes)
                 if missing_writes and missing_write_retries < self.MAX_MISSING_WRITE_RETRIES:
                     missing_write_retries += 1
@@ -1496,6 +2195,33 @@ class ChatHandler:
                         "content": self._build_missing_write_feedback(missing_writes),
                     })
                     continue
+                required_satisfied, missing_required_writes = self._required_writes_satisfied(
+                    project_id,
+                    required_write_snapshots,
+                    successful_write_events,
+                )
+                if not required_satisfied:
+                    if required_write_retries < self.MAX_MISSING_WRITE_RETRIES:
+                        required_write_retries += 1
+                        yield {
+                            "type": "tool",
+                            "data": "⚠️ 本轮要求更新报告正文，但未检测到草稿文件变化，正在要求助手调用文件工具重试。",
+                        }
+                        current_turn_messages.append({"role": "assistant", "content": candidate_message})
+                        current_turn_messages.append({
+                            "role": "user",
+                            "content": self._build_required_write_feedback(missing_required_writes),
+                        })
+                        continue
+                    assistant_message = self._build_required_write_failure_message(missing_required_writes)
+                    accumulated = ""
+                    stream_buffer = ""
+                    token_usage = self._normalize_provider_usage(
+                        stream_usage,
+                        policy,
+                        preflight_compaction_used=compressed,
+                    )
+                    break
                 assistant_message = candidate_message
                 token_usage = self._normalize_provider_usage(
                     stream_usage,
@@ -1505,12 +2231,24 @@ class ChatHandler:
                 break
         else:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
-            yield {"type": "content", "data": assistant_message}
-            accumulated = assistant_message
-            stream_buffer = ""
+            if buffer_required_write_content:
+                accumulated = ""
+                stream_buffer = ""
+            else:
+                yield {"type": "content", "data": assistant_message}
+                accumulated = assistant_message
+                stream_buffer = ""
 
         assistant_message = self._finalize_assistant_turn(project_id, assistant_message)
-        already_emitted_len = len(accumulated) - len(stream_buffer)
+        # 上游偶尔会返回只有空白的 assistant（stream 截断、tag strip 后变空等），
+        # 原样落盘会在下一轮产生 parts=[] 的 model turn，Gemini 拒收。用占位文本保底。
+        if not assistant_message.strip():
+            assistant_message = "（本轮无回复）"
+        already_emitted_len = (
+            0
+            if buffer_required_write_content
+            else len(accumulated) - len(stream_buffer)
+        )
         remainder = assistant_message[already_emitted_len:]
         if remainder:
             yield {"type": "content", "data": remainder}
@@ -1552,13 +2290,18 @@ class ChatHandler:
             "transient_attachments": transient_attachments or [],
         }
         active_model = self._get_active_model_name()
+        required_write_snapshots = self._build_required_write_snapshots(project_id, user_message)
+        self._turn_context["required_write_snapshots"] = required_write_snapshots
 
         iterations = 0
         missing_write_retries = 0
+        required_write_retries = 0
+        self_correction_retries = 0
         assistant_message = ""
         compressed = False
         policy = self._resolve_context_policy()
         successful_writes: set[str] = set()
+        successful_write_events: dict[str, list[dict]] = {}
         current_turn_messages: List[Dict] = []
         token_usage = self._normalize_provider_usage(
             None,
@@ -1585,23 +2328,39 @@ class ChatHandler:
                 return {"content": str(exc), "token_usage": None}
 
             for retry in range(2):
+                timeout = 120.0 if "v3.2" in active_model.lower() else 30.0
+                request_kwargs = {
+                    "model": active_model,
+                    "messages": conversation,
+                    "temperature": 0.7,
+                    "max_tokens": self._get_request_max_tokens(policy),
+                    "tools": self._get_tools(),
+                    "tool_choice": "auto",
+                    "timeout": timeout,
+                    "stream": False,
+                }
+                self._debug_dump_request(request_kwargs, label="nostream", note=f"iteration={iterations}")
                 try:
-                    timeout = 120.0 if "v3.2" in active_model.lower() else 30.0
-                    response = self.client.chat.completions.create(
-                        model=active_model,
-                        messages=conversation,
-                        temperature=0.7,
-                        max_tokens=self._get_request_max_tokens(policy),
-                        tools=self._get_tools(),
-                        tool_choice="auto",
-                        timeout=timeout,
-                    )
+                    response = self.client.chat.completions.create(**request_kwargs)
                     break
                 except Exception as e:
                     if retry < 1:
                         time.sleep(2)
                         continue
-                    return {"content": f"API调用失败: {str(e)}", "token_usage": None}
+                    self._debug_dump_request(
+                        request_kwargs,
+                        label="nostream",
+                        error=e,
+                        note=f"iteration={iterations}",
+                    )
+                    return {
+                        "content": self._format_provider_error(
+                            e,
+                            stream=False,
+                            request_kwargs=request_kwargs,
+                        ),
+                        "token_usage": None,
+                    }
 
             message = response.choices[0].message
             if message.tool_calls:
@@ -1623,13 +2382,16 @@ class ChatHandler:
                 current_turn_messages.append(msg_dict)
                 for tool_call in message.tool_calls:
                     result = self._execute_tool(project_id, tool_call)
-                    write_path = self._extract_successful_write_path(
+                    write_event = self._extract_successful_write_event(
                         tool_call.function.name,
                         tool_call.function.arguments,
                         result,
+                        project_id=project_id,
                     )
-                    if write_path:
+                    if write_event:
+                        write_path = write_event["path"]
                         successful_writes.add(write_path)
+                        successful_write_events.setdefault(write_path, []).append(write_event)
                     current_turn_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -1638,6 +2400,17 @@ class ChatHandler:
                 iterations += 1
             else:
                 candidate_message = message.content or ""
+                if (
+                    self._looks_like_self_correction_loop(candidate_message)
+                    and self_correction_retries < self.MAX_SELF_CORRECTION_RETRIES
+                ):
+                    self_correction_retries += 1
+                    current_turn_messages.append({"role": "assistant", "content": candidate_message})
+                    current_turn_messages.append({
+                        "role": "user",
+                        "content": self._build_self_correction_loop_feedback(),
+                    })
+                    continue
                 missing_writes = self._get_missing_expected_writes(candidate_message, successful_writes)
                 if missing_writes and missing_write_retries < self.MAX_MISSING_WRITE_RETRIES:
                     missing_write_retries += 1
@@ -1647,6 +2420,27 @@ class ChatHandler:
                         "content": self._build_missing_write_feedback(missing_writes),
                     })
                     continue
+                required_satisfied, missing_required_writes = self._required_writes_satisfied(
+                    project_id,
+                    required_write_snapshots,
+                    successful_write_events,
+                )
+                if not required_satisfied:
+                    if required_write_retries < self.MAX_MISSING_WRITE_RETRIES:
+                        required_write_retries += 1
+                        current_turn_messages.append({"role": "assistant", "content": candidate_message})
+                        current_turn_messages.append({
+                            "role": "user",
+                            "content": self._build_required_write_feedback(missing_required_writes),
+                        })
+                        continue
+                    assistant_message = self._build_required_write_failure_message(missing_required_writes)
+                    token_usage = self._normalize_provider_usage(
+                        getattr(response, "usage", None),
+                        policy,
+                        preflight_compaction_used=compressed,
+                    )
+                    break
                 assistant_message = candidate_message
                 token_usage = self._normalize_provider_usage(
                     getattr(response, "usage", None),
@@ -1658,6 +2452,8 @@ class ChatHandler:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
 
         assistant_message = self._finalize_assistant_turn(project_id, assistant_message)
+        if not assistant_message.strip():
+            assistant_message = "（本轮无回复）"
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
@@ -1849,8 +2645,13 @@ class ChatHandler:
             if result.get("status") != "success":
                 continue
 
+            if func_name == "append_report_draft":
+                source_keys.add(f"file:{self.skill_engine.REPORT_DRAFT_PATH}")
+                continue
+
             extra = None
-            if func_name in {"read_file", "write_file"}:
+            metadata_func_name = func_name
+            if func_name in {"read_file", "write_file", "edit_file"}:
                 file_path = args.get("file_path")
                 if not isinstance(file_path, str) or not file_path.strip():
                     continue
@@ -1858,8 +2659,10 @@ class ChatHandler:
                     extra = {"normalized_path": self.skill_engine.normalize_file_path(project_id, file_path)}
                 except ValueError:
                     continue
+                if func_name == "edit_file":
+                    metadata_func_name = "write_file"
 
-            metadata = self._build_tool_persistence_metadata(project_id, func_name, args, result, extra)
+            metadata = self._build_tool_persistence_metadata(project_id, metadata_func_name, args, result, extra)
             source_key = metadata.get("source_key") if isinstance(metadata, dict) else None
             if isinstance(source_key, str) and source_key.strip():
                 source_keys.add(source_key)
@@ -2045,7 +2848,12 @@ class ChatHandler:
         if role not in {"user", "assistant"}:
             return None
         if role == "assistant":
-            return {"role": "assistant", "content": message.get("content", "")}
+            content = message.get("content", "") or ""
+            # 历史里可能残留 content="" 的 assistant（早期版本无兜底时落盘过）。
+            # Gemini 对空 parts 的 model turn 会拒 400，这里统一兜底占位。
+            if not content.strip():
+                content = "（本轮无回复）"
+            return {"role": "assistant", "content": content}
 
         attached_material_ids = message.get("attached_material_ids") or []
         transient_attachments = message.get("transient_attachments") or []
@@ -2114,14 +2922,62 @@ class ChatHandler:
                 "type": "function",
                 "function": {
                     "name": "write_file",
-                    "description": "写入或更新项目文件",
+                    "description": (
+                        "整文件覆盖写入，适合新建文件或整体重写。"
+                        "追加条目到积累型文件（plan/data-log.md、plan/analysis-notes.md）时不要用 write_file，"
+                        "应改用 edit_file 以避免覆盖已有条目。"
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "file_path": {"type": "string", "description": "文件路径，如 plan/outline.md"},
-                            "content": {"type": "string", "description": "文件内容"},
+                            "content": {"type": "string", "description": "文件全量内容"},
                         },
                         "required": ["file_path", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_file",
+                    "description": (
+                        "对已存在文件做精确字符串替换——"
+                        "系统找到 old_string 的唯一匹配并替换为 new_string，其他内容保留不变。"
+                        "适合追加新条目（把文件末尾一段作为 old_string，new_string 放 '原文+新条目'）、"
+                        "或局部修正。data-log.md、analysis-notes.md 这类逐条积累的文件**首选用 edit_file**，"
+                        "避免 write_file 整体重写时误删历史条目。"
+                        "要求：目标文件已存在；old_string 在文件中唯一存在。不唯一时请在 old_string 前后补更多上下文。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string", "description": "已存在文件的路径，如 plan/data-log.md"},
+                            "old_string": {"type": "string", "description": "要被替换的原字符串片段，必须在文件中唯一存在"},
+                            "new_string": {"type": "string", "description": "替换成的新字符串；如果是追加条目，这里放 '原 old_string + 新内容'"},
+                        },
+                        "required": ["file_path", "old_string", "new_string"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "append_report_draft",
+                    "description": (
+                        "追加或续写报告正文到唯一草稿路径 content/report_draft_v1.md。"
+                        "用于 S4/S5 中用户要求继续写、补全章节、扩写正文时。"
+                        "不要用于 plan 文件、审查清单、交付记录或最终归档。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "要追加到报告草稿末尾的新正文，必须是完整 Markdown 段落或章节，不要只写摘要。",
+                            },
+                        },
+                        "required": ["content"],
                     },
                 },
             },
@@ -2192,103 +3048,58 @@ class ChatHandler:
             args = json.loads(tool_call.function.arguments)
 
             if func_name == "write_file":
-                normalized_early = self.skill_engine._to_posix(
-                    args["file_path"]
-                ).lstrip("/")
-                project_path = self.skill_engine.get_project_path(project_id)
-                if (
-                    project_path
-                    and normalized_early in self._S0_BLOCKED_PLAN_FILES
-                ):
-                    stage_state = self.skill_engine._infer_stage_state(project_path)
-                    if stage_state.get("stage_code") == "S0":
-                        reason = (
-                            "S0 阶段：请先对 seed 做一轮澄清，"
-                            "再写大纲/研究计划/资料清单/分析笔记"
-                        )
-                        self._emit_system_notice_once(
-                            category="s0_write_blocked",
-                            path=normalized_early,
-                            reason=reason,
-                            user_action=(
-                                "请先按 SKILL.md §S0 发一轮 3-5 个打包追问，"
-                                "用户回答或跳过后再写正式产出文件。"
-                            ),
-                        )
-                        return {"status": "error", "message": reason}
-                if self._should_block_non_plan_write(project_id, args["file_path"]):
-                    reason = "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。"
-                    self._emit_system_notice_once(
-                        category="non_plan_write_blocked",
-                        path=None,
-                        reason=reason,
-                        user_action="请先让用户确认大纲或明确要求继续正文后，再尝试写正式内容。",
-                    )
-                    return {
-                        "status": "error",
-                        "message": reason,
-                    }
-                if self._should_require_fetch_url_before_write(project_id, args["file_path"]):
-                    reason = "本轮已经做过 web_search，但还没调用 fetch_url 阅读网页正文。请先对候选链接使用 fetch_url，再写正式文件。"
-                    self._emit_system_notice_once(
-                        category="fetch_url_gate_blocked",
-                        path=None,
-                        reason=reason,
-                        user_action="请先读取候选网页正文，再把外部信息写入正式文件。",
-                    )
-                    return {
-                        "status": "error",
-                        "message": reason,
-                    }
-                normalized_path = self.skill_engine.validate_plan_write(project_id, args["file_path"])
-                if self.skill_engine.is_protected_stage_checkpoints_path(normalized_path):
-                    reason = (
-                        "stage_checkpoints.json 是用户确认真值源，模型不能直接写入。"
-                        "推进阶段需要用户点击右侧工作区对应按钮（例如\"确认大纲，进入资料采集\"）。"
-                    )
-                    self._emit_system_notice_once(
-                        category="checkpoint_forge_blocked",
-                        path=normalized_path,
-                        reason=reason,
-                        user_action="请告知用户需要他们点击工作区按钮来推进阶段；不要尝试直接写这个文件。",
-                    )
-                    return {"status": "error", "message": reason}
-                project_path = self.skill_engine.get_project_path(project_id)
-                checkpoints = self.skill_engine._load_stage_checkpoints(project_path) if project_path else {}
-                signature_error = self.skill_engine.validate_self_signature(
-                    normalized_path,
-                    args["content"],
-                    checkpoints,
-                )
-                if signature_error:
-                    self._emit_system_notice_once(
-                        category="write_blocked",
-                        path=normalized_path,
-                        reason=signature_error,
-                        user_action="请联系用户在右侧工作区完成对应的确认后再写入",
-                    )
-                    return {"status": "error", "message": signature_error}
-                should_emit_data_log_hint = self._is_first_data_log_write(project_id, normalized_path)
-                self.skill_engine.write_file(project_id, normalized_path, args["content"])
-                result = {"status": "success", "message": f"已写入文件: {normalized_path}"}
-                if should_emit_data_log_hint:
-                    self._emit_system_notice_once(
-                        category="data_log_format_hint",
-                        path=normalized_path,
-                        reason=(
-                            "data-log.md 每条事实必须写成 `### [DL-YYYY-NN] 事实标题`，"
-                            "下方带 URL / `material:xxx` / `访谈:` / `调研:` 来源标记。"
-                        ),
-                        user_action="不要用 Markdown 表格记录事实；请拆成独立 DL-id 条目后继续写入。",
-                    )
-                self._persist_successful_tool_result(
+                return self._execute_plan_write(
                     project_id,
-                    func_name,
-                    args,
-                    result,
-                    {"normalized_path": normalized_path},
+                    file_path=args["file_path"],
+                    content=args["content"],
+                    source_tool_name="write_file",
+                    source_tool_args=args,
+                    persist_func_name="write_file",
+                    persist_args=args,
                 )
-                return result
+            if func_name == "edit_file":
+                file_path = args.get("file_path", "")
+                old_string = args.get("old_string", "")
+                new_string = args.get("new_string", "")
+                if not file_path:
+                    return {"status": "error", "message": "缺少 file_path 参数。"}
+                if not old_string:
+                    return {
+                        "status": "error",
+                        "message": "old_string 不能为空；新建文件或整体重写请改用 write_file。",
+                    }
+                try:
+                    normalized_read = self.skill_engine.normalize_file_path(project_id, file_path)
+                    current_content = self.skill_engine.read_file(project_id, normalized_read)
+                except (ValueError, FileNotFoundError) as exc:
+                    return {
+                        "status": "error",
+                        "message": f"读取失败：{str(exc)}（edit_file 要求目标文件已存在；新建用 write_file）",
+                    }
+                count = current_content.count(old_string)
+                if count == 0:
+                    return {
+                        "status": "error",
+                        "message": "old_string 在文件中未找到，请先 read_file 核对原文后重试。",
+                    }
+                if count > 1:
+                    return {
+                        "status": "error",
+                        "message": f"old_string 在文件中出现 {count} 次，不唯一；请在 old_string 前后补更多上下文让它唯一。",
+                    }
+                updated = current_content.replace(old_string, new_string, 1)
+                # edit 成功的 persist 记录统一记成 write_file 行为，让 source_key 逻辑不分叉。
+                return self._execute_plan_write(
+                    project_id,
+                    file_path=file_path,
+                    content=updated,
+                    source_tool_name="edit_file",
+                    source_tool_args=args,
+                    persist_func_name="write_file",
+                    persist_args={"file_path": file_path, "content": updated},
+                )
+            if func_name == "append_report_draft":
+                return self._execute_append_report_draft(project_id, args.get("content", ""))
             if func_name == "read_file":
                 normalized_path = self.skill_engine.normalize_file_path(project_id, args["file_path"])
                 content = self.skill_engine.read_file(project_id, normalized_path)
@@ -2337,7 +3148,7 @@ class ChatHandler:
             return {"status": "error", "message": f"参数解析失败: {str(e)}"}
         except ValueError as e:
             logging.error(f"工具参数验证失败: {func_name}, 错误: {str(e)}")
-            if func_name == "write_file":
+            if func_name in {"write_file", "edit_file"}:
                 self._emit_system_notice_once(
                     category="write_blocked",
                     path=None,
@@ -2347,7 +3158,7 @@ class ChatHandler:
             return {"status": "error", "message": str(e)}
         except Exception as e:
             logging.error(f"工具执行异常: {func_name}, 错误: {str(e)}")
-            if func_name == "write_file":
+            if func_name in {"write_file", "edit_file"}:
                 self._emit_system_notice_once(
                     category="write_blocked",
                     path=None,
@@ -2355,6 +3166,381 @@ class ChatHandler:
                     user_action="请检查写入条件是否满足，然后重试。",
                 )
             return {"status": "error", "message": f"工具执行失败: {str(e)}"}
+
+    def _execute_append_report_draft(self, project_id: str, content: object) -> Dict:
+        if not isinstance(content, str):
+            return {"status": "error", "message": "content 必须是字符串。"}
+
+        append_content = content.strip()
+        substantive_chars = self._count_report_append_substantive_chars(append_content)
+        if substantive_chars < self.APPEND_REPORT_DRAFT_MIN_SUBSTANTIVE_CHARS:
+            return {
+                "status": "error",
+                "message": (
+                    "追加报告正文内容过短；去除常见 Markdown 标记和空白后，"
+                    f"至少 {self.APPEND_REPORT_DRAFT_MIN_SUBSTANTIVE_CHARS} 个有效字符。"
+                ),
+            }
+
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return {"status": "error", "message": f"项目 {project_id} 不存在"}
+
+        draft_path = project_path / self.skill_engine.REPORT_DRAFT_PATH
+        existing_content = ""
+        if draft_path.exists():
+            existing_content = draft_path.read_text(encoding="utf-8")
+
+        combined_content = self._join_report_draft_append(existing_content, append_content)
+        result = self._execute_plan_write(
+            project_id,
+            file_path=self.skill_engine.REPORT_DRAFT_PATH,
+            content=combined_content,
+            source_tool_name="append_report_draft",
+            source_tool_args={"content": append_content},
+            persist_func_name="write_file",
+            persist_args={
+                "file_path": self.skill_engine.REPORT_DRAFT_PATH,
+                "content": combined_content,
+            },
+        )
+        if result.get("status") != "success":
+            return result
+
+        targets = self.skill_engine._resolve_length_targets(project_path)
+        report_word_floor = int(targets.get("report_word_floor", 0) or 0)
+        word_count = self.skill_engine._count_words(combined_content)
+        result.update(
+            {
+                "path": self.skill_engine.REPORT_DRAFT_PATH,
+                "appended_chars": len(append_content),
+                "word_count": word_count,
+                "report_word_floor": report_word_floor,
+                "report_ready": self.skill_engine._has_effective_report_draft(
+                    project_path,
+                    min_words=report_word_floor,
+                ),
+            }
+        )
+        return result
+
+    def _count_report_append_substantive_chars(self, content: str) -> int:
+        text = content or ""
+        text = re.sub(r"```[^\n]*", "", text)
+        text = text.replace("```", "")
+        text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s*>\s?", "", text, flags=re.MULTILINE)
+        text = re.sub(r"[*_~`]+", "", text)
+        text = re.sub(r"!?\[|\]\(|\)|\[|\]", "", text)
+        text = re.sub(r"[\s\u3000]+", "", text)
+        return len(text)
+
+    def _join_report_draft_append(self, existing_content: str, append_content: str) -> str:
+        existing = (existing_content or "").rstrip()
+        addition = (append_content or "").strip()
+        if not existing:
+            return addition
+        return f"{existing}\n\n{addition}"
+
+    def _execute_plan_write(
+        self,
+        project_id: str,
+        *,
+        file_path: str,
+        content: str,
+        source_tool_name: str,
+        persist_func_name: str,
+        persist_args: Dict,
+        source_tool_args: Dict | None = None,
+    ) -> Dict:
+        """write_file / edit_file 共享的写入门禁链。入参已经是"最终要落盘的完整内容"。"""
+        normalized_early = self.skill_engine._to_posix(file_path).lstrip("/")
+        project_path = self.skill_engine.get_project_path(project_id)
+        try:
+            normalized_preview = self.skill_engine.normalize_file_path(project_id, file_path)
+        except ValueError:
+            normalized_preview = normalized_early
+        if self._is_noncanonical_report_draft_path(normalized_preview):
+            reason = self._build_report_draft_path_error(normalized_preview)
+            self._emit_system_notice_once(
+                category="report_draft_path_blocked",
+                path=normalized_preview,
+                reason=reason,
+                user_action=f"请改写到 `{self.skill_engine.REPORT_DRAFT_PATH}` 后再继续。",
+            )
+            return {"status": "error", "message": reason}
+        if project_path and normalized_early in self._S0_BLOCKED_PLAN_FILES:
+            stage_state = self.skill_engine._infer_stage_state(project_path)
+            if stage_state.get("stage_code") == "S0":
+                reason = (
+                    "S0 阶段：请先对 seed 做一轮澄清，"
+                    "再写大纲/研究计划/资料清单/分析笔记"
+                )
+                self._emit_system_notice_once(
+                    category="s0_write_blocked",
+                    path=normalized_early,
+                    reason=reason,
+                    user_action=(
+                        "请先按 SKILL.md §S0 发一轮 3-5 个打包追问，"
+                        "用户回答或跳过后再写正式产出文件。"
+                    ),
+                )
+                return {"status": "error", "message": reason}
+        if self._should_block_non_plan_write(project_id, file_path):
+            reason = "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。"
+            self._emit_system_notice_once(
+                category="non_plan_write_blocked",
+                path=None,
+                reason=reason,
+                user_action="请先让用户确认大纲或明确要求继续正文后，再尝试写正式内容。",
+            )
+            return {"status": "error", "message": reason}
+        if self._should_require_fetch_url_before_write(project_id, file_path):
+            reason = "本轮已经做过 web_search，但还没调用 fetch_url 阅读网页正文。请先对候选链接使用 fetch_url，再写正式文件。"
+            self._emit_system_notice_once(
+                category="fetch_url_gate_blocked",
+                path=None,
+                reason=reason,
+                user_action="请先读取候选网页正文，再把外部信息写入正式文件。",
+            )
+            return {"status": "error", "message": reason}
+        normalized_path = self.skill_engine.validate_plan_write(project_id, file_path)
+        if self._is_canonical_report_draft_path(normalized_path):
+            normalized_path = self.skill_engine.REPORT_DRAFT_PATH
+        destructive_write_error = self._validate_required_report_draft_prewrite(
+            project_id,
+            normalized_path,
+            content,
+            source_tool_name=source_tool_name,
+            source_tool_args=source_tool_args,
+        )
+        if destructive_write_error:
+            self._emit_system_notice_once(
+                category="report_draft_destructive_write_blocked",
+                path=normalized_path,
+                reason=destructive_write_error,
+                user_action=(
+                    "续写或新增章节请用 `append_report_draft`；"
+                    "局部修改请用 `edit_file`；只有完整重写整份草稿时才用 `write_file`。"
+                ),
+            )
+            return {"status": "error", "message": destructive_write_error}
+        if self.skill_engine.is_protected_stage_checkpoints_path(normalized_path):
+            reason = (
+                "stage_checkpoints.json 是用户确认真值源，模型不能直接写入。"
+                "推进阶段需要用户点击右侧工作区对应按钮（例如\"确认大纲，进入资料采集\"）。"
+            )
+            self._emit_system_notice_once(
+                category="checkpoint_forge_blocked",
+                path=normalized_path,
+                reason=reason,
+                user_action="请告知用户需要他们点击工作区按钮来推进阶段；不要尝试直接写这个文件。",
+            )
+            return {"status": "error", "message": reason}
+        project_path = self.skill_engine.get_project_path(project_id)
+        checkpoints = self.skill_engine._load_stage_checkpoints(project_path) if project_path else {}
+        signature_error = self.skill_engine.validate_self_signature(
+            normalized_path,
+            content,
+            checkpoints,
+        )
+        if signature_error:
+            self._emit_system_notice_once(
+                category="write_blocked",
+                path=normalized_path,
+                reason=signature_error,
+                user_action="请联系用户在右侧工作区完成对应的确认后再写入",
+            )
+            return {"status": "error", "message": signature_error}
+        analysis_refs_error = self._validate_analysis_notes_refs_for_write(
+            project_id,
+            normalized_path,
+            content,
+        )
+        if analysis_refs_error:
+            self._emit_system_notice_once(
+                category="analysis_refs_missing",
+                path=normalized_path,
+                reason=analysis_refs_error,
+                user_action=(
+                    "请在每条关键发现后补充明确的 data-log 引用，"
+                    "例如 `[DL-2026-01]` 或 `[DL-2026-01/06]`，再重新写入。"
+                ),
+            )
+            return {"status": "error", "message": analysis_refs_error}
+        should_emit_data_log_hint = self._is_first_data_log_write(project_id, normalized_path)
+        self.skill_engine.write_file(project_id, normalized_path, content)
+        result = {"status": "success", "message": f"已写入文件: {normalized_path}"}
+        if should_emit_data_log_hint:
+            self._emit_system_notice_once(
+                category="data_log_format_hint",
+                path=normalized_path,
+                reason=(
+                    "data-log.md 每条事实必须写成 `### [DL-YYYY-NN] 事实标题`，"
+                    "下方带 URL / `material:xxx` / `访谈:` / `调研:` 来源标记。"
+                ),
+                user_action="不要用 Markdown 表格记录事实；请拆成独立 DL-id 条目后继续写入。",
+            )
+        self._persist_successful_tool_result(
+            project_id,
+            persist_func_name,
+            persist_args,
+            result,
+            {"normalized_path": normalized_path},
+        )
+        return result
+
+    def _validate_required_report_draft_prewrite(
+        self,
+        project_id: str,
+        normalized_path: str,
+        content: str,
+        *,
+        source_tool_name: str,
+        source_tool_args: Dict | None = None,
+    ) -> str | None:
+        if not self._is_canonical_report_draft_path(normalized_path):
+            return None
+
+        snapshots = self._turn_context.get("required_write_snapshots")
+        if not isinstance(snapshots, dict):
+            return None
+        if self.skill_engine.REPORT_DRAFT_PATH not in snapshots:
+            return None
+
+        snapshot = snapshots.get(self.skill_engine.REPORT_DRAFT_PATH)
+        if isinstance(snapshot, dict) and snapshot.get("intent_kind") == "replace_text":
+            return self._validate_replace_text_report_draft_prewrite(
+                project_id,
+                snapshot,
+                source_tool_name=source_tool_name,
+                source_tool_args=source_tool_args,
+            )
+
+        if source_tool_name not in {"write_file", "edit_file"}:
+            return None
+
+        current = self._snapshot_project_file(project_id, self.skill_engine.REPORT_DRAFT_PATH)
+        if not current.get("exists"):
+            return None
+
+        current_word_count = int(current.get("word_count") or 0)
+        new_word_count = self.skill_engine._count_words(content or "")
+        if current_word_count <= new_word_count:
+            return None
+
+        return (
+            f"本轮要求更新报告正文，但 `{source_tool_name}` 形成的最终内容比现有草稿更短，"
+            "可能覆盖并丢失已有正文。请改用 `append_report_draft` 续写/新增章节，"
+            "或用 `edit_file` 做小范围局部替换；只有完整重写整份草稿时才使用 `write_file`。"
+        )
+
+    def _validate_replace_text_report_draft_prewrite(
+        self,
+        project_id: str,
+        snapshot: dict,
+        *,
+        source_tool_name: str,
+        source_tool_args: Dict | None,
+    ) -> str | None:
+        if source_tool_name == "write_file":
+            return (
+                "本轮用户要求对报告正文做局部替换，不能用 `write_file` 覆盖 "
+                f"`{self.skill_engine.REPORT_DRAFT_PATH}`。"
+                "请改用 `edit_file`，通过 old_string/new_string 做精确替换，"
+                "避免覆盖整份草稿。"
+            )
+
+        if source_tool_name == "append_report_draft":
+            return (
+                "本轮用户要求对报告正文做局部替换，不能用 `append_report_draft` 追加 "
+                f"`{self.skill_engine.REPORT_DRAFT_PATH}`。"
+                "请改用 `edit_file`，通过 old_string/new_string 对目标文字做精确替换。"
+            )
+
+        if source_tool_name != "edit_file":
+            return (
+                "本轮用户要求对报告正文做局部替换，只能用 `edit_file` "
+                "通过 old_string/new_string 做精确替换。"
+            )
+
+        if not isinstance(source_tool_args, dict):
+            return (
+                "本轮用户要求对报告正文做局部替换，但未检测到 `edit_file` 的 "
+                "old_string/new_string 参数。请重新用 `edit_file` 精确替换目标文字。"
+            )
+
+        old_text = str(snapshot.get("old_text") or "")
+        new_text = str(snapshot.get("new_text") or "")
+        old_string = source_tool_args.get("old_string")
+        new_string = source_tool_args.get("new_string")
+        if not (
+            old_text
+            and new_text
+            and isinstance(old_string, str)
+            and isinstance(new_string, str)
+        ):
+            return (
+                "本轮用户要求对报告正文做局部替换，`edit_file` 必须提供有效的 "
+                "old_string/new_string，并包含用户指定的新旧文字。"
+            )
+
+        if old_text not in old_string:
+            return (
+                "本轮用户要求替换的旧文字未出现在 `edit_file.old_string` 中。"
+                "请先 read_file 核对原文，再用包含该旧文字的 old_string 精确替换。"
+            )
+        if new_text not in new_string:
+            return (
+                "本轮用户要求替换成的新文字未出现在 `edit_file.new_string` 中。"
+                "请用 new_string 明确包含用户指定的新文字。"
+            )
+
+        current_text = self._read_project_file_text(
+            project_id,
+            self.skill_engine.REPORT_DRAFT_PATH,
+        )
+        current_length = len(current_text or "")
+        old_string_length = len(old_string)
+        old_string_limit = max(len(old_text) + 80, int(0.15 * current_length))
+        if old_string_length > old_string_limit:
+            return (
+                "`edit_file.old_string` 覆盖范围过大，像是在重写整份报告草稿。"
+                "本轮是局部替换，请只保留目标文字及必要上下文后重试。"
+            )
+        new_string_limit = max(len(new_text) + 80, int(0.15 * current_length))
+        if len(new_string) > new_string_limit:
+            return (
+                "`edit_file.new_string` 覆盖范围过大，像是在重写整份报告草稿。"
+                "本轮是局部替换，请只保留目标文字及必要上下文后重试。"
+            )
+
+        return None
+
+    def _validate_analysis_notes_refs_for_write(
+        self,
+        project_id: str,
+        normalized_path: str,
+        content: str,
+    ) -> str | None:
+        if normalized_path != "plan/analysis-notes.md":
+            return None
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return None
+        targets = self.skill_engine._resolve_length_targets(project_path)
+        if not self.skill_engine._has_enough_data_log_sources(project_path, targets["data_log_min"]):
+            return None
+        if not self.skill_engine._has_substantive_body(content):
+            return None
+        if self.skill_engine._count_analysis_refs_in_text(project_path, content) > 0:
+            return None
+        return (
+            "analysis-notes.md 中的关键发现需要显式引用 data-log 条目，"
+            "例如 `[DL-2026-01]` 或 `[DL-2026-01/06]`。"
+            "当前写入内容没有任何可统计的 DL 引用，请补上证据引用后再写入。"
+        )
 
     def _get_search_router(self) -> SearchRouter:
         global _SEARCH_ROUTER_SINGLETON
@@ -3046,6 +4232,228 @@ class ChatHandler:
             encoding="utf-8",
         )
 
+    # 调试辅助：仅在显式启用时 dump 已脱敏的上游请求元数据。
+    # 启用方式：CONSULTING_REPORT_DEBUG_DUMP=1。
+    def _debug_dump_request(
+        self,
+        request_kwargs: Dict,
+        *,
+        label: str,
+        error: object | None = None,
+        note: str | None = None,
+    ) -> None:
+        if os.environ.get("CONSULTING_REPORT_DEBUG_DUMP") != "1":
+            return
+        try:
+            from pathlib import Path
+
+            debug_dir = Path.home() / ".consulting-report" / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            snapshot = {
+                "label": label,
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "model": request_kwargs.get("model"),
+                "temperature": request_kwargs.get("temperature"),
+                "max_tokens": request_kwargs.get("max_tokens"),
+                "tool_choice": request_kwargs.get("tool_choice"),
+                "stream": request_kwargs.get("stream"),
+                "tools": self._debug_tool_names(request_kwargs.get("tools")),
+                "messages": self._debug_redact_messages(request_kwargs.get("messages")),
+            }
+            if note is not None:
+                snapshot["note"] = note
+            if error is not None:
+                snapshot["error"] = self._debug_summarize_error(error, request_kwargs)
+            (debug_dir / "payload-latest.json").write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            if error is not None:
+                stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                (debug_dir / f"error-{stamp}-{label}.json").write_text(
+                    json.dumps(snapshot, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
+
+    def _debug_summarize_error(self, error: object, request_kwargs: Dict) -> dict:
+        message = self._debug_redact_error_message(str(error), request_kwargs)
+        return {
+            "type": type(error).__name__,
+            "message": message,
+        }
+
+    def _debug_redact_error_message(self, message: str, request_kwargs: Dict) -> str:
+        sanitized = message or ""
+        sanitized = self.DEBUG_DATA_URL_BASE64_RE.sub("[redacted]", sanitized)
+        for fragment in self._debug_sensitive_request_fragments(request_kwargs):
+            sanitized = sanitized.replace(fragment, "[redacted]")
+        sanitized = self.DEBUG_LONG_BASE64_FRAGMENT_RE.sub("[redacted]", sanitized)
+        sanitized = re.sub(
+            r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}",
+            "Bearer [redacted]",
+            sanitized,
+        )
+        sanitized = re.sub(
+            r"(?i)\b(api[_-]?key|token|password|secret)(\s*[:=]\s*)(['\"]?)[^'\"\s,}]{4,}\3",
+            r"\1\2[redacted]",
+            sanitized,
+        )
+        sanitized = re.sub(r"\s+", " ", sanitized).strip()
+        if len(sanitized) > 240:
+            sanitized = sanitized[:237].rstrip() + "..."
+        return sanitized
+
+    def _debug_sensitive_request_fragments(self, request_kwargs: Dict) -> list[str]:
+        fragments: set[str] = set()
+        messages = request_kwargs.get("messages")
+        if not isinstance(messages, list):
+            return []
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            if "content" in message:
+                content = message.get("content")
+                self._debug_add_sensitive_fragment(
+                    fragments,
+                    self._extract_message_text(content),
+                )
+                self._debug_collect_message_image_url_fragments(content, fragments)
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function")
+                if not isinstance(function, dict):
+                    continue
+                arguments = function.get("arguments")
+                if not isinstance(arguments, str):
+                    continue
+                self._debug_add_sensitive_fragment(fragments, arguments)
+                try:
+                    parsed_arguments = json.loads(arguments)
+                except Exception:
+                    continue
+                self._debug_collect_sensitive_strings(parsed_arguments, fragments)
+
+        return sorted(fragments, key=len, reverse=True)
+
+    def _debug_collect_message_image_url_fragments(self, content, fragments: set[str]) -> None:
+        if not isinstance(content, list):
+            return
+        for item in content:
+            image_url = self._debug_get_value(item, "image_url")
+            if isinstance(image_url, str):
+                url = image_url
+            else:
+                url = self._debug_get_value(image_url, "url")
+            if not isinstance(url, str):
+                continue
+            self._debug_add_sensitive_fragment(fragments, url)
+            self._debug_add_data_url_payload_fragment(fragments, url)
+
+    def _debug_add_data_url_payload_fragment(self, fragments: set[str], url: str) -> None:
+        marker = ";base64,"
+        marker_index = url.lower().find(marker)
+        if not url.lower().startswith("data:") or marker_index == -1:
+            return
+        self._debug_add_sensitive_fragment(fragments, url[marker_index + len(marker):])
+
+    def _debug_get_value(self, value, key: str):
+        if isinstance(value, dict):
+            return value.get(key)
+        return getattr(value, key, None)
+
+    def _debug_collect_sensitive_strings(self, value, fragments: set[str]) -> None:
+        if isinstance(value, str):
+            self._debug_add_sensitive_fragment(fragments, value)
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                self._debug_collect_sensitive_strings(item, fragments)
+            return
+        if isinstance(value, list):
+            for item in value:
+                self._debug_collect_sensitive_strings(item, fragments)
+
+    def _debug_add_sensitive_fragment(self, fragments: set[str], value: str) -> None:
+        text = (value or "").strip()
+        if len(text) < 4:
+            return
+        fragments.add(text)
+        for ensure_ascii in (False, True):
+            encoded = json.dumps(text, ensure_ascii=ensure_ascii)[1:-1]
+            if encoded != text:
+                fragments.add(encoded)
+
+    def _debug_tool_names(self, tools) -> list[str]:
+        names: list[str] = []
+        if not isinstance(tools, list):
+            return names
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            function = tool.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+        return names
+
+    def _debug_redact_messages(self, messages) -> list[dict]:
+        if not isinstance(messages, list):
+            return []
+        redacted: list[dict] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                redacted.append({"type": type(message).__name__})
+                continue
+            item: dict = {}
+            role = message.get("role")
+            if isinstance(role, str):
+                item["role"] = role
+            if "content" in message:
+                content_text = self._extract_message_text(message.get("content"))
+                item["content"] = "[redacted]" if content_text else ""
+                item["content_length"] = len(content_text)
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                item["tool_calls"] = self._debug_redact_tool_calls(tool_calls)
+            redacted.append(item)
+        return redacted
+
+    def _debug_redact_tool_calls(self, tool_calls: list) -> list[dict]:
+        redacted: list[dict] = []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                redacted.append({"type": type(tool_call).__name__})
+                continue
+            item: dict = {}
+            call_id = tool_call.get("id")
+            if isinstance(call_id, str):
+                item["id"] = call_id
+            call_type = tool_call.get("type")
+            if isinstance(call_type, str):
+                item["type"] = call_type
+            function = tool_call.get("function")
+            if isinstance(function, dict):
+                redacted_function: dict = {}
+                name = function.get("name")
+                if isinstance(name, str):
+                    redacted_function["name"] = name
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    redacted_function["arguments"] = "[redacted]"
+                    redacted_function["arguments_length"] = len(arguments)
+                item["function"] = redacted_function
+            redacted.append(item)
+        return redacted
+
     def _extract_message_text(self, content) -> str:
         if isinstance(content, str):
             return content
@@ -3065,18 +4473,27 @@ class ChatHandler:
             turn_rule = (
                 "本轮如用户明确要求继续正文，可在更新 plan 后撰写正文。"
                 "像“你开始写吧”“开始写吧”“开始写正文吧”“继续写正文”都算明确授权。"
+                f"报告正文草稿统一写入 `{self.skill_engine.REPORT_DRAFT_PATH}`。"
             )
         else:
             turn_rule = (
                 "本轮只能做两类事：1）继续问清关键信息；2）更新 `plan/` 内文件。"
                 "在用户明确确认大纲或明确要求继续正文前，禁止写正文、章节草稿、report_draft 或最终报告。"
+                f"允许写正文后，报告正文草稿也只能写入 `{self.skill_engine.REPORT_DRAFT_PATH}`。"
                 "如果信息不足，提出问题后就停止本轮，不要擅自继续。"
             )
         evidence_rule = (
             "如果本轮调用了 `web_search` 并准备把外部网页信息写进正式文件，"
             "必须先对候选链接调用 `fetch_url` 阅读正文；搜索结果摘要不能直接当作正式依据。"
         )
-        return f"{skill_prompt}\n\n## 当前轮次约束\n{turn_rule}\n{evidence_rule}\n\n{project_context}"
+        # 管理型通道（newapi → Gemini）流式 tool_call chunk 偶发会把并行调用的 index 合并到 0，
+        # 导致 name/arguments 被首尾拼接成 `web_searchweb_search` 等畸形条目，后端只能作废本轮并请模型重发。
+        # 强制一次只发一个 tool_call，从源头规避该合并 bug。
+        concurrency_rule = (
+            "每轮消息只发一个 tool_call，等该工具返回结果后再发下一个；"
+            "不要在一条消息里并行发起多个工具调用。"
+        )
+        return f"{skill_prompt}\n\n## 当前轮次约束\n{turn_rule}\n{evidence_rule}\n{concurrency_rule}\n\n{project_context}"
 
     def _new_turn_context(self, *, can_write_non_plan: bool) -> Dict[str, object]:
         return {
@@ -3087,6 +4504,7 @@ class ChatHandler:
             "web_search_count": 0,
             "system_notice_emitted": False,
             "pending_system_notices": [],
+            "required_write_snapshots": {},
             "checkpoint_event": None,
             "pending_stage_keyword": None,
         }
@@ -3417,10 +4835,6 @@ class ChatHandler:
             "plan/research-plan.md",
             "plan/data-log.md",
             "plan/analysis-notes.md",
-            "report_draft_v1.md",
-            "content/report.md",
-            "content/draft.md",
-            "content/final-report.md",
-            "output/final-report.md",
+            self.skill_engine.REPORT_DRAFT_PATH,
         }
-        return normalized in evidence_paths
+        return normalized.lower() in evidence_paths

@@ -96,11 +96,15 @@ description: Use when writing consulting reports, strategy analysis, market rese
 ### S3 分析沉淀
 - 在 `analysis-notes.md` 中写清楚结论、证据、影响
 - 区分事实、推断与假设
+- 每条关键发现/推论必须显式引用 `data-log.md` 中已有的 `DL` 条目，例如 `[DL-2026-01]`；多个相关证据可以写成 `[DL-2026-01] [DL-2026-06]`，也可以合并写成 `[DL-2026-01/06]`
+- 不要只写“基于资料可知”“见 data-log.md”这类笼统表述；没有可统计的 `[DL-...]` 引用，系统不会把该分析计入 S3 进度
 
 **推进到 S4：** 当 `analysis-notes.md` 中对 `data-log.md` 条目的有效引用数达到目标阈值，由系统自动放行。无需用户确认。
 
 ### S4 报告撰写
 - 形成有效草稿
+- 报告正文草稿只写入 `content/report_draft_v1.md`
+- S4/S5 中续写、补全章节、扩写正文时，优先调用 `append_report_draft(content)` 追加到唯一草稿；不要手写路径，也不要把正文只贴在聊天里
 - 持续同步摘要、图表、章节结构
 
 **推进到 S5：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
@@ -123,9 +127,19 @@ description: Use when writing consulting reports, strategy analysis, market rese
 
 **推进到 done：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
 
+## 文件工具选择
+
+- `append_report_draft(content)`：**追加或续写报告正文**到 `content/report_draft_v1.md`。S4/S5 中用户要求“继续写”“补全剩余章节”“扩写正文”时优先用它。
+- `write_file(file_path, content)`：**整文件覆盖**写入。适合新建文件，或明确意图是"整体重写"（比如大纲变了要重做 outline.md）。
+- `edit_file(file_path, old_string, new_string)`：**精确字符串替换**。`plan/data-log.md`、`plan/analysis-notes.md` 这类**逐条积累**的文件**一律用 edit_file 追加新条目**，不要 write_file 整体重写——write 会让你脑内不记得的旧条目永久丢失。
+- `edit_file` 要求 `old_string` 在文件里**唯一存在**。追加到末尾最稳的做法：先 `read_file` 看清现有内容，把文件末尾一段（比如最后一个条目的最后一行，甚至末尾那个换行本身）作为 `old_string`，`new_string` 放 `"原 old_string + \n\n### [DL-YYYY-NN] 新条目..."`。
+- 如果 `edit_file` 报 `old_string 不唯一` 或 `未找到`，先 `read_file` 核对原文，别瞎猜。
+- 新建还不存在的文件只能用 `write_file`，`edit_file` 对不存在文件会报错。
+- 只有同一轮真实文件工具返回 `status: success` 后，才能说报告内容已保存、已写入或已同步；否则必须说明未落盘，并给出下一步。
+
 ## 工具错误处理
 
-当你调用 `write_file` / `web_search` / `fetch_url` 拿到 `status: error` 时：
+当你调用 `append_report_draft` / `write_file` / `edit_file` / `web_search` / `fetch_url` 拿到 `status: error` 时：
 
 1. 必须在本轮的可见回复里告诉用户：
    - 哪个工具调用失败了（写哪个文件 / 搜什么 / 抓哪个 URL）

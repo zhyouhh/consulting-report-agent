@@ -98,7 +98,7 @@ class WorkspaceMaterialTests(unittest.TestCase):
             "Impact: position onboarding redesign as a retention move, not polish.\n",
             encoding="utf-8",
         )
-        (project_dir / "report_draft_v1.md").write_text(
+        (project_dir / "content" / "report_draft_v1.md").write_text(
             "# Draft\n\n" + ("报" * 2200) + "\n",
             encoding="utf-8",
         )
@@ -192,7 +192,7 @@ class WorkspaceMaterialTests(unittest.TestCase):
                 "# 澶х翰\n\n## 鎵ц鎽樿\n- 缁撹\n## 寤鸿\n- 涓嬩竴姝n",
                 encoding="utf-8",
             )
-            (project_dir / "report_draft_v1.md").write_text(
+            (project_dir / "content" / "report_draft_v1.md").write_text(
                 "# 绗竴绔燶n\n## 鎵ц鎽樿\n褰㈡垚浜嗗彲浜や粯鐨勬鏂囨钀姐€俓n",
                 encoding="utf-8",
             )
@@ -228,7 +228,7 @@ class WorkspaceMaterialTests(unittest.TestCase):
                 "review_started_at",
             )
             (project_dir / "plan" / "review-checklist.md").unlink()
-            (project_dir / "report_draft_v1.md").write_text("# Draft\n\n" + ("报" * 2200) + "\n", encoding="utf-8")
+            (project_dir / "content" / "report_draft_v1.md").write_text("# Draft\n\n" + ("报" * 2200) + "\n", encoding="utf-8")
             (project_dir / "plan" / "delivery-log.md").write_text(
                 "# Delivery log\n\n"
                 "**Delivery date**: 2026-04-01\n"

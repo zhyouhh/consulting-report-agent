@@ -63,6 +63,8 @@ class SkillEngine:
     )
     _DL_ENTRY_PATTERN = re.compile(r"^#{3,4}\s*\*{0,2}\s*\[(DL-[^\]]+)\]", re.MULTILINE)
     _DL_REFERENCE_PATTERN = re.compile(r"\[(DL-[^\]]+)\]")
+    _DL_REFERENCE_BRACKET_PATTERN = re.compile(r"\[([^\]]*DL-[^\]]*)\]")
+    _DL_REFERENCE_GROUP_PATTERN = re.compile(r"DL-(?:\d{4}-)?\d+(?:/\d+)*")
     _MARKDOWN_STRIP_PATTERNS = [
         (re.compile(r"```[\s\S]*?```"), ""),
         (re.compile(r"`[^`]*`"), ""),
@@ -130,7 +132,7 @@ class SkillEngine:
         ],
         "S4": [
             "\u62a5\u544a\u7ed3\u6784\u786e\u5b9a",
-            "report_draft_v1.md / content/report.md / content/draft.md / content/final-report.md / output/final-report.md \u4efb\u4e00\u5f62\u6210\u6709\u6548\u8349\u7a3f",
+            "content/report_draft_v1.md \u5f62\u6210\u6709\u6548\u8349\u7a3f",
             "\u5404\u7ae0\u8282\u5185\u5bb9\u6301\u7eed\u5b8c\u5584",
             "\u6267\u884c\u6458\u8981\u4e0e\u56fe\u8868\u540c\u6b65\u66f4\u65b0",
         ],
@@ -161,13 +163,8 @@ class SkillEngine:
         "S6": "演示准备",
         "S7": "交付归档",
     }
-    REPORT_DRAFT_CANDIDATES = (
-        "report_draft_v1.md",
-        "content/report.md",
-        "content/draft.md",
-        "content/final-report.md",
-        "output/final-report.md",
-    )
+    REPORT_DRAFT_PATH = "content/report_draft_v1.md"
+    REPORT_DRAFT_CANDIDATES = (REPORT_DRAFT_PATH,)
     CHECKPOINT_PREREQ = {
         "s0_interview_done_at": None,
         "outline_confirmed_at": (
@@ -178,9 +175,9 @@ class SkillEngine:
         ),
         "review_started_at": (
             "_has_effective_report_draft",
-            "report_draft_v1.md",
+            REPORT_DRAFT_PATH,
             "需要先形成有效报告正文，才能进入质量审查。",
-            "请先让助手写入有效正文草稿，再开始审查。",
+            f"请先让助手写入 `{REPORT_DRAFT_PATH}`，再开始审查。",
         ),
         "review_passed_at": (
             "_has_effective_review_checklist",
@@ -407,19 +404,57 @@ class SkillEngine:
         data_log = project_path / "plan" / "data-log.md"
         if not analysis.exists() or not data_log.exists():
             return 0
-        dl_ids = {
+        refs = self._extract_analysis_ref_ids(
+            analysis.read_text(encoding="utf-8"),
+            self._extract_data_log_ids(data_log.read_text(encoding="utf-8")),
+        )
+        return len(refs)
+
+    def _count_analysis_refs_in_text(self, project_path, analysis_text: str) -> int:
+        data_log = project_path / "plan" / "data-log.md"
+        if not data_log.exists():
+            return 0
+        refs = self._extract_analysis_ref_ids(
+            analysis_text,
+            self._extract_data_log_ids(data_log.read_text(encoding="utf-8")),
+        )
+        return len(refs)
+
+    def _extract_data_log_ids(self, data_log_text: str) -> set[str]:
+        return {
             m.group(1)
-            for m in self._DL_ENTRY_PATTERN.finditer(
-                data_log.read_text(encoding="utf-8")
-            )
+            for m in self._DL_ENTRY_PATTERN.finditer(data_log_text or "")
         }
-        refs = {
-            m.group(1)
-            for m in self._DL_REFERENCE_PATTERN.finditer(
-                analysis.read_text(encoding="utf-8")
-            )
-        }
-        return len(refs & dl_ids)
+
+    def _extract_analysis_ref_ids(self, analysis_text: str, dl_ids: set[str]) -> set[str]:
+        refs: set[str] = set()
+        for bracket_match in self._DL_REFERENCE_BRACKET_PATTERN.finditer(analysis_text or ""):
+            bracket_content = bracket_match.group(1)
+            for group_match in self._DL_REFERENCE_GROUP_PATTERN.finditer(bracket_content):
+                refs.update(
+                    ref_id
+                    for ref_id in self._expand_grouped_dl_ref(group_match.group(0))
+                    if ref_id in dl_ids
+                )
+        return refs
+
+    def _expand_grouped_dl_ref(self, raw_ref: str) -> set[str]:
+        parts = (raw_ref or "").split("/")
+        first = parts[0].strip()
+        if not first:
+            return set()
+        refs = {first}
+        match = re.match(r"^(.*?)(\d+)$", first)
+        if not match:
+            return refs
+        prefix, first_number = match.groups()
+        width = len(first_number)
+        for suffix in parts[1:]:
+            suffix = suffix.strip()
+            if not suffix.isdigit():
+                continue
+            refs.add(f"{prefix}{suffix.zfill(width)}")
+        return refs
 
     def _has_enough_analysis_refs(self, project_path, min_refs):
         return self._count_analysis_refs(project_path) >= min_refs
@@ -1004,29 +1039,11 @@ class SkillEngine:
         if not project_path:
             raise ValueError(f"项目 {project_ref} 不存在")
 
-        output_report = project_path / "output" / "final-report.md"
-        if output_report.exists():
-            return str(output_report)
+        report_path = project_path / self.REPORT_DRAFT_PATH
+        if report_path.exists():
+            return str(report_path)
 
-        content_dir = project_path / "content"
-        preferred_names = ["final-report.md", "report.md", "draft.md"]
-        for name in preferred_names:
-            candidate = content_dir / name
-            if candidate.exists():
-                return str(candidate)
-
-        content_files = sorted(content_dir.glob("*.md"))
-        if len(content_files) == 1:
-            return str(content_files[0])
-
-        report_like_files = [path for path in content_files if "report" in path.stem.lower()]
-        if len(report_like_files) == 1:
-            return str(report_like_files[0])
-
-        if content_files:
-            raise ValueError("存在多个内容文件，无法确定主报告，请先生成 final-report.md")
-
-        raise ValueError("没有可检查或导出的报告草稿")
+        raise ValueError(f"没有可检查或导出的报告草稿，请先生成 {self.REPORT_DRAFT_PATH}")
 
     def _ensure_stage_gates_state(self, project_path: Path) -> str:
         return self._sync_stage_tracking_files(project_path)["stage_gates_text"]
@@ -1113,13 +1130,10 @@ class SkillEngine:
         return "报告+演示" if "演示" in value else "仅报告"
 
     def _current_report_word_count(self, project_path: Path) -> int:
-        counts = []
-        for candidate in self.REPORT_DRAFT_CANDIDATES:
-            draft_text = self._read_project_file(project_path, candidate)
-            if not draft_text or self._is_template_stub(draft_text):
-                continue
-            counts.append(self._count_words(draft_text))
-        return max(counts) if counts else 0
+        draft_text = self._read_project_file(project_path, self.REPORT_DRAFT_PATH)
+        if not draft_text or self._is_template_stub(draft_text):
+            return 0
+        return self._count_words(draft_text)
 
     def _last_evidence_write_at(self, project_path: Path) -> datetime | None:
         candidates = [
@@ -1747,14 +1761,12 @@ class SkillEngine:
         return not self._has_substantive_body(text)
 
     def _has_effective_report_draft(self, project_path: Path, min_words: int = 0) -> bool:
-        for candidate in self.REPORT_DRAFT_CANDIDATES:
-            draft_text = self._read_project_file(project_path, candidate)
-            if not draft_text or self._is_template_stub(draft_text):
-                continue
-            if min_words and self._count_words(draft_text) < min_words:
-                continue
-            return True
-        return False
+        draft_text = self._read_project_file(project_path, self.REPORT_DRAFT_PATH)
+        if not draft_text or self._is_template_stub(draft_text):
+            return False
+        if min_words and self._count_words(draft_text) < min_words:
+            return False
+        return True
 
     def _delivery_mode_requires_presentation(self, project_path: Path) -> bool:
         return self._extract_delivery_mode(project_path) == "报告+演示"
