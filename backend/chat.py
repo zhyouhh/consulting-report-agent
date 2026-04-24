@@ -212,6 +212,77 @@ class ChatHandler:
         "归档",
         "交付",
     )
+    REPORT_BODY_PAUSE_KEYWORDS = (
+        "先别写了",
+        "不要写正文",
+        "先不写正文",
+        "暂停写作",
+        "先别继续正文",
+    )
+    REPORT_BODY_FIRST_DRAFT_KEYWORDS = (
+        "开始写正文",
+        "开始写报告正文",
+        "起草正文",
+        "按大纲写初稿",
+        "先写第一版",
+        "继续写正文",
+        "继续写报告正文",
+    )
+    REPORT_BODY_EXPLICIT_CONTINUATION_KEYWORDS = (
+        "继续写报告正文",
+        "继续写正文",
+        "扩写正文",
+        "补全章节",
+        "写下一章",
+        "补正文",
+    )
+    REPORT_BODY_WHOLE_REWRITE_KEYWORDS = (
+        "整篇重写",
+        "全文重写",
+        "推倒重写",
+        "全部改写",
+    )
+    REPORT_BODY_SECTION_REWRITE_KEYWORDS = (
+        "重写",
+        "改写",
+        "改强",
+        "改得更强",
+        "重做",
+    )
+    REPORT_BODY_FOLLOWUP_EXPANSION_SIGNALS = (
+        "不够",
+        "不足",
+        "太单薄",
+        "再展开",
+        "再补一点",
+        "再扩写",
+    )
+    REPORT_BODY_CONDITIONAL_TARGET_EXPANSION_KEYWORDS = (
+        "扩到",
+        "补到",
+        "写到",
+        "不够就继续写",
+        "不够再扩写",
+    )
+    REPORT_BODY_INSPECT_WORD_COUNT_KEYWORDS = (
+        "现在多少字",
+        "字数多少",
+        "当前多少字",
+        "看看字数",
+        "看看现在多少字",
+    )
+    REPORT_BODY_INSPECT_FILE_KEYWORDS = ("看看文件",)
+    CANONICAL_DRAFT_NO_DRAFT_MESSAGE = (
+        "当前还没有正文草稿，请先用 append_report_draft 起草第一版。"
+    )
+    CANONICAL_DRAFT_AMBIGUOUS_SECTION_MESSAGE = "请指明具体章节。"
+    CANONICAL_DRAFT_STAGE_GATE_MESSAGE = (
+        "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。"
+    )
+    CANONICAL_DRAFT_SPLIT_TURN_MESSAGE = (
+        "这个请求同时包含多个后续动作，请拆成多个回合分别处理："
+        "先完成正文修改，再单独发起导出、质量检查或查看字数。"
+    )
     REPORT_BODY_CHAPTER_WRITE_RE = re.compile(
         r"(?:继续|接着|补写|撰写|写|扩写|续写|重写|改写|修改|完善)\s*第?\s*[一二三四五六七八九十百\d]+\s*章"
     )
@@ -734,6 +805,7 @@ class ChatHandler:
             "events": [],
             "memory_entries": [],
             "compact_state": None,
+            "draft_followup_state": None,
         }
 
     def _get_conversation_state_path(self, project_id: str):
@@ -848,6 +920,9 @@ class ChatHandler:
                 if isinstance(payload.get("memory_entries"), list):
                     state["memory_entries"] = payload["memory_entries"]
                 state["compact_state"] = self._normalize_compact_state(payload.get("compact_state"))
+                draft_followup_state = payload.get("draft_followup_state")
+                if isinstance(draft_followup_state, dict):
+                    state["draft_followup_state"] = draft_followup_state
 
             compact_state = state.get("compact_state")
             if compact_state and self._compact_state_is_drifted(compact_state, history, state["memory_entries"]):
@@ -868,6 +943,9 @@ class ChatHandler:
             if isinstance(payload.get("memory_entries"), list):
                 state["memory_entries"] = payload["memory_entries"]
             state["compact_state"] = self._normalize_compact_state(payload.get("compact_state"))
+            draft_followup_state = payload.get("draft_followup_state")
+            if isinstance(draft_followup_state, dict):
+                state["draft_followup_state"] = draft_followup_state
 
         state_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = state_path.with_suffix(".json.tmp")
@@ -1022,7 +1100,17 @@ class ChatHandler:
         if result.get("status") != "success":
             return
 
-        metadata = self._build_tool_persistence_metadata(project_id, func_name, args, result, extra)
+        persistence_extra = dict(extra or {})
+        metadata_func_name = persistence_extra.pop("metadata_func_name", func_name)
+        metadata_args = persistence_extra.pop("metadata_args", args)
+        persisted_via = persistence_extra.pop("persisted_via", None)
+        metadata = self._build_tool_persistence_metadata(
+            project_id,
+            metadata_func_name,
+            metadata_args,
+            result,
+            persistence_extra,
+        )
         if metadata is None:
             return
 
@@ -1036,6 +1124,15 @@ class ChatHandler:
                     "source_key": metadata["source_key"],
                     "recorded_at": recorded_at,
                 }
+                effective_persisted_via = persisted_via
+                if (
+                    not isinstance(effective_persisted_via, str)
+                    and isinstance(metadata_func_name, str)
+                    and metadata_func_name != func_name
+                ):
+                    effective_persisted_via = metadata_func_name
+                if isinstance(effective_persisted_via, str) and effective_persisted_via.strip():
+                    event["persisted_via"] = effective_persisted_via
                 source_ref = metadata.get("source_ref")
                 if isinstance(source_ref, str) and source_ref.strip():
                     event["source_ref"] = source_ref
@@ -1044,7 +1141,7 @@ class ChatHandler:
                     event["title"] = title
                 state["events"].append(event)
 
-                memory_entry = self._build_tool_memory_entry(func_name, metadata, recorded_at)
+                memory_entry = self._build_tool_memory_entry(metadata_func_name, metadata, recorded_at)
                 if memory_entry is not None:
                     compact_state = state.get("compact_state") or {}
                     covered_count = compact_state.get("source_memory_entry_count", 0)
@@ -1152,6 +1249,10 @@ class ChatHandler:
         tool_name = event.get("tool_name")
         if isinstance(tool_name, str) and tool_name.strip():
             skeleton["tool_name"] = tool_name
+
+        persisted_via = event.get("persisted_via")
+        if isinstance(persisted_via, str) and persisted_via.strip():
+            skeleton["persisted_via"] = persisted_via
 
         source_key = event.get("source_key")
         if isinstance(source_key, str) and source_key.strip():
@@ -1473,37 +1574,900 @@ class ChatHandler:
         user_message: str,
         stage_code: str,
     ) -> bool:
-        if not self._turn_context.get("can_write_non_plan", True):
-            return False
+        decision = self._classify_canonical_draft_turn(
+            project_id,
+            user_message,
+            stage_code=stage_code,
+        )
+        if decision.get("mode") == "require":
+            return True
+        return (
+            stage_code in self.NON_PLAN_WRITE_ALLOWED_STAGE_CODES
+            and decision.get("fixed_message") == self.CANONICAL_DRAFT_NO_DRAFT_MESSAGE
+        )
 
+    def _empty_canonical_draft_decision(self, *, stage_code: str) -> dict[str, object]:
+        return {
+            "mode": "no_write",
+            "priority": "P10",
+            "stage_code": stage_code,
+            "expected_tool_family": None,
+            "required_edit_scope": None,
+            "rewrite_target_snapshot": None,
+            "rewrite_target_label": None,
+            "fixed_message": None,
+            "mixed_intent_secondary_family": None,
+            "effective_turn_target_count": None,
+            "intent_kind": None,
+            "old_text": None,
+            "new_text": None,
+        }
+
+    def _make_canonical_draft_decision(
+        self,
+        *,
+        stage_code: str,
+        mode: str,
+        priority: str,
+        expected_tool_family: str | None = None,
+        required_edit_scope: str | None = None,
+        rewrite_target_snapshot: str | None = None,
+        rewrite_target_label: str | None = None,
+        fixed_message: str | None = None,
+        mixed_intent_secondary_family: str | None = None,
+        effective_turn_target_count: int | None = None,
+        intent_kind: str | None = None,
+        old_text: str | None = None,
+        new_text: str | None = None,
+    ) -> dict[str, object]:
+        decision = self._empty_canonical_draft_decision(stage_code=stage_code)
+        decision.update(
+            {
+                "mode": mode,
+                "priority": priority,
+                "expected_tool_family": expected_tool_family,
+                "required_edit_scope": required_edit_scope,
+                "rewrite_target_snapshot": rewrite_target_snapshot,
+                "rewrite_target_label": rewrite_target_label,
+                "fixed_message": fixed_message,
+                "mixed_intent_secondary_family": mixed_intent_secondary_family,
+                "effective_turn_target_count": effective_turn_target_count,
+                "intent_kind": intent_kind,
+                "old_text": old_text,
+                "new_text": new_text,
+            }
+        )
+        return decision
+
+    def _classify_canonical_draft_turn(
+        self,
+        project_id: str,
+        user_message: str,
+        *,
+        stage_code: str | None = None,
+    ) -> dict[str, object]:
         normalized_stage = (stage_code or "").strip()
-        if normalized_stage in {"S0", "S1", "S2", "S3"}:
-            return False
+        if not normalized_stage:
+            project_path = self.skill_engine.get_project_path(project_id)
+            if project_path:
+                normalized_stage = (
+                    self.skill_engine._infer_stage_state(project_path).get("stage_code", "S0")
+                )
+            else:
+                normalized_stage = "S0"
 
+        decision = self._empty_canonical_draft_decision(stage_code=normalized_stage)
         text = (user_message or "").strip()
         if not text:
-            return False
+            return decision
 
-        explicit_body_write = self._has_explicit_report_body_write_intent(text)
-        review_or_delivery = self._phrase_hits(
-            text,
-            list(self.REPORT_BODY_REVIEW_OR_DELIVERY_KEYWORDS),
+        project_path = self.skill_engine.get_project_path(project_id)
+        default_target_count = self._project_default_report_target_count(project_path)
+        draft_snapshot = self._snapshot_project_file(project_id, self.skill_engine.REPORT_DRAFT_PATH)
+        draft_exists = bool(draft_snapshot.get("exists"))
+        current_count = int(draft_snapshot.get("word_count") or 0)
+        draft_text = (
+            self._read_project_file_text(project_id, self.skill_engine.REPORT_DRAFT_PATH) or ""
         )
-        if review_or_delivery and not explicit_body_write:
-            return False
+        followup_threshold_count = self._resolve_followup_threshold_count(
+            project_id,
+            project_path,
+            default_target_count,
+        )
+        secondary_families = self._secondary_action_families_in_message(text)
+        has_distinct_non_expansion_action = self._message_has_distinct_non_expansion_action(text)
+        replace_text_intent = self._parse_report_body_replacement_intent(text)
+        section_match = self._resolve_section_rewrite_targets(text, draft_text)
+        matched_section_nodes = list(section_match.get("nodes") or [])
+        section_ambiguity = bool(section_match.get("ambiguous"))
+        section_label = (
+            str(matched_section_nodes[0].get("label"))
+            if len(matched_section_nodes) == 1 and isinstance(matched_section_nodes[0], dict)
+            else None
+        )
+        section_snapshot = (
+            str(matched_section_nodes[0].get("section_snapshot"))
+            if len(matched_section_nodes) == 1 and isinstance(matched_section_nodes[0], dict)
+            else None
+        )
+        section_rewrite_request = self._looks_like_section_rewrite_request(text)
+        multi_section_rewrite_intent = bool(
+            section_rewrite_request and len(matched_section_nodes) > 1
+        )
+        section_rewrite_intent = bool(
+            draft_exists
+            and section_label
+            and section_snapshot
+            and self._phrase_hits(text, list(self.REPORT_BODY_SECTION_REWRITE_KEYWORDS))
+        )
+        whole_rewrite_intent = self._phrase_hits(text, list(self.REPORT_BODY_WHOLE_REWRITE_KEYWORDS))
+        first_draft_intent = self._phrase_hits(text, list(self.REPORT_BODY_FIRST_DRAFT_KEYWORDS))
+        explicit_continuation_intent = self._phrase_hits(
+            text,
+            list(self.REPORT_BODY_EXPLICIT_CONTINUATION_KEYWORDS),
+        )
+        conditional_target_expansion_request = self._message_has_conditional_target_expansion_intent(text)
+        explicit_target_count = self._extract_explicit_word_target_count(text)
+        implicit_followup_append_candidate = (
+            normalized_stage == "S4"
+            and draft_exists
+            and current_count < followup_threshold_count
+            and self._draft_followup_state_allows_implicit_append(project_id)
+            and self._message_has_followup_expansion_signal(text)
+        )
 
-        if normalized_stage == "S4":
-            if explicit_body_write:
-                return True
-            return (
-                self._is_short_report_body_continuation(text)
-                and self._recent_assistant_prompted_report_body_continuation(project_id)
+        explicit_mutation_decision: dict[str, object] | None = None
+        if replace_text_intent:
+            if not draft_exists:
+                explicit_mutation_decision = self._make_canonical_draft_decision(
+                    stage_code=normalized_stage,
+                    mode="reject",
+                    priority="P1",
+                    fixed_message=self.CANONICAL_DRAFT_NO_DRAFT_MESSAGE,
+                )
+            else:
+                explicit_mutation_decision = self._make_canonical_draft_decision(
+                    stage_code=normalized_stage,
+                    mode="require",
+                    priority="P1",
+                    expected_tool_family="edit_file",
+                    required_edit_scope="replacement",
+                    intent_kind="replace_text",
+                    old_text=str(replace_text_intent.get("old_text") or ""),
+                    new_text=str(replace_text_intent.get("new_text") or ""),
+                )
+        elif section_rewrite_request and section_ambiguity:
+            explicit_mutation_decision = self._make_canonical_draft_decision(
+                stage_code=normalized_stage,
+                mode="reject",
+                priority="P2_AMBIGUOUS",
+                fixed_message=self.CANONICAL_DRAFT_AMBIGUOUS_SECTION_MESSAGE,
+            )
+        elif section_rewrite_intent:
+            explicit_mutation_decision = self._make_canonical_draft_decision(
+                stage_code=normalized_stage,
+                mode="require",
+                priority="P2",
+                    expected_tool_family="edit_file",
+                    required_edit_scope="section",
+                    rewrite_target_snapshot=section_snapshot,
+                    rewrite_target_label=section_label,
+                )
+        elif multi_section_rewrite_intent:
+            explicit_mutation_decision = self._make_canonical_draft_decision(
+                stage_code=normalized_stage,
+                mode="require",
+                priority="P2_MULTI_SECTION",
+                expected_tool_family="edit_file",
+                required_edit_scope="full_draft",
+                rewrite_target_snapshot=draft_text or None,
+            )
+        elif section_rewrite_request and not draft_exists:
+            explicit_mutation_decision = self._make_canonical_draft_decision(
+                stage_code=normalized_stage,
+                mode="reject",
+                priority="P2",
+                fixed_message=self.CANONICAL_DRAFT_NO_DRAFT_MESSAGE,
+            )
+        elif whole_rewrite_intent:
+            if not draft_exists:
+                explicit_mutation_decision = self._make_canonical_draft_decision(
+                    stage_code=normalized_stage,
+                    mode="reject",
+                    priority="P3",
+                    fixed_message=self.CANONICAL_DRAFT_NO_DRAFT_MESSAGE,
+                )
+            else:
+                explicit_mutation_decision = self._make_canonical_draft_decision(
+                    stage_code=normalized_stage,
+                    mode="require",
+                    priority="P3",
+                    expected_tool_family="edit_file",
+                    required_edit_scope="full_draft",
+                    rewrite_target_snapshot=draft_text or None,
+                )
+        elif not draft_exists and first_draft_intent:
+            explicit_mutation_decision = self._make_canonical_draft_decision(
+                stage_code=normalized_stage,
+                mode="require",
+                priority="P4",
+                expected_tool_family="append_report_draft",
+            )
+        elif explicit_continuation_intent:
+            explicit_mutation_decision = self._make_canonical_draft_decision(
+                stage_code=normalized_stage,
+                mode="require",
+                priority="P9",
+                expected_tool_family="append_report_draft",
             )
 
-        if normalized_stage in {"S5", "S6", "S7", "done"}:
-            return explicit_body_write
+        if len(secondary_families) > 1 and (
+            conditional_target_expansion_request
+            or explicit_mutation_decision is not None
+            or implicit_followup_append_candidate
+        ):
+            return self._make_canonical_draft_decision(
+                stage_code=normalized_stage,
+                mode="reject",
+                priority="P5_MULTI",
+                fixed_message=self.CANONICAL_DRAFT_SPLIT_TURN_MESSAGE,
+            )
+
+        if len(secondary_families) == 1 and conditional_target_expansion_request:
+            effective_target_count = explicit_target_count or followup_threshold_count
+            if not draft_exists:
+                if (
+                    isinstance(explicit_mutation_decision, dict)
+                    and explicit_mutation_decision.get("priority") == "P4"
+                    and explicit_mutation_decision.get("mode") == "require"
+                ):
+                    return self._apply_stage_gate_to_canonical_draft_decision(explicit_mutation_decision)
+                return self._make_canonical_draft_decision(
+                    stage_code=normalized_stage,
+                    mode="reject",
+                    priority="P5A",
+                    fixed_message=self.CANONICAL_DRAFT_NO_DRAFT_MESSAGE,
+                )
+            needs_more_writing = current_count < effective_target_count
+            if not needs_more_writing:
+                return self._make_canonical_draft_decision(
+                    stage_code=normalized_stage,
+                    mode="no_write",
+                    priority="P5A",
+                    mixed_intent_secondary_family=secondary_families[0],
+                    effective_turn_target_count=effective_target_count,
+                )
+            return self._apply_stage_gate_to_canonical_draft_decision(
+                self._make_canonical_draft_decision(
+                    stage_code=normalized_stage,
+                    mode="require",
+                    priority="P5A",
+                    expected_tool_family="append_report_draft",
+                    mixed_intent_secondary_family=secondary_families[0],
+                    effective_turn_target_count=effective_target_count,
+                )
+            )
+
+        if len(secondary_families) == 1 and explicit_mutation_decision is not None:
+            if explicit_mutation_decision.get("mode") != "require":
+                return explicit_mutation_decision
+            mixed_intent_decision = dict(explicit_mutation_decision)
+            mixed_intent_decision["priority"] = "P5B"
+            mixed_intent_decision["mixed_intent_secondary_family"] = secondary_families[0]
+            return self._apply_stage_gate_to_canonical_draft_decision(mixed_intent_decision)
+
+        if explicit_mutation_decision is not None:
+            return self._apply_stage_gate_to_canonical_draft_decision(explicit_mutation_decision)
+
+        if self._message_matches_priority6_non_write(text):
+            return self._make_canonical_draft_decision(
+                stage_code=normalized_stage,
+                mode="no_write",
+                priority="P6",
+            )
+
+        if self._message_matches_priority7_inspect(text):
+            return self._make_canonical_draft_decision(
+                stage_code=normalized_stage,
+                mode="no_write",
+                priority="P7",
+            )
+
+        if (
+            implicit_followup_append_candidate
+            and not has_distinct_non_expansion_action
+        ):
+            return self._apply_stage_gate_to_canonical_draft_decision(
+                self._make_canonical_draft_decision(
+                    stage_code=normalized_stage,
+                    mode="require",
+                    priority="P8",
+                    expected_tool_family="append_report_draft",
+                )
+            )
+
+        return decision
+
+    def _apply_stage_gate_to_canonical_draft_decision(
+        self,
+        decision: dict[str, object],
+    ) -> dict[str, object]:
+        if decision.get("mode") != "require":
+            return decision
+        stage_code = str(decision.get("stage_code") or "")
+        if stage_code in self.NON_PLAN_WRITE_ALLOWED_STAGE_CODES:
+            return decision
+        blocked = dict(decision)
+        blocked["mode"] = "reject"
+        blocked["fixed_message"] = self.CANONICAL_DRAFT_STAGE_GATE_MESSAGE
+        return blocked
+
+    def _project_default_report_target_count(self, project_path) -> int:
+        if not project_path:
+            return 3000
+        targets = self.skill_engine._resolve_length_targets(project_path)
+        return int(targets.get("expected_length", 3000) or 3000)
+
+    def _resolve_followup_threshold_count(
+        self,
+        project_id: str,
+        project_path,
+        default_target_count: int,
+    ) -> int:
+        draft_followup_state = self._load_draft_followup_state(project_id)
+        if isinstance(draft_followup_state, dict):
+            continuation_threshold_count = draft_followup_state.get("continuation_threshold_count")
+            if isinstance(continuation_threshold_count, int) and continuation_threshold_count > 0:
+                return continuation_threshold_count
+        return default_target_count
+
+    def _load_draft_followup_state(self, project_id: str) -> dict | None:
+        state = self._load_conversation_state(project_id)
+        draft_followup_state = state.get("draft_followup_state")
+        if not isinstance(draft_followup_state, dict):
+            return None
+        return draft_followup_state
+
+    def _draft_followup_state_allows_implicit_append(self, project_id: str) -> bool:
+        draft_followup_state = self._load_draft_followup_state(project_id)
+        if not isinstance(draft_followup_state, dict):
+            return False
+        return bool(
+            draft_followup_state.get("reported_under_target")
+            or draft_followup_state.get("asked_continue_expand")
+        )
+
+    def _empty_draft_followup_flags(self) -> dict[str, object]:
+        return {
+            "reported_under_target": False,
+            "asked_continue_expand": False,
+            "continuation_threshold_count": None,
+        }
+
+    def _normalize_draft_followup_flags(
+        self,
+        flags: dict | None,
+        *,
+        default_target_count: int | None = None,
+    ) -> dict[str, object]:
+        normalized = self._empty_draft_followup_flags()
+        if not isinstance(flags, dict):
+            return normalized
+        normalized["reported_under_target"] = bool(flags.get("reported_under_target"))
+        normalized["asked_continue_expand"] = bool(flags.get("asked_continue_expand"))
+        continuation_threshold_count = flags.get("continuation_threshold_count")
+        if isinstance(continuation_threshold_count, int) and continuation_threshold_count > 0:
+            if default_target_count is None or continuation_threshold_count > default_target_count:
+                normalized["continuation_threshold_count"] = continuation_threshold_count
+        return normalized
+
+    def _snapshot_continuation_threshold_count(
+        self,
+        snapshot: dict | None,
+        *,
+        default_target_count: int | None = None,
+    ) -> int | None:
+        if not isinstance(snapshot, dict):
+            return None
+        candidate = snapshot.get("effective_turn_target_count")
+        if not isinstance(candidate, int) or candidate <= 0:
+            candidate = snapshot.get("turn_target_count")
+        if not isinstance(candidate, int) or candidate <= 0:
+            return None
+        if default_target_count is not None and candidate <= default_target_count:
+            return None
+        return candidate
+
+    def _current_turn_effective_target_count(
+        self,
+        *,
+        default_target_count: int | None = None,
+    ) -> int | None:
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            return None
+        if decision.get("priority") != "P5A":
+            return None
+        candidate = decision.get("effective_turn_target_count")
+        if not isinstance(candidate, int) or candidate <= 0:
+            return None
+        if default_target_count is not None and candidate <= default_target_count:
+            return None
+        return candidate
+
+    def _current_turn_carried_followup_target_count(
+        self,
+        project_id: str,
+        *,
+        default_target_count: int | None = None,
+    ) -> int | None:
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            return None
+        if decision.get("priority") not in {"P7", "P8"}:
+            return None
+        carried_target_count = self._resolve_followup_threshold_count(
+            project_id,
+            None,
+            default_target_count or 0,
+        )
+        if default_target_count is not None and carried_target_count <= default_target_count:
+            return None
+        return carried_target_count
+
+    def _current_turn_requested_target_count(self) -> int | None:
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            return None
+        if decision.get("priority") != "P5A":
+            return None
+        candidate = decision.get("effective_turn_target_count")
+        if not isinstance(candidate, int) or candidate <= 0:
+            return None
+        return candidate
+
+    def _set_turn_draft_followup_flags(
+        self,
+        *,
+        reported_under_target: bool,
+        asked_continue_expand: bool,
+        continuation_threshold_count: int | None = None,
+    ) -> None:
+        self._turn_context["draft_followup_flags"] = {
+            "reported_under_target": bool(reported_under_target),
+            "asked_continue_expand": bool(asked_continue_expand),
+            "continuation_threshold_count": (
+                continuation_threshold_count
+                if isinstance(continuation_threshold_count, int) and continuation_threshold_count > 0
+                else None
+            ),
+        }
+
+    def _derive_structured_turn_draft_followup_flags(
+        self,
+        project_id: str,
+        *,
+        user_message: str | None = None,
+        default_target_count: int | None = None,
+    ) -> dict[str, object] | None:
+        mutation = self._successful_canonical_draft_mutation()
+        if isinstance(mutation, dict) and mutation.get("tool") == "append_report_draft":
+            snapshot = mutation.get("progress_snapshot")
+            if isinstance(snapshot, dict):
+                turn_target_count = int(snapshot.get("turn_target_count") or 0)
+                if turn_target_count <= 0 and isinstance(default_target_count, int):
+                    turn_target_count = default_target_count
+                continuation_threshold_count = self._snapshot_continuation_threshold_count(
+                    snapshot,
+                    default_target_count=default_target_count,
+                )
+                report_progress = snapshot.get("report_progress")
+                current_count = (
+                    int(report_progress.get("current_count") or 0)
+                    if isinstance(report_progress, dict)
+                    else 0
+                )
+                if current_count < turn_target_count:
+                    return {
+                        "reported_under_target": True,
+                        "asked_continue_expand": False,
+                        "continuation_threshold_count": continuation_threshold_count,
+                    }
+                return self._empty_draft_followup_flags()
+
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not (
+            isinstance(decision, dict)
+            and decision.get("priority") == "P7"
+            and self._phrase_hits(
+                user_message or "",
+                list(self.REPORT_BODY_INSPECT_WORD_COUNT_KEYWORDS),
+            )
+        ):
+            return None
+
+        snapshot = self._canonical_draft_progress_snapshot(project_id)
+        if not isinstance(snapshot, dict):
+            return None
+
+        turn_target_count = int(snapshot.get("turn_target_count") or 0)
+        if turn_target_count <= 0 and isinstance(default_target_count, int):
+            turn_target_count = default_target_count
+        continuation_threshold_count = self._snapshot_continuation_threshold_count(
+            snapshot,
+            default_target_count=default_target_count,
+        )
+        report_progress = snapshot.get("report_progress")
+        current_count = (
+            int(report_progress.get("current_count") or 0)
+            if isinstance(report_progress, dict)
+            else 0
+        )
+        if current_count < turn_target_count:
+            return {
+                "reported_under_target": True,
+                "asked_continue_expand": False,
+                "continuation_threshold_count": continuation_threshold_count,
+            }
+        return self._empty_draft_followup_flags()
+
+    def _finalize_turn_draft_followup_flags(
+        self,
+        project_id: str,
+        *,
+        user_message: str | None = None,
+    ) -> dict[str, object]:
+        project_path = self.skill_engine.get_project_path(project_id)
+        default_target_count = (
+            self._project_default_report_target_count(project_path) if project_path else None
+        )
+        existing_flags = self._turn_context.get("draft_followup_flags")
+        if isinstance(existing_flags, dict):
+            normalized = self._normalize_draft_followup_flags(
+                existing_flags,
+                default_target_count=default_target_count,
+            )
+        else:
+            normalized = self._normalize_draft_followup_flags(
+                self._derive_structured_turn_draft_followup_flags(
+                    project_id,
+                    user_message=user_message,
+                    default_target_count=default_target_count,
+                ),
+                default_target_count=default_target_count,
+            )
+        self._turn_context["draft_followup_flags"] = normalized
+        return normalized
+
+    def _persist_draft_followup_state_for_turn(
+        self,
+        project_id: str,
+        assistant_message: str,
+        *,
+        user_message: str | None = None,
+    ) -> None:
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return
+
+        default_target_count = self._project_default_report_target_count(project_path)
+        del assistant_message
+        flags = self._finalize_turn_draft_followup_flags(
+            project_id,
+            user_message=user_message,
+        )
+        followup_active = bool(flags.get("reported_under_target")) or bool(
+            flags.get("asked_continue_expand")
+        )
+        continuation_threshold_count = (
+            flags.get("continuation_threshold_count")
+            if followup_active
+            else None
+        )
+        threshold_count = (
+            int(continuation_threshold_count)
+            if isinstance(continuation_threshold_count, int) and continuation_threshold_count > 0
+            else default_target_count
+        )
+
+        current_text = self._read_project_file_text(project_id, self.skill_engine.REPORT_DRAFT_PATH)
+        payload = None
+        if current_text is not None:
+            current_count = self.skill_engine._count_words(current_text)
+            is_under_target = current_count < threshold_count
+            reported_under_target = is_under_target and bool(flags.get("reported_under_target"))
+            asked_continue_expand = is_under_target and bool(flags.get("asked_continue_expand"))
+            if reported_under_target or asked_continue_expand:
+                payload = {
+                    "reported_under_target": reported_under_target,
+                    "asked_continue_expand": asked_continue_expand,
+                    "current_count": current_count,
+                    "target_word_count": default_target_count,
+                    "continuation_threshold_count": continuation_threshold_count,
+                }
+
+        self._mutate_conversation_state(
+            project_id,
+            lambda state: {**state, "draft_followup_state": payload},
+        )
+
+    def _secondary_action_families_in_message(self, user_message: str) -> list[str]:
+        families: list[str] = []
+        mappings = (
+            ("quality_check", ("质量检查", "运行质量检查")),
+            ("export", ("导出",)),
+            ("inspect_file", self.REPORT_BODY_INSPECT_FILE_KEYWORDS),
+            ("inspect_word_count", self.REPORT_BODY_INSPECT_WORD_COUNT_KEYWORDS),
+        )
+        for family, keywords in mappings:
+            if self._phrase_hits(user_message, list(keywords)):
+                families.append(family)
+        return families
+
+    def _message_matches_priority6_non_write(self, user_message: str) -> bool:
+        return self._phrase_hits(
+            user_message,
+            [
+                *self.REPORT_BODY_REVIEW_OR_DELIVERY_KEYWORDS,
+                *self.REPORT_BODY_PAUSE_KEYWORDS,
+            ],
+        )
+
+    def _message_matches_priority7_inspect(self, user_message: str) -> bool:
+        return self._phrase_hits(
+            user_message,
+            [
+                *self.REPORT_BODY_INSPECT_WORD_COUNT_KEYWORDS,
+                "现在写到哪了",
+                "写到哪了",
+                *self.REPORT_BODY_INSPECT_FILE_KEYWORDS,
+            ],
+        )
+
+    def _message_has_conditional_target_expansion_intent(self, user_message: str) -> bool:
+        if self._match_explicit_word_target(user_message):
+            return True
+        return self._phrase_hits(
+            user_message,
+            ["不够就继续写", "不够再扩写"],
+        )
+
+    def _extract_explicit_word_target_count(self, user_message: str) -> int | None:
+        match = self._match_explicit_word_target(user_message)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    def _match_explicit_word_target(self, user_message: str):
+        return re.search(r"(?:扩到|补到|写到)\s*(\d{3,6})\s*字", user_message or "")
+
+    def _message_has_followup_expansion_signal(self, user_message: str) -> bool:
+        return self._phrase_hits(user_message, list(self.REPORT_BODY_FOLLOWUP_EXPANSION_SIGNALS))
+
+    def _message_has_distinct_non_expansion_action(self, user_message: str) -> bool:
+        if self._secondary_action_families_in_message(user_message):
+            return True
+
+        edit_markers = ["改一下", "修改", "改成", "改为", "替换", "换成", "调整"]
+        if self._phrase_hits(user_message, ["封面标题", "封面", "标题页"]) and self._phrase_hits(
+            user_message,
+            edit_markers,
+        ):
+            return True
+
+        if "顺便" in (user_message or "") and self._phrase_hits(user_message, edit_markers):
+            return True
 
         return False
+
+    def _looks_like_section_rewrite_request(self, user_message: str) -> bool:
+        return self._phrase_hits(user_message, list(self.REPORT_BODY_SECTION_REWRITE_KEYWORDS))
+
+    def _resolve_section_rewrite_targets(self, user_message: str, draft_text: str) -> dict[str, object]:
+        if not user_message or not draft_text:
+            return {"nodes": [], "ambiguous": False}
+
+        heading_nodes = self._extract_markdown_heading_nodes(draft_text)
+        if not heading_nodes:
+            return {"nodes": [], "ambiguous": False}
+
+        label_hits = {
+            str(node.get("label"))
+            for node in heading_nodes
+            if isinstance(node, dict)
+            and isinstance(node.get("label"), str)
+            and len(str(node.get("label"))) >= 2
+            and str(node.get("label")) in user_message
+        }
+        if not label_hits:
+            return {"nodes": [], "ambiguous": False}
+
+        matched_nodes: list[dict] = []
+        ambiguous = False
+        for label in sorted(label_hits, key=len, reverse=True):
+            candidates = [
+                node for node in heading_nodes
+                if isinstance(node, dict) and node.get("label") == label
+            ]
+            if len(candidates) == 1:
+                matched_nodes.extend(candidates)
+                continue
+
+            scored = []
+            for node in candidates:
+                ancestor_path = tuple(node.get("ancestor_path") or ())
+                score = sum(1 for ancestor_label in ancestor_path if ancestor_label in label_hits)
+                scored.append((score, node))
+            max_score = max(score for score, _ in scored)
+            narrowed = [node for score, node in scored if score == max_score]
+            if max_score > 0 and len(narrowed) == 1:
+                matched_nodes.extend(narrowed)
+                continue
+
+            matched_nodes.extend(narrowed)
+            ambiguous = True
+
+        unique_nodes: list[dict] = []
+        seen_keys: set[tuple[int, int]] = set()
+        for node in matched_nodes:
+            key = (int(node.get("start", -1)), int(node.get("end", -1)))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            unique_nodes.append(node)
+
+        collapsed_nodes = [
+            node for node in unique_nodes
+            if not any(
+                self._heading_node_is_ancestor(node, other)
+                for other in unique_nodes
+                if node is not other
+            )
+        ]
+
+        label_counts: dict[str, int] = {}
+        for node in collapsed_nodes:
+            label = str(node.get("label") or "")
+            label_counts[label] = label_counts.get(label, 0) + 1
+        if any(count > 1 for count in label_counts.values()):
+            ambiguous = True
+
+        return {
+            "nodes": collapsed_nodes,
+            "ambiguous": ambiguous,
+        }
+
+    def _heading_node_is_ancestor(self, ancestor: dict, descendant: dict) -> bool:
+        ancestor_path = tuple(ancestor.get("path") or ())
+        descendant_path = tuple(descendant.get("path") or ())
+        if len(ancestor_path) >= len(descendant_path):
+            return False
+        return descendant_path[:len(ancestor_path)] == ancestor_path
+
+    def _extract_markdown_heading_nodes(self, draft_text: str) -> list[dict]:
+        if not draft_text:
+            return []
+
+        heading_re = re.compile(r"(?m)^(?P<indent>[ \t]{0,3})(?P<hashes>#{1,6})\s*(?P<label>.+?)\s*$")
+        matches = list(heading_re.finditer(draft_text))
+        if not matches:
+            return []
+
+        nodes: list[dict] = []
+        stack: list[dict] = []
+        for match in matches:
+            level = len(match.group("hashes"))
+            label = re.sub(r"[*_`#]+", "", match.group("label")).strip()
+            if not label:
+                continue
+            while stack and int(stack[-1]["level"]) >= level:
+                stack.pop()
+            ancestor_path = tuple(str(node["label"]) for node in stack)
+            path = ancestor_path + (label,)
+            node = {
+                "label": label,
+                "level": level,
+                "start": match.start(),
+                "end": len(draft_text),
+                "ancestor_path": ancestor_path,
+                "path": path,
+                "section_snapshot": "",
+            }
+            nodes.append(node)
+            stack.append(node)
+
+        for index, node in enumerate(nodes):
+            end = len(draft_text)
+            for next_node in nodes[index + 1:]:
+                if int(next_node["level"]) <= int(node["level"]):
+                    end = int(next_node["start"])
+                    break
+            node["end"] = end
+            node["section_snapshot"] = draft_text[int(node["start"]):end].rstrip()
+
+        return nodes
+
+    def _match_existing_draft_section_labels(self, user_message: str, draft_text: str) -> list[str]:
+        resolved = self._resolve_section_rewrite_targets(user_message, draft_text)
+        labels: list[str] = []
+        for node in resolved.get("nodes") or []:
+            if isinstance(node, dict):
+                label = node.get("label")
+                if isinstance(label, str):
+                    labels.append(label)
+        return labels
+
+    def _match_existing_draft_section_label(self, user_message: str, draft_text: str) -> str | None:
+        labels = self._match_existing_draft_section_labels(user_message, draft_text)
+        if len(labels) != 1:
+            return None
+        return labels[0]
+
+    def _extract_markdown_heading_labels(self, draft_text: str) -> list[str]:
+        return [str(node.get("label")) for node in self._extract_markdown_heading_nodes(draft_text)]
+
+    def _extract_markdown_section_snapshot(self, draft_text: str, label: str | None) -> str | None:
+        if not draft_text or not label:
+            return None
+
+        resolved = self._resolve_section_rewrite_targets(label, draft_text)
+        nodes = resolved.get("nodes") or []
+        if len(nodes) != 1 or not isinstance(nodes[0], dict):
+            return None
+        snapshot = nodes[0].get("section_snapshot")
+        if isinstance(snapshot, str) and snapshot:
+            return snapshot
+        return None
+
+    def _build_section_rewrite_new_string_scope_message(
+        self,
+        rewrite_target_label: str | None,
+    ) -> str:
+        label_hint = (
+            f"`{rewrite_target_label}`"
+            if isinstance(rewrite_target_label, str) and rewrite_target_label
+            else "目标章节"
+        )
+        return (
+            f"本轮只允许改写 {label_hint}，`edit_file.new_string` 必须只包含该目标章节的完整替换内容。"
+            "可以保留该章节下的 `###` 等子标题，但不要提交整份草稿或多个同级章节，"
+            "避免超出目标章节的局部范围。"
+        )
+
+    def _validate_section_rewrite_new_string_scope(
+        self,
+        expected_section: str,
+        new_string: str,
+        *,
+        rewrite_target_label: str | None,
+    ) -> str | None:
+        if not isinstance(new_string, str) or not new_string.strip():
+            return self._build_section_rewrite_new_string_scope_message(rewrite_target_label)
+
+        expected_nodes = self._extract_markdown_heading_nodes(expected_section or "")
+        new_nodes = self._extract_markdown_heading_nodes(new_string)
+        if not expected_nodes or not new_nodes:
+            return self._build_section_rewrite_new_string_scope_message(rewrite_target_label)
+
+        expected_root = expected_nodes[0]
+        new_root = new_nodes[0]
+        if new_string[: int(new_root.get("start", 0))].strip():
+            return self._build_section_rewrite_new_string_scope_message(rewrite_target_label)
+
+        expected_level = int(expected_root.get("level") or 0)
+        expected_label = str(expected_root.get("label") or "")
+        new_level = int(new_root.get("level") or 0)
+        new_label = str(new_root.get("label") or "")
+        if new_level != expected_level or new_label != expected_label:
+            return self._build_section_rewrite_new_string_scope_message(rewrite_target_label)
+
+        if any(int(node.get("level") or 0) <= expected_level for node in new_nodes[1:]):
+            return self._build_section_rewrite_new_string_scope_message(rewrite_target_label)
+
+        return None
 
     def _has_explicit_report_body_write_intent(self, user_message: str) -> bool:
         if self._phrase_hits(user_message, list(self.REPORT_BODY_EXPLICIT_WRITE_KEYWORDS)):
@@ -1584,21 +2548,24 @@ class ChatHandler:
         return False
 
     def _required_write_paths_for_turn(self, project_id: str, user_message: str) -> set[str]:
-        project_path = self.skill_engine.get_project_path(project_id)
-        if not project_path:
-            return set()
-        stage_state = self.skill_engine._infer_stage_state(project_path)
-        stage_code = stage_state.get("stage_code", "S0")
-        if not self._message_has_report_body_write_intent(project_id, user_message, stage_code):
+        decision = self._classify_canonical_draft_turn(project_id, user_message)
+        if decision.get("mode") != "require":
             return set()
         return {self.skill_engine.REPORT_DRAFT_PATH}
 
     def _build_required_write_snapshots(self, project_id: str, user_message: str) -> dict[str, dict]:
+        decision = self._classify_canonical_draft_turn(project_id, user_message)
         snapshots = {
             path: self._snapshot_project_file(project_id, path)
             for path in self._required_write_paths_for_turn(project_id, user_message)
         }
-        replacement_intent = self._parse_report_body_replacement_intent(user_message)
+        replacement_intent = None
+        if decision.get("intent_kind") == "replace_text":
+            replacement_intent = {
+                "intent_kind": "replace_text",
+                "old_text": str(decision.get("old_text") or ""),
+                "new_text": str(decision.get("new_text") or ""),
+            }
         if replacement_intent:
             for path, snapshot in snapshots.items():
                 if self._is_canonical_report_draft_path(path):
@@ -1608,6 +2575,12 @@ class ChatHandler:
                         before_text is not None
                         and replacement_intent["old_text"] in before_text
                     )
+        if decision.get("required_edit_scope") in {"section", "full_draft"}:
+            for path, snapshot in snapshots.items():
+                if self._is_canonical_report_draft_path(path):
+                    snapshot["required_edit_scope"] = decision.get("required_edit_scope")
+                    snapshot["rewrite_target_snapshot"] = decision.get("rewrite_target_snapshot")
+                    snapshot["rewrite_target_label"] = decision.get("rewrite_target_label")
         return snapshots
 
     def _parse_report_body_replacement_intent(self, user_message: str) -> dict[str, str] | None:
@@ -1739,9 +2712,49 @@ class ChatHandler:
 
         before_word_count = int(before.get("word_count") or 0)
         current_word_count = int(current.get("word_count") or 0)
-        if current_word_count < before_word_count:
+        if (
+            current_word_count < before_word_count
+            and not self._current_canonical_draft_allows_shrinkage()
+        ):
             return False
         return self._project_file_has_substantive_required_write(project_id, normalized_path)
+
+    def _current_canonical_draft_allows_shrinkage(self) -> bool:
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            return False
+        if decision.get("expected_tool_family") != "edit_file":
+            return False
+        return decision.get("required_edit_scope") in {"section", "full_draft"}
+
+    def _canonical_edit_missing_old_string_guidance(
+        self,
+        project_id: str,
+        file_path: str,
+    ) -> str | None:
+        try:
+            normalized = self.skill_engine.normalize_file_path(project_id, file_path)
+        except ValueError:
+            return None
+        if not self._is_canonical_report_draft_path(normalized):
+            return None
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            return None
+        if decision.get("expected_tool_family") != "edit_file":
+            return None
+        rewrite_scope = decision.get("required_edit_scope")
+        if rewrite_scope not in {"section", "full_draft"}:
+            return None
+        if rewrite_scope == "full_draft":
+            return (
+                "本轮要全文重写报告正文。请先用 `read_file` 读取当前整份草稿，"
+                "再用 `edit_file` 把完整旧稿作为 old_string、重写后的整份新稿作为 new_string。"
+            )
+        return (
+            "本轮要改写现有章节。请先用 `read_file` 读取当前草稿，"
+            "再用 `edit_file` 把目标章节完整原文作为 old_string、改写后的章节内容作为 new_string。"
+        )
 
     def _required_replacement_write_satisfied(
         self,
@@ -1766,22 +2779,31 @@ class ChatHandler:
             return False
         if before.get("old_text_present") is False:
             return False
-        if not self._last_successful_write_is_matching_replacement_edit(
+        matching_event = self._last_successful_write_is_matching_replacement_edit(
             project_id,
             successful_write_events,
             canonical_path,
             old_text,
             new_text,
-        ):
+        )
+        if not isinstance(matching_event, dict):
             return False
         current_text = self._read_project_file_text(project_id, normalized_path)
         if current_text is None:
             return False
+        event_old_string = matching_event.get("old_string")
+        event_new_string = matching_event.get("new_string")
+        if not isinstance(event_old_string, str) or not isinstance(event_new_string, str):
+            return False
         if new_text not in current_text:
             return False
-        if old_text in new_text:
-            return True
-        return old_text not in current_text
+        if event_new_string not in current_text:
+            return False
+        return self._replacement_old_string_only_survives_inside_new_string(
+            current_text,
+            event_old_string,
+            event_new_string,
+        )
 
     def _last_successful_write_is_matching_replacement_edit(
         self,
@@ -1790,38 +2812,73 @@ class ChatHandler:
         canonical_path: str,
         old_text: str,
         new_text: str,
-    ) -> bool:
+    ) -> dict | None:
         events = successful_write_events.get(canonical_path) or []
         if not isinstance(events, list):
-            return False
+            return None
         if not events:
-            return False
+            return None
         last_event = events[-1]
         if not isinstance(last_event, dict):
-            return False
+            return None
         if last_event.get("path") != self.skill_engine.REPORT_DRAFT_PATH:
-            return False
+            return None
         if last_event.get("tool") != "edit_file":
-            return False
+            return None
         arguments = last_event.get("arguments")
         if not isinstance(arguments, dict):
-            return False
+            return None
         file_path = arguments.get("file_path")
         if not isinstance(file_path, str):
-            return False
+            return None
         if (
             self._canonical_successful_write_path(file_path, project_id=project_id)
             != self.skill_engine.REPORT_DRAFT_PATH
         ):
-            return False
+            return None
         old_string = arguments.get("old_string")
         new_string = arguments.get("new_string")
         if not isinstance(old_string, str) or not isinstance(new_string, str):
-            return False
-        return (
+            return None
+        if not (
             self._text_contains_meaningful_reference(old_string, old_text)
             and new_text in new_string
-        )
+        ):
+            return None
+        return {
+            "old_string": old_string,
+            "new_string": new_string,
+        }
+
+    def _replacement_old_string_only_survives_inside_new_string(
+        self,
+        current_text: str,
+        old_string: str,
+        new_string: str,
+    ) -> bool:
+        if not old_string or not new_string:
+            return False
+        old_spans = list(self._iter_substring_spans(current_text, old_string))
+        if not old_spans:
+            return True
+        new_spans = list(self._iter_substring_spans(current_text, new_string))
+        if not new_spans:
+            return False
+        for old_start, old_end in old_spans:
+            if not any(
+                new_start <= old_start and old_end <= new_end
+                for new_start, new_end in new_spans
+            ):
+                return False
+        return True
+
+    def _iter_substring_spans(self, text: str, needle: str):
+        if not needle:
+            return
+        start = text.find(needle)
+        while start != -1:
+            yield start, start + len(needle)
+            start = text.find(needle, start + 1)
 
     def _text_contains_meaningful_reference(self, container: str, needle: str) -> bool:
         if needle in container:
@@ -1888,23 +2945,82 @@ class ChatHandler:
 
     def _build_required_write_feedback(self, missing_paths: list[str]) -> str:
         joined = "、".join(f"`{path}`" for path in missing_paths)
+        decision = self._turn_context.get("canonical_draft_decision")
+        if (
+            isinstance(decision, dict)
+            and decision.get("expected_tool_family") == "edit_file"
+            and decision.get("required_edit_scope") == "full_draft"
+        ):
+            return (
+                f"用户本轮要求重写整份报告正文，因此必须真实更新 {joined}。"
+                "刚才未检测到该文件按用户意图完成更新。"
+                "请先用 `read_file` 读取当前草稿，再用 `edit_file` 把 old_string 设为当前整份正文、"
+                "new_string 设为重写后的完整草稿。"
+                "不要只口头说明已完成。"
+            )
+        if (
+            isinstance(decision, dict)
+            and decision.get("expected_tool_family") == "edit_file"
+        ):
+            return (
+                f"用户本轮要求修改报告正文，因此必须真实更新 {joined}。"
+                "刚才未检测到该文件按用户意图完成更新。"
+                "请先用 `read_file` 读取当前草稿，再用 `edit_file` 做对应修改。"
+                "不要只口头说明已完成，也不要把工具调用写在聊天正文里。"
+            )
+        if (
+            isinstance(decision, dict)
+            and decision.get("expected_tool_family") == "append_report_draft"
+        ):
+            return (
+                f"用户本轮要求继续补写报告正文，因此必须真实更新 {joined}。"
+                "刚才未检测到该文件按用户意图完成更新。"
+                "请直接调用 `append_report_draft` 继续补全正文。"
+                "不要只口头说明已完成，也不要把工具调用写在聊天正文里。"
+            )
         return (
             f"用户本轮要求更新报告正文，因此必须真实更新 {joined}。"
             "刚才未检测到该文件按用户意图完成更新。"
             "请根据用户意图选择真实文件工具："
-            "`append_report_draft` 仅用于继续撰写、补全或新增章节；"
-            "`edit_file` 用于替换、改写或修正现有报告中的局部文字；"
-            "`write_file` 仅用于整体重写整份草稿。"
+            "`append_report_draft` 用于继续撰写、补全或新增章节；"
+            "`read_file` + `edit_file` 用于替换、改写或修正现有报告中的已有文字。"
             "不要只口头说明已完成，也不要把工具调用写在聊天正文里。"
         )
 
     def _build_required_write_failure_message(self, missing_paths: list[str]) -> str:
         joined = "、".join(f"`{path}`" for path in missing_paths)
+        decision = self._turn_context.get("canonical_draft_decision")
+        if (
+            isinstance(decision, dict)
+            and decision.get("expected_tool_family") == "edit_file"
+            and decision.get("required_edit_scope") == "full_draft"
+        ):
+            return (
+                f"这轮没有检测到报告草稿 {joined} 被实际重写。"
+                "请重新发送重写正文的请求；我会要求模型先 `read_file` 当前草稿，"
+                "再用 `edit_file` 对整份内容做全文替换。"
+            )
+        if (
+            isinstance(decision, dict)
+            and decision.get("expected_tool_family") == "edit_file"
+        ):
+            return (
+                f"这轮没有检测到报告草稿 {joined} 被实际修改。"
+                "请重新发送修改正文的请求；我会要求模型先 `read_file` 当前草稿，"
+                "再用 `edit_file` 做对应修改。"
+            )
+        if (
+            isinstance(decision, dict)
+            and decision.get("expected_tool_family") == "append_report_draft"
+        ):
+            return (
+                f"这轮没有检测到报告草稿 {joined} 被实际补写。"
+                "请重新发送补写正文的请求；我会要求模型使用 `append_report_draft` 继续落盘。"
+            )
         return (
             f"这轮没有检测到报告草稿 {joined} 被实际更新。"
             "请重新发送更新报告正文的请求；我会要求模型按意图选择真实文件工具："
-            "续写或新增章节用 `append_report_draft`，局部替换用 `edit_file`，"
-            "整份草稿重写才用 `write_file`。"
+            "续写或新增章节用 `append_report_draft`，已有文字修改用 `read_file` + `edit_file`。"
         )
 
     def _build_self_correction_loop_feedback(self) -> str:
@@ -1934,6 +3050,50 @@ class ChatHandler:
             attached_material_ids=attached_material_ids or [],
         )
         self._turn_context = self._build_turn_context(project_id, user_message)
+        immediate_reject_message = self._immediate_canonical_draft_reject_message()
+        if immediate_reject_message:
+            assistant_message, token_usage, system_notices = self._finalize_early_assistant_message(
+                project_id,
+                history,
+                current_user_message,
+                immediate_reject_message,
+            )
+            yield {"type": "content", "data": assistant_message}
+            for notice in system_notices:
+                yield {
+                    "type": "system_notice",
+                    "category": notice.category,
+                    "path": notice.path,
+                    "reason": notice.reason,
+                    "user_action": notice.user_action,
+            }
+            yield {
+                "type": "usage",
+                "data": token_usage,
+            }
+            return
+        immediate_guidance_message = self._immediate_canonical_draft_guidance_message(project_id)
+        if immediate_guidance_message:
+            assistant_message, token_usage, system_notices = self._finalize_early_assistant_message(
+                project_id,
+                history,
+                current_user_message,
+                immediate_guidance_message,
+            )
+            yield {"type": "content", "data": assistant_message}
+            for notice in system_notices:
+                yield {
+                    "type": "system_notice",
+                    "category": notice.category,
+                    "path": notice.path,
+                    "reason": notice.reason,
+                    "user_action": notice.user_action,
+                }
+            yield {
+                "type": "usage",
+                "data": token_usage,
+            }
+            return
         provider_user_message = {
             **current_user_message,
             "transient_attachments": transient_attachments or [],
@@ -2079,6 +3239,7 @@ class ChatHandler:
                 return
 
             if collected_message["tool_calls"]:
+                guidance_override_message = None
                 # 上游（newapi → Gemini OpenAI 兼容层）偶发会把并行 functionCall 的流式
                 # chunk 全部塞到 index=0，导致 name/arguments 被首尾拼接成
                 # "write_filewrite_file" + "{...}{...}"。直接回传给上游会触发 400
@@ -2164,6 +3325,20 @@ class ChatHandler:
                         "tool_call_id": tool_call["id"],
                         "content": json.dumps(result, ensure_ascii=False),
                     })
+                    guidance_override_message = (
+                        guidance_override_message
+                        or self._mixed_intent_guidance_after_canonical_mutation(project_id)
+                    )
+                    if guidance_override_message:
+                        break
+                if guidance_override_message:
+                    assistant_message = guidance_override_message
+                    token_usage = self._normalize_provider_usage(
+                        stream_usage,
+                        policy,
+                        preflight_compaction_used=compressed,
+                    )
+                    break
                 iterations += 1
             else:
                 candidate_message = collected_message["content"]
@@ -2240,6 +3415,11 @@ class ChatHandler:
                 stream_buffer = ""
 
         assistant_message = self._finalize_assistant_turn(project_id, assistant_message)
+        self._persist_draft_followup_state_for_turn(
+            project_id,
+            assistant_message,
+            user_message=str(current_user_message.get("content") or ""),
+        )
         # 上游偶尔会返回只有空白的 assistant（stream 截断、tag strip 后变空等），
         # 原样落盘会在下一轮产生 parts=[] 的 model turn，Gemini 拒收。用占位文本保底。
         if not assistant_message.strip():
@@ -2285,6 +3465,32 @@ class ChatHandler:
             attached_material_ids=attached_material_ids or [],
         )
         self._turn_context = self._build_turn_context(project_id, user_message)
+        immediate_reject_message = self._immediate_canonical_draft_reject_message()
+        if immediate_reject_message:
+            assistant_message, token_usage, system_notices = self._finalize_early_assistant_message(
+                project_id,
+                history,
+                current_user_message,
+                immediate_reject_message,
+            )
+            return {
+                "content": assistant_message,
+                "token_usage": token_usage,
+                "system_notices": system_notices or None,
+            }
+        immediate_guidance_message = self._immediate_canonical_draft_guidance_message(project_id)
+        if immediate_guidance_message:
+            assistant_message, token_usage, system_notices = self._finalize_early_assistant_message(
+                project_id,
+                history,
+                current_user_message,
+                immediate_guidance_message,
+            )
+            return {
+                "content": assistant_message,
+                "token_usage": token_usage,
+                "system_notices": system_notices or None,
+            }
         provider_user_message = {
             **current_user_message,
             "transient_attachments": transient_attachments or [],
@@ -2364,6 +3570,7 @@ class ChatHandler:
 
             message = response.choices[0].message
             if message.tool_calls:
+                guidance_override_message = None
                 try:
                     msg_dict = message.model_dump()
                 except Exception:
@@ -2397,6 +3604,20 @@ class ChatHandler:
                         "tool_call_id": tool_call.id,
                         "content": json.dumps(result, ensure_ascii=False),
                     })
+                    guidance_override_message = (
+                        guidance_override_message
+                        or self._mixed_intent_guidance_after_canonical_mutation(project_id)
+                    )
+                    if guidance_override_message:
+                        break
+                if guidance_override_message:
+                    assistant_message = guidance_override_message
+                    token_usage = self._normalize_provider_usage(
+                        getattr(response, "usage", None),
+                        policy,
+                        preflight_compaction_used=compressed,
+                    )
+                    break
                 iterations += 1
             else:
                 candidate_message = message.content or ""
@@ -2452,6 +3673,11 @@ class ChatHandler:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
 
         assistant_message = self._finalize_assistant_turn(project_id, assistant_message)
+        self._persist_draft_followup_state_for_turn(
+            project_id,
+            assistant_message,
+            user_message=str(current_user_message.get("content") or ""),
+        )
         if not assistant_message.strip():
             assistant_message = "（本轮无回复）"
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
@@ -2923,9 +4149,8 @@ class ChatHandler:
                 "function": {
                     "name": "write_file",
                     "description": (
-                        "整文件覆盖写入，适合新建文件或整体重写。"
-                        "追加条目到积累型文件（plan/data-log.md、plan/analysis-notes.md）时不要用 write_file，"
-                        "应改用 edit_file 以避免覆盖已有条目。"
+                        "整文件覆盖写入。已有文件先 `read_file` 再写。"
+                        "不要对 `content/report_draft_v1.md` 使用 `write_file`。"
                     ),
                     "parameters": {
                         "type": "object",
@@ -2942,12 +4167,8 @@ class ChatHandler:
                 "function": {
                     "name": "edit_file",
                     "description": (
-                        "对已存在文件做精确字符串替换——"
-                        "系统找到 old_string 的唯一匹配并替换为 new_string，其他内容保留不变。"
-                        "适合追加新条目（把文件末尾一段作为 old_string，new_string 放 '原文+新条目'）、"
-                        "或局部修正。data-log.md、analysis-notes.md 这类逐条积累的文件**首选用 edit_file**，"
-                        "避免 write_file 整体重写时误删历史条目。"
-                        "要求：目标文件已存在；old_string 在文件中唯一存在。不唯一时请在 old_string 前后补更多上下文。"
+                        "对已存在文件做精确字符串替换。已有文件先 `read_file`。"
+                        "正文草稿的局部修改用 `edit_file`，不要用 `write_file` 覆盖。"
                     ),
                     "parameters": {
                         "type": "object",
@@ -2965,9 +4186,9 @@ class ChatHandler:
                 "function": {
                     "name": "append_report_draft",
                     "description": (
-                        "追加或续写报告正文到唯一草稿路径 content/report_draft_v1.md。"
-                        "用于 S4/S5 中用户要求继续写、补全章节、扩写正文时。"
-                        "不要用于 plan 文件、审查清单、交付记录或最终归档。"
+                        "用于正文首次成稿或续写：`content/report_draft_v1.md` 不存在就创建，存在就追加到末尾。"
+                        "正文已有文字要修改时改用 `read_file` + `edit_file`。"
+                        "混合意图里的导出、质量检查、看文件、看字数本轮只给下一步提示。"
                     ),
                     "parameters": {
                         "type": "object",
@@ -3064,6 +4285,12 @@ class ChatHandler:
                 if not file_path:
                     return {"status": "error", "message": "缺少 file_path 参数。"}
                 if not old_string:
+                    canonical_edit_guidance = self._canonical_edit_missing_old_string_guidance(project_id, file_path)
+                    if canonical_edit_guidance:
+                        return {
+                            "status": "error",
+                            "message": canonical_edit_guidance,
+                        }
                     return {
                         "status": "error",
                         "message": "old_string 不能为空；新建文件或整体重写请改用 write_file。",
@@ -3088,7 +4315,6 @@ class ChatHandler:
                         "message": f"old_string 在文件中出现 {count} 次，不唯一；请在 old_string 前后补更多上下文让它唯一。",
                     }
                 updated = current_content.replace(old_string, new_string, 1)
-                # edit 成功的 persist 记录统一记成 write_file 行为，让 source_key 逻辑不分叉。
                 return self._execute_plan_write(
                     project_id,
                     file_path=file_path,
@@ -3104,6 +4330,7 @@ class ChatHandler:
                 normalized_path = self.skill_engine.normalize_file_path(project_id, args["file_path"])
                 content = self.skill_engine.read_file(project_id, normalized_path)
                 result = {"status": "success", "content": content}
+                self._record_turn_read_file_path(normalized_path)
                 self._persist_successful_tool_result(
                     project_id,
                     func_name,
@@ -3209,7 +4436,10 @@ class ChatHandler:
 
         targets = self.skill_engine._resolve_length_targets(project_path)
         report_word_floor = int(targets.get("report_word_floor", 0) or 0)
-        word_count = self.skill_engine._count_words(combined_content)
+        report_progress = result.get("report_progress") if isinstance(result.get("report_progress"), dict) else {}
+        word_count = int(report_progress.get("current_count") or 0)
+        if word_count <= 0:
+            word_count = self.skill_engine._count_words(combined_content)
         result.update(
             {
                 "path": self.skill_engine.REPORT_DRAFT_PATH,
@@ -3223,6 +4453,34 @@ class ChatHandler:
             }
         )
         return result
+
+    def _validate_append_turn_canonical_draft_write(
+        self,
+        project_id: str,
+        normalized_path: str,
+        content: str,
+        *,
+        source_tool_name: str,
+    ) -> str | None:
+        if not self._is_canonical_report_draft_path(normalized_path):
+            return None
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            return None
+        if decision.get("expected_tool_family") != "append_report_draft":
+            return None
+        if source_tool_name == "append_report_draft":
+            return None
+
+        current_text = self._read_project_file_text(project_id, normalized_path) or ""
+        append_retry_guidance = (
+            "本轮要求继续补写报告正文，不能用整份覆盖或改写已有草稿来替代追加。"
+            "续写或新增章节请用 `append_report_draft`；"
+            "若本轮要改写已有内容，请先 `read_file` 再用 `edit_file` 处理对应范围。"
+        )
+        if source_tool_name in {"write_file", "edit_file"}:
+            return append_retry_guidance
+        return None
 
     def _count_report_append_substantive_chars(self, content: str) -> int:
         text = content or ""
@@ -3287,8 +4545,9 @@ class ChatHandler:
                     ),
                 )
                 return {"status": "error", "message": reason}
-        if self._should_block_non_plan_write(project_id, file_path):
-            reason = "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。"
+        non_plan_write_block_reason = self._non_plan_write_block_reason(project_id, file_path)
+        if non_plan_write_block_reason:
+            reason = non_plan_write_block_reason
             self._emit_system_notice_once(
                 category="non_plan_write_blocked",
                 path=None,
@@ -3308,6 +4567,47 @@ class ChatHandler:
         normalized_path = self.skill_engine.validate_plan_write(project_id, file_path)
         if self._is_canonical_report_draft_path(normalized_path):
             normalized_path = self.skill_engine.REPORT_DRAFT_PATH
+        if source_tool_name == "write_file":
+            canonical_write_file_error = self._build_canonical_draft_write_file_block_message(
+                project_id,
+                normalized_path,
+                source_tool_args=source_tool_args,
+            )
+            if canonical_write_file_error:
+                self._emit_system_notice_once(
+                    category="report_draft_destructive_write_blocked",
+                    path=normalized_path,
+                    reason=canonical_write_file_error,
+                    user_action=(
+                        "正文首次成稿或续写请用 `append_report_draft`；"
+                        "修改已有正文请先 `read_file`，再用 `edit_file`。"
+                    ),
+                )
+                return {"status": "error", "message": canonical_write_file_error}
+        mutation_limit_error = self._validate_canonical_draft_turn_mutation_limit(
+            normalized_path,
+        )
+        if mutation_limit_error:
+            self._emit_system_notice_once(
+                category="report_draft_destructive_write_blocked",
+                path=normalized_path,
+                reason=mutation_limit_error,
+                user_action="请基于当前已落盘的正文结果直接向用户汇报，本轮不要继续改动正文。",
+            )
+            return {"status": "error", "message": mutation_limit_error}
+        read_before_write_error = self._validate_existing_file_read_before_write(
+            project_id,
+            normalized_path,
+            source_tool_name=source_tool_name,
+        )
+        if read_before_write_error:
+            self._emit_system_notice_once(
+                category="write_blocked",
+                path=normalized_path,
+                reason=read_before_write_error,
+                user_action="请先读取目标文件最新内容，再重新提交写入。",
+            )
+            return {"status": "error", "message": read_before_write_error}
         destructive_write_error = self._validate_required_report_draft_prewrite(
             project_id,
             normalized_path,
@@ -3322,7 +4622,7 @@ class ChatHandler:
                 reason=destructive_write_error,
                 user_action=(
                     "续写或新增章节请用 `append_report_draft`；"
-                    "局部修改请用 `edit_file`；只有完整重写整份草稿时才用 `write_file`。"
+                    "改写已有正文请先 `read_file`，再用 `edit_file` 处理对应范围。"
                 ),
             )
             return {"status": "error", "message": destructive_write_error}
@@ -3372,6 +4672,18 @@ class ChatHandler:
         should_emit_data_log_hint = self._is_first_data_log_write(project_id, normalized_path)
         self.skill_engine.write_file(project_id, normalized_path, content)
         result = {"status": "success", "message": f"已写入文件: {normalized_path}"}
+        canonical_progress_snapshot = None
+        if self._is_canonical_report_draft_path(normalized_path):
+            canonical_progress_snapshot = self._canonical_draft_progress_snapshot(project_id)
+            result["path"] = self.skill_engine.REPORT_DRAFT_PATH
+            result.update(
+                self._canonical_draft_progress_response_payload(canonical_progress_snapshot)
+            )
+            progress_message = self._build_canonical_draft_write_success_message(
+                canonical_progress_snapshot
+            )
+            if progress_message:
+                result["message"] = progress_message
         if should_emit_data_log_hint:
             self._emit_system_notice_once(
                 category="data_log_format_hint",
@@ -3384,10 +4696,19 @@ class ChatHandler:
             )
         self._persist_successful_tool_result(
             project_id,
-            persist_func_name,
-            persist_args,
+            source_tool_name,
+            source_tool_args or {},
             result,
-            {"normalized_path": normalized_path},
+            {
+                "normalized_path": normalized_path,
+                "metadata_func_name": persist_func_name,
+                "metadata_args": persist_args,
+            },
+        )
+        self._record_successful_canonical_draft_mutation(
+            source_tool_name=source_tool_name,
+            normalized_path=normalized_path,
+            progress_snapshot=canonical_progress_snapshot,
         )
         return result
 
@@ -3418,6 +4739,101 @@ class ChatHandler:
                 source_tool_args=source_tool_args,
             )
 
+        append_turn_error = self._validate_append_turn_canonical_draft_write(
+            project_id,
+            normalized_path,
+            content,
+            source_tool_name=source_tool_name,
+        )
+        if append_turn_error:
+            return append_turn_error
+
+        decision = self._turn_context.get("canonical_draft_decision")
+        rewrite_scope = None
+        rewrite_target_snapshot = None
+        rewrite_target_label = None
+        if (
+            isinstance(decision, dict)
+            and decision.get("expected_tool_family") == "edit_file"
+        ):
+            rewrite_scope = decision.get("required_edit_scope")
+            rewrite_target_snapshot = decision.get("rewrite_target_snapshot")
+            rewrite_target_label = decision.get("rewrite_target_label")
+        if isinstance(snapshot, dict):
+            rewrite_scope = snapshot.get("required_edit_scope") or rewrite_scope
+            rewrite_target_snapshot = snapshot.get("rewrite_target_snapshot") or rewrite_target_snapshot
+            rewrite_target_label = snapshot.get("rewrite_target_label") or rewrite_target_label
+
+        if rewrite_scope in {"section", "full_draft"}:
+            if source_tool_name == "append_report_draft":
+                if rewrite_scope == "full_draft":
+                    return (
+                        "本轮用户要求全文重写报告正文，不能用 `append_report_draft` 追加内容来替代重写。"
+                        "请先用 `read_file` 读取当前草稿，再用 `edit_file` 把整份旧稿替换为重写后的完整新稿。"
+                    )
+                return (
+                    "本轮用户要求改写现有章节，不能用 `append_report_draft` 追加内容来替代章节修改。"
+                    "请先用 `read_file` 读取当前草稿，再用 `edit_file` 修改目标章节。"
+                )
+            if source_tool_name == "write_file":
+                if rewrite_scope == "full_draft":
+                    return (
+                        "本轮用户要求全文重写报告正文，请先用 `read_file` 读取当前草稿，"
+                        "再用 `edit_file` 把整份旧稿替换为重写后的完整新稿。"
+                    )
+                return (
+                        "本轮用户要求改写现有章节，请先用 `read_file` 读取当前草稿，"
+                        "再用 `edit_file` 修改目标章节。"
+                    )
+            if source_tool_name == "edit_file":
+                if not isinstance(source_tool_args, dict):
+                    return "本轮正文改写必须通过 `read_file` 后再用 `edit_file` 提交完整 old_string/new_string。"
+                old_string = source_tool_args.get("old_string")
+                new_string = source_tool_args.get("new_string")
+                if not isinstance(old_string, str) or not old_string:
+                    return self._canonical_edit_missing_old_string_guidance(project_id, normalized_path)
+                current_text = self._read_project_file_text(project_id, normalized_path)
+                if current_text is None:
+                    return "读取当前草稿失败。请先用 `read_file` 读取正文，再重新提交 `edit_file`。"
+                if rewrite_scope == "full_draft":
+                    if old_string != current_text:
+                        return (
+                            "本轮要求全文重写报告正文，`edit_file.old_string` 必须等于当前整份草稿。"
+                            "请先 `read_file` 读取完整正文，再把整份旧稿作为 old_string 提交。"
+                        )
+                    return None
+
+                expected_section = str(rewrite_target_snapshot or "")
+                if old_string == expected_section and expected_section:
+                    new_string_scope_error = self._validate_section_rewrite_new_string_scope(
+                        expected_section,
+                        str(new_string or ""),
+                        rewrite_target_label=rewrite_target_label,
+                    )
+                    if new_string_scope_error:
+                        return new_string_scope_error
+                    return None
+                heading_count = len(self._extract_markdown_heading_labels(old_string))
+                if old_string == current_text:
+                    return (
+                        "本轮只允许改写目标章节，不能用覆盖整份草稿的 `edit_file.old_string`。"
+                        "请先 `read_file`，再只提交目标章节的完整原文。"
+                    )
+                if heading_count > 1:
+                    return (
+                        "本轮只允许改写单个目标章节，`edit_file.old_string` 不能同时覆盖多个标题段。"
+                        "请先 `read_file`，再只提交目标章节的完整原文。"
+                    )
+                if not expected_section:
+                    return "当前缺少目标章节快照。请先 `read_file` 读取正文，再重新提交章节改写。"
+                if old_string != expected_section:
+                    label_hint = f"`{rewrite_target_label}`" if isinstance(rewrite_target_label, str) and rewrite_target_label else "目标章节"
+                    return (
+                        f"本轮要求改写 {label_hint}，`edit_file.old_string` 必须等于该章节的完整原文。"
+                        "请先 `read_file` 读取正文，再只提交目标章节的完整原文。"
+                    )
+                return None
+
         if source_tool_name not in {"write_file", "edit_file"}:
             return None
 
@@ -3431,9 +4847,10 @@ class ChatHandler:
             return None
 
         return (
-            f"本轮要求更新报告正文，但 `{source_tool_name}` 形成的最终内容比现有草稿更短，"
-            "可能覆盖并丢失已有正文。请改用 `append_report_draft` 续写/新增章节，"
-            "或用 `edit_file` 做小范围局部替换；只有完整重写整份草稿时才使用 `write_file`。"
+            "本轮要求更新报告正文，但当前提交的最终内容比现有草稿更短，"
+            "可能覆盖并丢失已有正文。"
+            "续写或新增章节请用 `append_report_draft`；"
+            "若本轮要改写已有内容，请先 `read_file` 再用 `edit_file` 处理对应范围。"
         )
 
     def _validate_replace_text_report_draft_prewrite(
@@ -4471,9 +5888,8 @@ class ChatHandler:
         project_context = self.skill_engine.build_project_context(project_id)
         if self._turn_context.get("can_write_non_plan", True):
             turn_rule = (
-                "本轮如用户明确要求继续正文，可在更新 plan 后撰写正文。"
-                "像“你开始写吧”“开始写吧”“开始写正文吧”“继续写正文”都算明确授权。"
-                f"报告正文草稿统一写入 `{self.skill_engine.REPORT_DRAFT_PATH}`。"
+                "本轮如用户明确要求正文，可在更新 plan 后处理正文草稿。"
+                f"正文草稿统一写入 `{self.skill_engine.REPORT_DRAFT_PATH}`。"
             )
         else:
             turn_rule = (
@@ -4482,6 +5898,14 @@ class ChatHandler:
                 f"允许写正文后，报告正文草稿也只能写入 `{self.skill_engine.REPORT_DRAFT_PATH}`。"
                 "如果信息不足，提出问题后就停止本轮，不要擅自继续。"
             )
+        draft_rule_block = (
+            "正文草稿规则：\n"
+            "- 已有文件先 `read_file`，再用 `write_file` / `edit_file`\n"
+            "- 正文首次成稿或续写 -> `append_report_draft`\n"
+            "- 正文局部修改 -> `edit_file`\n"
+            f"- 不要对 `{self.skill_engine.REPORT_DRAFT_PATH}` 使用 `write_file`\n"
+            "- mixed-intent 的导出 / 质量检查 / 看文件 / 看字数只给下一步提示，不要同轮执行"
+        )
         evidence_rule = (
             "如果本轮调用了 `web_search` 并准备把外部网页信息写进正式文件，"
             "必须先对候选链接调用 `fetch_url` 阅读正文；搜索结果摘要不能直接当作正式依据。"
@@ -4493,11 +5917,15 @@ class ChatHandler:
             "每轮消息只发一个 tool_call，等该工具返回结果后再发下一个；"
             "不要在一条消息里并行发起多个工具调用。"
         )
-        return f"{skill_prompt}\n\n## 当前轮次约束\n{turn_rule}\n{evidence_rule}\n{concurrency_rule}\n\n{project_context}"
+        return (
+            f"{skill_prompt}\n\n## 当前轮次约束\n{turn_rule}\n{draft_rule_block}\n"
+            f"{evidence_rule}\n{concurrency_rule}\n\n{project_context}"
+        )
 
     def _new_turn_context(self, *, can_write_non_plan: bool) -> Dict[str, object]:
         return {
             "can_write_non_plan": can_write_non_plan,
+            "generic_non_plan_write_allowed": can_write_non_plan,
             "web_search_disabled": False,
             "web_search_performed": False,
             "fetch_url_performed": False,
@@ -4505,6 +5933,10 @@ class ChatHandler:
             "system_notice_emitted": False,
             "pending_system_notices": [],
             "required_write_snapshots": {},
+            "canonical_draft_decision": None,
+            "draft_followup_flags": None,
+            "read_file_paths": set(),
+            "canonical_draft_mutation": None,
             "checkpoint_event": None,
             "pending_stage_keyword": None,
         }
@@ -4607,8 +6039,335 @@ class ChatHandler:
                         self._turn_context["checkpoint_event"] = {"action": action, "key": key}
                 else:
                     self._turn_context["pending_stage_keyword"] = (action, key)
-        self._turn_context["can_write_non_plan"] = self._should_allow_non_plan_write(project_id, user_message)
+        canonical_draft_decision = self._classify_canonical_draft_turn(project_id, user_message)
+        generic_non_plan_write_allowed = self._should_allow_generic_non_plan_write(project_id, user_message)
+        self._turn_context["canonical_draft_decision"] = canonical_draft_decision
+        self._turn_context["generic_non_plan_write_allowed"] = generic_non_plan_write_allowed
+        self._turn_context["can_write_non_plan"] = (
+            generic_non_plan_write_allowed
+            or canonical_draft_decision.get("mode") == "require"
+        )
         return self._turn_context
+
+    def _immediate_canonical_draft_reject_message(self) -> str | None:
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            return None
+        if decision.get("mode") != "reject":
+            return None
+        fixed_message = decision.get("fixed_message")
+        if not isinstance(fixed_message, str) or not fixed_message.strip():
+            return None
+        return fixed_message
+
+    def _turn_read_file_paths(self) -> set[str]:
+        paths = self._turn_context.get("read_file_paths")
+        if isinstance(paths, set):
+            return paths
+        normalized_paths = set()
+        if isinstance(paths, (list, tuple, set)):
+            normalized_paths = {
+                str(path).strip()
+                for path in paths
+                if isinstance(path, str) and str(path).strip()
+            }
+        self._turn_context["read_file_paths"] = normalized_paths
+        return normalized_paths
+
+    def _canonicalize_turn_file_path(self, normalized_path: str) -> str:
+        if self._is_canonical_report_draft_path(normalized_path):
+            return self.skill_engine.REPORT_DRAFT_PATH
+        return normalized_path
+
+    def _record_turn_read_file_path(self, normalized_path: str) -> None:
+        if not isinstance(normalized_path, str) or not normalized_path.strip():
+            return
+        self._turn_read_file_paths().add(
+            self._canonicalize_turn_file_path(normalized_path)
+        )
+
+    def _has_same_turn_read_file(self, normalized_path: str) -> bool:
+        if not isinstance(normalized_path, str) or not normalized_path.strip():
+            return False
+        canonicalized = self._canonicalize_turn_file_path(normalized_path)
+        return canonicalized in self._turn_read_file_paths()
+
+    def _validate_existing_file_read_before_write(
+        self,
+        project_id: str,
+        normalized_path: str,
+        *,
+        source_tool_name: str,
+    ) -> str | None:
+        if source_tool_name not in {"write_file", "edit_file"}:
+            return None
+        current = self._snapshot_project_file(project_id, normalized_path)
+        if not current.get("exists"):
+            return None
+        if self._has_same_turn_read_file(normalized_path):
+            return None
+        return (
+            f"本轮要修改的文件 `{normalized_path}` 已存在。"
+            "请先调用 `read_file` 读取最新内容，再执行写入或替换。"
+        )
+
+    def _successful_canonical_draft_mutation(self) -> dict | None:
+        mutation = self._turn_context.get("canonical_draft_mutation")
+        if isinstance(mutation, dict):
+            return mutation
+        return None
+
+    def _record_successful_canonical_draft_mutation(
+        self,
+        *,
+        source_tool_name: str,
+        normalized_path: str,
+        progress_snapshot: dict | None = None,
+    ) -> None:
+        if not self._is_canonical_report_draft_path(normalized_path):
+            return
+        mutation = {
+            "tool": source_tool_name,
+            "path": self.skill_engine.REPORT_DRAFT_PATH,
+        }
+        if isinstance(progress_snapshot, dict):
+            mutation["progress_snapshot"] = progress_snapshot
+        self._turn_context["canonical_draft_mutation"] = mutation
+
+    def _canonical_draft_progress_snapshot(
+        self,
+        project_id: str,
+        *,
+        effective_turn_target_count: int | None = None,
+    ) -> dict | None:
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return None
+
+        draft_text = self._read_project_file_text(project_id, self.skill_engine.REPORT_DRAFT_PATH)
+        if draft_text is None:
+            return None
+
+        default_target_count = self._project_default_report_target_count(project_path)
+        requested_target_count = effective_turn_target_count
+        if requested_target_count is None:
+            requested_target_count = self._current_turn_requested_target_count()
+        carried_target_count = self._current_turn_carried_followup_target_count(
+            project_id,
+            default_target_count=default_target_count,
+        )
+        if requested_target_count is None and carried_target_count is not None:
+            requested_target_count = carried_target_count
+        effective_target_count = self._current_turn_effective_target_count(
+            default_target_count=default_target_count
+        )
+        if effective_target_count is None:
+            effective_target_count = carried_target_count
+        if isinstance(requested_target_count, int) and requested_target_count > default_target_count:
+            effective_target_count = requested_target_count
+        current_count = self.skill_engine._count_words(draft_text)
+        turn_target_count = (
+            requested_target_count
+            if isinstance(requested_target_count, int) and requested_target_count > 0
+            else default_target_count
+        )
+        turn_target_met = current_count >= turn_target_count
+        snapshot = {
+            "path": self.skill_engine.REPORT_DRAFT_PATH,
+            "report_progress": {
+                "current_count": current_count,
+                "target_word_count": default_target_count,
+                "meets_target": current_count >= default_target_count,
+            },
+            "turn_target_count": turn_target_count,
+            "turn_target_met": turn_target_met,
+        }
+        if isinstance(effective_target_count, int) and effective_target_count > default_target_count:
+            snapshot["effective_turn_target_count"] = effective_target_count
+            snapshot["effective_turn_target_met"] = current_count >= effective_target_count
+            snapshot["turn_target_count"] = effective_target_count
+            snapshot["turn_target_met"] = current_count >= effective_target_count
+        return snapshot
+
+    def _canonical_draft_progress_response_payload(self, snapshot: dict | None) -> dict:
+        if not isinstance(snapshot, dict):
+            return {}
+        payload = {
+            "report_progress": dict(snapshot.get("report_progress") or {}),
+        }
+        if "effective_turn_target_count" in snapshot:
+            payload["effective_turn_target_count"] = snapshot["effective_turn_target_count"]
+            payload["effective_turn_target_met"] = snapshot["effective_turn_target_met"]
+        return payload
+
+    def _build_canonical_draft_write_success_message(self, snapshot: dict | None) -> str | None:
+        if not isinstance(snapshot, dict):
+            return None
+        report_progress = snapshot.get("report_progress")
+        if not isinstance(report_progress, dict):
+            return None
+        current_count = int(report_progress.get("current_count") or 0)
+        turn_target_count = int(snapshot.get("turn_target_count") or 0)
+        if turn_target_count <= 0:
+            turn_target_count = int(report_progress.get("target_word_count") or 0)
+        status_text = "已达到本轮目标。" if snapshot.get("turn_target_met") else "仍需继续补全。"
+        return (
+            f"已写入 {self.skill_engine.REPORT_DRAFT_PATH}；"
+            f"当前 {current_count}/{turn_target_count} 字，{status_text}"
+        )
+
+    def _validate_canonical_draft_turn_mutation_limit(
+        self,
+        normalized_path: str,
+    ) -> str | None:
+        if not self._is_canonical_report_draft_path(normalized_path):
+            return None
+        mutation = self._successful_canonical_draft_mutation()
+        if not isinstance(mutation, dict):
+            return None
+        tool_name = mutation.get("tool")
+        tool_hint = (
+            f"`{tool_name}`"
+            if isinstance(tool_name, str) and tool_name.strip()
+            else "前一个工具"
+        )
+        return (
+            f"本轮已经成功通过 {tool_hint} 修改了 `{self.skill_engine.REPORT_DRAFT_PATH}`。"
+            "请基于当前落盘结果直接向用户汇报，不要继续修改该文件。"
+        )
+
+    def _build_canonical_draft_write_file_block_message(
+        self,
+        project_id: str,
+        normalized_path: str,
+        *,
+        source_tool_args: Dict | None = None,
+    ) -> str | None:
+        if not self._is_canonical_report_draft_path(normalized_path):
+            return None
+        specific_error = self._validate_required_report_draft_prewrite(
+            project_id,
+            normalized_path,
+            str((source_tool_args or {}).get("content") or ""),
+            source_tool_name="write_file",
+            source_tool_args=source_tool_args,
+        )
+        if specific_error:
+            return specific_error
+        return (
+            f"不要对 `{self.skill_engine.REPORT_DRAFT_PATH}` 使用 `write_file`。"
+            "首次成稿或续写请用 `append_report_draft`；"
+            "修改已有正文请先 `read_file`，再用 `edit_file`。"
+        )
+
+    def _mixed_intent_secondary_action_label(self, family: str | None) -> str | None:
+        mapping = {
+            "export": "导出",
+            "quality_check": "质量检查",
+            "inspect_file": "看看文件",
+            "inspect_word_count": "看看现在多少字",
+        }
+        return mapping.get(family or "")
+
+    def _build_mixed_intent_guidance_message(self, project_id: str) -> str | None:
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            return None
+        priority = str(decision.get("priority") or "")
+        family = self._mixed_intent_secondary_action_label(
+            decision.get("mixed_intent_secondary_family")
+        )
+        if family is None:
+            return None
+
+        progress_snapshot = self._canonical_draft_progress_snapshot(project_id)
+        if not isinstance(progress_snapshot, dict):
+            return None
+        report_progress = progress_snapshot.get("report_progress") or {}
+        current_count = int(report_progress.get("current_count") or 0)
+        threshold_count = int(progress_snapshot.get("turn_target_count") or 0)
+
+        if priority == "P5A":
+            if progress_snapshot.get("turn_target_met"):
+                self._set_turn_draft_followup_flags(
+                    reported_under_target=False,
+                    asked_continue_expand=False,
+                )
+                return (
+                    f"当前正文约 {current_count}/{threshold_count} 字，已达到本轮目标。"
+                    f"本轮不执行“{family}”；如需{family}，请下一轮单独发起。"
+                )
+            self._set_turn_draft_followup_flags(
+                reported_under_target=True,
+                asked_continue_expand=True,
+                continuation_threshold_count=progress_snapshot.get("effective_turn_target_count"),
+            )
+            return (
+                f"当前正文约 {current_count}/{threshold_count} 字，仍未达到本轮目标。"
+                f"本轮不执行“{family}”；请下一轮继续扩写正文。"
+            )
+
+        if priority == "P5B":
+            self._set_turn_draft_followup_flags(
+                reported_under_target=False,
+                asked_continue_expand=False,
+            )
+            return (
+                "正文修改已落盘。"
+                f"本轮不执行“{family}”；如需{family}，请下一轮单独发起。"
+            )
+
+        return None
+
+    def _immediate_canonical_draft_guidance_message(self, project_id: str) -> str | None:
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            return None
+        if decision.get("priority") != "P5A" or decision.get("mode") != "no_write":
+            return None
+        return self._build_mixed_intent_guidance_message(project_id)
+
+    def _mixed_intent_guidance_after_canonical_mutation(self, project_id: str) -> str | None:
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            return None
+        if decision.get("priority") not in {"P5A", "P5B"}:
+            return None
+        if decision.get("mode") != "require":
+            return None
+        if not isinstance(self._successful_canonical_draft_mutation(), dict):
+            return None
+        return self._build_mixed_intent_guidance_message(project_id)
+
+    def _finalize_early_assistant_message(
+        self,
+        project_id: str,
+        history: List[Dict],
+        current_user_message: Dict,
+        assistant_message: str,
+    ) -> tuple[str, Dict | None, list[SystemNotice]]:
+        assistant_message = self._finalize_assistant_turn(project_id, assistant_message)
+        self._persist_draft_followup_state_for_turn(
+            project_id,
+            assistant_message,
+            user_message=str(current_user_message.get("content") or ""),
+        )
+        if not assistant_message.strip():
+            assistant_message = "（本轮无回复）"
+        history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
+        self._save_conversation(project_id, history)
+        token_usage = self._finalize_post_turn_compaction(project_id, history, None)
+        system_notices = [
+            SystemNotice(
+                category=notice["category"],
+                path=notice.get("path"),
+                reason=notice["reason"],
+                user_action=notice["user_action"],
+            )
+            for notice in self._turn_context.pop("pending_system_notices", [])
+        ]
+        self._turn_context = self._new_turn_context(can_write_non_plan=True)
+        return assistant_message, token_usage, system_notices
 
     def _finalize_assistant_turn(self, project_id: str, full_content: str) -> str:
         """Resolve stage-ack tags and pending keyword fallback for one turn."""
@@ -4715,6 +6474,14 @@ class ChatHandler:
         queue.append(notice)
 
     def _should_allow_non_plan_write(self, project_id: str, user_message: str) -> bool:
+        decision = self._turn_context.get("canonical_draft_decision")
+        if not isinstance(decision, dict):
+            decision = self._classify_canonical_draft_turn(project_id, user_message)
+        if decision.get("mode") == "require":
+            return True
+        return self._should_allow_generic_non_plan_write(project_id, user_message)
+
+    def _should_allow_generic_non_plan_write(self, project_id: str, user_message: str) -> bool:
         normalized = (user_message or "").strip()
         if not normalized:
             return False
@@ -4812,11 +6579,35 @@ class ChatHandler:
         return any(keyword in normalized for keyword in blocking_keywords)
 
     def _should_block_non_plan_write(self, project_id: str, file_path: str) -> bool:
+        return self._non_plan_write_block_reason(project_id, file_path) is not None
+
+    def _non_plan_write_block_reason(self, project_id: str, file_path: str) -> str | None:
         try:
             normalized = self.skill_engine.normalize_file_path(project_id, file_path)
         except ValueError:
-            return False
-        return not normalized.startswith("plan/") and not self._turn_context.get("can_write_non_plan", True)
+            return None
+        if self._is_canonical_report_draft_path(normalized):
+            decision = self._turn_context.get("canonical_draft_decision")
+            if isinstance(decision, dict):
+                if decision.get("mode") == "require":
+                    return None
+                stage_code = str(decision.get("stage_code") or "")
+                if stage_code not in self.NON_PLAN_WRITE_ALLOWED_STAGE_CODES:
+                    return self.CANONICAL_DRAFT_STAGE_GATE_MESSAGE
+                fixed_message = decision.get("fixed_message")
+                if isinstance(fixed_message, str) and fixed_message.strip():
+                    return fixed_message
+                return "本轮用户没有要求修改正文草稿，请不要改动 `content/report_draft_v1.md`。"
+            if not self._turn_context.get("can_write_non_plan", True):
+                return self.CANONICAL_DRAFT_STAGE_GATE_MESSAGE
+            return None
+        generic_allowed = self._turn_context.get(
+            "generic_non_plan_write_allowed",
+            self._turn_context.get("can_write_non_plan", True),
+        )
+        if not normalized.startswith("plan/") and not generic_allowed:
+            return self.CANONICAL_DRAFT_STAGE_GATE_MESSAGE
+        return None
 
     def _should_require_fetch_url_before_write(self, project_id: str, file_path: str) -> bool:
         if not self._turn_context.get("web_search_performed"):

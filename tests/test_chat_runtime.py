@@ -640,6 +640,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "events": [],
                 "memory_entries": [],
                 "compact_state": None,
+                "draft_followup_state": None,
             },
         )
         self.assertFalse((Path(project["project_dir"]) / "conversation_state.json").exists())
@@ -746,6 +747,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "events": [],
                 "memory_entries": [],
                 "compact_state": None,
+                "draft_followup_state": None,
             },
         )
         self.assertFalse(legacy_path.exists())
@@ -798,6 +800,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "events": [],
                 "memory_entries": [],
                 "compact_state": None,
+                "draft_followup_state": None,
             },
         )
         self.assertFalse(legacy_path.exists())
@@ -905,6 +908,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "events": [],
                 "memory_entries": [],
                 "compact_state": None,
+                "draft_followup_state": None,
             },
         )
         self.assertFalse(state_path.exists())
@@ -3583,6 +3587,237 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("已有正文\n\n## 第二章", text)
 
     @mock.patch("backend.chat.OpenAI")
+    def test_read_before_write_requires_same_turn_read_for_existing_generic_write_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        target_path = self.project_dir / "plan" / "notes.md"
+        target_path.write_text("# Notes\n\n旧内容\n", encoding="utf-8")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        blocked = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/notes.md",
+                        "content": "# Notes\n\n新内容\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(blocked["status"], "error")
+        self.assertIn("read_file", blocked["message"])
+        self.assertEqual(target_path.read_text(encoding="utf-8"), "# Notes\n\n旧内容\n")
+
+        read_result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "plan/notes.md"}, ensure_ascii=False),
+            ),
+        )
+        allowed = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/notes.md",
+                        "content": "# Notes\n\n新内容\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(read_result["status"], "success")
+        self.assertEqual(allowed["status"], "success")
+        self.assertEqual(target_path.read_text(encoding="utf-8"), "# Notes\n\n新内容\n")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_read_before_write_requires_same_turn_read_for_existing_generic_edit_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        target_path = self.project_dir / "plan" / "notes.md"
+        target_path.write_text("# Notes\n\n旧内容\n", encoding="utf-8")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        blocked = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "edit_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/notes.md",
+                        "old_string": "旧内容",
+                        "new_string": "新内容",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(blocked["status"], "error")
+        self.assertIn("read_file", blocked["message"])
+        self.assertEqual(target_path.read_text(encoding="utf-8"), "# Notes\n\n旧内容\n")
+
+        read_result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "plan/notes.md"}, ensure_ascii=False),
+            ),
+        )
+        allowed = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "edit_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/notes.md",
+                        "old_string": "旧内容",
+                        "new_string": "新内容",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(read_result["status"], "success")
+        self.assertEqual(allowed["status"], "success")
+        self.assertEqual(target_path.read_text(encoding="utf-8"), "# Notes\n\n新内容\n")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_write_file_is_rejected_even_when_write_is_otherwise_allowed(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("既有正文" * 120)
+        before = draft_path.read_text(encoding="utf-8")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_write_report_tool_call(content="# Draft\n\n整份替换内容\n"),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("write_file", result["message"])
+        self.assertIn("append_report_draft", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_append_report_draft_is_exempt_from_same_turn_read_before_write(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        draft_path = self._write_partial_report_draft("已有正文" * 120)
+        before = draft_path.read_text(encoding="utf-8")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "append_report_draft",
+                json.dumps({"content": "## 第二章\n\n" + ("新增正文" * 60)}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_edit_file_requires_same_turn_read_before_write(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("执行摘要保留旧版表述。")
+        original = draft_path.read_text(encoding="utf-8")
+        exec_summary = "## 第一章\n\n执行摘要保留旧版表述。"
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "把第一章改强一点",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把第一章改强一点",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        blocked = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=exec_summary,
+                new_string="## 第一章\n\n更强的章节版本。",
+            ),
+        )
+
+        self.assertEqual(blocked["status"], "error")
+        self.assertIn("read_file", blocked["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
+
+        read_result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "content/report_draft_v1.md"}, ensure_ascii=False),
+            ),
+        )
+        allowed = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=exec_summary,
+                new_string="## 第一章\n\n更强的章节版本。",
+            ),
+        )
+
+        self.assertEqual(read_result["status"], "success")
+        self.assertEqual(allowed["status"], "success")
+        self.assertIn("更强的章节版本", draft_path.read_text(encoding="utf-8"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_mutation_blocks_second_successful_mutation_in_same_turn(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("既有正文" * 120)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "继续写正文",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "继续写正文",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        first = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(),
+        )
+        after_first = draft_path.read_text(encoding="utf-8")
+        second = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(call_id="call-append-2"),
+        )
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(second["status"], "error")
+        self.assertIn("本轮已经成功", second["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), after_first)
+
+    @mock.patch("backend.chat.OpenAI")
     def test_append_report_draft_rejects_short_content(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
@@ -3619,7 +3854,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertFalse((self.project_dir / "content" / "report_draft_v1.md").exists())
 
     @mock.patch("backend.chat.OpenAI")
-    def test_append_report_draft_updates_canonical_workspace_memory(self, mock_openai):
+    def test_append_report_draft_memory_entry_refreshes_canonical_source_key(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
@@ -3640,6 +3875,30 @@ class ChatRuntimeTests(unittest.TestCase):
             persisted["memory_entries"][0]["source_key"],
             "file:content/report_draft_v1.md",
         )
+        self.assertEqual(
+            persisted["memory_entries"][0]["content"],
+            (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8"),
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_append_report_draft_event_tool_name_stays_real_tool_name(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "append_report_draft",
+                json.dumps({"content": "## 第三章：IP 强度对比\n\n" + ("正文" * 80)}, ensure_ascii=False),
+            ),
+        )
+        persisted = json.loads((self.project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(persisted["events"]), 1)
+        self.assertEqual(persisted["events"][0]["tool_name"], "append_report_draft")
+        self.assertEqual(persisted["events"][0]["source_key"], "file:content/report_draft_v1.md")
 
     @mock.patch("backend.chat.OpenAI")
     def test_append_report_draft_success_maps_to_current_turn_source_key(self, mock_openai):
@@ -3739,6 +3998,45 @@ class ChatRuntimeTests(unittest.TestCase):
         ):
             return set(handler._build_required_write_snapshots(self.project_id, user_message))
 
+    def _classify_canonical_draft_for_stage(
+        self,
+        handler: ChatHandler,
+        stage_code: str,
+        user_message: str,
+    ) -> dict:
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state(stage_code),
+        ):
+            return handler._classify_canonical_draft_turn(self.project_id, user_message)
+
+    def _save_draft_followup_state(
+        self,
+        handler: ChatHandler,
+        *,
+        reported_under_target: bool = True,
+        asked_continue_expand: bool = True,
+        current_count: int = 1800,
+        target_word_count: int = 3000,
+        continuation_threshold_count: int | None = None,
+    ) -> None:
+        state = handler._empty_conversation_state()
+        state["draft_followup_state"] = {
+            "reported_under_target": reported_under_target,
+            "asked_continue_expand": asked_continue_expand,
+            "current_count": current_count,
+            "target_word_count": target_word_count,
+            "continuation_threshold_count": continuation_threshold_count,
+        }
+        handler._save_conversation_state_atomically(self.project_id, state)
+
+    def _save_previous_assistant_turn(self, handler: ChatHandler, content: str = "上轮已说明正文仍需继续扩写。") -> None:
+        handler._save_conversation(
+            self.project_id,
+            [{"role": "assistant", "content": content}],
+        )
+
     def _mock_stage_state(self, stage_code: str) -> dict:
         return {
             "stage_code": stage_code,
@@ -3804,6 +4102,23 @@ class ChatRuntimeTests(unittest.TestCase):
             ),
         )
 
+    def _make_read_tool_call(
+        self,
+        file_path: str,
+        *,
+        call_id: str = "call-read-file",
+    ):
+        return SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(
+                name="read_file",
+                arguments=json.dumps(
+                    {"file_path": file_path},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
     def _make_edit_report_tool_call(
         self,
         *,
@@ -3862,6 +4177,26 @@ class ChatRuntimeTests(unittest.TestCase):
             ]
         )
 
+    def _make_read_stream_chunk(
+        self,
+        file_path: str,
+        *,
+        call_id: str = "call-read-file",
+    ):
+        return self._make_chunk(
+            tool_calls=[
+                self._make_stream_tool_call_chunk(
+                    0,
+                    id=call_id,
+                    name="read_file",
+                    arguments=json.dumps(
+                        {"file_path": file_path},
+                        ensure_ascii=False,
+                    ),
+                )
+            ]
+        )
+
     def _make_edit_report_stream_chunk(
         self,
         *,
@@ -3892,43 +4227,456 @@ class ChatRuntimeTests(unittest.TestCase):
             (self.project_dir / "conversation.json").read_text(encoding="utf-8")
         )
 
+    def _read_file_for_turn(
+        self,
+        handler: ChatHandler,
+        file_path: str,
+        project_id: str | None = None,
+    ):
+        effective_project_id = project_id or self.project_id
+        snapshot = handler._snapshot_project_file(effective_project_id, file_path)
+        if not snapshot.get("exists"):
+            return None
+
+        result = handler._execute_tool(
+            effective_project_id,
+            self._make_read_tool_call(file_path),
+        )
+        self.assertEqual(result["status"], "success")
+        return result
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_s4_first_draft_request_requires_append(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        decision = self._classify_canonical_draft_for_stage(handler, "S4", "开始写正文")
+
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["priority"], "P4")
+        self.assertEqual(decision["expected_tool_family"], "append_report_draft")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_edit_only_without_draft_returns_fixed_reject(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        decision = self._classify_canonical_draft_for_stage(handler, "S5", "把报告里旧结论改成新结论")
+
+        self.assertEqual(decision["mode"], "reject")
+        self.assertEqual(
+            decision["fixed_message"],
+            "当前还没有正文草稿，请先用 append_report_draft 起草第一版。",
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_immediately_rejects_no_draft_replace_without_provider_execution(self, mock_openai):
+        handler = self._make_handler_with_project()
+
+        result = handler.chat(self.project_id, "把报告里旧结论改成新结论")
+
+        self.assertEqual(
+            result["content"],
+            "当前还没有正文草稿，请先用 append_report_draft 起草第一版。",
+        )
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_immediately_rejects_no_draft_full_rewrite_without_provider_execution(self, mock_openai):
+        handler = self._make_handler_with_project()
+
+        result = handler.chat(self.project_id, "请全文重写这份报告正文")
+
+        self.assertEqual(
+            result["content"],
+            "当前还没有正文草稿，请先用 append_report_draft 起草第一版。",
+        )
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_immediately_rejects_split_turn_case_without_provider_execution(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节。" * 120)
+
+        result = handler.chat(self.project_id, "先扩到 5000 字再导出并运行质量检查")
+
+        self.assertIn("拆成多个回合", result["content"])
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_threshold_recheck_p5a_already_met_returns_guidance_only_without_mutation(self, mock_openai):
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("现有章节。" * 120)
+        before = draft_path.read_text(encoding="utf-8")
+
+        result = handler.chat(self.project_id, "先扩到 500 字再导出")
+
+        self.assertIn("导出", result["content"])
+        self.assertIn("下一轮", result["content"])
+        self.assertIn("500", result["content"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_whole_draft_rewrite_uses_full_file_edit_path(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("执行摘要保留旧版表述。")
+
+        decision = self._classify_canonical_draft_for_stage(handler, "S5", "请全文重写这份报告正文")
+
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["priority"], "P3")
+        self.assertEqual(decision["expected_tool_family"], "edit_file")
+        self.assertEqual(decision["required_edit_scope"], "full_draft")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_whole_draft_rewrite_without_draft_returns_fixed_reject(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        decision = self._classify_canonical_draft_for_stage(handler, "S5", "请全文重写这份报告正文")
+
+        self.assertEqual(decision["mode"], "reject")
+        self.assertEqual(
+            decision["fixed_message"],
+            "当前还没有正文草稿，请先用 append_report_draft 起草第一版。",
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_followup_state_unlocks_implicit_append_in_s4(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        self._save_draft_followup_state(
+            handler,
+            current_count=1800,
+            target_word_count=3000,
+            continuation_threshold_count=5000,
+        )
+
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S4",
+            "目标5000字喔？而且每章现在都太单薄了",
+        )
+
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["priority"], "P8")
+        self.assertEqual(decision["expected_tool_family"], "append_report_draft")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_followup_state_does_not_force_append_for_unrelated_action(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        self._save_draft_followup_state(handler, current_count=1800, target_word_count=3000)
+
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S4",
+            "目标5000字喔？而且每章现在都太单薄了，先开始审查",
+        )
+
+        self.assertEqual(decision["mode"], "no_write")
+        self.assertEqual(decision["priority"], "P6")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_p8_does_not_match_distinct_non_expansion_action(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        self._save_draft_followup_state(
+            handler,
+            current_count=1800,
+            target_word_count=3000,
+            continuation_threshold_count=5000,
+        )
+
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S4",
+            "太单薄了，顺便把封面标题改一下",
+        )
+
+        self.assertNotEqual(decision["mode"], "require")
+        self.assertNotEqual(decision["priority"], "P8")
+        self.assertNotEqual(decision["expected_tool_family"], "append_report_draft")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_followup_state_is_s4_only(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        self._save_draft_followup_state(
+            handler,
+            current_count=1800,
+            target_word_count=3000,
+            continuation_threshold_count=5000,
+        )
+
+        for stage_code in ("S5", "done"):
+            with self.subTest(stage_code=stage_code):
+                decision = self._classify_canonical_draft_for_stage(
+                    handler,
+                    stage_code,
+                    "目标5000字喔？而且每章现在都太单薄了",
+                )
+                self.assertNotEqual(decision["mode"], "require")
+                self.assertNotEqual(decision["priority"], "P8")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_load_draft_followup_state_reads_sidecar_without_conversation_history(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        self._save_draft_followup_state(handler, current_count=1800, target_word_count=3000)
+
+        with mock.patch.object(handler, "_load_conversation", side_effect=AssertionError("should not read conversation")):
+            state = handler._load_draft_followup_state(self.project_id)
+            decision = self._classify_canonical_draft_for_stage(
+                handler,
+                "S4",
+                "目标5000字喔？而且每章现在都太单薄了",
+            )
+
+        self.assertIsNotNone(state)
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["priority"], "P8")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_explicit_continuation_authorizes_append_without_history(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("已有章节。" * 100)
+
+        for message in ("继续写正文", "扩写正文"):
+            with self.subTest(message=message):
+                decision = self._classify_canonical_draft_for_stage(handler, "S7", message)
+                self.assertEqual(decision["mode"], "require")
+                self.assertEqual(decision["priority"], "P9")
+                self.assertEqual(decision["expected_tool_family"], "append_report_draft")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mixed_intent_canonical_draft_decision_routes_target_then_export(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节。" * 120)
+
+        decision = self._classify_canonical_draft_for_stage(handler, "S4", "先扩到 5000 字再导出")
+
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["priority"], "P5A")
+        self.assertEqual(decision["expected_tool_family"], "append_report_draft")
+        self.assertEqual(decision["mixed_intent_secondary_family"], "export")
+        self.assertEqual(decision["effective_turn_target_count"], 5000)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mixed_intent_canonical_draft_decision_already_at_target_returns_p5a_no_write(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节。" * 1200)
+
+        decision = self._classify_canonical_draft_for_stage(handler, "S4", "先扩到 500 字再导出")
+
+        self.assertEqual(decision["mode"], "no_write")
+        self.assertEqual(decision["priority"], "P5A")
+        self.assertEqual(decision["mixed_intent_secondary_family"], "export")
+        self.assertEqual(decision["effective_turn_target_count"], 500)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mixed_intent_canonical_draft_decision_without_draft_but_with_first_draft_intent_falls_to_p4(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S4",
+            "开始写正文，写到 5000 字再导出",
+        )
+
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["priority"], "P4")
+        self.assertEqual(decision["expected_tool_family"], "append_report_draft")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mixed_intent_canonical_draft_decision_routes_inspect_then_continue_if_needed(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节。" * 120)
+
+        decision = self._classify_canonical_draft_for_stage(handler, "S4", "看看现在多少字，不够就继续写")
+
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["priority"], "P5A")
+        self.assertEqual(decision["expected_tool_family"], "append_report_draft")
+        self.assertEqual(decision["mixed_intent_secondary_family"], "inspect_word_count")
+        self.assertEqual(decision["effective_turn_target_count"], 3000)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mixed_intent_canonical_draft_decision_does_not_treat_incidental_digit_phrase_as_explicit_target(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节。" * 120)
+
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S4",
+            "看看现在多少字，结合 2025 字节跳动案例，不够就继续写",
+        )
+
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["priority"], "P5A")
+        self.assertEqual(decision["mixed_intent_secondary_family"], "inspect_word_count")
+        self.assertEqual(decision["effective_turn_target_count"], 3000)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mixed_intent_canonical_draft_decision_routes_section_edit_before_export(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft(
+            "## 执行摘要\n\n旧版摘要。\n\n## 第一章\n\n现有章节。"
+        )
+
+        decision = self._classify_canonical_draft_for_stage(handler, "S5", "把执行摘要改强一点后导出")
+
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["priority"], "P5B")
+        self.assertEqual(decision["expected_tool_family"], "edit_file")
+        self.assertEqual(decision["required_edit_scope"], "section")
+        self.assertEqual(decision["mixed_intent_secondary_family"], "export")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_parent_and_child_heading_phrase_targets_single_deepest_section(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(
+            "# 报告草稿\n\n"
+            "## 第一章\n\n"
+            "章节总述。\n\n"
+            "### 市场分析\n\n"
+            "市场分析原文。\n\n"
+            "### 竞争态势\n\n"
+            "竞争态势原文。",
+            encoding="utf-8",
+        )
+
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S5",
+            "把第一章市场分析改强一点",
+        )
+
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["expected_tool_family"], "edit_file")
+        self.assertEqual(decision["required_edit_scope"], "section")
+        self.assertEqual(decision["rewrite_target_label"], "市场分析")
+        self.assertNotEqual(decision["priority"], "P2_MULTI_SECTION")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_draft_decision_duplicate_headings_require_specific_section(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(
+            "# 报告草稿\n\n"
+            "## 第一章\n\n"
+            "### 市场分析\n\n"
+            "第一章市场分析原文。\n\n"
+            "## 第二章\n\n"
+            "### 市场分析\n\n"
+            "第二章市场分析原文。",
+            encoding="utf-8",
+        )
+
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S5",
+            "把市场分析改强一点",
+        )
+
+        self.assertEqual(decision["mode"], "reject")
+        self.assertEqual(decision["fixed_message"], "请指明具体章节。")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mixed_intent_canonical_draft_decision_rejects_multiple_secondary_actions(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节。" * 120)
+
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S4",
+            "先扩到 5000 字再导出并运行质量检查",
+        )
+
+        self.assertEqual(decision["mode"], "reject")
+        self.assertEqual(decision["priority"], "P5_MULTI")
+        self.assertIn("拆成", decision["fixed_message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mixed_intent_canonical_draft_decision_rejects_multiple_secondary_actions_for_implicit_p8_candidate(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        self._save_draft_followup_state(
+            handler,
+            current_count=1800,
+            target_word_count=3000,
+            continuation_threshold_count=5000,
+        )
+
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S4",
+            "太单薄了，看看现在多少字再导出",
+        )
+
+        self.assertEqual(decision["mode"], "reject")
+        self.assertEqual(decision["priority"], "P5_MULTI")
+        self.assertIn("拆成", decision["fixed_message"])
+
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_snapshots_include_canonical_path_for_s4_body_intent(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
 
-        for message in ("继续写吧", "写第三章"):
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        self.assertTrue(
+            handler._message_has_report_body_write_intent(self.project_id, "继续写正文", "S4")
+        )
+        self.assertEqual(
+            self._required_write_paths_for_stage(handler, "S4", "继续写正文"),
+            {"content/report_draft_v1.md"},
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_non_table_s4_phrases_do_not_authorize_canonical_draft_write(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+
+        for message in ("写第三章", "继续写吧", "扩写第三章"):
             with self.subTest(message=message):
                 handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-                self.assertTrue(
+                self.assertFalse(
                     handler._message_has_report_body_write_intent(self.project_id, message, "S4")
                 )
                 self.assertEqual(
                     self._required_write_paths_for_stage(handler, "S4", message),
-                    {"content/report_draft_v1.md"},
+                    set(),
                 )
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_required_draft_write_snapshots_include_contextual_s4_short_continue(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        handler._save_conversation(
-            self.project_id,
-            [
-                {
-                    "role": "assistant",
-                    "content": "若无问题，请回复“继续”，我将补全剩余章节",
-                }
-            ],
-        )
-
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-
-        self.assertTrue(handler._message_has_report_body_write_intent(self.project_id, "继续", "S4"))
-        self.assertEqual(
-            self._required_write_paths_for_stage(handler, "S4", "继续"),
-            {"content/report_draft_v1.md"},
-        )
 
     @mock.patch("backend.chat.OpenAI")
     def test_report_body_write_intent_ignores_generic_s4_short_continue_prompt(self, mock_openai):
@@ -3956,7 +4704,10 @@ class ChatRuntimeTests(unittest.TestCase):
                 )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_report_body_write_intent_uses_latest_s4_short_continue_prompt(self, mock_openai):
+    def test_report_body_write_intent_ignores_contextual_short_continue_without_structured_followup_state(
+        self,
+        mock_openai,
+    ):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._save_conversation(
@@ -3968,28 +4719,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 },
                 {
                     "role": "assistant",
-                    "content": "报告正文已写完。若无问题，请回复“继续”开始审查。",
-                },
-            ],
-        )
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-
-        self.assertFalse(handler._message_has_report_body_write_intent(self.project_id, "继续", "S4"))
-        self.assertEqual(
-            self._required_write_paths_for_stage(handler, "S4", "继续"),
-            set(),
-        )
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_report_body_write_intent_ignores_past_tense_s4_short_continue_prompt(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        handler._save_conversation(
-            self.project_id,
-            [
-                {
-                    "role": "assistant",
-                    "content": "我已经继续写正文。若无问题，请回复“继续”开始审查。",
+                    "content": "报告正文仍偏短。若无问题，请回复“继续”开始扩写。",
                 }
             ],
         )
@@ -4042,24 +4772,24 @@ class ChatRuntimeTests(unittest.TestCase):
         handler = self._make_handler_with_project()
 
         cases = [
-            ("S5", "开始审查", False),
-            ("S5", "开始第三章质量检查", False),
-            ("S5", "扩写第三章", True),
-            ("S5", "把报告里 X 改成 Y", True),
-            ("S6", "把报告里 X 改成 Y", True),
-            ("S7", "继续写报告正文", True),
-            ("done", "继续写报告正文", True),
-            ("S6", "导出可审草稿", False),
-            ("S7", "归档", False),
+            ("S5", "开始审查", False, False),
+            ("S5", "开始第三章质量检查", False, False),
+            ("S5", "扩写正文", True, True),
+            ("S5", "把报告里 X 改成 Y", True, False),
+            ("S6", "把报告里 X 改成 Y", True, False),
+            ("S7", "继续写报告正文", True, True),
+            ("done", "继续写报告正文", True, True),
+            ("S6", "导出可审草稿", False, False),
+            ("S7", "归档", False, False),
         ]
-        for stage_code, message, expected in cases:
+        for stage_code, message, expected_intent, expected_required_path in cases:
             with self.subTest(stage_code=stage_code, message=message):
                 handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
                 self.assertEqual(
                     handler._message_has_report_body_write_intent(self.project_id, message, stage_code),
-                    expected,
+                    expected_intent,
                 )
-                expected_paths = {"content/report_draft_v1.md"} if expected else set()
+                expected_paths = {"content/report_draft_v1.md"} if expected_required_path else set()
                 self.assertEqual(
                     self._required_write_paths_for_stage(handler, stage_code, message),
                     expected_paths,
@@ -4074,10 +4804,10 @@ class ChatRuntimeTests(unittest.TestCase):
             with self.subTest(stage_code=stage_code):
                 handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
                 self.assertFalse(
-                    handler._message_has_report_body_write_intent(self.project_id, "继续写吧", stage_code)
+                    handler._message_has_report_body_write_intent(self.project_id, "继续写正文", stage_code)
                 )
                 self.assertEqual(
-                    self._required_write_paths_for_stage(handler, stage_code, "继续写吧"),
+                    self._required_write_paths_for_stage(handler, stage_code, "继续写正文"),
                     set(),
                 )
 
@@ -4159,7 +4889,7 @@ class ChatRuntimeTests(unittest.TestCase):
             "_infer_stage_state",
             return_value=self._mock_stage_state("S4"),
         ):
-            snapshots = handler._build_required_write_snapshots(self.project_id, "继续写吧")
+            snapshots = handler._build_required_write_snapshots(self.project_id, "继续写正文")
         handler._turn_context["required_write_snapshots"] = snapshots
 
         result = handler._execute_tool(
@@ -4168,11 +4898,14 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("write_file", result["message"])
+        self.assertIn("append_report_draft", result["message"])
+        self.assertIn("read_file", result["message"])
+        self.assertIn("edit_file", result["message"])
+        self.assertNotIn("write_file", result["message"])
         self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
 
     @mock.patch("backend.chat.OpenAI")
-    def test_required_draft_write_tool_rejects_destructive_edit_file_before_disk_mutation(
+    def test_required_draft_write_tool_rejects_append_like_whole_file_edit_before_disk_mutation(
         self,
         mock_openai,
     ):
@@ -4180,21 +4913,38 @@ class ChatRuntimeTests(unittest.TestCase):
         handler = self._make_handler_with_project()
         draft_path = self._write_partial_report_draft("既有正文" * 120)
         before = draft_path.read_text(encoding="utf-8")
+        append_like_new_content = before.rstrip() + "\n\n## 第二章：策略建议\n\n" + ("新增正文" * 80)
         handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
         with mock.patch.object(
             handler.skill_engine,
             "_infer_stage_state",
             return_value=self._mock_stage_state("S4"),
         ):
-            snapshots = handler._build_required_write_snapshots(self.project_id, "继续写吧")
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "继续写正文",
+            )
+            snapshots = handler._build_required_write_snapshots(self.project_id, "继续写正文")
         handler._turn_context["required_write_snapshots"] = snapshots
 
+        read_result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "content/report_draft_v1.md"}, ensure_ascii=False),
+            ),
+        )
         result = handler._execute_tool(
             self.project_id,
-            self._make_edit_report_tool_call(old_string=before, new_string="# Draft\n\n太短"),
+            self._make_edit_report_tool_call(
+                old_string=before,
+                new_string=append_like_new_content,
+            ),
         )
 
+        self.assertEqual(read_result["status"], "success")
         self.assertEqual(result["status"], "error")
+        self.assertIn("append_report_draft", result["message"])
         self.assertIn("edit_file", result["message"])
         self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
 
@@ -4290,6 +5040,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "把报告里旧结论改成新结论",
             )
         handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -4328,6 +5079,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "把报告里旧结论改成新结论",
             )
         handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -4381,6 +5133,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "把报告里旧结论改成新结论",
             )
         handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -4422,6 +5175,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "把报告里旧结论改成新结论",
             )
         handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -4452,6 +5206,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "把报告里旧结论改成新结论",
             )
         handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -4466,6 +5221,73 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("新结论", updated)
         self.assertNotIn("旧结论", updated)
         self.assertIn("原始段落", updated)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_accepts_localized_replace_when_same_old_phrase_still_exists_elsewhere(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        normalized_path = "content/report_draft_v1.md"
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        targeted_old = "旧结论\n\n第一段保持上下文。"
+        targeted_new = "新结论\n\n第一段保持上下文。"
+        untouched_old = "旧结论\n\n第二段仍保留原词。"
+        draft_path.write_text(
+            "# 报告草稿\n\n"
+            f"{targeted_old}\n\n"
+            "## 第一章\n\n章节正文。\n\n"
+            f"{untouched_old}",
+            encoding="utf-8",
+        )
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=targeted_old,
+                new_string=targeted_new,
+            ),
+        )
+        successful_write_events = {
+            normalized_path: [
+                {
+                    "path": normalized_path,
+                    "tool": "edit_file",
+                    "arguments": {
+                        "file_path": normalized_path,
+                        "old_string": targeted_old,
+                        "new_string": targeted_new,
+                    },
+                    "raw_arguments": "",
+                }
+            ]
+        }
+        satisfied, missing = handler._required_writes_satisfied(
+            self.project_id,
+            snapshots,
+            successful_write_events,
+        )
+        updated = draft_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(satisfied)
+        self.assertEqual(missing, [])
+        self.assertIn(targeted_new, updated)
+        self.assertIn(untouched_old, updated)
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_accepts_existing_draft_append_growth(self, mock_openai):
@@ -4516,6 +5338,544 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(current["word_count"], before["word_count"])
         self.assertTrue(satisfied)
         self.assertEqual(missing, [])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_accepts_shorter_full_draft_rewrite_via_edit_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        normalized_path = "content/report_draft_v1.md"
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(
+            "# 报告草稿\n\n"
+            "## 执行摘要\n\n"
+            + ("长摘要" * 120)
+            + "\n\n## 第一章\n\n"
+            + ("第一章展开说明" * 160),
+            encoding="utf-8",
+        )
+        before_text = draft_path.read_text(encoding="utf-8")
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "请全文重写这份报告正文",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "请全文重写这份报告正文",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
+
+        rewritten = (
+            "# 报告草稿\n\n"
+            "## 执行摘要\n\n新的精简摘要。\n\n"
+            "## 第一章\n\n"
+            + ("重写后的第一章聚焦关键结论。" * 40)
+        )
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=before_text,
+                new_string=rewritten,
+            ),
+        )
+        current = handler._snapshot_project_file(self.project_id, normalized_path)
+        satisfied, missing = handler._required_writes_satisfied(
+            self.project_id,
+            snapshots,
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), rewritten)
+        self.assertLess(current["word_count"], int(snapshots[normalized_path]["word_count"]))
+        self.assertTrue(satisfied)
+        self.assertEqual(missing, [])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_accepts_shorter_section_rewrite_via_edit_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        normalized_path = "content/report_draft_v1.md"
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        long_summary = "## 执行摘要\n\n" + ("这里是很长的执行摘要说明。" * 80)
+        body = "## 第一章\n\n" + ("第一章保留原有详细分析。" * 120)
+        draft_path.write_text(
+            "# 报告草稿\n\n" + long_summary + "\n\n" + body,
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "把执行摘要改强一点",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把执行摘要改强一点",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
+
+        shorter_summary = "## 执行摘要\n\n更强但更短的执行摘要。"
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=long_summary,
+                new_string=shorter_summary,
+            ),
+        )
+        current = handler._snapshot_project_file(self.project_id, normalized_path)
+        satisfied, missing = handler._required_writes_satisfied(
+            self.project_id,
+            snapshots,
+        )
+
+        self.assertEqual(result["status"], "success")
+        updated = draft_path.read_text(encoding="utf-8")
+        self.assertIn(shorter_summary, updated)
+        self.assertNotIn(long_summary, updated)
+        self.assertIn(body, updated)
+        self.assertLess(current["word_count"], int(snapshots[normalized_path]["word_count"]))
+        self.assertTrue(satisfied)
+        self.assertEqual(missing, [])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_accepts_exact_section_snapshot_with_nested_subheads(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        normalized_path = "content/report_draft_v1.md"
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        section = (
+            "## 执行摘要\n\n"
+            "先说明总体判断。\n\n"
+            "### 关键发现\n\n"
+            "这里是细化发现。\n\n"
+            "### 行动建议\n\n"
+            "这里是细化建议。"
+        )
+        body = "## 第一章\n\n" + ("第一章保留原有详细分析。" * 60)
+        draft_path.write_text(
+            "# 报告草稿\n\n" + section + "\n\n" + body,
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "把执行摘要改强一点",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把执行摘要改强一点",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
+
+        target_section = snapshots[normalized_path]["rewrite_target_snapshot"]
+        rewritten_section = (
+            "## 执行摘要\n\n"
+            "新的总体判断。\n\n"
+            "### 关键发现\n\n"
+            "新的细化发现。\n\n"
+            "### 行动建议\n\n"
+            "新的细化建议。"
+        )
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=target_section,
+                new_string=rewritten_section,
+            ),
+        )
+        current = handler._snapshot_project_file(self.project_id, normalized_path)
+        satisfied, missing = handler._required_writes_satisfied(
+            self.project_id,
+            snapshots,
+        )
+
+        self.assertEqual(result["status"], "success")
+        updated = draft_path.read_text(encoding="utf-8")
+        self.assertIn(rewritten_section, updated)
+        self.assertIn(body, updated)
+        self.assertTrue(satisfied)
+        self.assertEqual(missing, [])
+        self.assertGreater(current["word_count"], 0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_section_rewrite_request_rejects_full_draft_or_multi_section_new_string_with_exact_old_snapshot(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        payloads = {
+            "full_draft": (
+                "# 报告草稿\n\n"
+                "## 执行摘要\n\n新的整篇执行摘要。\n\n"
+                "## 第一章\n\n新的第一章内容。\n\n"
+                "## 第二章\n\n新的第二章内容。"
+            ),
+            "multi_section": (
+                "## 执行摘要\n\n更强的章节摘要。\n\n"
+                "## 第一章\n\n这一整章不该出现在章节级改写里。"
+            ),
+        }
+
+        for payload_name, new_payload in payloads.items():
+            with self.subTest(payload_name=payload_name):
+                handler = self._make_handler_with_project()
+                normalized_path = "content/report_draft_v1.md"
+                draft_path = self.project_dir / "content" / "report_draft_v1.md"
+                draft_path.parent.mkdir(parents=True, exist_ok=True)
+                section = (
+                    "## 执行摘要\n\n"
+                    "先说明总体判断。\n\n"
+                    "### 关键发现\n\n"
+                    "这里是细化发现。\n\n"
+                    "### 行动建议\n\n"
+                    "这里是细化建议。"
+                )
+                chapter_one = "## 第一章\n\n" + ("第一章保留原有详细分析。" * 60)
+                chapter_two = "## 第二章\n\n" + ("第二章保留原有详细分析。" * 40)
+                original = "# 报告草稿\n\n" + section + "\n\n" + chapter_one + "\n\n" + chapter_two
+                draft_path.write_text(original, encoding="utf-8")
+
+                with mock.patch.object(
+                    handler.skill_engine,
+                    "_infer_stage_state",
+                    return_value=self._mock_stage_state("S5"),
+                ):
+                    handler._turn_context = handler._build_turn_context(
+                        self.project_id,
+                        "把执行摘要改强一点",
+                    )
+                    snapshots = handler._build_required_write_snapshots(
+                        self.project_id,
+                        "把执行摘要改强一点",
+                    )
+                handler._turn_context["required_write_snapshots"] = snapshots
+                self._read_file_for_turn(handler, normalized_path)
+
+                target_section = snapshots[normalized_path]["rewrite_target_snapshot"]
+                result = handler._execute_tool(
+                    self.project_id,
+                    self._make_edit_report_tool_call(
+                        old_string=target_section,
+                        new_string=new_payload,
+                    ),
+                )
+
+                self.assertEqual(result["status"], "error")
+                self.assertIn("new_string", result["message"])
+                self.assertIn("目标章节", result["message"])
+                self.assertIn("局部范围", result["message"])
+                self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_section_rewrite_request_rejects_whole_file_edit_file_and_preserves_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        original = (
+            "# 报告草稿\n\n"
+            "## 执行摘要\n\n"
+            + ("这里是很长的执行摘要说明。" * 60)
+            + "\n\n## 第一章\n\n"
+            + ("第一章保留原有详细分析。" * 80)
+        )
+        draft_path.write_text(original, encoding="utf-8")
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "把执行摘要改强一点",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把执行摘要改强一点",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=original,
+                new_string=original.replace("这里是很长的执行摘要说明。", "更短摘要。"),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("目标章节", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_section_rewrite_request_rejects_append_report_draft_and_preserves_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        original = (
+            "# 报告草稿\n\n"
+            "## 执行摘要\n\n"
+            + ("这里是很长的执行摘要说明。" * 60)
+            + "\n\n## 第一章\n\n"
+            + ("第一章保留原有详细分析。" * 80)
+        )
+        draft_path.write_text(original, encoding="utf-8")
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "把第一章改强一点",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把第一章改强一点",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(
+                content="## 第一章\n\n" + ("新的补写内容。" * 80),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("append_report_draft", result["message"])
+        self.assertIn("edit_file", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_full_draft_rewrite_request_rejects_partial_edit_file_and_preserves_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        original = (
+            "# 报告草稿\n\n"
+            "## 执行摘要\n\n"
+            + ("执行摘要原文。" * 60)
+            + "\n\n## 第一章\n\n"
+            + ("第一章原文。" * 80)
+        )
+        draft_path.write_text(original, encoding="utf-8")
+        partial_old_string = "## 执行摘要\n\n" + ("执行摘要原文。" * 60)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "请全文重写这份报告正文",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "请全文重写这份报告正文",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=partial_old_string,
+                new_string="## 执行摘要\n\n新的局部摘要。",
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("整份旧稿", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_full_draft_rewrite_request_rejects_append_report_draft_and_preserves_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        original = (
+            "# 报告草稿\n\n"
+            "## 执行摘要\n\n"
+            + ("执行摘要原文。" * 60)
+            + "\n\n## 第一章\n\n"
+            + ("第一章原文。" * 80)
+        )
+        draft_path.write_text(original, encoding="utf-8")
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "请全文重写这份报告正文",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "请全文重写这份报告正文",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(
+                content="## 新版报告\n\n" + ("重写后的完整草稿。" * 80),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("append_report_draft", result["message"])
+        self.assertIn("edit_file", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_full_draft_rewrite_missing_old_string_guidance_uses_read_then_edit(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("既有正文" * 120)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "请全文重写这份报告正文",
+            )
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "edit_file",
+                json.dumps(
+                    {
+                        "file_path": "content/report_draft_v1.md",
+                        "old_string": "",
+                        "new_string": "# 新草稿\n\n重写版本",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("read_file", result["message"])
+        self.assertIn("edit_file", result["message"])
+        self.assertNotIn("write_file", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_multi_section_rewrite_request_rejects_one_section_edit_and_preserves_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        exec_summary = "## 执行摘要\n\n" + ("执行摘要原文。" * 30)
+        chapter_one = "## 第一章\n\n" + ("第一章原文。" * 40)
+        original = "# 报告草稿\n\n" + exec_summary + "\n\n" + chapter_one
+        draft_path.write_text(original, encoding="utf-8")
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "把执行摘要和第一章改强一点",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "把执行摘要和第一章改强一点",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
+
+        decision = handler._turn_context["canonical_draft_decision"]
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string=exec_summary,
+                new_string="## 执行摘要\n\n更强的单章节摘要。",
+            ),
+        )
+
+        self.assertEqual(decision["expected_tool_family"], "edit_file")
+        self.assertEqual(decision["required_edit_scope"], "full_draft")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("整份旧稿", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_full_rewrite_retry_and_error_messages_never_recommend_write_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("既有正文" * 120)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "请全文重写这份报告正文",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "请全文重写这份报告正文",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        feedback = handler._build_required_write_feedback(["content/report_draft_v1.md"])
+        failure = handler._build_required_write_failure_message(["content/report_draft_v1.md"])
+        prewrite_error = handler._validate_required_report_draft_prewrite(
+            self.project_id,
+            "content/report_draft_v1.md",
+            "# 新草稿\n\n更短版本",
+            source_tool_name="write_file",
+            source_tool_args={"file_path": "content/report_draft_v1.md", "content": "# 新草稿\n\n更短版本"},
+        )
+
+        self.assertIn("read_file", feedback)
+        self.assertIn("edit_file", feedback)
+        self.assertNotIn("write_file", feedback)
+        self.assertIn("read_file", failure)
+        self.assertIn("edit_file", failure)
+        self.assertNotIn("write_file", failure)
+        self.assertIsInstance(prewrite_error, str)
+        self.assertIn("read_file", prewrite_error)
+        self.assertIn("edit_file", prewrite_error)
+        self.assertNotIn("write_file", prewrite_error)
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_snapshot_carries_inline_replacement_intent(self, mock_openai):
@@ -4610,6 +5970,9 @@ class ChatRuntimeTests(unittest.TestCase):
         draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
         final_message = "已完成替换。"
         mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_tool_response(
+                self._make_read_tool_call("content/report_draft_v1.md")
+            ),
             self._make_non_stream_tool_response(self._make_edit_report_tool_call()),
             self._make_non_stream_tool_response(
                 self._make_write_report_tool_call(
@@ -4635,7 +5998,7 @@ class ChatRuntimeTests(unittest.TestCase):
             )
 
         saved = self._read_saved_conversation()
-        final_request_messages = mock_openai.return_value.chat.completions.create.call_args_list[2].kwargs["messages"]
+        final_request_messages = mock_openai.return_value.chat.completions.create.call_args_list[3].kwargs["messages"]
         tool_results = [
             json.loads(message["content"])
             for message in final_request_messages
@@ -4656,7 +6019,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("原始段落", updated)
         self.assertNotIn("旧结论", updated)
         self.assertNotEqual(updated, "新结论")
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 4)
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_punctuation_replace_intent_rejects_append_only(self, mock_openai):
@@ -4732,7 +6095,7 @@ class ChatRuntimeTests(unittest.TestCase):
             "_infer_stage_state",
             return_value=self._mock_stage_state("S4"),
         ):
-            events = list(handler.chat_stream(self.project_id, "继续写吧", max_iterations=4))
+            events = list(handler.chat_stream(self.project_id, "继续写正文", max_iterations=4))
 
         content = "".join(event["data"] for event in events if event["type"] == "content")
         tool_messages = [event["data"] for event in events if event["type"] == "tool"]
@@ -4765,7 +6128,7 @@ class ChatRuntimeTests(unittest.TestCase):
             "_infer_stage_state",
             return_value=self._mock_stage_state("S4"),
         ):
-            events = list(handler.chat_stream(self.project_id, "继续写吧", max_iterations=3))
+            events = list(handler.chat_stream(self.project_id, "继续写正文", max_iterations=3))
 
         tool_messages = [event["data"] for event in events if event["type"] == "tool"]
         saved = self._read_saved_conversation()
@@ -4818,6 +6181,7 @@ class ChatRuntimeTests(unittest.TestCase):
         final_message = "已将报告中的旧结论改成新结论。"
         mock_openai.return_value.chat.completions.create.side_effect = [
             iter([self._make_chunk(content=false_completion)]),
+            iter([self._make_read_stream_chunk("content/report_draft_v1.md")]),
             iter([self._make_edit_report_stream_chunk()]),
             iter([self._make_chunk(content=final_message)]),
         ]
@@ -4846,14 +6210,15 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertTrue(retry_feedback)
         self.assertIn("edit_file", retry_feedback[-1])
-        self.assertIn("append_report_draft", retry_feedback[-1])
-        self.assertNotRegex(retry_feedback[-1], r"请先调用\s*`append_report_draft`")
+        self.assertIn("read_file", retry_feedback[-1])
+        self.assertNotIn("append_report_draft", retry_feedback[-1])
+        self.assertNotIn("write_file", retry_feedback[-1])
         self.assertIn(final_message, content)
         self.assertNotIn(false_completion, content)
         self.assertIn("新结论", updated)
         self.assertNotIn("旧结论", updated)
         self.assertNotIn("旧结论\n\n新结论", updated)
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 4)
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_non_stream_accepts_edit_when_new_text_contains_old_text(self, mock_openai):
@@ -4863,6 +6228,9 @@ class ChatRuntimeTests(unittest.TestCase):
         draft_path = self._write_partial_report_draft("2024\n\n原始段落")
         final_message = "已将报告中的 2024 改成 2024年。"
         mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_tool_response(
+                self._make_read_tool_call("content/report_draft_v1.md")
+            ),
             self._make_non_stream_tool_response(
                 self._make_edit_report_tool_call(old_string="2024", new_string="2024年")
             ),
@@ -4886,7 +6254,7 @@ class ChatRuntimeTests(unittest.TestCase):
         saved = self._read_saved_conversation()
         self.assertEqual(saved[-1]["content"], final_message)
         self.assertIn("2024年", updated)
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_non_stream_retries_text_only_completion_until_append_tool_mutates_draft(self, mock_openai):
@@ -4906,7 +6274,7 @@ class ChatRuntimeTests(unittest.TestCase):
             "_infer_stage_state",
             return_value=self._mock_stage_state("S4"),
         ):
-            result = handler.chat(self.project_id, "继续写吧", max_iterations=4)
+            result = handler.chat(self.project_id, "继续写正文", max_iterations=4)
 
         self.assertGreaterEqual(
             mock_openai.return_value.chat.completions.create.call_count,
@@ -4952,7 +6320,7 @@ class ChatRuntimeTests(unittest.TestCase):
             "_infer_stage_state",
             return_value=self._mock_stage_state("S4"),
         ):
-            result = handler.chat(self.project_id, "继续写吧", max_iterations=4)
+            result = handler.chat(self.project_id, "继续写正文", max_iterations=4)
 
         retry_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
         tool_results = [
@@ -4966,7 +6334,10 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertTrue(
             any(
                 item.get("status") == "error"
-                and "write_file" in item.get("message", "")
+                and "append_report_draft" in item.get("message", "")
+                and "read_file" in item.get("message", "")
+                and "edit_file" in item.get("message", "")
+                and "write_file" not in item.get("message", "")
                 for item in tool_results
             )
         )
@@ -4987,6 +6358,9 @@ class ChatRuntimeTests(unittest.TestCase):
         final_message = "已将报告中的旧结论改成新结论。"
         mock_openai.return_value.chat.completions.create.side_effect = [
             self._make_non_stream_response(false_completion),
+            self._make_non_stream_tool_response(
+                self._make_read_tool_call("content/report_draft_v1.md")
+            ),
             self._make_non_stream_tool_response(self._make_edit_report_tool_call()),
             self._make_non_stream_response(final_message),
         ]
@@ -5013,15 +6387,16 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertTrue(retry_feedback)
         self.assertIn("edit_file", retry_feedback[-1])
-        self.assertIn("append_report_draft", retry_feedback[-1])
-        self.assertNotRegex(retry_feedback[-1], r"请先调用\s*`append_report_draft`")
+        self.assertIn("read_file", retry_feedback[-1])
+        self.assertNotIn("append_report_draft", retry_feedback[-1])
+        self.assertNotIn("write_file", retry_feedback[-1])
         self.assertEqual(result["content"], final_message)
         self.assertEqual(saved[-1]["content"], final_message)
         self.assertNotIn(false_completion, saved[-1]["content"])
         self.assertIn("新结论", updated)
         self.assertNotIn("旧结论", updated)
         self.assertNotIn("旧结论\n\n新结论", updated)
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 4)
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_non_stream_rejects_unrelated_edit_then_destructive_write_file_for_replace_text(self, mock_openai):
@@ -5090,6 +6465,9 @@ class ChatRuntimeTests(unittest.TestCase):
                 )
             ),
             self._make_non_stream_response(wrong_append_completion),
+            self._make_non_stream_tool_response(
+                self._make_read_tool_call("content/report_draft_v1.md")
+            ),
             self._make_non_stream_tool_response(self._make_edit_report_tool_call()),
             self._make_non_stream_response(final_message),
         ]
@@ -5113,7 +6491,9 @@ class ChatRuntimeTests(unittest.TestCase):
             any(
                 message.get("role") == "user"
                 and "edit_file" in message.get("content", "")
-                and "append_report_draft" in message.get("content", "")
+                and "read_file" in message.get("content", "")
+                and "append_report_draft" not in message.get("content", "")
+                and "write_file" not in message.get("content", "")
                 for message in post_append_retry_messages
             )
         )
@@ -5123,7 +6503,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertNotIn(wrong_append_completion, saved[-1]["content"])
         self.assertIn("新结论", updated)
         self.assertNotIn("旧结论", updated)
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 5)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 6)
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_non_stream_accepts_append_report_draft_success_without_retry(self, mock_openai):
@@ -5141,7 +6521,7 @@ class ChatRuntimeTests(unittest.TestCase):
             "_infer_stage_state",
             return_value=self._mock_stage_state("S4"),
         ):
-            result = handler.chat(self.project_id, "继续写吧", max_iterations=3)
+            result = handler.chat(self.project_id, "继续写正文", max_iterations=3)
 
         second_call_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
         saved = self._read_saved_conversation()
@@ -5158,6 +6538,801 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
         self.assertEqual(saved[-1]["content"], final_message)
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_persists_followup_state_from_structured_under_target_report_and_p8_uses_real_runtime_state(
+        self,
+        mock_openai,
+    ):
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("现有章节偏短。" * 120)
+        before = draft_path.read_text(encoding="utf-8")
+        initial_count = handler._snapshot_project_file(
+            self.project_id,
+            "content/report_draft_v1.md",
+        )["word_count"]
+        state_path = Path(handler._get_conversation_state_path(self.project_id))
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_response("当前正文约 1800/3000 字。"),
+            self._make_non_stream_tool_response(
+                self._make_append_report_tool_call(
+                    content="## 第二章：策略建议\n\n" + ("新增正文" * 80),
+                )
+            ),
+            self._make_non_stream_response("已追加第二章正文。"),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            first = handler.chat(self.project_id, "看看现在多少字", max_iterations=2)
+            first_state = json.loads(state_path.read_text(encoding="utf-8"))["draft_followup_state"]
+            second = handler.chat(
+                self.project_id,
+                "目标5000字喔？而且每章现在都太单薄了",
+                max_iterations=4,
+            )
+
+        self.assertIn("1800/3000", first["content"])
+        self.assertIsNotNone(first_state)
+        self.assertTrue(first_state["reported_under_target"])
+        self.assertFalse(first_state["asked_continue_expand"])
+        self.assertEqual(first_state["current_count"], initial_count)
+        self.assertEqual(first_state["target_word_count"], 3000)
+        self.assertEqual(second["content"], "已追加第二章正文。")
+        self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_draft_followup_state_defaults_to_null_and_missing_field_loads_as_null(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self.assertIsNone(handler._empty_conversation_state()["draft_followup_state"])
+
+        state_path = Path(handler._get_conversation_state_path(self.project_id))
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "events": [],
+                    "memory_entries": [],
+                    "compact_state": None,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        loaded = handler._load_conversation_state(self.project_id)
+
+        self.assertIn("draft_followup_state", loaded)
+        self.assertIsNone(loaded["draft_followup_state"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_persist_draft_followup_state_does_not_parse_assistant_text_without_structured_flags(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "当前 1800/3000 字，仍需继续补全。要我继续扩写正文吗？",
+            user_message="看看现在多少字",
+        )
+        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+
+        self.assertIsNone(saved)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_persist_draft_followup_state_uses_structured_turn_flags(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["draft_followup_flags"] = {
+            "reported_under_target": True,
+            "asked_continue_expand": True,
+            "continuation_threshold_count": None,
+        }
+
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "普通说明，不带旧版提示关键词。",
+        )
+        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+
+        self.assertIsNotNone(saved)
+        self.assertTrue(saved["reported_under_target"])
+        self.assertTrue(saved["asked_continue_expand"])
+        self.assertIsNone(saved["continuation_threshold_count"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_persist_draft_followup_state_uses_under_target_report_turn_data(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "看看现在多少字",
+            )
+
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "普通汇报，不带旧版提示关键词。",
+            user_message="看看现在多少字",
+        )
+        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+
+        self.assertIsNotNone(saved)
+        self.assertTrue(saved["reported_under_target"])
+        self.assertFalse(saved["asked_continue_expand"])
+        self.assertIsNone(saved["continuation_threshold_count"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_persist_draft_followup_state_uses_canonical_mutation_progress_when_append_still_under_target(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "继续写正文",
+            )
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(
+                content="## 第二章：策略建议\n\n" + ("新增正文" * 40),
+            ),
+        )
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "已追加第二章正文。",
+            user_message="继续写正文",
+        )
+        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+
+        self.assertEqual(result["status"], "success")
+        self.assertIsNotNone(saved)
+        self.assertTrue(saved["reported_under_target"])
+        self.assertFalse(saved["asked_continue_expand"])
+        self.assertIsNone(saved["continuation_threshold_count"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_persist_draft_followup_state_clears_when_canonical_mutation_reaches_target(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "继续写正文",
+            )
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(
+                content="## 第二章：策略建议\n\n" + ("新增正文" * 1200),
+            ),
+        )
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "已追加第二章正文。",
+            user_message="继续写正文",
+        )
+        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+
+        self.assertEqual(result["status"], "success")
+        self.assertIsNone(saved)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_persist_draft_followup_state_survives_when_default_target_met_but_continuation_threshold_unmet(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("正文" * 1800)
+        current_count = handler._snapshot_project_file(
+            self.project_id,
+            "content/report_draft_v1.md",
+        )["word_count"]
+        self.assertGreaterEqual(current_count, 3000)
+        self.assertLess(current_count, 5000)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["draft_followup_flags"] = {
+            "reported_under_target": True,
+            "asked_continue_expand": True,
+            "continuation_threshold_count": 5000,
+        }
+
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "普通说明，不带旧版提示关键词。",
+        )
+        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved["current_count"], current_count)
+        self.assertEqual(saved["target_word_count"], 3000)
+        self.assertEqual(saved["continuation_threshold_count"], 5000)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_second_p8_append_turn_preserves_carried_threshold_and_keeps_next_implicit_append_authority(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("正文" * 1800)
+        current_count = handler._snapshot_project_file(
+            self.project_id,
+            "content/report_draft_v1.md",
+        )["word_count"]
+        self.assertGreaterEqual(current_count, 3000)
+        self.assertLess(current_count, 5000)
+        self._save_draft_followup_state(
+            handler,
+            current_count=current_count,
+            target_word_count=3000,
+            continuation_threshold_count=5000,
+        )
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "太单薄了，再展开一点",
+            )
+        decision = handler._turn_context["canonical_draft_decision"]
+        self.assertEqual(decision["priority"], "P8")
+
+        append_result = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(content="补充分析" * 30),
+        )
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "已继续补写正文。",
+            user_message="太单薄了，再展开一点",
+        )
+        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+        next_decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S4",
+            "还是太单薄了",
+        )
+
+        self.assertEqual(append_result["status"], "success")
+        self.assertIsNotNone(saved)
+        self.assertGreaterEqual(saved["current_count"], 3000)
+        self.assertLess(saved["current_count"], 5000)
+        self.assertEqual(saved["target_word_count"], 3000)
+        self.assertEqual(saved["continuation_threshold_count"], 5000)
+        self.assertEqual(next_decision["mode"], "require")
+        self.assertEqual(next_decision["priority"], "P8")
+        self.assertEqual(next_decision["expected_tool_family"], "append_report_draft")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_p7_inspect_turn_preserves_carried_threshold_above_default_target(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("正文" * 1800)
+        current_count = handler._snapshot_project_file(
+            self.project_id,
+            "content/report_draft_v1.md",
+        )["word_count"]
+        self.assertGreaterEqual(current_count, 3000)
+        self.assertLess(current_count, 5000)
+        self._save_draft_followup_state(
+            handler,
+            current_count=current_count,
+            target_word_count=3000,
+            continuation_threshold_count=5000,
+        )
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "看看现在多少字",
+            )
+        decision = handler._turn_context["canonical_draft_decision"]
+        self.assertEqual(decision["priority"], "P7")
+
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "当前正文约 3608/3000 字。",
+            user_message="看看现在多少字",
+        )
+        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+
+        self.assertIsNotNone(saved)
+        self.assertTrue(saved["reported_under_target"])
+        self.assertFalse(saved["asked_continue_expand"])
+        self.assertEqual(saved["current_count"], current_count)
+        self.assertEqual(saved["target_word_count"], 3000)
+        self.assertEqual(saved["continuation_threshold_count"], 5000)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_intervening_nonwriting_turn_clears_priority8_authority(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["draft_followup_flags"] = {
+            "reported_under_target": True,
+            "asked_continue_expand": True,
+            "continuation_threshold_count": 5000,
+        }
+
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "普通说明，不带旧版提示关键词。",
+        )
+        first_state = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+        self.assertIsNotNone(first_state)
+
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["draft_followup_flags"] = {
+            "reported_under_target": False,
+            "asked_continue_expand": False,
+            "continuation_threshold_count": None,
+        }
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "这轮先不写正文。",
+        )
+        second_state = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S4",
+            "目标5000字喔？而且每章现在都太单薄了",
+        )
+
+        self.assertIsNone(second_state)
+        self.assertEqual(decision["mode"], "no_write")
+        self.assertEqual(decision["priority"], "P10")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_tool_rejects_longer_write_file_substitute_before_append_turn(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("既有正文" * 120)
+        before = draft_path.read_text(encoding="utf-8")
+        longer_content = before.rstrip() + "\n\n## 第二章：策略建议\n\n" + ("新增正文" * 80)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "继续写正文",
+            )
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id,
+                "继续写正文",
+            )
+        handler._turn_context["required_write_snapshots"] = snapshots
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_write_report_tool_call(content=longer_content),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("append_report_draft", result["message"])
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_p5a_inherits_followup_threshold_count_over_default_target(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("正文" * 1800)
+        current_count = handler._snapshot_project_file(
+            self.project_id,
+            "content/report_draft_v1.md",
+        )["word_count"]
+        self.assertGreater(current_count, 3000)
+        self.assertLess(current_count, 5000)
+        self._save_draft_followup_state(
+            handler,
+            current_count=current_count,
+            target_word_count=3000,
+            continuation_threshold_count=5000,
+        )
+
+        decision = self._classify_canonical_draft_for_stage(
+            handler,
+            "S4",
+            "看看现在多少字，不够就继续写",
+        )
+
+        self.assertEqual(decision["mode"], "require")
+        self.assertEqual(decision["priority"], "P5A")
+        self.assertEqual(decision["effective_turn_target_count"], 5000)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_append_report_draft_returns_final_on_disk_report_progress_and_effective_turn_target(
+        self,
+        mock_openai,
+    ):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("正文" * 1800)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "先扩到 5000 字再导出",
+            )
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(
+                content="## 第二章：策略建议\n\n" + ("新增正文" * 40),
+            ),
+        )
+        final_count = handler._snapshot_project_file(
+            self.project_id,
+            "content/report_draft_v1.md",
+        )["word_count"]
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            result["report_progress"],
+            {
+                "current_count": final_count,
+                "target_word_count": 3000,
+                "meets_target": True,
+            },
+        )
+        self.assertEqual(result["effective_turn_target_count"], 5000)
+        self.assertFalse(result["effective_turn_target_met"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_canonical_edit_file_returns_final_on_disk_report_progress(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("旧结论\n\n" + ("现有正文" * 200))
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        read_result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "content/report_draft_v1.md"}, ensure_ascii=False),
+            ),
+        )
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_edit_report_tool_call(
+                old_string="旧结论",
+                new_string="新结论",
+            ),
+        )
+        final_count = handler._snapshot_project_file(
+            self.project_id,
+            "content/report_draft_v1.md",
+        )["word_count"]
+
+        self.assertEqual(read_result["status"], "success")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            result["report_progress"],
+            {
+                "current_count": final_count,
+                "target_word_count": 3000,
+                "meets_target": False,
+            },
+        )
+        self.assertNotIn("effective_turn_target_count", result)
+        self.assertNotIn("effective_turn_target_met", result)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_implicit_continuation_s4_without_legacy_keywords_requires_canonical_draft_write(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        self._save_draft_followup_state(handler, current_count=1800, target_word_count=3000)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            turn_context = handler._build_turn_context(
+                self.project_id,
+                "目标5000字喔？而且每章现在都太单薄了",
+            )
+
+        self.assertTrue(turn_context["can_write_non_plan"])
+        self.assertEqual(
+            self._required_write_paths_for_stage(
+                handler,
+                "S4",
+                "目标5000字喔？而且每章现在都太单薄了",
+            ),
+            {"content/report_draft_v1.md"},
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_implicit_continuation_s3_still_hits_existing_stage_gate_rejection(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        self._save_draft_followup_state(handler, current_count=1800, target_word_count=3000)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S3"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "目标5000字喔？而且每章现在都太单薄了",
+            )
+            result = handler._execute_tool(
+                self.project_id,
+                self._make_append_report_tool_call(),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("当前轮次还不能开始写正文", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_implicit_continuation_retry_path_fires_when_required_canonical_write_is_skipped(self, mock_openai):
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("现有章节偏短。" * 120)
+        before = draft_path.read_text(encoding="utf-8")
+        self._save_draft_followup_state(handler, current_count=1800, target_word_count=3000)
+        false_completion = "已经补到 5000 字了。"
+        final_message = "已继续补写正文。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_response(false_completion),
+            self._make_non_stream_tool_response(self._make_append_report_tool_call()),
+            self._make_non_stream_response(final_message),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            result = handler.chat(
+                self.project_id,
+                "目标5000字喔？而且每章现在都太单薄了",
+                max_iterations=4,
+            )
+
+        retry_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        saved = self._read_saved_conversation()
+
+        self.assertTrue(
+            any(
+                message.get("role") == "user"
+                and "append_report_draft" in message.get("content", "")
+                and "未检测到" in message.get("content", "")
+                for message in retry_messages
+            )
+        )
+        self.assertEqual(result["content"], final_message)
+        self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertNotIn(false_completion, saved[-1]["content"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_feedback_for_canonical_append_omits_write_file(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+        self._save_draft_followup_state(handler, current_count=1800, target_word_count=3000)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "目标5000字喔？而且每章现在都太单薄了",
+            )
+
+        feedback = handler._build_required_write_feedback(["content/report_draft_v1.md"])
+
+        self.assertIn("append_report_draft", feedback)
+        self.assertNotIn("write_file", feedback)
+        self.assertNotIn("edit_file", feedback)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_required_draft_write_feedback_for_canonical_full_rewrite_mentions_read_then_edit_only(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_partial_report_draft("现有章节偏短。" * 120)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            handler._turn_context = handler._build_turn_context(
+                self.project_id,
+                "请全文重写这份报告正文",
+            )
+
+        feedback = handler._build_required_write_feedback(["content/report_draft_v1.md"])
+
+        self.assertIn("read_file", feedback)
+        self.assertIn("edit_file", feedback)
+        self.assertNotIn("write_file", feedback)
+        self.assertNotIn("append_report_draft", feedback)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_threshold_recheck_p5a_unmet_after_one_append_returns_guidance_only(self, mock_openai):
+        handler = self._make_handler_with_project()
+        draft_path = self._write_partial_report_draft("现有章节偏短。" * 120)
+        before = draft_path.read_text(encoding="utf-8")
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_tool_response(self._make_append_report_tool_call()),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            result = handler.chat(self.project_id, "先扩到 5000 字再导出", max_iterations=3)
+
+        self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
+        self.assertIn("导出", result["content"])
+        self.assertIn("下一轮", result["content"])
+        self.assertRegex(result["content"], r"仍(未达到|需继续)")
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 1)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_threshold_recheck_p5a_met_after_one_append_returns_ready_next_turn_guidance(self, mock_openai):
+        handler = self._make_handler_with_project()
+        append_content = "## 第二章：策略建议\n\n" + ("新增正文" * 80)
+        self._write_partial_report_draft("正文" * 2300)
+        current_count = handler._snapshot_project_file(
+            self.project_id,
+            "content/report_draft_v1.md",
+        )["word_count"]
+        append_count = handler.skill_engine._count_words(append_content)
+        target_count = current_count + max(10, append_count // 2)
+        self.assertLess(current_count, target_count)
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_tool_response(
+                self._make_append_report_tool_call(content=append_content),
+            ),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            result = handler.chat(
+                self.project_id,
+                f"先扩到 {target_count} 字再导出",
+                max_iterations=3,
+            )
+
+        final_count = handler._snapshot_project_file(
+            self.project_id,
+            "content/report_draft_v1.md",
+        )["word_count"]
+        self.assertGreaterEqual(final_count, target_count)
+        self.assertIn("导出", result["content"])
+        self.assertIn("下一轮", result["content"])
+        self.assertIn(str(target_count), result["content"])
+        self.assertIn("已达到", result["content"])
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 1)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mixed_intent_secondary_families_stay_guidance_only_when_p5a_is_already_met(self, mock_openai):
+        cases = [
+            ("先扩到 500 字再导出", "导出"),
+            ("先扩到 500 字再运行质量检查", "质量检查"),
+            ("看看文件，不够就继续写", "看看文件"),
+            ("看看现在多少字，不够就继续写", "看看现在多少字"),
+        ]
+        for message, marker in cases:
+            with self.subTest(message=message):
+                handler = self._make_handler_with_project()
+                self._write_partial_report_draft("正文" * 1800)
+                current_count = handler._snapshot_project_file(
+                    self.project_id,
+                    "content/report_draft_v1.md",
+                )["word_count"]
+                self.assertGreaterEqual(current_count, 3000)
+                mock_openai.return_value.chat.completions.create.reset_mock()
+
+                with mock.patch.object(
+                    handler.skill_engine,
+                    "_infer_stage_state",
+                    return_value=self._mock_stage_state("S4"),
+                ):
+                    result = handler.chat(self.project_id, message)
+
+                self.assertIn(marker, result["content"])
+                self.assertIn("下一轮", result["content"])
+                self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mixed_intent_secondary_families_stay_guidance_only_after_one_append(self, mock_openai):
+        cases = [
+            ("先扩到 5000 字再导出", "导出"),
+            ("先扩到 5000 字再运行质量检查", "质量检查"),
+            ("看看文件，不够就继续写", "看看文件"),
+            ("看看现在多少字，不够就继续写", "看看现在多少字"),
+        ]
+        for message, marker in cases:
+            with self.subTest(message=message):
+                handler = self._make_handler_with_project()
+                draft_path = self._write_partial_report_draft("现有章节偏短。" * 120)
+                before = draft_path.read_text(encoding="utf-8")
+                mock_openai.return_value.chat.completions.create.reset_mock()
+                mock_openai.return_value.chat.completions.create.side_effect = [
+                    self._make_non_stream_tool_response(self._make_append_report_tool_call()),
+                ]
+
+                with mock.patch.object(
+                    handler.skill_engine,
+                    "_infer_stage_state",
+                    return_value=self._mock_stage_state("S4"),
+                ):
+                    result = handler.chat(self.project_id, message, max_iterations=3)
+
+                self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
+                self.assertIn("本轮不执行", result["content"])
+                self.assertIn(marker, result["content"])
+                self.assertIn("下一轮", result["content"])
+                self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 1)
 
     @mock.patch("backend.chat.OpenAI")
     def test_debug_dump_request_skips_when_env_flag_disabled(self, mock_openai):
@@ -5684,6 +7859,7 @@ class ChatRuntimeTests(unittest.TestCase):
             )
             handler = ChatHandler(settings, engine)
             handler._turn_context = {"can_write_non_plan": False, "web_search_disabled": False}
+            self._read_file_for_turn(handler, "./plan/OUTLINE.MD", project["id"])
 
             result = handler._execute_tool(
                 project["id"],
@@ -5705,6 +7881,7 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/review-checklist.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5728,6 +7905,7 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/review-checklist.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5751,6 +7929,7 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/review-checklist.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5775,6 +7954,7 @@ class ChatRuntimeTests(unittest.TestCase):
         handler = self._make_handler_with_project()
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/review-checklist.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5798,6 +7978,7 @@ class ChatRuntimeTests(unittest.TestCase):
         handler = self._make_handler_with_project()
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_passed_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/review-checklist.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5820,6 +8001,7 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/delivery-log.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5843,6 +8025,7 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/delivery-log.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5866,6 +8049,7 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/delivery-log.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5888,6 +8072,7 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/delivery-log.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5912,6 +8097,7 @@ class ChatRuntimeTests(unittest.TestCase):
         handler = self._make_handler_with_project()
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "delivery_archived_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/delivery-log.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -6069,6 +8255,7 @@ class ChatRuntimeTests(unittest.TestCase):
             "pending_system_notices": [],
             "system_notice_emitted": False,
         }
+        self._read_file_for_turn(handler, "plan/analysis-notes.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -6713,6 +8900,7 @@ class ChatRuntimeTests(unittest.TestCase):
                     ),
                 ),
             )
+            self._read_file_for_turn(handler, "notes\\draft.md", project["id"])
             second = handler._execute_tool(
                 project["id"],
                 self._make_tool_call(
@@ -6729,7 +8917,11 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(first["status"], "success")
         self.assertEqual(second["status"], "success")
-        self.assertEqual(len(persisted["events"]), 2)
+        self.assertEqual(len(persisted["events"]), 3)
+        self.assertEqual(
+            [event["tool_name"] for event in persisted["events"]],
+            ["write_file", "read_file", "write_file"],
+        )
         self.assertNotIn("arguments", persisted["events"][0])
         self.assertNotIn("result", persisted["events"][0])
         self.assertEqual(len(persisted["memory_entries"]), 1)
@@ -8568,6 +10760,7 @@ class S0WriteFileGateTests(ChatRuntimeTests):
     def test_s0_allows_non_blocked_plan_files(self):
         handler = self._make_handler_with_project()
         for path in self.S0_ALLOWED:
+            self._read_file_for_turn(handler, path)
             tool_call = self._make_tool_call(path, "# content\n" * 5)
             result = handler._execute_tool(self.project_id, tool_call)
             self.assertEqual(
@@ -8600,6 +10793,7 @@ class S0WriteFileGateTests(ChatRuntimeTests):
             encoding="utf-8",
         )
         self._write_evidence_gate_prerequisites(self.project_dir)
+        self._read_file_for_turn(handler, "plan/outline.md")
         tool_call = self._make_tool_call("plan/outline.md", "# 大纲\n## 章节\n" * 3)
         result = handler._execute_tool(self.project_id, tool_call)
         # S1 stage — outline.md is the expected write, should succeed

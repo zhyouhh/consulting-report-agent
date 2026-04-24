@@ -104,7 +104,8 @@ description: Use when writing consulting reports, strategy analysis, market rese
 ### S4 报告撰写
 - 形成有效草稿
 - 报告正文草稿只写入 `content/report_draft_v1.md`
-- S4/S5 中续写、补全章节、扩写正文时，优先调用 `append_report_draft(content)` 追加到唯一草稿；不要手写路径，也不要把正文只贴在聊天里
+- 正文首次成稿或续写，用 `append_report_draft(content)`；正文已有文字要改，先 `read_file` 再用 `edit_file`
+- 不要对 `content/report_draft_v1.md` 使用 `write_file`
 - 持续同步摘要、图表、章节结构
 
 **推进到 S5：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
@@ -129,12 +130,13 @@ description: Use when writing consulting reports, strategy analysis, market rese
 
 ## 文件工具选择
 
-- `append_report_draft(content)`：**追加或续写报告正文**到 `content/report_draft_v1.md`。S4/S5 中用户要求“继续写”“补全剩余章节”“扩写正文”时优先用它。
-- `write_file(file_path, content)`：**整文件覆盖**写入。适合新建文件，或明确意图是"整体重写"（比如大纲变了要重做 outline.md）。
-- `edit_file(file_path, old_string, new_string)`：**精确字符串替换**。`plan/data-log.md`、`plan/analysis-notes.md` 这类**逐条积累**的文件**一律用 edit_file 追加新条目**，不要 write_file 整体重写——write 会让你脑内不记得的旧条目永久丢失。
-- `edit_file` 要求 `old_string` 在文件里**唯一存在**。追加到末尾最稳的做法：先 `read_file` 看清现有内容，把文件末尾一段（比如最后一个条目的最后一行，甚至末尾那个换行本身）作为 `old_string`，`new_string` 放 `"原 old_string + \n\n### [DL-YYYY-NN] 新条目..."`。
-- 如果 `edit_file` 报 `old_string 不唯一` 或 `未找到`，先 `read_file` 核对原文，别瞎猜。
-- 新建还不存在的文件只能用 `write_file`，`edit_file` 对不存在文件会报错。
+- 已有文件要改，先 `read_file`，再用 `write_file` / `edit_file`
+- 正文首次成稿或续写 -> `append_report_draft(content)`
+- 正文已有文字修改 -> `read_file` + `edit_file`
+- 不要对 `content/report_draft_v1.md` 使用 `write_file`
+- 同一条消息如果还带 `导出` / `质量检查` / `看看文件` / `看看现在多少字`，本轮只完成正文写入并给下一步提示，下一轮再单独处理
+- `write_file(file_path, content)`：**整文件覆盖**写入，适合新建文件或明确的整份重写
+- `edit_file(file_path, old_string, new_string)`：**精确字符串替换**，`old_string` 必须在文件里唯一存在；如果报 `old_string 不唯一` 或 `未找到`，先 `read_file` 核对原文
 - 只有同一轮真实文件工具返回 `status: success` 后，才能说报告内容已保存、已写入或已同步；否则必须说明未落盘，并给出下一步。
 
 ## 工具错误处理
