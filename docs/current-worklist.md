@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-04-21（二轮 smoke 已打，又冒 3 处新问题 → 见 1b；A/B/D/F + 前端复制的修复生效，无回归）
+最后更新：2026-04-24（正文草稿工具契约与真实落盘防线已合 main；1c 从待诊断转为待现场复测）
 
 ## 当前未解决 / 待验证
 
@@ -71,6 +71,48 @@
   - (b) 中期重构：让 LLM 在 assistant 尾部输出结构化信号（如 `<stage-ack>outline_confirmed</stage-ack>`），后端校验前置文件后 set checkpoint，剥掉标签再返回前端。五个 checkpoint 通吃
   - (c) 加轻量意图分类（调一次小模型判断）— 成本 + 延迟
 
+1c. **[新发现] 模型行为硬伤 — 主体修复已合 main，待现场复测**
+- 状态：`部分已修复，待现场复测`（2026-04-24 codex 已完成正文草稿工具契约、真实落盘校验、先读再写门禁；commit `a7f36d0` 已合 main）
+- 测试项目：`D:\CodexProject\test\.consulting-report\`
+- 模型约束：`gemini-3-flash`（免费批量渠道限制，无法更换）
+
+**2026-04-24 已落地**：
+- `content/report_draft_v1.md` 成为正文草稿唯一规范路径；首次成稿/续写走 `append_report_draft`，修改已有正文走 `read_file + edit_file`，禁止用 `write_file` 直接覆盖正文草稿
+- 所有已有文件通用要求同一轮先 `read_file`，再 `write_file` / `edit_file`，降低模型拿旧上下文覆盖新文件的概率
+- 正文写入工具回传真实落盘字数进度，`append_report_draft` 事件保留真实 tool name，`draft_followup_state` 改成结构化状态，不再从 assistant 文案反推
+- 混合意图（如"写够 5000 字再导出/质量检查/看文件/看字数"）改为本轮只完成正文写入并给下一步提示，后续动作下一轮单独处理
+- 章节改写新增范围校验：`edit_file.new_string` 不能把整篇草稿或多个同级章节塞进单章节替换里
+
+**仍需现场确认**：
+- data-log 伪条目场景是否已被真实写入校验和先读再写门禁兜住
+- 反思循环输出是否仍会在 `gemini-3-flash` 下复现；如复现，再单独做流式循环检测/截断
+
+**问题 1：模型假装落盘，把条目写在聊天正文不调工具**
+- 现象：用户催"把来源写进去"，模型回一大段正文里有 `### [DL-2026-03]`、`DL-2026-04`、`DL-2026-05` 完整 Markdown 条目，**但 `plan/data-log.md` 磁盘上没有这几条**
+- 证据：`conversation.json[17]` 6613 字 assistant 包含伪造条目；同 turn `~/.consulting-report/debug/payload-latest.json` 里无 `edit_file` / `write_file` 调用
+- 现状 UI：`data-log.md` 卡在 5 条（DL-01/02/06/07/08，跳号），有效来源 `5/7 71%` 一直上不去
+- 已尝试无效：SKILL.md 有"禁止在工具被挡时贴正文"约束，但不覆盖"工具没被挡、模型自己不调"这种场景
+
+**问题 2：反思循环输出（自言自语）**
+- 现象：assistant 无限输出 `(修正: ...) (纠正: ...) (对不起，我需要停止自言自语...)` 循环至 max_tokens 截断，末尾残留 `<stage` 标签
+- 根因判断：Gemini 3 Flash 遇到「多层 skill 约束 + 模糊状态」时的反思幻觉故障
+- 目前无兜底——污染 conversation.json，下一轮带烂尾消息进 context
+
+**问题 3：`plan/report-draft.md` 反复违规**
+- 现象：模型反复尝试写 `plan/report-draft.md`（非法文件名），skill 校验拦截后下一轮继续试
+- 正确位置应是 `content/report_draft_v1.md`
+- SKILL.md 现有文案没能拦住这个幻觉
+
+**备选修复方向（codex 自行判断）**：
+- α：加 `append_file(file_path, content)` 工具 —— 对追加条目场景零门槛，降低模型跳过工具的诱因
+- β：SKILL.md 加硬约束「正文里写 `### [DL-XXXX-NN]` 条目而本轮没真调工具 = 严重错误」
+- γ：流式层加循环检测 —— 累积 content 时检测 `(修正:` / `(纠正:` 等 pattern 连续 ≥3 次主动打断 stream
+- δ：`content/report_draft_v1.md` 正确路径在 SKILL.md 里更显著地提示
+
+**诊断入口**：
+- 每次请求的完整 payload 都在 `~/.consulting-report/debug/`（`payload-latest.json` 覆盖写 / `error-*.json` 保留），对照 `conversation.json` 能看出真实 tool 调用行为
+- 本轮 claude 侧代码改动已清 400 死循环（见"最近已解决"第 0 条 2026-04-22 那份），剩下的是模型行为/产品交互层
+
 2. 流式输出体感
 - 状态：`待验证`
 - 来源：原 `debug-backlog` 第 1 条
@@ -113,7 +155,21 @@
 
 ## 最近已解决
 
-0. ⭐ **stage-advance-gates smoke-test bugfix（Bug A/B/D/F + 前端复制）**
+0. ⭐ **400 死循环根因清理 + edit_file 工具 + debug dump 转正（2026-04-22）**
+- 状态：`已完成`（claude 侧自改自测，未派 codex；测试 509 passed / 1 skipped / 0 failed）
+- 根因：`newapi → Gemini` OpenAI 流式兼容层偶发把并行 `functionCall` 的 chunk `index` 合并到 0，导致我方累积层把多个 tool_call 的 `name` 和 `arguments` 首尾拼接成 `"write_filewrite_file"` + `"{...}{...}"`，上游拒收 `400 INVALID_ARGUMENT`
+- 代码改动全部在 `backend/chat.py`：
+  - **Fix A**（畸形 tool_calls 拦截）：`if collected_message["tool_calls"]:` 分支开头校验每个 tool_call 的 `name in known_tool_names` 且 `arguments` 是合法 JSON；任一畸形 → 本轮作废，append `assistant 占位 + user 反馈` 对子做合规隔板（**单独 append user 反馈会造成连续两条 user → Gemini 角色交替校验 400，踩过一次**），`iterations += 1; continue`
+  - **Fix B**（当轮空 content 兜底）：流式和非流式两条 `_finalize_assistant_turn` 之后都加 `if not assistant_message.strip(): assistant_message = "（本轮无回复）"`，避免空 parts 的 assistant 进历史
+  - **Fix C**（历史回放兜底）：`_to_provider_message` 对 `role=assistant` 且 `content=""` 的老残迹同样兜底，不依赖干净历史
+  - **Fix D**（system prompt 约束）：加 `concurrency_rule`「每轮只发一个 tool_call」—— 实测 Gemini 3 Flash 基本无视，但 Fix A 能兜底合并畸形
+- 新工具 `edit_file(file_path, old_string, new_string)`：精确字符串替换，要求 `old_string` 唯一存在；`write_file` 和 `edit_file` 共用抽出来的 `_execute_plan_write(project_id, *, file_path, content, persist_func_name, persist_args)` 方法跑完整 gate 链（S0 block / non-plan-write / fetch-url gate / path normalize / signature / data-log-hint / persist）。`skill/SKILL.md` 新增「文件工具选择」章节，明确 data-log.md / analysis-notes.md 追加条目一律 `edit_file`，`write_file` 只用于新建或整体重写
+- 配置：`managed_search_pool.json` `per_turn_searches: 2 → 4`（仍受 `project_minute_limit: 10` / `global_minute_limit: 20` 保护）
+- debug dump 转正：`_debug_dump_request` 方法从临时调试代码改成持久辅助工具。路径从 `D:/consulting-debug/` 挪到 `~/.consulting-report/debug/`（跨平台 + 和其他用户数据同目录），每次请求写 `payload-latest.json`（覆盖），失败时另存 `error-{UTC}-{label}.json`（保留）。`label` ∈ `{stream, stream-iter, nostream}`，`note` 字段带 `iteration=N`
+- 关键证据：`~/.consulting-report/debug/error-20260422T132039Z-stream.json`（最初定位到 `write_filewrite_file` 畸形 payload）、`error-20260422T135150Z-stream.json`（Fix A 早期实现引入的"连续两条 user"回归证据）
+- 后续未解决的模型行为问题转交 codex，见"当前未解决"第 1c 条
+
+1. ⭐ **stage-advance-gates smoke-test bugfix（Bug A/B/D/F + 前端复制）**
 - 状态：`已完成`（2026-04-21 3 路并行派活，全部合 main）
 - 5 个 commit：`cb15e4c` / `7e262cf` / `1e180cc`（task-4 Bug A/B/F）+ `4a6a7da` / `88f10d7` / `7a50bb3`（task-5 Bug D）+ `341de44`（frontend-copy 复制体验）
 - 测试：后端 403 passed（397→403，+6 新测试）；前端 139 passed；`npm run build` 零错
@@ -139,29 +195,29 @@
   - 裸 exec 模板：`codex exec --cd "..." --color never --output-last-message .codex-run/X-last.txt < .codex-run/X-prompt.md > .codex-run/X-full.log 2>&1`，bash 传 `run_in_background: true`
   - 30 min cron (`7,37 * * * *`) 做活性自查，完成后自动 `CronDelete`
 
-2. 内置搜索池主链路
+3. 内置搜索池主链路
 - 状态：`已完成`
 - 结论：`managed_search_pool.json` 打包注入、运行时状态/缓存、四家 provider 适配器、分层路由、native fallback、chat runtime 接线都已落地。
 
-3. 1.29 GB 异常大包
+4. 1.29 GB 异常大包
 - 状态：`已完成`
 - 根因：之前在 Anaconda 大环境里打包，PyInstaller 把大量无关科学计算/Notebook 依赖一起卷进包。
 - 结论：已切到项目 `.venv` 打包，最新包体积约 `91 MB`（含 Task 4/7 新增代码）。
 
-4. 打包脚本不稳
+5. 打包脚本不稳
 - 状态：`已完成`
 - 结论：`build.bat` 已改为薄入口，实际逻辑迁到 `build.ps1`；默认走项目 `.venv`，不再依赖脏全局环境。
 
-5. 前端依赖漏洞
+6. 前端依赖漏洞
 - 状态：`已完成`
 - 结论：已升级前端依赖，当前 `npm audit` 为 `0 vulnerabilities`。
 
-6. 阶段事实源与工作流对齐
+7. 阶段事实源与工作流对齐
 - 状态：`已完成`
 - 关联文档：`docs/superpowers/specs/2026-04-01-stage-facts-and-phase-alignment-design.md`
 - 结论：`project-info.md` 已退出正式工作流；阶段推断、正式 plan 文件和门禁规则已对齐。
 
-7. Session memory 重构
+8. Session memory 重构
 - 状态：`已完成`
 - 关联文档：`docs/superpowers/specs/2026-04-14-session-memory-rearchitecture-design.md`
 - 结论：`conversation_state.json`、memory entries、post-turn compaction 和 provider 上下文顺序已完成重构。
@@ -171,7 +227,7 @@
 1. Web Search 相关性加固（针对 SearXNG 单后端）
 - 状态：`已被取代（Superseded）`
 - 关联文档：`docs/superpowers/specs/2026-04-15-web-search-relevance-hardening-design.md`（顶部已加 Superseded banner）
-- 取代原因：项目走了**管理型搜索池**路线（`managed-search-pool` 已完成，见"最近已解决"第 2 条），四家 provider + 分层路由，从根本上绕过了 SearXNG 召回质量问题。
+- 取代原因：项目走了**管理型搜索池**路线（`managed-search-pool` 已完成，见"最近已解决"第 3 条），四家 provider + 分层路由，从根本上绕过了 SearXNG 召回质量问题。
 - 不要再按这份 spec 落地。保留文档是因为它记录的 SearXNG 实测问题可作为未来搜索策略调整的参考。
 
 ## 使用约定
