@@ -153,6 +153,12 @@ try {
 
     Cleanup-BundleFiles
 
+    # Flush Windows Explorer icon cache so the new exe icon shows immediately
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    Remove-Item "$env:LOCALAPPDATA\IconCache.db" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\iconcache_*.db" -Force -ErrorAction SilentlyContinue
+    Start-Process explorer
+
     Write-Host ""
     Write-Host "========================================"
     Write-Host "Build completed."
