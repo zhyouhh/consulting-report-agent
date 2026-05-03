@@ -3037,7 +3037,7 @@ class ChatHandler:
         user_message: str,
         attached_material_ids: List[str] | None = None,
         transient_attachments: List[Dict] | None = None,
-        max_iterations: int = 10,
+        max_iterations: int = 20,
     ):
         """流式处理对话，yield 每个 chunk"""
         if len(user_message) > 10000:
@@ -3706,7 +3706,7 @@ class ChatHandler:
         user_message: str,
         attached_material_ids: List[str] | None = None,
         transient_attachments: List[Dict] | None = None,
-        max_iterations: int = 10,
+        max_iterations: int = 20,
     ):
         request_lock = self._get_project_request_lock(project_id)
         with request_lock:
