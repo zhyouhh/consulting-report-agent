@@ -1,18 +1,18 @@
 # Current Worklist
 
-最后更新：2026-04-24（正文草稿工具契约与真实落盘防线已合 main；1c 从待诊断转为待现场复测）
+最后更新：2026-05-04（max_iterations 10→20；反思循环已有兜底；S0 interview 全套实施完毕，1a Bug C / 1b Bug 1+3 标 ✅；reality_test 进 S0 收尾轮的撞顶根因定位）
 
 ## 当前未解决 / 待验证
 
 1. 二轮重打包已完成，主链路已跑完
-- 状态：`已走二轮 smoke（暴露新 3 bug，见 1b）`
+- 状态：`已走二轮 smoke（暴露新 3 bug，见 1b；后续已全部修复）`
 - 二轮重点验回顾：
   - Bug A/B/D/F 修复在新包里都生效（data-log.md 已按 `### [DL-YYYY-NN]` 格式写；非 plan 写入阶段门禁生效）
   - 聊天气泡 + 文件预览原生框选复制可用
-- 二轮新暴露问题见 1b
+- 二轮新暴露问题见 1b（已修）
 
-1a. **[BUG 串] stage-advance-gates 实机链条性失效 — A/B/D/F 已修**
-- 状态：`A/B/D/F 已修，C/G/H 待跟进`（2026-04-21 3 路并行 codex + general-purpose 派活，全部合 main）
+1a. **[BUG 串] stage-advance-gates 实机链条性失效 — A/B/C/D/F 已修，G/H 待跟进**
+- 状态：`A/B/C/D/F 已修，G/H 待跟进`（2026-04-21 3 路并行 codex + general-purpose 派活，全部合 main；C 后续被 S0 interview 实施覆盖，详见 1d）
 - 关联 plan：`docs/superpowers/plans/2026-04-21-smoke-test-bugfix.md`
 - 测试基线：403 passed / 1 skipped（基线 397 → 403，加 6 条新测试）
 
@@ -20,7 +20,7 @@
 
 **Bug B ✅** — `backend/skill.py:record_stage_checkpoint` 在 `set` 前校验对应 plan 文件有效存在（outline/report_draft/review_checklist/presentation_plan/delivery_log），缺文件 raise ValueError。commit `7e262cf fix(skill): validate stage checkpoint prerequisites`。
 
-**Bug C ⏸** — 未修。S0 质量门槛缺失：`stage_zero_complete = project_overview_ready`，项目一创建就 S0 完成。需产品侧设计"访谈深度"判据（最少 N 轮真实问答？区分表单生成 vs 访谈补全？），暂挂。
+**Bug C ✅** — 已被 S0 interview + stage-ack 实施覆盖（spec/plan APPROVED 后 19 个 task 全套合 main，commits `3817c43`「Add s0_interview_done_at to stage checkpoint infrastructure」+ `aca1350`「Gate S0 completion on s0_interview_done_at checkpoint」+ `916f135`「Remove weak advance keyword table; add s0 strong keywords」+ `0ab565c`「Gate S0 write_file for four downstream plan files」等）。`stage_zero_complete` 不再依赖 `project_overview_ready`，必须 LLM 主动发 `<stage-ack>s0_interview_done</stage-ack>` 才推进。详见 1d。
 
 **Bug D ✅** — `skill/SKILL.md` §S2 明确 `### [DL-YYYY-NN]` 格式 + 完整示例，并写明"表格形式不会被识别"；首次写 `plan/data-log.md` 时通过 `_emit_system_notice_once` 注入格式提示。commits `7a50bb3` / `88f10d7` / `4a6a7da`。
 
@@ -39,19 +39,14 @@
 - 两个 codex 共享 main working tree，Bug F 先手被 task-4 commit，task-5 跑完看到存在不覆盖，零冲突
 - 监控从 30 min cron → 5 min cron（监控到 task-5 越界迹象）→ 20 min cron（兜底挂掉），bash 完成靠系统 notification，无需频繁自查
 
-1b. **[二轮 smoke] 新发现三处问题**
-- 状态：`待讨论方向 + 待修`（2026-04-21 二次 smoke）
+1b. **[二轮 smoke] 新发现三处问题 — 全部已修**
+- 状态：`三处全修，已合 main`（2026-04-21 二次 smoke 发现，2026-04-21~04-24 修复）
 - 测试项目：`D:\MyProject\CodeProject\JustTest\.consulting-report\`
-- 已走 systematic-debugging Phase 1，根因定位完毕，未下修
 
-**新 Bug 1（S0 门槛回归，关联旧 1a#Bug C）** — 图5
-- 现象：填完新建项目表单 → 右侧「已完成」直接显示 "需求访谈完成 / 范围界定明确 / project-overview.md 创建 / 交付形式确认" 四项全勾，对话一句没说
-- 实证：`backend/skill.py:1257` `stage_zero_complete = project_overview_ready`；`STAGE_CHECKLIST_ITEMS["S0"]` 正是这 4 项；表单创建项目时直接写 `plan/project-overview.md` → `_is_effective_plan_file` 立即 True → stage 跳 S1 → `_build_completed_items` 把 S0 全部塞入完成
-- 用户澄清（2026-04-21）：原设计意图是「表单 → 模型基于信息（可选加一轮 web_search 了解主题）→ 主动需求访谈 → 写 outline → 再确认」。当前行为跳过了访谈步骤
-- 决策点（需讨论）：
-  - 访谈「完成」的判据（最少 N 轮真实 Q&A？必答字段清单？模型自判 + 用户点"访谈够了"？）
-  - `project-overview.md` 模型还需不需要主动补全/修订？还是表单已经生成的版本即终稿？
-  - S0 checklist 4 项怎么映射（哪项来自表单、哪项来自访谈、哪项由模型判定）
+**新 Bug 1 ✅（S0 门槛回归，关联旧 1a#Bug C）** — 图5
+- 原现象：填完新建项目表单 → 右侧「已完成」直接四项全勾，对话一句没说
+- 修法：S0 interview + stage-ack 全套 19 个 task 实施完毕（spec/plan APPROVED 后），`stage_zero_complete` 改成必须 LLM 发 `<stage-ack>s0_interview_done</stage-ack>` 才推进。`backend/skill.py` 不再用 `stage_zero_complete = project_overview_ready` 短路。详见 1d。
+- 关键 commits：`3817c43` / `aca1350` / `916f135` / `0ab565c` / `8f63570 Update SKILL.md with S0 mandatory interview and stage-ack rules`
 
 **新 Bug 2 ✅（tool 结果气泡吞 assistant 正文）** — 图6
 - 现象：`✅ 结果: {...}` 气泡把紧跟的 assistant 正文首段一起吞入同一个气泡
@@ -60,58 +55,40 @@
 - commit：`73b345d fix(chat): preserve text after tool events`；前端测试 139→140 passed，`npm run build` 零错
 - 附带：codex 多加了 `frontend/tests/index.js`（为让 `node --test tests/` 做显式目录入口，可保留）
 
-**新 Bug 3（口头"确认"不推进阶段）** — 图8
-- 现象：用户回"确认"（响应模型"请回复'确认大纲'或'按此大纲执行'"），`stage_checkpoints.json` 未写入 `outline_confirmed_at`
-- 实证：`conversation.json[2]` 用户原话 = `"确认"`；`stage_checkpoints.json` 只有 `__migrated_at`
-- 根因：`backend/chat.py` `_STRONG_ADVANCE_KEYWORDS["outline_confirmed_at"]` = `["确认大纲","大纲没问题","按这个大纲写","就这个大纲","就按这个版本"]` — **没单独"确认"**；`_WEAK_ADVANCE_BY_STAGE["S1"]` = `["行","可以","同意","没问题","OK","ok","好的","挺好的"]` — **也没"确认"**。`_detect_stage_keyword` 直接返回 None，没调 `record_stage_checkpoint`
-- 反讽：模型自己在回复里引导"请回复'**确认大纲**'或'按此大纲执行'"，用户简写"确认"最自然，关键词表漏了
-- 更深问题：整个「后端用 regex 猜对话意图」的方案是否合适？LLM 本身在回路内最懂上下文，层级颠倒
-- 决策点（需讨论）：
-  - (a) 短期打补丁：`_WEAK_ADVANCE_BY_STAGE["S1"]` 加 `"确认"`，同步改 SKILL.md §S1 白名单
-  - (b) 中期重构：让 LLM 在 assistant 尾部输出结构化信号（如 `<stage-ack>outline_confirmed</stage-ack>`），后端校验前置文件后 set checkpoint，剥掉标签再返回前端。五个 checkpoint 通吃
-  - (c) 加轻量意图分类（调一次小模型判断）— 成本 + 延迟
+**新 Bug 3 ✅（口头"确认"不推进阶段）** — 图8
+- 原现象：用户回"确认"（响应模型"请回复'确认大纲'或'按此大纲执行'"），`stage_checkpoints.json` 未写入 `outline_confirmed_at`
+- 修法：选了决策点 (b) 中期重构。新增 `StageAckParser`（commits `088d648 Add StageAckParser parse_raw with unknown-key events` + `c0e30b3 Add tag position judgment` + `41d21ef Add StageAckParser.strip` + `9a81d69 Wire StageAckParser finalize into both chat paths with tag priority` 等），LLM 在 assistant 尾部输出 `<stage-ack>KEY</stage-ack>`，后端校验前置文件后 set checkpoint 并剥掉标签。`_WEAK_ADVANCE_BY_STAGE` 弱关键词表整张删除（commit `916f135 Remove weak advance keyword table; add s0 strong keywords`）。五个 checkpoint 通吃。详见 1d。
 
 1c. **[新发现] 模型行为硬伤 — 主体修复已合 main，待现场复测**
-- 状态：`部分已修复，待现场复测`（2026-04-24 codex 已完成正文草稿工具契约、真实落盘校验、先读再写门禁；commit `a7f36d0` 已合 main）
-- 测试项目：`D:\CodexProject\test\.consulting-report\`
+- 状态：`核心兜底全部落地，reality_test 已暴露 max_iterations 撞顶并修复，待重打包后再测`
+- 测试项目：`D:\MyProject\CodeProject\consulting-report-agent\reality_test\.consulting-report\`（替代旧的 `D:\CodexProject\test\`）
 - 模型约束：`gemini-3-flash`（免费批量渠道限制，无法更换）
 
-**2026-04-24 已落地**：
-- `content/report_draft_v1.md` 成为正文草稿唯一规范路径；首次成稿/续写走 `append_report_draft`，修改已有正文走 `read_file + edit_file`，禁止用 `write_file` 直接覆盖正文草稿
+**2026-04-24 已落地（α/β/γ/δ 全套）**：
+- `content/report_draft_v1.md` 成为正文草稿唯一规范路径；首次成稿/续写走 `append_report_draft`，修改已有正文走 `read_file + edit_file`，禁止用 `write_file` 直接覆盖正文草稿（**δ + 问题 3 修法**）
 - 所有已有文件通用要求同一轮先 `read_file`，再 `write_file` / `edit_file`，降低模型拿旧上下文覆盖新文件的概率
-- 正文写入工具回传真实落盘字数进度，`append_report_draft` 事件保留真实 tool name，`draft_followup_state` 改成结构化状态，不再从 assistant 文案反推
+- 正文写入工具回传真实落盘字数进度，`append_report_draft` 事件保留真实 tool name，`draft_followup_state` 改成结构化状态，不再从 assistant 文案反推（**β + 问题 1 修法**）
 - 混合意图（如"写够 5000 字再导出/质量检查/看文件/看字数"）改为本轮只完成正文写入并给下一步提示，后续动作下一轮单独处理
 - 章节改写新增范围校验：`edit_file.new_string` 不能把整篇草稿或多个同级章节塞进单章节替换里
+- **反思循环兜底**（**γ 修法，commit `6883bfa fix: require real report draft writes`**）：流式层加 `SELF_CORRECTION_LOOP_MARKERS = ("（修正", "(修正", "（纠正", "(纠正", "停止自言自语")` 累积检测，命中 ≥3 次实时 break；完整 candidate_message 也再检一次；命中后 `MAX_SELF_CORRECTION_RETRIES=1` 给一次重试机会，feedback 让模型停止反思继续真实动作。代码位置 `backend/chat.py:171/1543/3202/3346`
 
-**仍需现场确认**：
-- data-log 伪条目场景是否已被真实写入校验和先读再写门禁兜住
-- 反思循环输出是否仍会在 `gemini-3-flash` 下复现；如复现，再单独做流式循环检测/截断
+**2026-05-04 reality_test 进展**：
+- reality_test 项目走完 S0 interview 后，第一轮收尾撞 `max_iterations=10` 上限，模型刚 fetch_url 第 1 个百科就被截断，references.md 还是空模板
+- 系统化调查：单轮内做了 6 次成功 tool 调用 + 1 次失败 write（fetch_url 前置门禁挡的），assistant 输出**零** SELF_CORRECTION_LOOP_MARKERS 命中——撞顶不是病理性循环，是真实工作密度
+- 根因：当前架构（先读后写 + fetch_url 前置 + Gemini 3 Flash 串行 tool call）下，单轮"完成 S0 收尾 + 补全 plan + 抓 1-2 条引用"实际需要 11-13 轮，10 不够
+- 修复：`max_iterations` 默认值 10 → 20（commit `ec976b8 fix(chat): raise stream max_iterations from 10 to 20`），`_chat_stream_unlocked` + `chat_stream` 两处。非流式 `chat()` 仍 5（仅测试用）。test_chat_runtime 342 passed / 1 skipped 零回归
+- 重打包已完成（2026-05-04，dist 104 MB / exe 14 MB），待用 reality_test 跑同样会话验证
 
-**问题 1：模型假装落盘，把条目写在聊天正文不调工具**
-- 现象：用户催"把来源写进去"，模型回一大段正文里有 `### [DL-2026-03]`、`DL-2026-04`、`DL-2026-05` 完整 Markdown 条目，**但 `plan/data-log.md` 磁盘上没有这几条**
-- 证据：`conversation.json[17]` 6613 字 assistant 包含伪造条目；同 turn `~/.consulting-report/debug/payload-latest.json` 里无 `edit_file` / `write_file` 调用
-- 现状 UI：`data-log.md` 卡在 5 条（DL-01/02/06/07/08，跳号），有效来源 `5/7 71%` 一直上不去
-- 已尝试无效：SKILL.md 有"禁止在工具被挡时贴正文"约束，但不覆盖"工具没被挡、模型自己不调"这种场景
-
-**问题 2：反思循环输出（自言自语）**
-- 现象：assistant 无限输出 `(修正: ...) (纠正: ...) (对不起，我需要停止自言自语...)` 循环至 max_tokens 截断，末尾残留 `<stage` 标签
-- 根因判断：Gemini 3 Flash 遇到「多层 skill 约束 + 模糊状态」时的反思幻觉故障
-- 目前无兜底——污染 conversation.json，下一轮带烂尾消息进 context
-
-**问题 3：`plan/report-draft.md` 反复违规**
-- 现象：模型反复尝试写 `plan/report-draft.md`（非法文件名），skill 校验拦截后下一轮继续试
-- 正确位置应是 `content/report_draft_v1.md`
-- SKILL.md 现有文案没能拦住这个幻觉
-
-**备选修复方向（codex 自行判断）**：
-- α：加 `append_file(file_path, content)` 工具 —— 对追加条目场景零门槛，降低模型跳过工具的诱因
-- β：SKILL.md 加硬约束「正文里写 `### [DL-XXXX-NN]` 条目而本轮没真调工具 = 严重错误」
-- γ：流式层加循环检测 —— 累积 content 时检测 `(修正:` / `(纠正:` 等 pattern 连续 ≥3 次主动打断 stream
-- δ：`content/report_draft_v1.md` 正确路径在 SKILL.md 里更显著地提示
-
-**诊断入口**：
-- 每次请求的完整 payload 都在 `~/.consulting-report/debug/`（`payload-latest.json` 覆盖写 / `error-*.json` 保留），对照 `conversation.json` 能看出真实 tool 调用行为
-- 本轮 claude 侧代码改动已清 400 死循环（见"最近已解决"第 0 条 2026-04-22 那份），剩下的是模型行为/产品交互层
+1d. **[已完成] S0 interview + stage-ack 19 个 task 全套实施**
+- 状态：`全部合 main`（2026-04-21 spec/plan APPROVED → 2026-04-21~04-22 19 个 task 实施 → 全部进入 main）
+- 关联文档：`docs/superpowers/specs/2026-04-21-s0-interview-and-stage-ack-design.md` / `docs/superpowers/plans/2026-04-21-s0-interview-and-stage-ack-impl.md` / `docs/superpowers/handoffs/2026-04-21-s0-impl-handoff.md`
+- 覆盖范围：
+  - **S0 硬门禁**（解 1a Bug C / 1b Bug 1）：`stage_zero_complete` 不再依赖 `project_overview_ready`，必须 `s0_interview_done_at` checkpoint 才推进。`backend/skill.py` 新增 `s0_interview_done_at` infra（commit `3817c43`）+ gating（`aca1350`）；`backend/chat.py` 加 S0 软门禁阻挡 LLM 在访谈未完成时直接写 outline / report-draft（commits `0ab565c` / `216f5f1` / `167e10f`）
+  - **stage-ack 信号**（解 1b Bug 3）：删除整张 `_WEAK_ADVANCE_BY_STAGE` 弱关键词表（`916f135`），改成 LLM 在 assistant 尾部输出 `<stage-ack>KEY</stage-ack>`。新增 `StageAckParser`（`088d648` parse_raw / `c0e30b3` 位置判断 / `41d21ef` strip / `9a81d69` finalize 接线）+ 流式 tail guard 防标签泄漏（`5d2f00e`）+ 历史消息 sanitize（`4ba744e`）+ 兜底防御性 strip（`5356f3c`）
+  - **路由 + 配套**：新增 `POST /api/projects/{id}/checkpoints/s0-interview-done`（`504801f`，`action=set` 直接 400）；`workspaceSummary` 暴露 `s0InterviewDone` flag（`31dc7cf`）；`SKILL.md` 写明 S0 强制访谈与 stage-ack 规则（`8f63570`）；S2+ 增加"重置 S0"高级回退选项（`2332822`）
+  - **migration**：增量 schema 迁移（`cf26609`），legacy 项目不会被新判据推回 S0
+- 测试基线：spec 5 轮 / plan 3 轮 codex review；实施期 19 个 task 各 commit 跑 review
+- 结论：1a Bug C ✅ / 1b Bug 1 ✅ / 1b Bug 3 ✅ 全部由本块覆盖，无需独立追踪
 
 2. 流式输出体感
 - 状态：`待验证`
