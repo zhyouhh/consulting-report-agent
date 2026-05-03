@@ -97,6 +97,7 @@ class SystemNotice(BaseModel):
     path: Optional[str] = None
     reason: str
     user_action: str
+    surface_to_user: bool
 
 
 class ChatResponse(BaseModel):

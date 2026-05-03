@@ -11450,3 +11450,25 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(LoadConversationSanitizeTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class SystemNoticeFieldTests(unittest.TestCase):
+    def test_surface_to_user_is_required_no_default(self):
+        from backend.models import SystemNotice
+        # 不传 surface_to_user 必须抛 ValidationError / TypeError
+        with self.assertRaises(Exception):
+            SystemNotice(category="test", reason="r", user_action="a")
+
+    def test_surface_to_user_true_accepted(self):
+        from backend.models import SystemNotice
+        notice = SystemNotice(
+            category="test", reason="r", user_action="a", surface_to_user=True,
+        )
+        self.assertTrue(notice.surface_to_user)
+
+    def test_surface_to_user_false_accepted(self):
+        from backend.models import SystemNotice
+        notice = SystemNotice(
+            category="test", reason="r", user_action="a", surface_to_user=False,
+        )
+        self.assertFalse(notice.surface_to_user)
