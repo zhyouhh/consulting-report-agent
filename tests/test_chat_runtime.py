@@ -12094,3 +12094,47 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
+class StreamSplitSafeTailDraftActionTests(unittest.TestCase):
+    """模块级 helper 独立测试，不需要 ChatHandler。"""
+
+    def test_draft_action_simple_marker_held(self):
+        from backend.chat import stream_split_safe_tail
+        # buffer 中段就含 "<draft-action" → 从此位置起全部 hold
+        emit, hold = stream_split_safe_tail("Hello <draft-action>begin</draft-action>")
+        self.assertEqual(emit, "Hello ")
+        self.assertEqual(hold, "<draft-action>begin</draft-action>")
+
+    def test_draft_action_replace_marker_held(self):
+        from backend.chat import stream_split_safe_tail
+        emit, hold = stream_split_safe_tail("Reply <draft-action-replace>")
+        self.assertEqual(emit, "Reply ")
+        self.assertEqual(hold, "<draft-action-replace>")
+
+    def test_draft_action_partial_prefix_at_tail_held(self):
+        from backend.chat import stream_split_safe_tail
+        # 末尾恰好是某 marker 的前缀（如 "<draft-act"）→ hold 该尾段
+        emit, hold = stream_split_safe_tail("Ok content <draft-act")
+        self.assertEqual(emit, "Ok content ")
+        self.assertEqual(hold, "<draft-act")
+
+    def test_stage_ack_marker_still_held(self):
+        # 回归：stage-ack marker 行为不变
+        from backend.chat import stream_split_safe_tail
+        emit, hold = stream_split_safe_tail("Hi <stage-ack>x</stage-ack>")
+        self.assertEqual(emit, "Hi ")
+        self.assertIn("<stage-ack", hold)
+
+    def test_no_marker_emit_all(self):
+        from backend.chat import stream_split_safe_tail
+        emit, hold = stream_split_safe_tail("plain text no markers here")
+        self.assertEqual(emit, "plain text no markers here")
+        self.assertEqual(hold, "")
+
+    def test_earliest_marker_anchors_hold(self):
+        from backend.chat import stream_split_safe_tail
+        # 同时含 stage-ack 和 draft-action，靠前的赢
+        emit, hold = stream_split_safe_tail("Hi <draft-action>x</draft-action> <stage-ack>y</stage-ack>")
+        self.assertEqual(emit, "Hi ")
+        self.assertTrue(hold.startswith("<draft-action"))
+
+

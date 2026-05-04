@@ -68,6 +68,8 @@ LEGACY_EMPTY_ASSISTANT_FALLBACKS = frozenset({
     USER_VISIBLE_FALLBACK,
 })
 _STAGE_ACK_MARKER = "<stage-ack"
+_DRAFT_ACTION_MARKER = "<draft-action"  # 同时覆盖 <draft-action-replace
+_TAIL_GUARD_MARKERS = (_STAGE_ACK_MARKER, _DRAFT_ACTION_MARKER)
 _CONVERSATION_STATE_LOCKS: dict[str, threading.RLock] = {}
 _CONVERSATION_STATE_LOCKS_GUARD = threading.Lock()
 _PROJECT_REQUEST_LOCKS: dict[str, threading.RLock] = {}
@@ -94,34 +96,29 @@ def strip_tool_log_comments(content: str) -> str:
 def stream_split_safe_tail(buffer: str) -> tuple[str, str]:
     """Split buffer into (safe_to_emit_now, held_until_stream_close).
 
-    Called by _chat_stream_unlocked after every new content delta is
-    accumulated. Held portion must NOT be sent to the frontend until stream
-    close and StageAckParser.strip() has scrubbed it.
-
-    Rules:
-      1. If "<stage-ack" occurs at position p, hold from p to end.
-      2. Otherwise, if buffer's suffix is a prefix of "<stage-ack"
-         (e.g., "<" / "<s" / "<stage-a"), hold that suffix.
-      3. Otherwise, emit the whole buffer.
-
-    Note: rule 1 uses `find`, not `rfind` - the earliest "<stage-ack"
-    anchors the hold. Using rfind would match the '<' in a closing
-    </stage-ack> and leak the opening "<stage-ack".
+    v2: now scans for both <stage-ack and <draft-action markers; earliest one wins.
     """
     if not buffer:
         return "", ""
 
-    idx = buffer.lower().find(_STAGE_ACK_MARKER)
-    if idx != -1:
-        return buffer[:idx], buffer[idx:]
+    # Rule 1: 找最早的 marker 出现位置
+    earliest_idx = -1
+    for marker in _TAIL_GUARD_MARKERS:
+        idx = buffer.lower().find(marker)
+        if idx != -1 and (earliest_idx == -1 or idx < earliest_idx):
+            earliest_idx = idx
+    if earliest_idx != -1:
+        return buffer[:earliest_idx], buffer[earliest_idx:]
 
-    marker_len = len(_STAGE_ACK_MARKER)
-    max_overlap = min(marker_len - 1, len(buffer))
-    for overlap in range(max_overlap, 0, -1):
-        suffix = buffer[-overlap:].lower()
-        if _STAGE_ACK_MARKER.startswith(suffix):
-            return buffer[:-overlap], buffer[-overlap:]
+    # Rule 2: 末尾是某 marker 的前缀（"<draft-act" 等）
+    for marker in _TAIL_GUARD_MARKERS:
+        marker_len = len(marker)
+        max_overlap = min(marker_len - 1, len(buffer))
+        for k in range(max_overlap, 0, -1):
+            if marker.startswith(buffer[-k:].lower()):
+                return buffer[:-k], buffer[-k:]
 
+    # Rule 3: 全部安全
     return buffer, ""
 
 
