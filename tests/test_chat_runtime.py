@@ -3578,6 +3578,10 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        from backend.draft_action import DraftActionEvent
+        handler._turn_context["draft_action_events"] = [
+            DraftActionEvent(raw="...", intent="begin", executable=True)
+        ]
 
         result = handler._execute_tool(
             self.project_id,
@@ -3827,6 +3831,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "继续写正文",
             )
         handler._turn_context["required_write_snapshots"] = snapshots
+        handler._turn_context["canonical_draft_decision"]["preflight_keyword_intent"] = "continue"
 
         first = handler._execute_tool(
             self.project_id,
@@ -12334,6 +12339,139 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in PreflightCheckTests.__dict__
     ):
         setattr(PreflightCheckTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class GateCanonicalDraftToolCallTests(ChatRuntimeTests):
+    """注意：append_report_draft 真实 schema 只有 content（chat.py:4187-4202）；
+    write_file/edit_file 写 content/* 才有 file_path。"""
+
+    def test_append_report_draft_with_begin_tag_passes(self):
+        from backend.draft_action import DraftActionEvent
+        handler = self._make_handler_with_project()
+        tags = [DraftActionEvent(raw="...", intent="begin", executable=True)]
+        decision = {"preflight_keyword_intent": None}
+        result = handler._gate_canonical_draft_tool_call(
+            self.project_id, "append_report_draft",
+            {"content": "new section"},  # 真实 schema 只有 content
+            decision, tags,
+        )
+        self.assertIsNone(result)  # pass
+
+    def test_append_report_draft_with_keyword_fallback_passes(self):
+        handler = self._make_handler_with_project()
+        decision = {"preflight_keyword_intent": "begin"}
+        result = handler._gate_canonical_draft_tool_call(
+            self.project_id, "append_report_draft",
+            {"content": "new section"},
+            decision, [],
+        )
+        self.assertIsNone(result)
+
+    def test_edit_file_no_tag_blocked_for_canonical_draft_path(self):
+        handler = self._make_handler_with_project()
+        decision = {"preflight_keyword_intent": "begin"}  # 即使 keyword 命中也不放行 edit_file
+        result = handler._gate_canonical_draft_tool_call(
+            self.project_id, "edit_file",
+            {"file_path": "content/report_draft_v1.md", "old_string": "x", "new_string": "y"},
+            decision, [],
+        )
+        self.assertIsNotNone(result)  # block
+
+    def test_edit_file_with_section_tag_passes(self):
+        from backend.draft_action import DraftActionEvent
+        handler = self._make_handler_with_project()
+        tags = [DraftActionEvent(raw="...", intent="section", section_label="x", executable=True)]
+        decision = {"preflight_keyword_intent": None}
+        result = handler._gate_canonical_draft_tool_call(
+            self.project_id, "edit_file",
+            {"file_path": "content/report_draft_v1.md", "old_string": "x", "new_string": "y"},
+            decision, tags,
+        )
+        self.assertIsNone(result)
+
+    def test_edit_file_with_replace_tag_passes(self):
+        from backend.draft_action import DraftActionEvent
+        handler = self._make_handler_with_project()
+        tags = [DraftActionEvent(raw="...", intent="replace", old_text="x", new_text="y", executable=True)]
+        decision = {"preflight_keyword_intent": None}
+        result = handler._gate_canonical_draft_tool_call(
+            self.project_id, "edit_file",
+            {"file_path": "content/report_draft_v1.md", "old_string": "x", "new_string": "y"},
+            decision, tags,
+        )
+        self.assertIsNone(result)
+
+    def test_fallback_signal_only_from_preflight_keyword_intent(self):
+        """关键防御测试：偷偷塞 intent_kind="section" 不能让 gate 放行 edit_file"""
+        handler = self._make_handler_with_project()
+        decision = {
+            "preflight_keyword_intent": None,
+            "intent_kind": "section",  # 偷塞
+            "expected_tool_family": "edit_file",
+        }
+        result = handler._gate_canonical_draft_tool_call(
+            self.project_id, "edit_file",
+            {"file_path": "content/report_draft_v1.md", "old_string": "x", "new_string": "y"},
+            decision, [],
+        )
+        self.assertIsNotNone(result)  # 必须 block
+
+    def test_non_executable_tag_does_not_pass(self):
+        from backend.draft_action import DraftActionEvent
+        handler = self._make_handler_with_project()
+        tags = [DraftActionEvent(raw="...", intent="section", section_label="x",
+                                  executable=False, ignored_reason="no_draft")]
+        decision = {"preflight_keyword_intent": None}
+        result = handler._gate_canonical_draft_tool_call(
+            self.project_id, "edit_file",
+            {"file_path": "content/report_draft_v1.md", "old_string": "x", "new_string": "y"},
+            decision, tags,
+        )
+        self.assertIsNotNone(result)
+
+    def test_non_canonical_path_passes_unchecked(self):
+        """写其他路径不归 gate 管"""
+        handler = self._make_handler_with_project()
+        result = handler._gate_canonical_draft_tool_call(
+            self.project_id, "write_file",
+            {"file_path": "plan/notes.md", "content": "..."},
+            {}, [],
+        )
+        self.assertIsNone(result)
+
+    def test_record_tagless_fallback_event_writes_state(self):
+        handler = self._make_handler_with_project()
+        decision = {"preflight_keyword_intent": "begin"}
+        handler._gate_canonical_draft_tool_call(
+            self.project_id, "append_report_draft",
+            {"content": "x"},
+            decision, [],
+        )
+        state = handler._load_conversation_state(self.project_id, [])
+        events = [e for e in state.get("events", []) if e.get("type") == "tagless_draft_fallback"]
+        self.assertGreaterEqual(len(events), 1)
+
+    def test_append_report_draft_no_file_path_still_gated(self):
+        """v3 关键回归测试：append_report_draft 真实 schema 没 file_path，
+        但 gate 不能因此绕过——它按工具名识别 canonical draft 目标"""
+        handler = self._make_handler_with_project()
+        # 没 file_path、没 tag、没 keyword_intent → 必须 block
+        result = handler._gate_canonical_draft_tool_call(
+            self.project_id, "append_report_draft",
+            {"content": "any text"},  # 真实 schema 只有 content
+            {"preflight_keyword_intent": None},
+            [],
+        )
+        self.assertIsNotNone(result)  # 必须 block，不能因为缺 file_path 就 pass
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in GateCanonicalDraftToolCallTests.__dict__
+    ):
+        setattr(GateCanonicalDraftToolCallTests, _inherited_test_name, None)
 del _inherited_test_name
 
 

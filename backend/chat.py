@@ -324,6 +324,10 @@ class ChatHandler:
     CANONICAL_DRAFT_NO_DRAFT_MESSAGE = (
         "当前还没有正文草稿，请先用 append_report_draft 起草第一版。"
     )
+    CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE = (
+        "请先在回复中发 <draft-action> tag 声明本轮正文动作类型（begin/continue/section/replace），"
+        "再调用写正文工具。"
+    )
     CANONICAL_DRAFT_AMBIGUOUS_SECTION_MESSAGE = "请指明具体章节。"
     CANONICAL_DRAFT_STAGE_GATE_MESSAGE = (
         "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。"
@@ -1789,6 +1793,77 @@ class ChatHandler:
 
     def _is_canonical_report_draft_path(self, normalized_path: str) -> bool:
         return self._normalize_project_file_path(normalized_path).lower() == self.skill_engine.REPORT_DRAFT_PATH
+
+    def _gate_canonical_draft_tool_call(
+        self,
+        project_id: str,
+        tool_name: str,
+        tool_args: dict,
+        decision: dict,
+        tags: list,  # list[DraftActionEvent]
+    ) -> str | None:
+        """spec §4.8 — 工具放行 gate。返回 None=pass / str=block reason。
+
+        入口判定（v3 修订 — codex round-2 plan review P1）：
+        - append_report_draft：真实 schema 只有 content，无 file_path。
+          但本工具按定义就是写 canonical draft，所以工具名一致即纳入 gate。
+        - write_file / edit_file：通用工具，必须看 file_path 是否指向 canonical draft。
+        """
+        is_canonical_target = False
+        if tool_name == "append_report_draft":
+            # append_report_draft 工具 by definition 写 canonical draft（chat.py:4187-4202）
+            is_canonical_target = True
+        elif tool_name in {"write_file", "edit_file"}:
+            target_path = (tool_args.get("file_path") or "").replace("\\", "/")
+            is_canonical_target = self._is_canonical_report_draft_path(target_path)
+        if not is_canonical_target:
+            return None
+
+        # 仅依赖 preflight_keyword_intent 字段（v4/v5 强制）
+        keyword_intent = decision.get("preflight_keyword_intent")
+        if keyword_intent not in {"begin", "continue", None}:
+            # 防御：如果实施有 bug 让其他值进来，强制 block
+            return self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
+
+        tag_intents = {t.intent for t in tags if getattr(t, "executable", False)}
+
+        if tool_name == "append_report_draft":
+            if tag_intents & {"begin", "continue"}:
+                return None
+            if keyword_intent in {"begin", "continue"}:
+                self._record_tagless_fallback_event(
+                    project_id, fallback_tool="append_report_draft",
+                    fallback_intent=keyword_intent,
+                )
+                logging.warning("draft_write without explicit tag, fallback path used")
+                return None
+            return self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
+
+        if tool_name == "edit_file":
+            if tag_intents & {"section", "replace"}:
+                return None
+            return self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
+
+        return None
+
+
+    def _record_tagless_fallback_event(
+        self,
+        project_id: str,
+        *,
+        fallback_tool: str,
+        fallback_intent: str,
+    ) -> None:
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        def mutate(state: Dict):
+            state.setdefault("events", []).append({
+                "type": "tagless_draft_fallback",
+                "fallback_tool": fallback_tool,
+                "fallback_intent": fallback_intent,
+                "recorded_at": timestamp,
+            })
+            return state
+        self._mutate_conversation_state(project_id, mutate)
 
     def _is_noncanonical_report_draft_path(self, normalized_path: str) -> bool:
         candidate = self._normalize_project_file_path(normalized_path).lower()
@@ -5110,6 +5185,21 @@ class ChatHandler:
         source_tool_name: str,
         source_tool_args: Dict | None = None,
     ) -> str | None:
+        # v2 新增：先过 gate
+        if self._is_canonical_report_draft_path(normalized_path):
+            gate_block = self._gate_canonical_draft_tool_call(
+                project_id, source_tool_name, source_tool_args or {},
+                decision=self._turn_context.get("canonical_draft_decision") or {},
+                tags=self._turn_context.get("draft_action_events") or [],
+            )
+            if gate_block:
+                self._emit_system_notice_once(
+                    category="non_plan_write_blocked",
+                    path=normalized_path, reason=gate_block,
+                    user_action="请按 SKILL.md 附录的 draft-action 标签规范操作",
+                    surface_to_user=True,
+                )
+                return gate_block  # caller 检测 truthy 返回 → reject
         if not self._is_canonical_report_draft_path(normalized_path):
             return None
 
