@@ -29,6 +29,7 @@ from .config import (
     load_managed_search_pool_config,
 )
 from .context_policy import ResolvedContextPolicy, resolve_context_policy
+from backend.draft_action import DraftActionEvent
 from .models import SystemNotice
 from .search_pool import SearchRouter
 from .search_providers import (
@@ -6327,6 +6328,7 @@ class ChatHandler:
             "read_file_paths": set(),
             "canonical_draft_mutation": None,
             "checkpoint_event": None,
+            "draft_action_events": [],
             "pending_stage_keyword": None,
         }
 
@@ -6827,9 +6829,13 @@ class ChatHandler:
                 else:
                     self._turn_context["checkpoint_event"] = {"action": action, "key": key}
 
-        # Step 3: draft-action side effects (Phase 2 only).
+        # Step 3: draft-action side effects (Phase 2).
         for event in draft_events:
-            del event
+            if not event.executable:
+                continue
+            validated = self._validate_draft_action_event(project_id, event)
+            if validated.executable:
+                self._apply_draft_action_event(project_id, validated)
 
         # Step 4: strip control tags.
         visible_content = stage_parser.strip(assistant_message)
@@ -6865,6 +6871,172 @@ class ChatHandler:
         ])
         self._save_conversation(project_id, history)
         return persisted_content
+
+    def _validate_draft_action_event(
+        self,
+        project_id: str,
+        event: DraftActionEvent,
+    ) -> DraftActionEvent:
+        """spec §4.6 前置校验。返回事件本身（可能被改 executable=False / 自动降级）"""
+        # v2 新增：preflight_blocked / stage_too_early / outline_not_confirmed 校验
+        decision = self._turn_context.get("canonical_draft_decision") or {}
+        if decision.get("mode") == "reject":
+            event.executable = False
+            event.ignored_reason = "preflight_blocked"
+            # 不重复发 notice（preflight 已发）
+            return event
+
+        # stage_too_early
+        project_path = self.skill_engine.get_project_path(project_id)
+        if project_path is None:
+            event.executable = False
+            event.ignored_reason = "no_project"
+            return event
+        stage_state = self.skill_engine._infer_stage_state(project_path)
+        stage_code = stage_state.get("stage_code") or "S0"
+        if stage_code not in self.NON_PLAN_WRITE_ALLOWED_STAGE_CODES:
+            event.executable = False
+            event.ignored_reason = "stage_too_early"
+            self._emit_system_notice_once(
+                category="non_plan_write_blocked", path=None,
+                reason="S0/S1 阶段不能写正文，请先确认大纲",
+                user_action="请先在工作区确认大纲", surface_to_user=True,
+            )
+            return event
+
+        # outline_not_confirmed
+        checkpoints = self.skill_engine._load_stage_checkpoints(project_path)
+        if "outline_confirmed_at" not in checkpoints:
+            event.executable = False
+            event.ignored_reason = "outline_not_confirmed"
+            self._emit_system_notice_once(
+                category="non_plan_write_blocked", path=None,
+                reason="大纲尚未确认，不能写正文",
+                user_action="请先在工作区确认大纲", surface_to_user=True,
+            )
+            return event
+
+        # 文件存在性
+        draft_path = project_path / self.skill_engine.REPORT_DRAFT_PATH
+        draft_exists = draft_path.exists() and draft_path.read_text(encoding="utf-8").strip()
+
+        if event.intent == "begin":
+            return event  # always pass
+
+        if event.intent == "continue":
+            if not draft_exists:
+                event.intent = "begin"  # auto-degrade（不 fail，可继续）
+            return event
+
+        if event.intent == "section":
+            if not draft_exists:
+                event.executable = False
+                event.ignored_reason = "no_draft"
+                self._emit_system_notice_once(
+                    category="non_plan_write_blocked", path=None,
+                    reason=self.CANONICAL_DRAFT_NO_DRAFT_MESSAGE,
+                    user_action="请先发 <draft-action>begin</draft-action> 起草，再来重写章节",
+                    surface_to_user=True,
+                )
+                return event
+            # section label 匹配（复用 _resolve_section_rewrite_targets 但改 query 来源）
+            draft_text = draft_path.read_text(encoding="utf-8")
+            match_result = self._resolve_section_rewrite_targets(
+                event.section_label, draft_text,
+            )
+            matched_nodes = list(match_result.get("nodes") or [])
+            section_ambiguous = bool(match_result.get("ambiguous")) or len(matched_nodes) > 1
+            section_label = (event.section_label or "").strip()
+            if not matched_nodes and section_label:
+                def _matches_section_label_prefix(node) -> bool:
+                    heading_label = str(node.get("label") or "").strip()
+                    if heading_label.startswith(section_label):
+                        return True
+                    heading_title = re.sub(
+                        r"^第[一二三四五六七八九十百千万0-9]+[章节篇部分卷]\s*",
+                        "",
+                        heading_label,
+                    ).strip()
+                    return heading_title.startswith(section_label)
+
+                heading_nodes = self._extract_markdown_heading_nodes(draft_text)
+                exact_nodes = [
+                    node for node in heading_nodes
+                    if str(node.get("label") or "") == section_label
+                ]
+                prefix_nodes = exact_nodes or [
+                    node for node in heading_nodes
+                    if _matches_section_label_prefix(node)
+                ]
+                matched_nodes = prefix_nodes
+                section_ambiguous = len(prefix_nodes) > 1
+            if section_ambiguous:
+                event.executable = False
+                event.ignored_reason = "section_ambiguous"
+                self._emit_system_notice_once(
+                    category="non_plan_write_blocked", path=None,
+                    reason=f"章节 '{event.section_label}' 不唯一，请用完整 heading 定位",
+                    user_action="参考 read_file content/report_draft_v1.md 看完整章节标题",
+                    surface_to_user=True,
+                )
+                return event
+            if not matched_nodes:
+                event.executable = False
+                event.ignored_reason = "section_not_found"
+                self._emit_system_notice_once(
+                    category="non_plan_write_blocked", path=None,
+                    reason=f"找不到章节 '{event.section_label}'，请先 read_file 核对章节标题",
+                    user_action="先 read_file content/report_draft_v1.md 确认 heading",
+                    surface_to_user=True,
+                )
+                return event
+            return event
+
+        if event.intent == "replace":
+            if not draft_exists:
+                event.executable = False
+                event.ignored_reason = "no_draft"
+                self._emit_system_notice_once(
+                    category="non_plan_write_blocked", path=None,
+                    reason=self.CANONICAL_DRAFT_NO_DRAFT_MESSAGE,
+                    user_action="请先发 <draft-action>begin</draft-action> 起草",
+                    surface_to_user=True,
+                )
+                return event
+            draft_text = draft_path.read_text(encoding="utf-8")
+            if event.old_text not in draft_text:
+                event.executable = False
+                event.ignored_reason = "replace_target_invalid"
+                self._emit_system_notice_once(
+                    category="non_plan_write_blocked", path=None,
+                    reason="替换源文本未找到，请用完整唯一片段",
+                    user_action="先 read_file 找到准确文本片段",
+                    surface_to_user=True,
+                )
+                return event
+            if draft_text.count(event.old_text) > 1:
+                event.executable = False
+                event.ignored_reason = "replace_target_invalid"
+                self._emit_system_notice_once(
+                    category="non_plan_write_blocked", path=None,
+                    reason="替换源文本不唯一，请加上下文使其唯一",
+                    user_action="扩大 OLD 片段使其唯一", surface_to_user=True,
+                )
+                return event
+            return event
+
+        return event
+
+    def _apply_draft_action_event(
+        self,
+        project_id: str,
+        event: DraftActionEvent,
+    ) -> None:
+        """通过校验的 event 追加到 turn_context.draft_action_events 列表（v2 命名统一）"""
+        if not event.executable:
+            return
+        events_list = self._turn_context.setdefault("draft_action_events", [])
+        events_list.append(event)
 
     def _apply_stage_ack_event(self, project_id: str, event) -> None:
         if (

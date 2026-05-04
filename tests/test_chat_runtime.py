@@ -10648,6 +10648,113 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
+from backend.draft_action import DraftActionEvent
+
+
+class DraftActionPreCheckTests(ChatRuntimeTests):
+    def _seed_outline_confirmed(self, handler):
+        """Helper: 让 outline_confirmed_at checkpoint 已 set + stage 推到 S4，
+        否则 _validate_draft_action_event 会先在 stage_too_early/outline_not_confirmed
+        分支拒绝，测不到 no_draft/section/replace 校验。"""
+        # 用现有 _write_stage_one_prerequisites 准备 outline + research-plan
+        self._write_stage_one_prerequisites(self.project_dir)
+        # mock _infer_stage_state 返回 S4 + outline_confirmed_at 已 set
+        # 简化：直接落 checkpoints + stage S4 推断逻辑会自然认到
+        from datetime import datetime
+        ckpt_path = self.project_dir / "stage_checkpoints.json"
+        ckpt_path.write_text(
+            json.dumps({"outline_confirmed_at": datetime.now().isoformat(timespec="seconds")}),
+            encoding="utf-8",
+        )
+        stage_patcher = mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value={"stage_code": "S4"},
+        )
+        stage_patcher.start()
+        self.addCleanup(stage_patcher.stop)
+
+    def _seed_draft(self, content: str):
+        """Helper: 写 content/report_draft_v1.md"""
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(content, encoding="utf-8")
+
+    def test_section_intent_no_draft_returns_no_draft_message(self):
+        handler = self._make_handler_with_project()
+        self._seed_outline_confirmed(handler)
+        # 故意不调 _seed_draft → draft 不存在
+        event = DraftActionEvent(
+            raw="...", intent="section", section_label="第二章",
+        )
+        result = handler._validate_draft_action_event(self.project_id, event)
+        self.assertFalse(result.executable)
+        self.assertEqual(result.ignored_reason, "no_draft")
+
+    def test_replace_intent_no_draft_returns_no_draft_message(self):
+        handler = self._make_handler_with_project()
+        self._seed_outline_confirmed(handler)
+        event = DraftActionEvent(
+            raw="...", intent="replace", old_text="x", new_text="y",
+        )
+        result = handler._validate_draft_action_event(self.project_id, event)
+        self.assertFalse(result.executable)
+        self.assertEqual(result.ignored_reason, "no_draft")
+
+    def test_continue_intent_no_draft_auto_degrade_to_begin(self):
+        handler = self._make_handler_with_project()
+        self._seed_outline_confirmed(handler)
+        event = DraftActionEvent(raw="...", intent="continue")
+        result = handler._validate_draft_action_event(self.project_id, event)
+        self.assertTrue(result.executable)
+        self.assertEqual(result.intent, "begin")  # 降级
+
+    def test_section_label_unique_match(self):
+        handler = self._make_handler_with_project()
+        self._seed_outline_confirmed(handler)
+        self._seed_draft(
+            "# 报告\n\n## 第一章 序言\n背景内容\n\n## 第二章 战力演化\n演化分析\n"
+        )
+        event = DraftActionEvent(
+            raw="...", intent="section", section_label="第二章 战力演化",
+        )
+        result = handler._validate_draft_action_event(self.project_id, event)
+        self.assertTrue(result.executable)
+
+    def test_section_label_partial_match_ambiguous(self):
+        handler = self._make_handler_with_project()
+        self._seed_outline_confirmed(handler)
+        self._seed_draft(
+            "# 报告\n\n## 第二章 战力演化\n正文\n\n## 第二章附录\n附录内容\n"
+        )
+        event = DraftActionEvent(
+            raw="...", intent="section", section_label="第二章",
+        )
+        result = handler._validate_draft_action_event(self.project_id, event)
+        self.assertFalse(result.executable)
+        self.assertEqual(result.ignored_reason, "section_ambiguous")
+
+    def test_replace_old_text_not_unique_rejects(self):
+        handler = self._make_handler_with_project()
+        self._seed_outline_confirmed(handler)
+        self._seed_draft("X 出现一次。\n然后 X 又出现一次。\n")  # X 出现两次
+        event = DraftActionEvent(
+            raw="...", intent="replace", old_text="X", new_text="Y",
+        )
+        result = handler._validate_draft_action_event(self.project_id, event)
+        self.assertFalse(result.executable)
+        self.assertEqual(result.ignored_reason, "replace_target_invalid")
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in DraftActionPreCheckTests.__dict__
+    ):
+        setattr(DraftActionPreCheckTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 class EmptyAssistantFallbackTests(ChatRuntimeTests):
     def test_finalize_empty_assistant_does_not_persist_assistant(self):
         handler = self._make_handler_with_project()
