@@ -80,6 +80,15 @@ TAIL_TAG_SCAN_RE = re.compile(
     r'|<draft-action-replace>[\s\S]*?</draft-action-replace>',
     re.IGNORECASE,
 )
+TOOL_LOG_COMMENT_RE = re.compile(
+    r'<!--\s*tool-log'
+    r'(?:[\s\S]*?-->|[\s\S]*$)',
+    re.IGNORECASE,
+)
+
+
+def strip_tool_log_comments(content: str) -> str:
+    return TOOL_LOG_COMMENT_RE.sub("", content).rstrip()
 
 
 def stream_split_safe_tail(buffer: str) -> tuple[str, str]:

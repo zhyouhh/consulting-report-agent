@@ -203,3 +203,35 @@ class InsertBeforeTailTagsTests(unittest.TestCase):
         content = "body\n\n<stage-ack>outline_confirmed_at</stage-ack>\n\n"
         result = self.handler._insert_before_tail_tags(content, "INJ")
         self.assertIn("INJ", result)
+
+
+class StripToolLogCommentsTests(unittest.TestCase):
+    def test_strips_well_formed_single_line(self):
+        from backend.chat import strip_tool_log_comments
+        s = "Reply.\n<!-- tool-log\n- web_search ✓\n-->"
+        result = strip_tool_log_comments(s)
+        self.assertEqual(result, "Reply.")
+
+    def test_strips_multi_line(self):
+        from backend.chat import strip_tool_log_comments
+        s = "Reply.\n<!-- tool-log\n- a ✓\n- b ✗ err\n-->"
+        result = strip_tool_log_comments(s)
+        self.assertEqual(result, "Reply.")
+
+    def test_handles_unclosed_truncated_stream(self):
+        from backend.chat import strip_tool_log_comments
+        s = "Reply.\n<!-- tool-log\n- partial ✓"
+        result = strip_tool_log_comments(s)
+        self.assertEqual(result, "Reply.")
+
+    def test_handles_nested_dash_dash(self):
+        from backend.chat import strip_tool_log_comments
+        s = "Reply.\n<!-- tool-log\n- some -- tool ✓\n-->"
+        result = strip_tool_log_comments(s)
+        self.assertEqual(result, "Reply.")
+
+    def test_no_tool_log_comment_unchanged(self):
+        from backend.chat import strip_tool_log_comments
+        s = "Reply with no comment.\n<!-- regular html comment -->"
+        result = strip_tool_log_comments(s)
+        self.assertEqual(result, s)
