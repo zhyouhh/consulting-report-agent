@@ -143,6 +143,32 @@ class ChatRuntimeTests(unittest.TestCase):
         self.project_dir = Path(project["project_dir"])
         return handler
 
+    def _finalize_assistant_for_test(
+        self,
+        handler,
+        assistant_message: str,
+        *,
+        history: list | None = None,
+        current_user: dict | None = None,
+        current_turn_messages: list | None = None,
+        user_message: str = "",
+    ):
+        history = [] if history is None else history
+        current_user = current_user or {
+            "role": "user",
+            "content": user_message,
+            "attached_material_ids": [],
+        }
+        current_turn_messages = [] if current_turn_messages is None else current_turn_messages
+        return handler._finalize_assistant_turn(
+            self.project_id,
+            history,
+            current_user,
+            assistant_message,
+            current_turn_messages,
+            user_message=user_message,
+        )
+
     def _allow_public_fetch_host(self, mock_getaddrinfo, ip: str = "93.184.216.34"):
         mock_getaddrinfo.return_value = [
             (2, 1, 6, "", (ip, 443)),
@@ -6014,7 +6040,8 @@ class ChatRuntimeTests(unittest.TestCase):
             )
         )
         self.assertEqual(result["content"], final_message)
-        self.assertEqual(saved[-1]["content"], result["content"])
+        self.assertIn(result["content"], saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertIn("新结论", updated)
         self.assertIn("原始段落", updated)
         self.assertNotIn("旧结论", updated)
@@ -6108,7 +6135,8 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn(final_message, content)
         self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
         self.assertEqual(saved[-1]["role"], "assistant")
-        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertIn(final_message, saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertNotIn(false_completion, saved[-1]["content"])
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
 
@@ -6137,7 +6165,8 @@ class ChatRuntimeTests(unittest.TestCase):
             any("报告正文" in message and "未检测到" in message for message in tool_messages)
         )
         self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
-        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertIn(final_message, saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
 
     @mock.patch("backend.chat.OpenAI")
@@ -6252,7 +6281,8 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["content"], final_message)
         saved = self._read_saved_conversation()
-        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertIn(final_message, saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertIn("2024年", updated)
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
 
@@ -6293,7 +6323,8 @@ class ChatRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result["content"], final_message)
         self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
-        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertIn(final_message, saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertNotIn(false_completion, saved[-1]["content"])
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
 
@@ -6345,7 +6376,8 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertTrue(final_draft.startswith(before.rstrip()))
         self.assertIn("既有正文", final_draft)
         self.assertIn("新增正文", final_draft)
-        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertIn(final_message, saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
 
     @mock.patch("backend.chat.OpenAI")
@@ -6391,7 +6423,8 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertNotIn("append_report_draft", retry_feedback[-1])
         self.assertNotIn("write_file", retry_feedback[-1])
         self.assertEqual(result["content"], final_message)
-        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertIn(final_message, saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertNotIn(false_completion, saved[-1]["content"])
         self.assertIn("新结论", updated)
         self.assertNotIn("旧结论", updated)
@@ -6440,7 +6473,8 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertIn("这轮没有检测到报告草稿", result["content"])
         self.assertNotEqual(result["content"], final_message)
-        self.assertEqual(saved[-1]["content"], result["content"])
+        self.assertIn(result["content"], saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertIn("旧结论", updated)
         self.assertNotIn("原始段落（无关补充）", updated)
         self.assertNotIn("新结论", updated)
@@ -6498,7 +6532,8 @@ class ChatRuntimeTests(unittest.TestCase):
             )
         )
         self.assertEqual(result["content"], final_message)
-        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertIn(final_message, saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertNotIn(false_completion, saved[-1]["content"])
         self.assertNotIn(wrong_append_completion, saved[-1]["content"])
         self.assertIn("新结论", updated)
@@ -6536,7 +6571,8 @@ class ChatRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result["content"], final_message)
         self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
-        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertIn(final_message, saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
 
     @mock.patch("backend.chat.OpenAI")
@@ -7162,7 +7198,8 @@ class ChatRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result["content"], final_message)
         self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
-        self.assertEqual(saved[-1]["content"], final_message)
+        self.assertIn(final_message, saved[-1]["content"])
+        self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertNotIn(false_completion, saved[-1]["content"])
 
     @mock.patch("backend.chat.OpenAI")
@@ -10398,7 +10435,7 @@ class ChatRuntimeTests(unittest.TestCase):
             turn_context["pending_stage_keyword"],
             ("set", "outline_confirmed_at"),
         )
-        handler._finalize_assistant_turn(self.project_id, "好的，按大纲写。")
+        self._finalize_assistant_for_test(handler, "好的，按大纲写。")
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
         self.assertIn("outline_confirmed_at", checkpoints)
 
@@ -10415,7 +10452,7 @@ class ChatRuntimeTests(unittest.TestCase):
             handler._turn_context["pending_stage_keyword"],
             ("set", "outline_confirmed_at"),
         )
-        handler._finalize_assistant_turn(self.project_id, "好的，按大纲写。")
+        self._finalize_assistant_for_test(handler, "好的，按大纲写。")
         self.assertEqual(
             handler._turn_context["checkpoint_event"],
             {"action": "set", "key": "outline_confirmed_at"},
@@ -10516,7 +10553,7 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertNotIn("outline_confirmed_at", checkpoints)
         self.assertIsNone(turn_context["checkpoint_event"])
-        handler._finalize_assistant_turn(self.project_id, "好的，按大纲写。")
+        self._finalize_assistant_for_test(handler, "好的，按大纲写。")
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
         self.assertNotIn("outline_confirmed_at", checkpoints)
         self.assertIsNone(turn_context["checkpoint_event"])
@@ -10547,7 +10584,7 @@ class ChatRuntimeTests(unittest.TestCase):
             "outline_confirmed_at",
             handler.skill_engine._load_stage_checkpoints(self.project_dir),
         )
-        handler._finalize_assistant_turn(self.project_id, "好的，按大纲写。")
+        self._finalize_assistant_for_test(handler, "好的，按大纲写。")
         self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "确认大纲"))
         self.assertIn(
             "outline_confirmed_at",
@@ -10661,6 +10698,89 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in EmptyAssistantFallbackTests.__dict__
     ):
         setattr(EmptyAssistantFallbackTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class AssistantTurnOrchestratorTests(ChatRuntimeTests):
+    def test_only_stage_ack_turn_records_checkpoint_then_a3(self):
+        """assistant 只回 <stage-ack>outline_confirmed_at</stage-ack> →
+        checkpoint 落戳 + 走 A3 不持久化空文本"""
+        handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
+        history = []
+        current_user = {"role": "user", "content": "确认大纲", "attached_material_ids": []}
+        assistant_msg = "<stage-ack>outline_confirmed_at</stage-ack>"
+        result = self._finalize_assistant_for_test(
+            handler, assistant_msg, history=history, current_user=current_user,
+            current_turn_messages=[], user_message="确认大纲",
+        )
+        ckpt = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertIn("outline_confirmed_at", ckpt)
+        self.assertEqual(history[-1]["role"], "user")
+        from backend.chat import USER_VISIBLE_FALLBACK
+        self.assertEqual(result, USER_VISIBLE_FALLBACK)
+
+    def test_stage_ack_executed_before_empty_check(self):
+        handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
+        history = []
+        current_user = {"role": "user", "content": "确认", "attached_material_ids": []}
+        assistant_msg = "<stage-ack>outline_confirmed_at</stage-ack>"
+        with mock.patch.object(handler, "_apply_stage_ack_event") as mock_apply:
+            self._finalize_assistant_for_test(
+                handler, assistant_msg, history=history, current_user=current_user,
+                current_turn_messages=[], user_message="确认",
+            )
+            self.assertTrue(mock_apply.called)
+
+    def test_normal_turn_persists_with_tool_log(self):
+        handler = self._make_handler_with_project()
+        history = []
+        current_user = {"role": "user", "content": "搜一下", "attached_material_ids": []}
+        assistant_msg = "好的，已搜到结果。"
+        current_turn_messages = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "c1", "function": {"name": "web_search",
+                 "arguments": '{"query":"猪猪侠"}'}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1",
+             "content": '{"status":"success","results":[1,2]}'},
+        ]
+        self._finalize_assistant_for_test(
+            handler, assistant_msg, history=history, current_user=current_user,
+            current_turn_messages=current_turn_messages, user_message="搜一下",
+        )
+        self.assertEqual(history[-1]["role"], "assistant")
+        self.assertIn("好的，已搜到结果。", history[-1]["content"])
+        self.assertIn("<!-- tool-log", history[-1]["content"])
+        self.assertIn("web_search", history[-1]["content"])
+
+    def test_tool_only_turn_walks_a3_no_tool_log_persisted(self):
+        handler = self._make_handler_with_project()
+        history = []
+        current_user = {"role": "user", "content": "test", "attached_material_ids": []}
+        assistant_msg = ""
+        current_turn_messages = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "c1", "function": {"name": "web_search", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": '{"status":"success"}'},
+        ]
+        result = self._finalize_assistant_for_test(
+            handler, assistant_msg, history=history, current_user=current_user,
+            current_turn_messages=current_turn_messages, user_message="test",
+        )
+        from backend.chat import USER_VISIBLE_FALLBACK
+        self.assertEqual(result, USER_VISIBLE_FALLBACK)
+        self.assertEqual(history[-1]["role"], "user")
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in AssistantTurnOrchestratorTests.__dict__
+    ):
+        setattr(AssistantTurnOrchestratorTests, _inherited_test_name, None)
 del _inherited_test_name
 
 
@@ -10966,8 +11086,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         handler = self._make_handler_with_project()
         self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
         self._write_effective_outline()
-        stripped = handler._finalize_assistant_turn(
-            self.project_id,
+        stripped = self._finalize_assistant_for_test(
+            handler,
             "大纲完成。\n\n<stage-ack>outline_confirmed_at</stage-ack>\n",
         )
         self.assertNotIn("<stage-ack", stripped)
@@ -10978,8 +11098,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         handler = self._make_handler_with_project()
         self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
         self._write_effective_outline()
-        stripped = handler._finalize_assistant_turn(
-            self.project_id,
+        stripped = self._finalize_assistant_for_test(
+            handler,
             "示例：\n```md\n<stage-ack>outline_confirmed_at</stage-ack>\n```\n结尾。\n",
         )
         self.assertNotIn("<stage-ack", stripped)
@@ -10989,8 +11109,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
     def test_fenced_code_tag_logs_warning_no_notice(self):
         handler = self._make_handler_with_project()
         with self.assertLogs(level="WARNING") as cm:
-            handler._finalize_assistant_turn(
-                self.project_id,
+            self._finalize_assistant_for_test(
+                handler,
                 "示例：\n```md\n<stage-ack>outline_confirmed_at</stage-ack>\n```\n结尾。\n",
             )
         joined = "\n".join(cm.output)
@@ -11002,8 +11122,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
     def test_non_tail_tag_logs_warning_no_notice(self):
         handler = self._make_handler_with_project()
         with self.assertLogs(level="WARNING") as cm:
-            handler._finalize_assistant_turn(
-                self.project_id,
+            self._finalize_assistant_for_test(
+                handler,
                 "<stage-ack>outline_confirmed_at</stage-ack>\n\n非 tail 后面还有正文。\n",
             )
         joined = "\n".join(cm.output)
@@ -11019,8 +11139,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
             "outline_confirmed_at": "2026-04-21T11:00:00",
         })
         self._write_effective_outline()
-        handler._finalize_assistant_turn(
-            self.project_id,
+        self._finalize_assistant_for_test(
+            handler,
             "回退再推进。\n"
             '<stage-ack action="clear">outline_confirmed_at</stage-ack>\n'
             "<stage-ack>outline_confirmed_at</stage-ack>\n",
@@ -11034,8 +11154,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         handler = self._make_handler_with_project()
         self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
         # outline.md NOT written - prereq will fail
-        handler._finalize_assistant_turn(
-            self.project_id,
+        self._finalize_assistant_for_test(
+            handler,
             "大纲没写但强推。\n<stage-ack>outline_confirmed_at</stage-ack>\n",
         )
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
@@ -11047,8 +11167,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         handler = self._make_handler_with_project()
         self._write_conversation([{"role": "user", "content": "你好"}])
         # No assistant history
-        handler._finalize_assistant_turn(
-            self.project_id,
+        self._finalize_assistant_for_test(
+            handler,
             "先简化流程。\n<stage-ack>s0_interview_done_at</stage-ack>\n",
         )
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
@@ -11062,8 +11182,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
             {"role": "user", "content": "你好"},
             {"role": "assistant", "content": "请回答：1) 读者是谁？"},
         ])
-        stripped = handler._finalize_assistant_turn(
-            self.project_id,
+        stripped = self._finalize_assistant_for_test(
+            handler,
             "记录了。\n<stage-ack>s0_interview_done_at</stage-ack>\n",
         )
         self.assertNotIn("<stage-ack", stripped)
@@ -11072,8 +11192,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
 
     def test_unknown_key_tag_stripped_no_checkpoint_no_notice(self):
         handler = self._make_handler_with_project()
-        handler._finalize_assistant_turn(
-            self.project_id,
+        self._finalize_assistant_for_test(
+            handler,
             "写错 key。\n<stage-ack>bogus_key</stage-ack>\n",
         )
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
@@ -11088,8 +11208,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
     def test_clear_idempotent_through_tag(self):
         handler = self._make_handler_with_project()
         # Clear when not set - should be idempotent
-        handler._finalize_assistant_turn(
-            self.project_id,
+        self._finalize_assistant_for_test(
+            handler,
             '回退。\n<stage-ack action="clear">outline_confirmed_at</stage-ack>\n',
         )
         # No assertion failure; no notice raised
@@ -11121,8 +11241,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
             self.project_dir, "outline_confirmed_at"
         )
         # Assistant tag points at review_started_at
-        handler._finalize_assistant_turn(
-            self.project_id,
+        self._finalize_assistant_for_test(
+            handler,
             "进入审查。\n<stage-ack>review_started_at</stage-ack>\n",
         )
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
@@ -11142,8 +11262,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
         handler._turn_context["pending_stage_keyword"] = ("set", "outline_confirmed_at")
         # Non-executable tag (inside code fence) must NOT block fallback
-        handler._finalize_assistant_turn(
-            self.project_id,
+        self._finalize_assistant_for_test(
+            handler,
             "示例：\n```md\n<stage-ack>review_started_at</stage-ack>\n```\n完。\n",
         )
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
@@ -11159,8 +11279,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         # NO effective outline - prereq will fail
         handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
         handler._turn_context["pending_stage_keyword"] = ("set", "outline_confirmed_at")
-        handler._finalize_assistant_turn(
-            self.project_id,
+        self._finalize_assistant_for_test(
+            handler,
             "没 tag 的正文。\n",
         )
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
@@ -11173,8 +11293,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         # fed to it.
         handler = self._make_handler_with_project()
         # No exception, no checkpoint change
-        stripped = handler._finalize_assistant_turn(
-            self.project_id,
+        stripped = self._finalize_assistant_for_test(
+            handler,
             "用户问到了 <stage-ack>outline_confirmed_at</stage-ack>"
             " 这种语法。\n",  # non-tail tag
         )
@@ -11186,8 +11306,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         handler = self._make_handler_with_project()
         self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
         self._write_effective_outline()
-        final = handler._finalize_assistant_turn(
-            self.project_id,
+        final = self._finalize_assistant_for_test(
+            handler,
             "完成。\n<stage-ack>outline_confirmed_at</stage-ack>\n",
         )
         # Whatever the caller persists must have no tag
@@ -11972,3 +12092,5 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(HistorySanitizeTests, _inherited_test_name, None)
 del _inherited_test_name
+
+

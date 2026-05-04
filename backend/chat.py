@@ -3638,26 +3638,25 @@ class ChatHandler:
                 accumulated = assistant_message
                 stream_buffer = ""
 
-        assistant_message = self._finalize_assistant_turn(project_id, assistant_message)
-        self._persist_draft_followup_state_for_turn(
+        result_content = self._finalize_assistant_turn(
             project_id,
+            history,
+            current_user_message,
             assistant_message,
+            current_turn_messages,
             user_message=str(current_user_message.get("content") or ""),
         )
-        if not assistant_message.strip():
-            fallback_text = self._finalize_empty_assistant_turn(
-                project_id, history, current_user_message,
-                diagnostic="stream_truncated",
-            )
-            yield {"type": "content", "data": fallback_text}
-            yield {"type": "usage", "data": token_usage}
-            return
+        self._persist_draft_followup_state_for_turn(
+            project_id,
+            result_content,
+            user_message=str(current_user_message.get("content") or ""),
+        )
         already_emitted_len = (
             0
             if buffer_required_write_content
             else len(accumulated) - len(stream_buffer)
         )
-        remainder = assistant_message[already_emitted_len:]
+        remainder = result_content[already_emitted_len:]
         if remainder:
             yield {"type": "content", "data": remainder}
 
@@ -3671,8 +3670,6 @@ class ChatHandler:
             }
         self._turn_context["pending_system_notices"] = []
 
-        history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
-        self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
         self._turn_context = self._new_turn_context(can_write_non_plan=True)
 
@@ -3906,27 +3903,26 @@ class ChatHandler:
         else:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
 
-        assistant_message = self._finalize_assistant_turn(project_id, assistant_message)
-        self._persist_draft_followup_state_for_turn(
+        result_content = self._finalize_assistant_turn(
             project_id,
+            history,
+            current_user_message,
             assistant_message,
+            current_turn_messages,
             user_message=str(current_user_message.get("content") or ""),
         )
-        if not assistant_message.strip():
-            fallback_text = self._finalize_empty_assistant_turn(
-                project_id, history, current_user_message,
-                diagnostic="non_stream_empty",
-            )
-            return {"content": fallback_text, "token_usage": token_usage}
-        history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
-        self._save_conversation(project_id, history)
+        self._persist_draft_followup_state_for_turn(
+            project_id,
+            result_content,
+            user_message=str(current_user_message.get("content") or ""),
+        )
         token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
         system_notices = self._collect_user_visible_system_notices()
         self._turn_context["pending_system_notices"] = []
         self._turn_context = self._new_turn_context(can_write_non_plan=True)
 
         return {
-            "content": assistant_message,
+            "content": result_content,
             "token_usage": token_usage,
             "system_notices": system_notices or None,
         }
@@ -6645,40 +6641,66 @@ class ChatHandler:
         current_user_message: Dict,
         assistant_message: str,
     ) -> tuple[str, Dict | None, list[SystemNotice]]:
-        assistant_message = self._finalize_assistant_turn(project_id, assistant_message)
-        self._persist_draft_followup_state_for_turn(
+        result_content = self._finalize_assistant_turn(
             project_id,
+            history,
+            current_user_message,
             assistant_message,
+            [],
             user_message=str(current_user_message.get("content") or ""),
         )
-        if not assistant_message.strip():
-            fallback_text = self._finalize_empty_assistant_turn(
-                project_id, history, current_user_message,
-                diagnostic="early_finalize_empty",
-            )
-            token_usage = self._finalize_post_turn_compaction(project_id, history, None)
-            system_notices = self._collect_user_visible_system_notices()
-            return fallback_text, token_usage, system_notices
-        history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
-        self._save_conversation(project_id, history)
+        self._persist_draft_followup_state_for_turn(
+            project_id,
+            result_content,
+            user_message=str(current_user_message.get("content") or ""),
+        )
         token_usage = self._finalize_post_turn_compaction(project_id, history, None)
         system_notices = self._collect_user_visible_system_notices()
         self._turn_context["pending_system_notices"] = []
         self._turn_context = self._new_turn_context(can_write_non_plan=True)
-        return assistant_message, token_usage, system_notices
+        return result_content, token_usage, system_notices
 
-    def _finalize_assistant_turn(self, project_id: str, full_content: str) -> str:
-        """Resolve stage-ack tags and pending keyword fallback for one turn."""
+    def _finalize_assistant_turn(
+        self,
+        project_id: str,
+        history: List[Dict],
+        current_user_message: Dict,
+        assistant_message: str,
+        current_turn_messages: List[Dict],
+        *,
+        user_message: str = "",
+    ) -> str:
+        """统一编排器（spec §5.6 7 步顺序）：
+        1. parse 控制 tag (stage-ack + draft-action)
+        2. 执行 stage-ack 副作用
+        3. 执行 draft-action 副作用 (Phase 2 才有)
+        4. strip 控制 tag → visible_content
+        5. 判空 → A3 (_finalize_empty_assistant_turn)
+        6. append tool-log
+        7. 持久化 history + save_conversation
+        """
         from backend.stage_ack import StageAckParser
+        try:
+            from backend.draft_action import DraftActionParser
+            draft_parser = DraftActionParser()
+        except ImportError:
+            draft_parser = None
 
-        parser = StageAckParser()
-        events = parser.parse(full_content)
-        executable_events = [event for event in events if event.executable]
+        del user_message
+
+        stage_parser = StageAckParser()
+
+        # Step 1: parse
+        stage_events = stage_parser.parse(assistant_message)
+        draft_events = draft_parser.parse(assistant_message) if draft_parser else []
+        executable_stage_events = [event for event in stage_events if event.executable]
         pending = self._turn_context.get("pending_stage_keyword")
 
+        # Step 2: stage-ack side effects. Keep the project RLock and pending
+        # keyword fallback semantics from the pre-orchestrator finalizer.
         lock = _get_project_request_lock(project_id)
         with lock:
-            for event in events:
+            for event in stage_events:
                 if not event.executable:
                     logging.getLogger("backend.chat").warning(
                         "stage-ack tag ignored: key=%s action=%s reason=%s",
@@ -6687,9 +6709,9 @@ class ChatHandler:
                         event.ignored_reason,
                     )
 
-            if executable_events:
+            if executable_stage_events:
                 self._turn_context["pending_stage_keyword"] = None
-                for event in events:
+                for event in stage_events:
                     if event.executable:
                         self._apply_stage_ack_event(project_id, event)
             elif pending:
@@ -6710,7 +6732,44 @@ class ChatHandler:
                 else:
                     self._turn_context["checkpoint_event"] = {"action": action, "key": key}
 
-        return parser.strip(full_content)
+        # Step 3: draft-action side effects (Phase 2 only).
+        for event in draft_events:
+            del event
+
+        # Step 4: strip control tags.
+        visible_content = stage_parser.strip(assistant_message)
+        if draft_parser:
+            visible_content = draft_parser.strip(visible_content)
+        visible_content = visible_content.strip()
+
+        # Step 5: empty visible reply goes through A3 before any tool-log append.
+        if not visible_content:
+            return self._finalize_empty_assistant_turn(
+                project_id,
+                history,
+                current_user_message,
+                diagnostic=(
+                    "tag_strip_emptied"
+                    if (stage_events or draft_events)
+                    else "stream_truncated"
+                ),
+            )
+
+        # Step 6: append tool-log.
+        persisted_content = visible_content
+        if current_turn_messages:
+            persisted_content = self._append_tool_log_to_assistant(
+                persisted_content,
+                current_turn_messages,
+            )
+
+        # Step 7: persist this turn.
+        history.extend([
+            current_user_message,
+            {"role": "assistant", "content": persisted_content},
+        ])
+        self._save_conversation(project_id, history)
+        return visible_content
 
     def _apply_stage_ack_event(self, project_id: str, event) -> None:
         if (
