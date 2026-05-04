@@ -110,6 +110,27 @@ description: Use when writing consulting reports, strategy analysis, market rese
 
 **推进到 S5：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
 
+### S4 正文写作标签（draft-action）
+
+当用户表达想要起草/续写/修改正文时（如"开始写报告""继续写""把第二章重写""把 X 改成 Y"），
+你在调用 `append_report_draft` / `edit_file` **之前**必须先在回复中输出对应 draft-action tag：
+
+| 用户意图 | 你发的 tag |
+|---|---|
+| 想看正文初稿 / "开始写报告" / "起草" | `<draft-action>begin</draft-action>` |
+| 想继续 / 续写 / 写下一段或下一章 | `<draft-action>continue</draft-action>` |
+| 想重写某一节（如"第二章重写"） | `<draft-action>section:第二章 战力演化</draft-action>`（用完整 heading 定位） |
+| 想替换具体文字（如"把 X 改成 Y"） | `<draft-action-replace><old>X</old><new>Y</new></draft-action-replace>` |
+
+tag 必须独立一行、在回复尾部、代码块外。系统检测到合法 tag 后才会放行写正文工具。
+不发 tag 直接调写正文工具会被拒绝。
+
+模型不需要遍历用户中文表达——只要能从用户消息中识别出"用户希望我做正文动作"，就发对应 tag；
+不确定时不发 tag，先问用户澄清。
+
+如果只调工具不输出文本（少见情况），系统会按本轮 preflight 推断的意图兜底放行
+（仅 `append_report_draft` begin/continue 类，不放行 `edit_file`）。
+
 ### S5 质量审查
 - 完成 `review-checklist.md`
 - `review.md` 可选，用于记录修订意见
@@ -204,3 +225,32 @@ description: Use when writing consulting reports, strategy analysis, market rese
 - review_passed_at：审查通过 / 审查没问题 / 报告可以交付
 - presentation_ready_at：演示准备好了 / 演示准备完成 / PPT 完成 / 讲稿完成
 - delivery_archived_at：归档结束项目 / 项目交付完成 / 交付归档
+
+## 附录：draft-action 标签规范
+
+阶段进入 S4 后，发起正文动作前的控制信号。
+
+**Simple 形式**（intent ∈ {begin, continue, section}）：
+
+```
+<draft-action>begin</draft-action>
+<draft-action>continue</draft-action>
+<draft-action>section:第二章 战力演化</draft-action>
+```
+
+**Replace 形式**（嵌套 XML 子节点）：
+
+```
+<draft-action-replace>
+  <old>原文片段</old>
+  <new>新文本</new>
+</draft-action-replace>
+```
+
+**KEY 取值**：
+- `begin` — 模型即将首次调用 `append_report_draft` 创建草稿
+- `continue` — 模型即将调用 `append_report_draft` 在现有草稿末尾追加（draft 不存在自动降级为 begin）
+- `section:LABEL` — 模型即将调用 `edit_file` 重写指定章节（LABEL 必须能在 draft 中唯一找到 heading）
+- `replace` — 模型即将调用 `edit_file` 做精确替换（OLD 必须在 draft 中唯一存在）
+
+**位置 / 剥离规则**：完全沿用 stage-ack 附录的同款约束（必须在回复尾部、独立一行、代码块外）。replace 多行 block 要求"起始行独立 + 终止行独立"。

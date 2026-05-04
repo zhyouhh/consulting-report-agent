@@ -100,6 +100,11 @@ class SkillMdS0InterviewLockTests(unittest.TestCase):
         self.assertIn("演示准备完成", self.skill_md)
         self.assertIn("归档结束项目", self.skill_md)
 
+    def test_draft_action_tag_contract_present(self):
+        self.assertIn("<draft-action>begin</draft-action>", self.skill_md)
+        self.assertIn("draft-action 标签规范", self.skill_md)
+        self.assertIn("<draft-action-replace>", self.skill_md)
+
 
 if __name__ == "__main__":
     unittest.main()
