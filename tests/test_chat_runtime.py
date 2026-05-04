@@ -12368,6 +12368,23 @@ class GateCanonicalDraftToolCallTests(ChatRuntimeTests):
         )
         self.assertIsNone(result)
 
+    def test_append_report_draft_with_conflicting_section_tag_blocks(self):
+        """v2 fix1 regression: section/replace tag is incompatible with append_report_draft.
+        Even if keyword_intent is begin/continue, the tagless fallback MUST NOT fire when
+        an executable non-{begin,continue} tag is present - that's a contradictory turn,
+        not a tagless turn.
+        """
+        from backend.draft_action import DraftActionEvent
+        handler = self._make_handler_with_project()
+        tags = [DraftActionEvent(raw="...", intent="section", section_label="x", executable=True)]
+        decision = {"preflight_keyword_intent": "begin"}
+        result = handler._gate_canonical_draft_tool_call(
+            self.project_id, "append_report_draft",
+            {"content": "new section"},
+            decision, tags,
+        )
+        self.assertIsNotNone(result)  # must block
+
     def test_edit_file_no_tag_blocked_for_canonical_draft_path(self):
         handler = self._make_handler_with_project()
         decision = {"preflight_keyword_intent": "begin"}  # 即使 keyword 命中也不放行 edit_file

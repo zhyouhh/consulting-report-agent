@@ -1830,7 +1830,8 @@ class ChatHandler:
         if tool_name == "append_report_draft":
             if tag_intents & {"begin", "continue"}:
                 return None
-            if keyword_intent in {"begin", "continue"}:
+            # spec §4.8: tagless fallback only when NO executable tag was emitted.
+            if not tag_intents and keyword_intent in {"begin", "continue"}:
                 self._record_tagless_fallback_event(
                     project_id, fallback_tool="append_report_draft",
                     fallback_intent=keyword_intent,
