@@ -3066,7 +3066,6 @@ class ChatHandler:
                     "path": notice.path,
                     "reason": notice.reason,
                     "user_action": notice.user_action,
-                    "surface_to_user": notice.surface_to_user,
                 }
             yield {
                 "type": "usage",
@@ -3089,7 +3088,6 @@ class ChatHandler:
                     "path": notice.path,
                     "reason": notice.reason,
                     "user_action": notice.user_action,
-                    "surface_to_user": notice.surface_to_user,
                 }
             yield {
                 "type": "usage",
@@ -3312,15 +3310,15 @@ class ChatHandler:
                         write_path = write_event["path"]
                         successful_writes.add(write_path)
                         successful_write_events.setdefault(write_path, []).append(write_event)
-                    for notice in self._turn_context.pop("pending_system_notices", []):
+                    for notice in self._yield_user_visible_notices():
                         yield {
                             "type": "system_notice",
                             "category": notice["category"],
                             "path": notice.get("path"),
                             "reason": notice["reason"],
                             "user_action": notice["user_action"],
-                            "surface_to_user": notice["surface_to_user"],
                         }
+                    self._turn_context["pending_system_notices"] = []
                     result_icon = "✅" if result.get("status") == "success" else "⚠️"
                     yield {"type": "tool", "data": f"{result_icon} 结果: {str(result)[:160]}..."}
                     current_turn_messages.append({
@@ -3436,8 +3434,14 @@ class ChatHandler:
         if remainder:
             yield {"type": "content", "data": remainder}
 
-        for notice in list(self._turn_context.get("pending_system_notices") or []):
-            yield notice
+        for notice in self._yield_user_visible_notices():
+            yield {
+                "type": "system_notice",
+                "category": notice["category"],
+                "path": notice.get("path"),
+                "reason": notice["reason"],
+                "user_action": notice["user_action"],
+            }
         self._turn_context["pending_system_notices"] = []
 
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
@@ -3686,16 +3690,8 @@ class ChatHandler:
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
-        system_notices = [
-            SystemNotice(
-                category=notice["category"],
-                path=notice.get("path"),
-                reason=notice["reason"],
-                user_action=notice["user_action"],
-                surface_to_user=notice["surface_to_user"],
-            )
-            for notice in self._turn_context.pop("pending_system_notices", [])
-        ]
+        system_notices = self._collect_user_visible_system_notices()
+        self._turn_context["pending_system_notices"] = []
         self._turn_context = self._new_turn_context(can_write_non_plan=True)
 
         return {
@@ -6377,16 +6373,8 @@ class ChatHandler:
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, None)
-        system_notices = [
-            SystemNotice(
-                category=notice["category"],
-                path=notice.get("path"),
-                reason=notice["reason"],
-                user_action=notice["user_action"],
-                surface_to_user=notice["surface_to_user"],
-            )
-            for notice in self._turn_context.pop("pending_system_notices", [])
-        ]
+        system_notices = self._collect_user_visible_system_notices()
+        self._turn_context["pending_system_notices"] = []
         self._turn_context = self._new_turn_context(can_write_non_plan=True)
         return assistant_message, token_usage, system_notices
 
@@ -6499,6 +6487,32 @@ class ChatHandler:
         self._turn_context[flag_key] = True
         queue = self._turn_context.setdefault("pending_system_notices", [])
         queue.append(notice)
+
+    def _yield_user_visible_notices(self):
+        """Yield pending notices that are allowed to surface in SSE."""
+        logger = logging.getLogger("backend.chat")
+        for notice in self._turn_context.get("pending_system_notices", []):
+            if not notice.get("surface_to_user"):
+                logger.info(
+                    "[internal-notice] %s | reason=%s",
+                    notice.get("category"),
+                    notice.get("reason"),
+                )
+                continue
+            yield dict(notice)
+
+    def _collect_user_visible_system_notices(self) -> list[SystemNotice]:
+        """Build non-stream response notices after filtering internal-only notices."""
+        return [
+            SystemNotice(
+                category=notice["category"],
+                path=notice.get("path"),
+                reason=notice["reason"],
+                user_action=notice["user_action"],
+                surface_to_user=True,
+            )
+            for notice in self._yield_user_visible_notices()
+        ]
 
     def _should_allow_non_plan_write(self, project_id: str, user_message: str) -> bool:
         decision = self._turn_context.get("canonical_draft_decision")

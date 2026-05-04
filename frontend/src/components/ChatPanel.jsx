@@ -8,6 +8,7 @@ import {
   buildProjectWelcomeMessage,
   extractSseDataPayload,
   getStreamResponseError,
+  shouldRenderSystemNoticeMessage,
   shouldContinueSseStream,
   shouldFlushStreamingQueueImmediately,
   splitAssistantMessageBlocks,
@@ -530,6 +531,7 @@ export default function ChatPanel({
                     category: parsed.category || '',
                     reason: parsed.reason || '',
                     user_action: parsed.user_action || '',
+                    surface_to_user: parsed.surface_to_user !== false,
                   },
                 ])
               } else if (parsed.type === 'error') {
@@ -674,6 +676,9 @@ export default function ChatPanel({
         {messages.map((msg) => {
           // §9 system_notice — distinct warning block, yellow-orange tone
           if (msg.role === 'system_notice') {
+            if (!shouldRenderSystemNoticeMessage(msg)) {
+              return null
+            }
             return (
               <div key={msg.id} className="flex justify-start">
                 <div className="max-w-2xl w-full rounded-xl border border-[#6b4f1a] bg-[#2a1e0a] px-4 py-3 flex gap-3 items-start selectable-content">

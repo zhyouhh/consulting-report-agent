@@ -6,6 +6,7 @@ import {
   buildProjectWelcomeMessage,
   extractSseDataPayload,
   getStreamResponseError,
+  shouldRenderSystemNoticeMessage,
   shouldContinueSseStream,
   splitAssistantMessageBlocks,
   shouldFlushStreamingQueueImmediately,
@@ -159,5 +160,31 @@ test("splitAssistantMessageBlocks applies stripStageAckTags first", () => {
       '<stage-ack action="set">interview_done</stage-ack>\n正文段落',
     ),
     [{ type: "text", content: "正文段落" }],
+  );
+});
+
+test("system_notice with surface_to_user=false is not renderable", () => {
+  assert.equal(
+    shouldRenderSystemNoticeMessage({
+      role: "system_notice",
+      surface_to_user: false,
+      reason: "hide",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRenderSystemNoticeMessage({
+      role: "system_notice",
+      surface_to_user: true,
+      reason: "show",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRenderSystemNoticeMessage({
+      role: "system_notice",
+      reason: "legacy default show",
+    }),
+    true,
   );
 });

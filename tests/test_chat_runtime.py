@@ -8177,8 +8177,8 @@ class ChatRuntimeTests(unittest.TestCase):
             name="write_file",
             arguments=json.dumps(
                 {
-                    "file_path": "plan/review-checklist.md",
-                    "content": "审查人：咨询报告写作助手",
+                    "file_path": "stage_checkpoints.json",
+                    "content": '{"outline_confirmed_at": "2026-04-17T12:00:00"}',
                 },
                 ensure_ascii=False,
             ),
@@ -8192,10 +8192,11 @@ class ChatRuntimeTests(unittest.TestCase):
         notices = [event for event in events if event["type"] == "system_notice"]
 
         self.assertEqual(len(notices), 1)
-        self.assertEqual(notices[0]["category"], "write_blocked")
-        self.assertEqual(notices[0]["path"], "plan/review-checklist.md")
+        self.assertEqual(notices[0]["category"], "non_plan_write_blocked")
+        self.assertIsNone(notices[0]["path"])
         self.assertTrue(notices[0]["reason"])
         self.assertTrue(notices[0]["user_action"])
+        self.assertNotIn("surface_to_user", notices[0])
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_blocks_data_log_format_hint_write_in_s0(self, mock_openai):
@@ -8320,11 +8321,9 @@ class ChatRuntimeTests(unittest.TestCase):
         events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
         notices = [event for event in events if event["type"] == "system_notice"]
 
-        self.assertEqual(len(notices), 2)
-        self.assertEqual(
-            [notice["surface_to_user"] for notice in notices],
-            [False, True],
-        )
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["category"], "non_plan_write_blocked")
+        self.assertNotIn("surface_to_user", notices[0])
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_notice_reset_between_turns(self, mock_openai):
@@ -8335,8 +8334,8 @@ class ChatRuntimeTests(unittest.TestCase):
             name="write_file",
             arguments=json.dumps(
                 {
-                    "file_path": "plan/review-checklist.md",
-                    "content": "审查人：咨询报告写作助手",
+                    "file_path": "stage_checkpoints.json",
+                    "content": '{"outline_confirmed_at": "2026-04-17T12:00:00"}',
                 },
                 ensure_ascii=False,
             ),
@@ -8365,8 +8364,8 @@ class ChatRuntimeTests(unittest.TestCase):
                 name="write_file",
                 arguments=json.dumps(
                     {
-                        "file_path": "plan/review-checklist.md",
-                        "content": "审查人：咨询报告写作助手",
+                        "file_path": "stage_checkpoints.json",
+                        "content": '{"outline_confirmed_at": "2026-04-17T12:00:00"}',
                     },
                     ensure_ascii=False,
                 ),
@@ -8401,7 +8400,7 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertIn("system_notices", result)
         self.assertEqual(len(result["system_notices"]), 1)
-        self.assertEqual(result["system_notices"][0].category, "write_blocked")
+        self.assertEqual(result["system_notices"][0].category, "non_plan_write_blocked")
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_retries_when_assistant_claims_outline_written_without_actual_write(self, mock_openai):
@@ -11478,6 +11477,91 @@ class SystemNoticeFieldTests(unittest.TestCase):
             category="test", reason="r", user_action="a", surface_to_user=False,
         )
         self.assertFalse(notice.surface_to_user)
+
+
+class SystemNoticeServerSideFilterTests(ChatRuntimeTests):
+    def test_internal_notice_not_in_sse_yield(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["pending_system_notices"] = [
+            {
+                "type": "system_notice",
+                "category": "x_user",
+                "path": None,
+                "reason": "r1",
+                "user_action": "a1",
+                "surface_to_user": True,
+            },
+            {
+                "type": "system_notice",
+                "category": "x_internal",
+                "path": None,
+                "reason": "r2",
+                "user_action": "a2",
+                "surface_to_user": False,
+            },
+        ]
+
+        yielded = list(handler._yield_user_visible_notices())
+
+        self.assertEqual(len(yielded), 1)
+        self.assertEqual(yielded[0]["category"], "x_user")
+
+    def test_internal_notice_logged_when_filtered(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["pending_system_notices"] = [
+            {
+                "type": "system_notice",
+                "category": "x_internal",
+                "path": None,
+                "reason": "internal_r",
+                "user_action": "a",
+                "surface_to_user": False,
+            },
+        ]
+
+        with self.assertLogs("backend.chat", level="INFO") as caplog:
+            list(handler._yield_user_visible_notices())
+
+        self.assertTrue(any("internal-notice" in message for message in caplog.output))
+
+    def test_non_stream_response_filters_internal_notices(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["pending_system_notices"] = [
+            {
+                "type": "system_notice",
+                "category": "x_user",
+                "path": None,
+                "reason": "r1",
+                "user_action": "a1",
+                "surface_to_user": True,
+            },
+            {
+                "type": "system_notice",
+                "category": "x_internal",
+                "path": None,
+                "reason": "r2",
+                "user_action": "a2",
+                "surface_to_user": False,
+            },
+        ]
+
+        notices = handler._collect_user_visible_system_notices()
+
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0].category, "x_user")
+        self.assertTrue(notices[0].surface_to_user)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in SystemNoticeServerSideFilterTests.__dict__
+    ):
+        setattr(SystemNoticeServerSideFilterTests, _inherited_test_name, None)
+del _inherited_test_name
 
 
 class SystemNoticeDualDedupeTests(ChatRuntimeTests):

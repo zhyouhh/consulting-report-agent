@@ -24,6 +24,10 @@ export function shouldFlushStreamingQueueImmediately(reason = "") {
   return reason === "tool" || reason === "error" || reason === "abort";
 }
 
+export function shouldRenderSystemNoticeMessage(message = {}) {
+  return message.role === "system_notice" && message.surface_to_user !== false;
+}
+
 export function appendToolEventContent(prev = "", toolText = "") {
   const separator = prev && !prev.endsWith("\n") ? "\n" : "";
   return `${prev}${separator}${toolText}\n`;
