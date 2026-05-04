@@ -505,6 +505,7 @@ class WorkspaceApiTests(unittest.TestCase):
                     "path": "plan/review-checklist.md",
                     "reason": "review-checklist.md 的\"审查人\"字段必须由真实用户签字，请保留\"审查人：[待用户确认]\"让用户在 UI 上签字。",
                     "user_action": "请联系用户在右侧工作区完成对应的确认后再写入",
+                    "surface_to_user": True,
                 }
             ],
         }
