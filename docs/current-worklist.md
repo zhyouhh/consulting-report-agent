@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-05-04（max_iterations 10→20；反思循环已有兜底；S0 interview 全套实施完毕，1a Bug C / 1b Bug 1+3 标 ✅；reality_test 进 S0 收尾轮的撞顶根因定位）
+最后更新：2026-05-04（context-signal-and-intent-tag Phase 1 实施完成 16 commit 在 `claude/happy-jackson-938bd1`，5 reality_test bug 中 4 修 1 留 Phase 2，pytest 713 passed / dist 91MB 待实测；详见"最近已解决"第 0 条）
 
 ## 当前未解决 / 待验证
 
@@ -132,7 +132,28 @@
 
 ## 最近已解决
 
-0. ⭐ **400 死循环根因清理 + edit_file 工具 + debug dump 转正（2026-04-22）**
+0. ⭐ **context-signal-and-intent-tag Phase 1 实施完成（2026-05-04，16 commits 在 `claude/happy-jackson-938bd1`）**
+- 状态：`Phase 1 13/13 task done，待 reality_test 实测 + Phase 2/3`
+- 关联文档：
+  - spec `docs/superpowers/specs/2026-05-04-context-signal-and-intent-tag-design.md`（5 轮 review APPROVED）
+  - plan `docs/superpowers/plans/2026-05-04-context-signal-and-intent-tag.md`（6 轮 review APPROVED）
+  - handoff `docs/superpowers/handoffs/2026-05-04-phase1-impl-handoff.md`（cold-start 下个 session 用）
+- 5 reality_test bug 状态：
+  - **Bug A**（门禁误判）⏸ 留 Phase 2，由 `<draft-action>` tag 替代 `_classify_canonical_draft_turn` 关键词遍历
+  - **Bug B**（黄框污染）✅ A1 修：`SystemNotice.surface_to_user` 必填 + `_emit_system_notice_once` 双 dedupe + 服务端过滤
+  - **Bug C**（阈值黑盒）✅ A2 修：`_render_progress_markdown` 渲染 `**质量进度**: 5/7 条 有效来源` + tool_result 追加 `quality_hint`
+  - **Bug D**（兜底黑洞）✅ A3 修：`_finalize_empty_assistant_turn` helper（永不持久化空 assistant）+ `_coalesce_consecutive_user_messages` + 三层 sanitize（provider build / GET /conversation / 前端）
+  - **Bug E**（工具历史零记忆）✅ C1 修：`<!-- tool-log -->` HTML 注释嵌入 assistant content（模型看，前端 strip）
+- 编排器：`_finalize_assistant_turn` 重构成 7 步顺序（Task 13），3 个 caller（stream / non-stream / early-finalize）统一调
+- 测试基线：pytest 713 passed / 1 skipped / 0 failed（21 min）；frontend 168 passed；dist/咨询报告助手/ 91 MB
+- 派活节奏（实施统计参考）：
+  - 13 task × ~30-45 min/task ≈ 6-7 小时（含 spec/quality 两阶段 review）
+  - 全程 codex exec gpt-5.4 xhigh + PowerShell tool inline env 注入 + 20 min 静默 cron
+  - Task 13 编排器整合是最贵的——3 commit（实施 + return value fix1 + 14 旧测试断言修 fix2）
+  - chat_runtime suite 11k 行是 pytest 全套主时间瓶颈，reviewer prompt 必须 narrow scope
+- **下一步**：（1）reality_test 实测（启动 dist exe，验 4 个修好的 bug 不复现）→（2）Phase 2 Task 15-22（B1 draft-action tag 灰度并行）→（3）Task 23 cutover **必须用户审 5-session compare report** →（4）Phase 3 Task 24-27 删旧 + 重打包 + 同步文档
+
+1. ⭐ **400 死循环根因清理 + edit_file 工具 + debug dump 转正（2026-04-22）**
 - 状态：`已完成`（claude 侧自改自测，未派 codex；测试 509 passed / 1 skipped / 0 failed）
 - 根因：`newapi → Gemini` OpenAI 流式兼容层偶发把并行 `functionCall` 的 chunk `index` 合并到 0，导致我方累积层把多个 tool_call 的 `name` 和 `arguments` 首尾拼接成 `"write_filewrite_file"` + `"{...}{...}"`，上游拒收 `400 INVALID_ARGUMENT`
 - 代码改动全部在 `backend/chat.py`：
