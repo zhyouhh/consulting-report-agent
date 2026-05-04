@@ -74,6 +74,12 @@ _PROJECT_REQUEST_LOCKS: dict[str, threading.RLock] = {}
 _PROJECT_REQUEST_LOCKS_GUARD = threading.Lock()
 _SEARCH_ROUTER_SINGLETON: SearchRouter | None = None
 _SEARCH_ROUTER_GUARD = threading.Lock()
+TAIL_TAG_SCAN_RE = re.compile(
+    r'<stage-ack(?:\s+action="(?:set|clear)")?>[a-z_0-9]+</stage-ack>'
+    r'|<draft-action>[^<]+</draft-action>'
+    r'|<draft-action-replace>[\s\S]*?</draft-action-replace>',
+    re.IGNORECASE,
+)
 
 
 def stream_split_safe_tail(buffer: str) -> tuple[str, str]:
@@ -1165,6 +1171,99 @@ class ChatHandler:
                     result = {"status": "error", "raw": msg.get("content")}
                 pairs.append(ToolPair(name=meta["name"], args=meta["args"], result=result))
         return pairs
+
+    def _format_tool_pair_line(self, pair: ToolPair) -> str:
+        """Format: - TOOL_NAME(SHORT_ARGS) ✓ SUMMARY or ✗ ERROR_BRIEF. Max 120 chars.
+
+        v2: append_report_draft 真实 schema 只有 content；执行结果有 path。所以路径优先 result["path"]。
+        """
+        try:
+            args_dict = json.loads(pair.args) if isinstance(pair.args, str) else (pair.args or {})
+        except json.JSONDecodeError:
+            args_dict = {}
+        if not isinstance(args_dict, dict):
+            args_dict = {}
+
+        short_args = ""
+        if args_dict:
+            if pair.name == "append_report_draft":
+                short_args = "..."
+            else:
+                first_key = next(iter(args_dict))
+                first_val = str(args_dict[first_key])
+                if len(first_val) > 40:
+                    first_val = first_val[:37] + "..."
+                short_args = f"'{first_val}'" if first_key in {"query", "url"} else first_val
+
+        is_success = pair.result.get("status") == "success"
+        symbol = "✓" if is_success else "✗"
+
+        if is_success:
+            if pair.name == "web_search":
+                n = len(pair.result.get("results") or [])
+                summary = f"{n} results"
+            elif pair.name == "fetch_url":
+                kb = round(len(pair.result.get("content") or "") / 1024, 1)
+                summary = f"{kb} KB"
+            elif pair.name in {"write_file", "edit_file"}:
+                summary = args_dict.get("file_path", "")
+                qh = pair.result.get("quality_hint")
+                if qh:
+                    summary = f"{summary} | {qh[:40]}"
+            elif pair.name == "append_report_draft":
+                summary = pair.result.get("path", "content/report_draft_v1.md")
+            else:
+                summary = ""
+        else:
+            msg = pair.result.get("message") or pair.result.get("error") or "unknown"
+            summary = msg[:60]
+
+        line = f"- {pair.name}({short_args}) {symbol} {summary}".rstrip()
+        if len(line) > 120:
+            line = line[:117] + "..."
+        return line
+
+    def _append_tool_log_to_assistant(
+        self,
+        content: str,
+        current_turn_messages: List[Dict],
+    ) -> str:
+        pairs = self._pair_tool_calls_with_results(current_turn_messages)
+        if not pairs:
+            return content
+        lines = [self._format_tool_pair_line(p) for p in pairs]
+        block = "<!-- tool-log\n" + "\n".join(lines) + "\n-->"
+        return self._insert_before_tail_tags(content, block)
+
+    def _insert_before_tail_tags(self, content: str, block: str) -> str:
+        """Insert before tail tag block (stage-ack / draft-action / draft-action-replace).
+        Uses TAIL_TAG_SCAN_RE module-level regex.
+        """
+        spans = [(m.start(), m.end()) for m in TAIL_TAG_SCAN_RE.finditer(content)]
+        if not spans:
+            sep = "\n\n" if content and not content.endswith("\n") else ""
+            return content + sep + block
+
+        last_pos = -1
+        i = 0
+        while i < len(content):
+            in_tag = False
+            for s, e in spans:
+                if s <= i < e:
+                    i = e
+                    in_tag = True
+                    break
+            if in_tag:
+                continue
+            if not content[i].isspace():
+                last_pos = i
+            i += 1
+        tail_anchor = last_pos + 1
+
+        before = content[:tail_anchor].rstrip()
+        after = content[tail_anchor:]
+        sep = "\n\n" if before else ""
+        return before + sep + block + "\n" + after.lstrip("\n")
 
     def _persist_successful_tool_result(
         self,
