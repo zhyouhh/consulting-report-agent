@@ -11936,3 +11936,39 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(CoalesceConsecutiveUserTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class HistorySanitizeTests(ChatRuntimeTests):
+    def test_legacy_fallback_skipped_in_provider_message(self):
+        handler = self._make_handler_with_project()
+        msg = {"role": "assistant", "content": "（本轮无回复）"}
+        result = handler._to_provider_message(self.project_id, msg, include_images=False)
+        self.assertIsNone(result)
+
+    def test_user_visible_fallback_skipped_in_provider_message(self):
+        from backend.chat import USER_VISIBLE_FALLBACK
+        handler = self._make_handler_with_project()
+        msg = {"role": "assistant", "content": USER_VISIBLE_FALLBACK}
+        result = handler._to_provider_message(self.project_id, msg, include_images=False)
+        self.assertIsNone(result)
+
+    def test_normal_assistant_passes_through(self):
+        handler = self._make_handler_with_project()
+        msg = {"role": "assistant", "content": "normal reply"}
+        result = handler._to_provider_message(self.project_id, msg, include_images=False)
+        self.assertEqual(result["content"], "normal reply")
+
+    def test_user_role_with_legacy_text_not_sanitized(self):
+        handler = self._make_handler_with_project()
+        msg = {"role": "user", "content": "（本轮无回复）"}
+        result = handler._to_provider_message(self.project_id, msg, include_images=False)
+        self.assertEqual(result["content"], "（本轮无回复）")
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in HistorySanitizeTests.__dict__
+    ):
+        setattr(HistorySanitizeTests, _inherited_test_name, None)
+del _inherited_test_name

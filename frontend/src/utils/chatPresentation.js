@@ -126,3 +126,15 @@ export function buildProjectWelcomeMessage(project = {}) {
   lines.push("如果这些信息没问题，请直接补充你现在最想让我先做的那一步；如果有偏差，也可以直接纠正。");
   return lines.join("\n");
 }
+
+export const LEGACY_EMPTY_ASSISTANT_FALLBACKS = new Set([
+  "（本轮无回复）",
+  "（这一轮我没有产出可见回复，可能是处理过程中断了。请把刚才的需求换个说法再发一次。）",
+]);
+
+export function sanitizeAssistantMessage(message) {
+  if (message.role !== "assistant") return message;
+  const trimmed = (message.content || "").trim();
+  if (LEGACY_EMPTY_ASSISTANT_FALLBACKS.has(trimmed)) return null;
+  return message;
+}

@@ -1,12 +1,16 @@
 import asyncio
+import json
+import tempfile
 import threading
 import unittest
 from io import BytesIO
+from pathlib import Path
 from unittest import mock
 
 from fastapi.testclient import TestClient
 
 import backend.main as main_module
+from backend.chat import LEGACY_EMPTY_ASSISTANT_FALLBACKS, USER_VISIBLE_FALLBACK
 
 
 class CheckpointTableInvariantTests(unittest.TestCase):
@@ -524,3 +528,78 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(response.json()["content"], "已拦截伪造写入")
         self.assertEqual(len(response.json()["system_notices"]), 1)
         self.assertEqual(response.json()["system_notices"][0]["category"], "write_blocked")
+
+
+class GetConversationSanitizeTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(main_module.app)
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.project_path = Path(self.tmpdir.name) / "demo-project"
+        self.project_path.mkdir(parents=True, exist_ok=True)
+        self.patcher = mock.patch.object(
+            main_module.skill_engine,
+            "get_project_path",
+            return_value=self.project_path,
+        )
+        self.mock_get_project_path = self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
+    def _write_conversation(self, messages):
+        (self.project_path / "conversation.json").write_text(
+            json.dumps(messages, ensure_ascii=False), encoding="utf-8",
+        )
+
+    def test_get_conversation_returns_messages_dict(self):
+        self._write_conversation([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("messages", data)
+        self.assertEqual(len(data["messages"]), 2)
+
+    def test_get_conversation_filters_legacy_fallback_assistants(self):
+        self._write_conversation([
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "（本轮无回复）"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": USER_VISIBLE_FALLBACK},
+            {"role": "user", "content": "q3"},
+            {"role": "assistant", "content": "real reply"},
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        data = resp.json()
+        self.assertEqual(len(data["messages"]), 4)
+        contents = [m["content"] for m in data["messages"]]
+        self.assertIn("q1", contents)
+        self.assertIn("real reply", contents)
+        self.assertNotIn("（本轮无回复）", contents)
+        self.assertNotIn(USER_VISIBLE_FALLBACK, contents)
+
+    def test_get_conversation_strips_tool_log_comments_from_assistants(self):
+        """assistant content 含 <!-- tool-log ... --> 注释 → API 返回不含"""
+        self._write_conversation([
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "Real reply.\n<!-- tool-log\n- web_search ✓\n-->"},
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        self.assertNotIn("<!-- tool-log", assistant_msg["content"])
+        self.assertIn("Real reply", assistant_msg["content"])
+
+    def test_get_conversation_user_role_unchanged_even_with_tool_log_text(self):
+        self._write_conversation([
+            {"role": "user", "content": "see <!-- tool-log\n--> in my message"},
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        data = resp.json()
+        self.assertIn("<!-- tool-log", data["messages"][0]["content"])
+
+    def test_get_conversation_404_when_project_missing(self):
+        self.mock_get_project_path.return_value = None
+        resp = self.client.get("/api/projects/missing/conversation")
+        self.assertEqual(resp.status_code, 404)

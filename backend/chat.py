@@ -4206,6 +4206,9 @@ class ChatHandler:
             return None
         if role == "assistant":
             content = message.get("content", "") or ""
+            # v5: sanitize 历史 fallback 污染——这种 assistant 不喂回模型。
+            if content.strip() in LEGACY_EMPTY_ASSISTANT_FALLBACKS:
+                return None
             # 历史里可能残留 content="" 的 assistant（早期版本无兜底时落盘过）。
             # Gemini 对空 parts 的 model turn 会拒 400，这里统一兜底占位。
             if not content.strip():

@@ -17,7 +17,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from .chat import ChatHandler
+from .chat import ChatHandler, LEGACY_EMPTY_ASSISTANT_FALLBACKS
 from .config import Settings, get_base_path, load_settings, save_settings
 from .context_policy import clamp_custom_context_limit_override
 from .models import ChatRequest, ChatResponse, ProjectInfo
@@ -374,7 +374,15 @@ async def get_conversation(project_id: str):
     if conv_file.exists():
         with open(conv_file, "r", encoding="utf-8") as f:
             messages = json.load(f)
-        return {"messages": messages}
+        # v5: sanitize 历史 fallback assistant，避免旧占位气泡重新展示。
+        sanitized = [
+            m for m in messages
+            if not (
+                m.get("role") == "assistant"
+                and (m.get("content") or "").strip() in LEGACY_EMPTY_ASSISTANT_FALLBACKS
+            )
+        ]
+        return {"messages": sanitized}
     return {"messages": []}
 
 

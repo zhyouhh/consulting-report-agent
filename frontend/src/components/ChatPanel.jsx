@@ -8,6 +8,7 @@ import {
   buildProjectWelcomeMessage,
   extractSseDataPayload,
   getStreamResponseError,
+  sanitizeAssistantMessage,
   shouldRenderSystemNoticeMessage,
   shouldContinueSseStream,
   shouldFlushStreamingQueueImmediately,
@@ -123,6 +124,8 @@ export default function ChatPanel({
           if (history.length > 0) {
             // 过滤掉 system/tool 消息，只显示 user/assistant
             const displayMessages = history
+              .map(sanitizeAssistantMessage)
+              .filter(m => m !== null)
               .filter(m => m.role === 'user' || m.role === 'assistant')
               .map((m, i) => ({
                 id: `${Date.now()}-${i}`,

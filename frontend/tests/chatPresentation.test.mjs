@@ -8,6 +8,7 @@ import {
   getStreamResponseError,
   shouldRenderSystemNoticeMessage,
   shouldContinueSseStream,
+  sanitizeAssistantMessage,
   splitAssistantMessageBlocks,
   shouldFlushStreamingQueueImmediately,
   stripStageAckTags,
@@ -187,4 +188,27 @@ test("system_notice with surface_to_user=false is not renderable", () => {
     }),
     true,
   );
+});
+
+test("sanitizeAssistantMessage drops legacy fallback assistant", () => {
+  const msg = { role: "assistant", content: "（本轮无回复）" };
+  assert.equal(sanitizeAssistantMessage(msg), null);
+});
+
+test("sanitizeAssistantMessage drops user_visible_fallback assistant", () => {
+  const msg = {
+    role: "assistant",
+    content: "（这一轮我没有产出可见回复，可能是处理过程中断了。请把刚才的需求换个说法再发一次。）",
+  };
+  assert.equal(sanitizeAssistantMessage(msg), null);
+});
+
+test("sanitizeAssistantMessage keeps user role with same text", () => {
+  const msg = { role: "user", content: "（本轮无回复）" };
+  assert.deepEqual(sanitizeAssistantMessage(msg), msg);
+});
+
+test("sanitizeAssistantMessage keeps normal assistant", () => {
+  const msg = { role: "assistant", content: "real reply" };
+  assert.deepEqual(sanitizeAssistantMessage(msg), msg);
 });
