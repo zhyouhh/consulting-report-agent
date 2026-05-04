@@ -9,6 +9,7 @@ import requests
 import socket
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, List
 from html import unescape
@@ -118,6 +119,13 @@ def _get_project_request_lock(project_id: str) -> threading.RLock:
             lock = threading.RLock()
             _PROJECT_REQUEST_LOCKS[lock_key] = lock
     return lock
+
+
+@dataclass
+class ToolPair:
+    name: str
+    args: str
+    result: dict
 
 
 class ChatHandler:
@@ -1130,6 +1138,33 @@ class ChatHandler:
 
         updated_entries.append(new_entry)
         return updated_entries
+
+    def _pair_tool_calls_with_results(self, current_turn_messages: List[Dict]) -> List[ToolPair]:
+        """严格按 tool_call_id 配对。跳过纯文本 assistant、retry user 隔板、orphan tool 消息。"""
+        pending_calls: dict[str, dict] = {}
+        pairs: List[ToolPair] = []
+        for msg in current_turn_messages:
+            if msg.get("role") == "assistant":
+                for tc in (msg.get("tool_calls") or []):
+                    tc_id = tc.get("id")
+                    if tc_id:
+                        pending_calls[tc_id] = {
+                            "name": tc.get("function", {}).get("name"),
+                            "args": tc.get("function", {}).get("arguments") or "",
+                        }
+            elif msg.get("role") == "tool":
+                tc_id = msg.get("tool_call_id")
+                meta = pending_calls.pop(tc_id, None) if tc_id else None
+                if meta is None:
+                    continue
+                try:
+                    result = json.loads(msg.get("content") or "{}")
+                    if not isinstance(result, dict):
+                        result = {"status": "error", "raw": str(result)}
+                except json.JSONDecodeError:
+                    result = {"status": "error", "raw": msg.get("content")}
+                pairs.append(ToolPair(name=meta["name"], args=meta["args"], result=result))
+        return pairs
 
     def _persist_successful_tool_result(
         self,
