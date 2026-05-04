@@ -3862,6 +3862,40 @@ class ChatHandler:
                 history_messages.append(provider_message)
         return history_messages, state
 
+    def _coalesce_consecutive_user_messages(self, conversation: List[Dict]) -> List[Dict]:
+        """合并相邻的 user role 消息，防 Gemini 角色交替 400。"""
+        def _normalize_content(c) -> str | list:
+            if c is None:
+                return ""
+            if isinstance(c, str) or isinstance(c, list):
+                return c
+            return str(c)
+
+        coalesced: List[Dict] = []
+        for msg in conversation:
+            if (
+                coalesced
+                and msg.get("role") == "user"
+                and coalesced[-1].get("role") == "user"
+            ):
+                prev = coalesced[-1]
+                prev_content = _normalize_content(prev.get("content"))
+                new_content = _normalize_content(msg.get("content"))
+                if isinstance(prev_content, str) and isinstance(new_content, str):
+                    joined = prev_content + "\n\n" + new_content
+                    prev["content"] = joined.strip("\n") if (prev_content or new_content) else ""
+                else:
+                    prev_parts = prev_content if isinstance(prev_content, list) else (
+                        [{"type": "text", "text": prev_content}] if prev_content else []
+                    )
+                    new_parts = new_content if isinstance(new_content, list) else (
+                        [{"type": "text", "text": new_content}] if new_content else []
+                    )
+                    prev["content"] = prev_parts + new_parts
+            else:
+                coalesced.append(dict(msg))
+        return coalesced
+
     def _build_provider_turn_conversation(
         self,
         project_id: str,
@@ -3886,7 +3920,16 @@ class ChatHandler:
         current_turn_start_index = len(conversation) - 1
         if current_turn_messages:
             conversation.extend(current_turn_messages)
-        return conversation, current_turn_start_index
+        # v5: 合并相邻 user role（必须在 budget fit 之前）
+        coalesced = self._coalesce_consecutive_user_messages(conversation)
+
+        # v2 修订：合并可能改变 current_turn_start_index——重新定位
+        # current user message 现在被合并到了"最后一个 user role 块"里
+        new_current_turn_start_index = next(
+            (i for i in range(len(coalesced) - 1, -1, -1) if coalesced[i].get("role") == "user"),
+            len(coalesced),
+        )
+        return coalesced, new_current_turn_start_index
 
     def _memory_items_from_state(
         self,

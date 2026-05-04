@@ -11829,3 +11829,110 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(SystemNoticeDualDedupeTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class CoalesceConsecutiveUserTests(ChatRuntimeTests):
+    def test_two_str_user_messages_merged(self):
+        handler = self._make_handler_with_project()
+        conv = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+        ]
+        result = handler._coalesce_consecutive_user_messages(conv)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[1]["role"], "user")
+        self.assertEqual(result[1]["content"], "first\n\nsecond")
+
+    def test_str_plus_multipart_merged_to_array(self):
+        handler = self._make_handler_with_project()
+        conv = [
+            {"role": "user", "content": "text"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hi"},
+                    {"type": "image_url", "image_url": {"url": "data:..."}},
+                ],
+            },
+        ]
+        result = handler._coalesce_consecutive_user_messages(conv)
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0]["content"], list)
+        self.assertEqual(result[0]["content"][0], {"type": "text", "text": "text"})
+        self.assertEqual(result[0]["content"][1], {"type": "text", "text": "hi"})
+
+    def test_two_multipart_arrays_merged(self):
+        handler = self._make_handler_with_project()
+        conv = [
+            {"role": "user", "content": [{"type": "text", "text": "a"}]},
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:..."}}]},
+        ]
+        result = handler._coalesce_consecutive_user_messages(conv)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result[0]["content"]), 2)
+
+    def test_does_not_modify_original_history(self):
+        handler = self._make_handler_with_project()
+        original_msg = {"role": "user", "content": "first"}
+        conv = [original_msg, {"role": "user", "content": "second"}]
+        handler._coalesce_consecutive_user_messages(conv)
+        self.assertEqual(original_msg["content"], "first")
+
+    def test_alternating_user_assistant_no_merge(self):
+        handler = self._make_handler_with_project()
+        conv = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+        ]
+        result = handler._coalesce_consecutive_user_messages(conv)
+        self.assertEqual(len(result), 3)
+
+    def test_none_content_normalized_to_empty_string(self):
+        handler = self._make_handler_with_project()
+        conv = [
+            {"role": "user", "content": None},
+            {"role": "user", "content": "after"},
+        ]
+        result = handler._coalesce_consecutive_user_messages(conv)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["content"], "after")
+
+    def test_invoked_in_build_provider_turn_conversation(self):
+        handler = self._make_handler_with_project()
+        history = [
+            {"role": "user", "content": "first", "attached_material_ids": []},
+            {"role": "user", "content": "second", "attached_material_ids": []},
+        ]
+        current = {"role": "user", "content": "current", "attached_material_ids": []}
+        conv, _ = handler._build_provider_turn_conversation(
+            self.project_id,
+            history,
+            current,
+        )
+        user_msgs = [m for m in conv if m.get("role") == "user"]
+        self.assertEqual(len(user_msgs), 1)
+
+    def test_coalesce_recomputes_current_turn_start_index(self):
+        handler = self._make_handler_with_project()
+        history = [{"role": "user", "content": "previous", "attached_material_ids": []}]
+        current = {"role": "user", "content": "current", "attached_material_ids": []}
+        conv, idx = handler._build_provider_turn_conversation(
+            self.project_id,
+            history,
+            current,
+        )
+        user_msgs = [m for m in conv if m.get("role") == "user"]
+        self.assertEqual(len(user_msgs), 1)
+        self.assertEqual(conv[idx].get("role"), "user")
+        self.assertIn("current", conv[idx]["content"])
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in CoalesceConsecutiveUserTests.__dict__
+    ):
+        setattr(CoalesceConsecutiveUserTests, _inherited_test_name, None)
+del _inherited_test_name
