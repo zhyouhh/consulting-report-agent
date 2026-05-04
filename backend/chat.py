@@ -2061,6 +2061,7 @@ class ChatHandler:
         user_message: str,
         *,
         stage_code: str | None = None,
+        silent: bool = False,
     ) -> dict[str, object]:
         """
         新通道：粗粒度门禁（spec §4.2）。
@@ -2099,13 +2100,14 @@ class ChatHandler:
         # Step 2: 含意图但 stage 不对 → reject
         if preflight_intent is not None:
             if normalized_stage not in self.NON_PLAN_WRITE_ALLOWED_STAGE_CODES:
-                self._emit_system_notice_once(
-                    category="non_plan_write_blocked",
-                    path=None,
-                    reason="S0/S1 阶段不能写正文，请先确认大纲再启动正文",
-                    user_action="请先在工作区确认大纲，再发起正文请求",
-                    surface_to_user=True,
-                )
+                if not silent:
+                    self._emit_system_notice_once(
+                        category="non_plan_write_blocked",
+                        path=None,
+                        reason="S0/S1 阶段不能写正文，请先确认大纲再启动正文",
+                        user_action="请先在工作区确认大纲，再发起正文请求",
+                        surface_to_user=True,
+                    )
                 return self._make_canonical_draft_decision(
                     stage_code=normalized_stage,
                     mode="reject",
@@ -6496,7 +6498,9 @@ class ChatHandler:
         new_channel_exception = None
 
         try:
-            new_decision = self._preflight_canonical_draft_check(project_id, user_message)
+            new_decision = self._preflight_canonical_draft_check(
+                project_id, user_message, silent=True
+            )
         except Exception as e:
             new_channel_exception = {"stage": "preflight", "message": str(e)[:200]}
             try:

@@ -12577,6 +12577,39 @@ class DraftDecisionCompareEventTests(ChatRuntimeTests):
         self.assertTrue(tp["begin"])
         self.assertFalse(tp["section"])  # executable=False 不算
 
+    def test_compare_writer_silent_does_not_emit_notice_in_s0_reject(self):
+        """v2 fix1 P0 regression: when compare writer's preflight rejects in S0/S1,
+        it MUST NOT emit a user-visible system_notice (Phase 2a silent channel contract)."""
+        handler = self._make_handler_with_project()
+        # Force project into S0 by NOT writing any stage prerequisites.
+        # turn_context starts empty.
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=False)
+        # Run compare writer with a draft-intent message in S0.
+        handler._run_phase2a_compare_writer(self.project_id, "开始写报告吧")
+        # surface_to_user notice MUST NOT have been emitted by the new channel.
+        notices = handler._turn_context.get("pending_system_notices", [])
+        user_notices = [
+            n for n in notices
+            if (isinstance(n, dict) and n.get("surface_to_user") is True)
+        ]
+        self.assertEqual(
+            user_notices, [],
+            f"compare writer leaked user-visible notice into pending: {user_notices}",
+        )
+
+    def test_preflight_silent_param_skips_notice(self):
+        """Direct test of silent param: preflight in silent mode does not emit notice."""
+        handler = self._make_handler_with_project()
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "开始写报告吧", stage_code="S0", silent=True,
+        )
+        # decision still rejects (return value contract unchanged)
+        self.assertEqual(decision["mode"], "reject")
+        # but no surface_to_user notice was emitted
+        notices = handler._turn_context.get("pending_system_notices", [])
+        user_notices = [n for n in notices if n.get("surface_to_user")]
+        self.assertEqual(user_notices, [])
+
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
