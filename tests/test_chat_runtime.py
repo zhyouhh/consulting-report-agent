@@ -12138,3 +12138,73 @@ class StreamSplitSafeTailDraftActionTests(unittest.TestCase):
         self.assertTrue(hold.startswith("<draft-action"))
 
 
+class PreflightCheckTests(ChatRuntimeTests):
+    def test_preflight_keyword_intent_begin_for_start_writing(self):
+        handler = self._make_handler_with_project()
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "开始写报告吧", stage_code="S4",
+        )
+        self.assertEqual(decision["preflight_keyword_intent"], "begin")
+
+    def test_preflight_keyword_intent_continue_for_continue_writing(self):
+        handler = self._make_handler_with_project()
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "继续写", stage_code="S4",
+        )
+        self.assertEqual(decision["preflight_keyword_intent"], "continue")
+
+    def test_preflight_keyword_intent_none_for_unrelated(self):
+        handler = self._make_handler_with_project()
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "你好", stage_code="S4",
+        )
+        self.assertIsNone(decision["preflight_keyword_intent"])
+
+    def test_preflight_keyword_intent_never_section_or_replace(self):
+        handler = self._make_handler_with_project()
+        # spec §4.2 硬约束
+        for msg in ["重写第二章", "把 X 改成 Y", "section:foo", "replace this"]:
+            decision = handler._preflight_canonical_draft_check(
+                self.project_id, msg, stage_code="S4",
+            )
+            self.assertNotIn(
+                decision["preflight_keyword_intent"], {"section", "replace"},
+            )
+
+    def test_preflight_s0_with_draft_intent_rejects(self):
+        handler = self._make_handler_with_project()
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "开始写报告吧", stage_code="S0",
+        )
+        self.assertEqual(decision["mode"], "reject")
+        # surface_to_user system_notice 应被发出
+        notices = handler._turn_context.get("pending_system_notices", [])
+        user_notices = [n for n in notices if n.get("surface_to_user")]
+        self.assertTrue(any("S0" in (n.get("reason") or "") or "大纲" in (n.get("reason") or "") for n in user_notices))
+
+    def test_preflight_no_decisions_no_keyword_no_change(self):
+        # "你好" 在 S4 → no_write
+        handler = self._make_handler_with_project()
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "你好", stage_code="S4",
+        )
+        self.assertEqual(decision["mode"], "no_write")
+
+    def test_preflight_begin_wins_over_continue_when_both_match(self):
+        """v2 显式：begin/continue 双命中时，按 dict 顺序 begin 在前，begin 赢"""
+        handler = self._make_handler_with_project()
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "开始写报告，然后继续写", stage_code="S4",
+        )
+        self.assertEqual(decision["preflight_keyword_intent"], "begin")
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in PreflightCheckTests.__dict__
+    ):
+        setattr(PreflightCheckTests, _inherited_test_name, None)
+del _inherited_test_name
+
+

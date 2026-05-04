@@ -70,6 +70,24 @@ LEGACY_EMPTY_ASSISTANT_FALLBACKS = frozenset({
 _STAGE_ACK_MARKER = "<stage-ack"
 _DRAFT_ACTION_MARKER = "<draft-action"  # 同时覆盖 <draft-action-replace
 _TAIL_GUARD_MARKERS = (_STAGE_ACK_MARKER, _DRAFT_ACTION_MARKER)
+# Spec §4.7 — 极短关键词列表，分 begin/continue 两类，仅供 preflight 粗粒度判定
+_DRAFT_INTENT_PREFLIGHT_KEYWORDS = {
+    "begin": (
+        "开始写报告",
+        "开始写正文",
+        "开始起草",
+        "起草报告",
+        "写第一版",
+    ),
+    "continue": (
+        "继续写",
+        "继续写报告",
+        "继续写正文",
+        "接着写",
+        "写下一章",
+        "写下一段",
+    ),
+}
 _CONVERSATION_STATE_LOCKS: dict[str, threading.RLock] = {}
 _CONVERSATION_STATE_LOCKS_GUARD = threading.Lock()
 _PROJECT_REQUEST_LOCKS: dict[str, threading.RLock] = {}
@@ -1819,6 +1837,7 @@ class ChatHandler:
             "mixed_intent_secondary_family": None,
             "effective_turn_target_count": None,
             "intent_kind": None,
+            "preflight_keyword_intent": None,
             "old_text": None,
             "new_text": None,
         }
@@ -1837,6 +1856,7 @@ class ChatHandler:
         mixed_intent_secondary_family: str | None = None,
         effective_turn_target_count: int | None = None,
         intent_kind: str | None = None,
+        preflight_keyword_intent: str | None = None,
         old_text: str | None = None,
         new_text: str | None = None,
     ) -> dict[str, object]:
@@ -1853,11 +1873,89 @@ class ChatHandler:
                 "mixed_intent_secondary_family": mixed_intent_secondary_family,
                 "effective_turn_target_count": effective_turn_target_count,
                 "intent_kind": intent_kind,
+                "preflight_keyword_intent": preflight_keyword_intent,
                 "old_text": old_text,
                 "new_text": new_text,
             }
         )
         return decision
+
+    def _preflight_canonical_draft_check(
+        self,
+        project_id: str,
+        user_message: str,
+        *,
+        stage_code: str | None = None,
+    ) -> dict[str, object]:
+        """
+        新通道：粗粒度门禁（spec §4.2）。
+        1. 用户消息是否含正文意图（_DRAFT_INTENT_PREFLIGHT_KEYWORDS 命中）？
+        2. 含意图时 stage / outline 是否允许？
+        3. mixed-intent 拆轮？
+
+        返回 _make_canonical_draft_decision dict，preflight_keyword_intent 字段填值。
+        不再做 begin/continue/section/replace 的细分（细分由 draft-action tag 决定）。
+
+        Phase 2a 期间：仅供 Task 20 compare 使用，不参与实际决策。
+        Phase 2b 切主时：替代旧 classifier 成为唯一 preflight。
+        """
+        # stage 推断：复用现有 inline 逻辑（chat.py:1649-1657 同款）
+        normalized_stage = (stage_code or "").strip()
+        if not normalized_stage:
+            project_path = self.skill_engine.get_project_path(project_id)
+            if project_path:
+                normalized_stage = (
+                    self.skill_engine._infer_stage_state(project_path).get("stage_code") or "S0"
+                )
+            else:
+                normalized_stage = "S0"
+
+        text = (user_message or "").strip()
+        if not text:
+            return self._empty_canonical_draft_decision(stage_code=normalized_stage)
+
+        # Step 1: preflight_keyword_intent 检测（dict 顺序定义优先级：begin 在前）
+        preflight_intent = None
+        for intent, kws in _DRAFT_INTENT_PREFLIGHT_KEYWORDS.items():
+            if self._phrase_hits(text, list(kws)):
+                preflight_intent = intent  # "begin" 或 "continue"
+                break  # 首匹配赢——begin 比 continue 优先
+
+        # Step 2: 含意图但 stage 不对 → reject
+        if preflight_intent is not None:
+            if normalized_stage not in self.NON_PLAN_WRITE_ALLOWED_STAGE_CODES:
+                self._emit_system_notice_once(
+                    category="non_plan_write_blocked",
+                    path=None,
+                    reason="S0/S1 阶段不能写正文，请先确认大纲再启动正文",
+                    user_action="请先在工作区确认大纲，再发起正文请求",
+                    surface_to_user=True,
+                )
+                return self._make_canonical_draft_decision(
+                    stage_code=normalized_stage,
+                    mode="reject",
+                    priority="P_PREFLIGHT_STAGE",
+                    fixed_message=self.CANONICAL_DRAFT_STAGE_GATE_MESSAGE,
+                    preflight_keyword_intent=preflight_intent,
+                )
+
+        # Step 3: mixed-intent 拆轮（保留现有 helper）
+        secondary = self._secondary_action_families_in_message(text)
+        if len(secondary) > 1 and preflight_intent is not None:
+            return self._make_canonical_draft_decision(
+                stage_code=normalized_stage,
+                mode="reject",
+                priority="P_PREFLIGHT_MULTI",
+                fixed_message=self.CANONICAL_DRAFT_SPLIT_TURN_MESSAGE,
+                preflight_keyword_intent=preflight_intent,
+            )
+
+        return self._make_canonical_draft_decision(
+            stage_code=normalized_stage,
+            mode="no_write" if preflight_intent is None else "require",
+            priority="P_PREFLIGHT_OK",
+            preflight_keyword_intent=preflight_intent,
+        )
 
     def _classify_canonical_draft_turn(
         self,
