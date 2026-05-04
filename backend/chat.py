@@ -6769,7 +6769,7 @@ class ChatHandler:
             {"role": "assistant", "content": persisted_content},
         ])
         self._save_conversation(project_id, history)
-        return visible_content
+        return persisted_content
 
     def _apply_stage_ack_event(self, project_id: str, event) -> None:
         if (
