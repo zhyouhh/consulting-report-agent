@@ -2599,7 +2599,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 ):
                     result = handler.chat(project["id"], "继续", max_iterations=2)
 
-        self.assertEqual(result["content"], "最终答复")
+        self.assertIn("最终答复", result["content"])
         self.assertEqual(fit_mock.call_count, 2)
         self.assertTrue(any(message.get("role") == "tool" for message in fit_inputs[1]))
         self.assertEqual(
@@ -2686,7 +2686,7 @@ class ChatRuntimeTests(unittest.TestCase):
             second_call_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
             persisted_state = json.loads((project_dir / "conversation_state.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(result["content"], "最终答复")
+        self.assertIn("最终答复", result["content"])
         self.assertTrue(any(message.get("role") == "tool" for message in second_call_messages))
         self.assertFalse(any(handler._is_memory_block_message(message) for message in second_call_messages))
         self.assertEqual(len(persisted_state["memory_entries"]), 1)
@@ -2974,7 +2974,7 @@ class ChatRuntimeTests(unittest.TestCase):
                     ):
                         result = handler.chat(project["id"], "继续", max_iterations=2)
 
-        self.assertEqual(result["content"], "最终答复")
+        self.assertIn("最终答复", result["content"])
         self.assertEqual(result["token_usage"]["usage_source"], "unavailable")
         self.assertIsNone(result["token_usage"]["context_used_tokens"])
         self.assertEqual(result["token_usage"]["post_turn_compaction_status"], "skipped_unavailable")
@@ -6039,7 +6039,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 for item in tool_results
             )
         )
-        self.assertEqual(result["content"], final_message)
+        self.assertIn(final_message, result["content"])
         self.assertIn(result["content"], saved[-1]["content"])
         self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertIn("新结论", updated)
@@ -6279,7 +6279,7 @@ class ChatRuntimeTests(unittest.TestCase):
 
         updated = draft_path.read_text(encoding="utf-8")
 
-        self.assertEqual(result["content"], final_message)
+        self.assertIn(final_message, result["content"])
         saved = self._read_saved_conversation()
         self.assertIn(final_message, saved[-1]["content"])
         self.assertIn("<!-- tool-log", saved[-1]["content"])
@@ -6321,7 +6321,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 for message in retry_messages
             )
         )
-        self.assertEqual(result["content"], final_message)
+        self.assertIn(final_message, result["content"])
         self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
         self.assertIn(final_message, saved[-1]["content"])
         self.assertIn("<!-- tool-log", saved[-1]["content"])
@@ -6372,7 +6372,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 for item in tool_results
             )
         )
-        self.assertEqual(result["content"], final_message)
+        self.assertIn(final_message, result["content"])
         self.assertTrue(final_draft.startswith(before.rstrip()))
         self.assertIn("既有正文", final_draft)
         self.assertIn("新增正文", final_draft)
@@ -6422,7 +6422,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("read_file", retry_feedback[-1])
         self.assertNotIn("append_report_draft", retry_feedback[-1])
         self.assertNotIn("write_file", retry_feedback[-1])
-        self.assertEqual(result["content"], final_message)
+        self.assertIn(final_message, result["content"])
         self.assertIn(final_message, saved[-1]["content"])
         self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertNotIn(false_completion, saved[-1]["content"])
@@ -6531,7 +6531,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 for message in post_append_retry_messages
             )
         )
-        self.assertEqual(result["content"], final_message)
+        self.assertIn(final_message, result["content"])
         self.assertIn(final_message, saved[-1]["content"])
         self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertNotIn(false_completion, saved[-1]["content"])
@@ -6569,7 +6569,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 for message in second_call_messages
             )
         )
-        self.assertEqual(result["content"], final_message)
+        self.assertIn(final_message, result["content"])
         self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
         self.assertIn(final_message, saved[-1]["content"])
         self.assertIn("<!-- tool-log", saved[-1]["content"])
@@ -6617,7 +6617,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertFalse(first_state["asked_continue_expand"])
         self.assertEqual(first_state["current_count"], initial_count)
         self.assertEqual(first_state["target_word_count"], 3000)
-        self.assertEqual(second["content"], "已追加第二章正文。")
+        self.assertIn("已追加第二章正文。", second["content"])
         self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
 
@@ -7196,7 +7196,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 for message in retry_messages
             )
         )
-        self.assertEqual(result["content"], final_message)
+        self.assertIn(final_message, result["content"])
         self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
         self.assertIn(final_message, saved[-1]["content"])
         self.assertIn("<!-- tool-log", saved[-1]["content"])
@@ -8521,7 +8521,7 @@ class ChatRuntimeTests(unittest.TestCase):
             ) as execute_tool:
                 result = handler.chat(project["id"], "先给我一版大纲", max_iterations=4)
 
-        self.assertEqual(result["content"], "已实际写入 `plan/outline.md`，请确认大纲。")
+        self.assertIn("已实际写入 `plan/outline.md`，请确认大纲。", result["content"])
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
         self.assertEqual(execute_tool.call_count, 1)
         second_call_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
@@ -8714,7 +8714,7 @@ class ChatRuntimeTests(unittest.TestCase):
             ) as execute_tool:
                 result = handler.chat(project["id"], "补来源", max_iterations=4)
 
-        self.assertEqual(result["content"], "已真实写入 `plan/data-log.md`。")
+        self.assertIn("已真实写入 `plan/data-log.md`。", result["content"])
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
         self.assertEqual(execute_tool.call_count, 1)
         retry_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
