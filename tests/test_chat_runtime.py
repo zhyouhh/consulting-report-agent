@@ -12482,6 +12482,79 @@ class GateCanonicalDraftToolCallTests(ChatRuntimeTests):
         )
         self.assertIsNotNone(result)  # 必须 block，不能因为缺 file_path 就 pass
 
+    def test_execute_plan_write_invokes_gate_before_legacy_block(self):
+        """Task 19 fix2 P0 regression: gate must run BEFORE _non_plan_write_block_reason.
+
+        Setup: turn_context has canonical_draft_decision with mode=no_write (the Bug A
+        legacy-classifier path) AND draft_action_events containing executable begin tag
+        (model correctly emitted tag). Without fix2, legacy block fires first and gate
+        never runs (gate_block event count stays 0). With fix2, gate sees the begin tag
+        and the canonical write passes through, advancing to subsequent checks.
+        """
+        from backend.draft_action import DraftActionEvent
+
+        handler = self._make_handler_with_project()
+        # Set turn_context: legacy classified no_write (Bug A symptom)
+        handler._turn_context["canonical_draft_decision"] = {
+            "mode": "no_write",
+            "stage_code": "S4",
+        }
+        # Model emitted explicit begin tag (Phase 2 happy path)
+        handler._turn_context["draft_action_events"] = [
+            DraftActionEvent(
+                raw="<draft-action>begin</draft-action>",
+                intent="begin",
+                executable=True,
+            ),
+        ]
+        # Call _execute_plan_write with canonical draft path
+        result = handler._execute_plan_write(
+            self.project_id,
+            file_path="content/report_draft_v1.md",
+            content="# Report\n\nFirst draft body.\n",
+            source_tool_name="append_report_draft",
+            source_tool_args={"content": "First draft body."},
+            persist_func_name="write_file",
+            persist_args={
+                "file_path": "content/report_draft_v1.md",
+                "content": "# Report\n\nFirst draft body.\n",
+            },
+        )
+        # Must NOT return the legacy "本轮用户没有要求修改正文草稿" message
+        msg = result.get("message") or ""
+        self.assertNotIn(
+            "本轮用户没有要求修改正文草稿",
+            msg,
+            f"legacy non_plan_write_block_reason fired before gate; result={result}",
+        )
+
+    def test_execute_plan_write_blocks_when_no_tag_no_keyword(self):
+        """Task 19 fix2 regression: when neither tag nor preflight_keyword_intent,
+        gate blocks at _execute_plan_write level (not legacy block)."""
+        handler = self._make_handler_with_project()
+        handler._turn_context["canonical_draft_decision"] = {
+            "mode": "require",  # legacy allows
+            "stage_code": "S4",
+            "preflight_keyword_intent": None,  # no preflight signal
+        }
+        handler._turn_context["draft_action_events"] = []  # no tags
+        result = handler._execute_plan_write(
+            self.project_id,
+            file_path="content/report_draft_v1.md",
+            content="x" * 100,
+            source_tool_name="append_report_draft",
+            source_tool_args={"content": "x" * 100},
+            persist_func_name="write_file",
+            persist_args={
+                "file_path": "content/report_draft_v1.md",
+                "content": "x" * 100,
+            },
+        )
+        self.assertEqual(result.get("status"), "error")
+        msg = result.get("message") or ""
+        # gate block message contains "请先在回复中发 <draft-action> tag"
+        self.assertIn("<draft-action>", msg)
+
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (

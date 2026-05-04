@@ -5102,7 +5102,54 @@ class ChatHandler:
                     surface_to_user=True,
                 )
                 return {"status": "error", "message": reason}
-        non_plan_write_block_reason = self._non_plan_write_block_reason(project_id, file_path)
+        # Task 19 fix2: gate canonical-draft writes BEFORE legacy non_plan_write block
+        # (legacy block was masking the gate by short-circuiting; gate now runs first
+        # for all canonical-draft writes; non-canonical paths fall through.)
+        try:
+            canonical_normalized = self.skill_engine.normalize_file_path(project_id, file_path)
+        except ValueError:
+            canonical_normalized = normalized_early
+        canonical_draft_gate_checked = False
+        skip_legacy_no_write_block = False
+        if self._is_canonical_report_draft_path(canonical_normalized):
+            canonical_draft_gate_checked = True
+            draft_decision = self._turn_context.get("canonical_draft_decision") or {}
+            gate_block = self._gate_canonical_draft_tool_call(
+                project_id,
+                source_tool_name,
+                source_tool_args or {},
+                decision=draft_decision,
+                tags=self._turn_context.get("draft_action_events") or [],
+            )
+            if gate_block:
+                self._emit_system_notice_once(
+                    category="non_plan_write_blocked",
+                    path=canonical_normalized,
+                    reason=gate_block,
+                    user_action="请按 SKILL.md 附录的 draft-action 标签规范操作",
+                    surface_to_user=True,
+                )
+                return {"status": "error", "message": gate_block}
+            fixed_message = (
+                draft_decision.get("fixed_message")
+                if isinstance(draft_decision, dict)
+                else None
+            )
+            skip_legacy_no_write_block = (
+                isinstance(draft_decision, dict)
+                and draft_decision.get("mode") != "require"
+                and str(draft_decision.get("stage_code") or "")
+                in self.NON_PLAN_WRITE_ALLOWED_STAGE_CODES
+                and not (
+                    isinstance(fixed_message, str)
+                    and fixed_message.strip()
+                )
+            )
+        non_plan_write_block_reason = (
+            None
+            if canonical_draft_gate_checked and skip_legacy_no_write_block
+            else self._non_plan_write_block_reason(project_id, file_path)
+        )
         if non_plan_write_block_reason:
             reason = non_plan_write_block_reason
             self._emit_system_notice_once(
@@ -5294,21 +5341,6 @@ class ChatHandler:
         source_tool_name: str,
         source_tool_args: Dict | None = None,
     ) -> str | None:
-        # v2 新增：先过 gate
-        if self._is_canonical_report_draft_path(normalized_path):
-            gate_block = self._gate_canonical_draft_tool_call(
-                project_id, source_tool_name, source_tool_args or {},
-                decision=self._turn_context.get("canonical_draft_decision") or {},
-                tags=self._turn_context.get("draft_action_events") or [],
-            )
-            if gate_block:
-                self._emit_system_notice_once(
-                    category="non_plan_write_blocked",
-                    path=normalized_path, reason=gate_block,
-                    user_action="请按 SKILL.md 附录的 draft-action 标签规范操作",
-                    surface_to_user=True,
-                )
-                return gate_block  # caller 检测 truthy 返回 → reject
         if not self._is_canonical_report_draft_path(normalized_path):
             return None
 
