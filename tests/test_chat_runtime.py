@@ -11642,6 +11642,133 @@ class SystemNoticeDualDedupeTests(ChatRuntimeTests):
             )
 
 
+class ToolResultQualityHintTests(ChatRuntimeTests):
+    def _seed_data_log(self, project_dir, n_entries):
+        lines = ["# Data log\n"]
+        for i in range(n_entries):
+            lines.extend([
+                f"\n### [DL-2026-{i+1:02d}] entry {i+1}",
+                f"- **来源**: source-{i+1}",
+                f"- **时间**: 2026-05-04",
+                f"- **URL**: https://example.com/{i+1}",
+                f"- **用途**: test",
+                "",
+            ])
+        (project_dir / "plan" / "data-log.md").write_text("\n".join(lines), encoding="utf-8")
+
+    def _seed_outline_for_data_log_min_7(self, project_dir):
+        """触发 data_log_min=7（5000 字 → ceil(5000/1000*1.3)=7）"""
+        overview = project_dir / "plan" / "project-overview.md"
+        text = overview.read_text(encoding="utf-8")
+        text = text.replace("3000 words", "5000 字").replace("3000", "5000")
+        overview.write_text(text, encoding="utf-8")
+
+    def test_write_data_log_appends_quality_hint_when_s2(self):
+        handler = self._make_handler_with_project()
+        self._seed_outline_for_data_log_min_7(self.project_dir)
+        self._seed_data_log(self.project_dir, 5)
+        with mock.patch.object(handler.skill_engine, "_infer_stage_state", return_value={
+            "stage_code": "S2",
+            "quality_progress": {"label": "条 有效来源", "current": 5, "target": 7},
+        }):
+            result = {"status": "success", "path": "plan/data-log.md"}
+            handler._maybe_attach_quality_hint(
+                self.project_id,
+                tool_name="write_file",
+                tool_args={"file_path": "plan/data-log.md"},
+                result=result,
+            )
+        self.assertIn("quality_hint", result)
+        self.assertIn("5/7", result["quality_hint"])
+        self.assertIn("有效来源", result["quality_hint"])
+
+    def test_write_other_plan_file_no_quality_hint(self):
+        handler = self._make_handler_with_project()
+        result = {"status": "success", "path": "plan/notes.md"}
+        handler._maybe_attach_quality_hint(
+            self.project_id,
+            tool_name="write_file",
+            tool_args={"file_path": "plan/notes.md"},
+            result=result,
+        )
+        self.assertNotIn("quality_hint", result)
+
+    def test_write_content_draft_no_quality_hint(self):
+        handler = self._make_handler_with_project()
+        result = {"status": "success"}
+        handler._maybe_attach_quality_hint(
+            self.project_id,
+            tool_name="edit_file",
+            tool_args={"file_path": "content/report_draft_v1.md"},
+            result=result,
+        )
+        self.assertNotIn("quality_hint", result)
+
+    def test_quality_hint_absent_when_target_zero(self):
+        handler = self._make_handler_with_project()
+        with mock.patch.object(handler.skill_engine, "_infer_stage_state", return_value={
+            "stage_code": "S2",
+            "quality_progress": {"label": "条", "current": 0, "target": 0},
+        }):
+            result = {"status": "success"}
+            handler._maybe_attach_quality_hint(
+                self.project_id, tool_name="write_file",
+                tool_args={"file_path": "plan/data-log.md"}, result=result,
+            )
+        self.assertNotIn("quality_hint", result)
+
+    def test_quality_hint_absent_when_stage_not_s2_s3(self):
+        handler = self._make_handler_with_project()
+        with mock.patch.object(handler.skill_engine, "_infer_stage_state", return_value={
+            "stage_code": "S4",
+            "quality_progress": None,
+        }):
+            result = {"status": "success"}
+            handler._maybe_attach_quality_hint(
+                self.project_id, tool_name="write_file",
+                tool_args={"file_path": "plan/data-log.md"}, result=result,
+            )
+        self.assertNotIn("quality_hint", result)
+
+    def test_edit_data_log_also_appends_quality_hint(self):
+        handler = self._make_handler_with_project()
+        self._seed_outline_for_data_log_min_7(self.project_dir)
+        self._seed_data_log(self.project_dir, 5)
+        with mock.patch.object(handler.skill_engine, "_infer_stage_state", return_value={
+            "stage_code": "S2",
+            "quality_progress": {"label": "条 有效来源", "current": 5, "target": 7},
+        }):
+            result = {"status": "success"}
+            handler._maybe_attach_quality_hint(
+                self.project_id, tool_name="edit_file",
+                tool_args={"file_path": "plan/data-log.md"}, result=result,
+            )
+        self.assertIn("quality_hint", result)
+
+    def test_write_analysis_notes_appends_when_s3(self):
+        handler = self._make_handler_with_project()
+        with mock.patch.object(handler.skill_engine, "_infer_stage_state", return_value={
+            "stage_code": "S3",
+            "quality_progress": {"label": "项 分析引用", "current": 3, "target": 4},
+        }):
+            result = {"status": "success"}
+            handler._maybe_attach_quality_hint(
+                self.project_id, tool_name="write_file",
+                tool_args={"file_path": "plan/analysis-notes.md"}, result=result,
+            )
+        self.assertIn("quality_hint", result)
+        self.assertIn("3/4", result["quality_hint"])
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in ToolResultQualityHintTests.__dict__
+    ):
+        setattr(ToolResultQualityHintTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
         _inherited_test_name.startswith("test_")

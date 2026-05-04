@@ -178,6 +178,8 @@ class ChatHandler:
     MAX_MISSING_WRITE_RETRIES = 2
     MAX_SELF_CORRECTION_RETRIES = 1
     NON_PLAN_WRITE_ALLOWED_STAGE_CODES = {"S4", "S5", "S6", "S7", "done"}
+    QUALITY_HINT_TARGET_FILES = frozenset({"plan/data-log.md", "plan/analysis-notes.md"})
+    QUALITY_HINT_STAGES = frozenset({"S2", "S3"})
     LEGACY_REPORT_DRAFT_PATHS = frozenset({
         "report_draft_v1.md",
         "content/report.md",
@@ -1160,6 +1162,44 @@ class ChatHandler:
                 func_name,
                 metadata.get("source_key"),
                 exc_info=True,
+            )
+
+    def _maybe_attach_quality_hint(
+        self,
+        project_id: str,
+        *,
+        tool_name: str,
+        tool_args: dict,
+        result: dict,
+    ) -> None:
+        if tool_name not in {"write_file", "edit_file"}:
+            return
+        if result.get("status") != "success":
+            return
+        file_path = tool_args.get("file_path") or ""
+        normalized = file_path.replace("\\", "/").lstrip("./")
+        if normalized not in self.QUALITY_HINT_TARGET_FILES:
+            return
+        project_path = self.skill_engine.get_project_path(project_id)
+        if project_path is None:
+            return
+        stage_state = self.skill_engine._infer_stage_state(project_path)
+        stage_code = stage_state.get("stage_code")
+        if stage_code not in self.QUALITY_HINT_STAGES:
+            return
+        qp = stage_state.get("quality_progress")
+        if not qp or not isinstance(qp.get("target"), int) or qp["target"] <= 0:
+            return
+        label = qp.get("label", "")
+        current = qp.get("current", 0)
+        target = qp["target"]
+        if current >= target:
+            result["quality_hint"] = f"已达标：{current}/{target} {label}"
+        else:
+            delta = target - current
+            next_stage = "S3" if stage_code == "S2" else "S4"
+            result["quality_hint"] = (
+                f"当前 {current}/{target} {label}，还差 {delta} 条满足 {stage_code} 进 {next_stage} 门槛"
             )
 
     def _save_compact_state_atomically(
@@ -4718,6 +4758,12 @@ class ChatHandler:
                 "metadata_func_name": persist_func_name,
                 "metadata_args": persist_args,
             },
+        )
+        self._maybe_attach_quality_hint(
+            project_id,
+            tool_name=source_tool_name,
+            tool_args=source_tool_args or {},
+            result=result,
         )
         self._record_successful_canonical_draft_mutation(
             source_tool_name=source_tool_name,
