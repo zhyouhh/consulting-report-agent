@@ -6939,37 +6939,35 @@ class ChatHandler:
                     surface_to_user=True,
                 )
                 return event
-            # section label 匹配（复用 _resolve_section_rewrite_targets 但改 query 来源）
+            # section label 匹配（spec §4.6: section_label 是 heading 的 prefix，不是反过来）
             draft_text = draft_path.read_text(encoding="utf-8")
-            match_result = self._resolve_section_rewrite_targets(
-                event.section_label, draft_text,
-            )
-            matched_nodes = list(match_result.get("nodes") or [])
-            section_ambiguous = bool(match_result.get("ambiguous")) or len(matched_nodes) > 1
             section_label = (event.section_label or "").strip()
-            if not matched_nodes and section_label:
-                def _matches_section_label_prefix(node) -> bool:
-                    heading_label = str(node.get("label") or "").strip()
-                    if heading_label.startswith(section_label):
-                        return True
-                    heading_title = re.sub(
-                        r"^第[一二三四五六七八九十百千万0-9]+[章节篇部分卷]\s*",
-                        "",
-                        heading_label,
-                    ).strip()
-                    return heading_title.startswith(section_label)
-
+            matched_nodes = []
+            if section_label:
                 heading_nodes = self._extract_markdown_heading_nodes(draft_text)
                 exact_nodes = [
                     node for node in heading_nodes
                     if str(node.get("label") or "") == section_label
                 ]
-                prefix_nodes = exact_nodes or [
-                    node for node in heading_nodes
-                    if _matches_section_label_prefix(node)
-                ]
-                matched_nodes = prefix_nodes
-                section_ambiguous = len(prefix_nodes) > 1
+                if exact_nodes:
+                    matched_nodes = exact_nodes
+                else:
+                    def _matches_section_label_prefix(node) -> bool:
+                        heading_label = str(node.get("label") or "").strip()
+                        if heading_label.startswith(section_label):
+                            return True
+                        heading_title = re.sub(
+                            r"^第[一二三四五六七八九十百千万0-9]+[章节篇部分卷]\s*",
+                            "",
+                            heading_label,
+                        ).strip()
+                        return heading_title.startswith(section_label)
+
+                    matched_nodes = [
+                        node for node in heading_nodes
+                        if _matches_section_label_prefix(node)
+                    ]
+            section_ambiguous = len(matched_nodes) > 1
             if section_ambiguous:
                 event.executable = False
                 event.ignored_reason = "section_ambiguous"

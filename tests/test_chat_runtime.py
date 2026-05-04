@@ -10734,6 +10734,28 @@ class DraftActionPreCheckTests(ChatRuntimeTests):
         self.assertFalse(result.executable)
         self.assertEqual(result.ignored_reason, "section_ambiguous")
 
+    def test_section_label_with_extra_suffix_rejects(self):
+        """v2 fix1 regression: tag with extra text after heading must NOT match.
+
+        Old code used `_resolve_section_rewrite_targets` which checks
+        `heading.label in section_label` (wrong direction). A tag like
+        'section:第二章 战力演化 请重写' would falsely match heading
+        '第二章 战力演化'. New matcher requires section_label to be a
+        prefix of heading.
+        """
+        handler = self._make_handler_with_project()
+        self._seed_outline_confirmed(handler)
+        self._seed_draft(
+            "# 报告\n\n## 第二章 战力演化\n演化分析\n"
+        )
+        event = DraftActionEvent(
+            raw="...", intent="section",
+            section_label="第二章 战力演化 请重写",
+        )
+        result = handler._validate_draft_action_event(self.project_id, event)
+        self.assertFalse(result.executable)
+        self.assertEqual(result.ignored_reason, "section_not_found")
+
     def test_replace_old_text_not_unique_rejects(self):
         handler = self._make_handler_with_project()
         self._seed_outline_confirmed(handler)
