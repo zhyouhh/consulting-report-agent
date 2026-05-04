@@ -9,6 +9,7 @@ import requests
 import socket
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, List
@@ -1823,7 +1824,11 @@ class ChatHandler:
         keyword_intent = decision.get("preflight_keyword_intent")
         if keyword_intent not in {"begin", "continue", None}:
             # 防御：如果实施有 bug 让其他值进来，强制 block
-            return self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
+            block_reason = self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
+            self._record_draft_gate_block_event(
+                project_id, tool_name=tool_name, reason=block_reason,
+            )
+            return block_reason
 
         tag_intents = {t.intent for t in tags if getattr(t, "executable", False)}
 
@@ -1838,12 +1843,20 @@ class ChatHandler:
                 )
                 logging.warning("draft_write without explicit tag, fallback path used")
                 return None
-            return self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
+            block_reason = self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
+            self._record_draft_gate_block_event(
+                project_id, tool_name=tool_name, reason=block_reason,
+            )
+            return block_reason
 
         if tool_name == "edit_file":
             if tag_intents & {"section", "replace"}:
                 return None
-            return self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
+            block_reason = self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
+            self._record_draft_gate_block_event(
+                project_id, tool_name=tool_name, reason=block_reason,
+            )
+            return block_reason
 
         return None
 
@@ -1861,6 +1874,91 @@ class ChatHandler:
                 "type": "tagless_draft_fallback",
                 "fallback_tool": fallback_tool,
                 "fallback_intent": fallback_intent,
+                "recorded_at": timestamp,
+            })
+            return state
+        self._mutate_conversation_state(project_id, mutate)
+
+    def _record_draft_decision_compare_event(
+        self,
+        project_id: str,
+        *,
+        turn_id: str,
+        user_message: str,
+        old_decision: dict,
+        new_decision: dict,
+        tags: list,
+        fallback_used: bool,
+        fallback_tool: str | None,
+        fallback_intent: str | None,
+        blocked_missing_tag: bool,
+        blocked_tool: str | None,
+        new_channel_exception: dict | None,
+    ) -> None:
+        import hashlib
+        user_hash = hashlib.sha1(user_message.encode("utf-8")).hexdigest()
+        agreement = old_decision.get("mode") == new_decision.get("mode")
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        tag_present = {
+            "begin": any(t.intent == "begin" and t.executable for t in tags),
+            "continue": any(t.intent == "continue" and t.executable for t in tags),
+            "section": any(t.intent == "section" and t.executable for t in tags),
+            "replace": any(t.intent == "replace" and t.executable for t in tags),
+        }
+
+        def mutate(state: Dict):
+            state.setdefault("events", []).append({
+                "type": "draft_decision_compare",
+                "turn_id": turn_id,
+                "user_message_hash": user_hash,
+                "old_decision": old_decision,
+                "new_decision": new_decision,
+                "agreement": agreement,
+                "divergence_reason": None if agreement else f"old.mode={old_decision.get('mode')}, new.mode={new_decision.get('mode')}",
+                "tag_present": tag_present,
+                "fallback_used": fallback_used,
+                "fallback_tool": fallback_tool,
+                "fallback_intent": fallback_intent,
+                "blocked_missing_tag": blocked_missing_tag,
+                "blocked_tool": blocked_tool,
+                "new_channel_exception": new_channel_exception,
+                "recorded_at": timestamp,
+            })
+            return state
+        self._mutate_conversation_state(project_id, mutate)
+
+
+    def _record_draft_decision_exception_event(
+        self,
+        project_id: str,
+        *,
+        turn_id: str | None,
+        stage: str,  # "preflight" / "parser" / "gate" / "side_effect"
+        exception_class: str,
+        exception_message: str,
+    ) -> None:
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        def mutate(state: Dict):
+            state.setdefault("events", []).append({
+                "type": "draft_decision_exception",
+                "turn_id": turn_id,
+                "stage": stage,
+                "exception_class": exception_class,
+                "exception_message": exception_message[:500],
+                "recorded_at": timestamp,
+            })
+            return state
+        self._mutate_conversation_state(project_id, mutate)
+
+    def _record_draft_gate_block_event(
+        self, project_id: str, *, tool_name: str, reason: str,
+    ) -> None:
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        def mutate(state: Dict):
+            state.setdefault("events", []).append({
+                "type": "draft_gate_block",
+                "tool_name": tool_name,
+                "reason": reason[:200],
                 "recorded_at": timestamp,
             })
             return state
@@ -3818,6 +3916,10 @@ class ChatHandler:
             current_turn_messages,
             user_message=str(current_user_message.get("content") or ""),
         )
+        try:
+            self._run_phase2a_compare_writer(project_id, user_message)
+        except Exception:
+            pass
         self._persist_draft_followup_state_for_turn(
             project_id,
             result_content,
@@ -4083,6 +4185,10 @@ class ChatHandler:
             current_turn_messages,
             user_message=str(current_user_message.get("content") or ""),
         )
+        try:
+            self._run_phase2a_compare_writer(project_id, user_message)
+        except Exception:
+            pass
         self._persist_draft_followup_state_for_turn(
             project_id,
             result_content,
@@ -6362,6 +6468,85 @@ class ChatHandler:
             return "\n".join(part for part in texts if part).strip()
         return json.dumps(content, ensure_ascii=False)
 
+    def _extract_user_message_text(self, message: dict | None) -> str:
+        """从 persisted user message 拿 LLM 看到的文本。
+        multipart content array 会抽出所有 type='text' 部分拼接，跳过 image_url 等。
+        """
+        if not message:
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(str(part.get("text") or ""))
+            return "\n\n".join(parts)
+        return ""
+
+    def _run_phase2a_compare_writer(self, project_id: str, user_message: str):
+        """Phase 2a 灰度：在 turn 完全结束后调用。
+        所有 fallback / block 状态都从 conversation_state event 反查（本 turn 内事件）。
+        所有 exception silent — 永远不让 compare writer 影响真实 turn。"""
+        turn_id = str(uuid.uuid4())
+        old_decision = self._turn_context.get("canonical_draft_decision") or {}
+
+        new_decision = {}
+        new_channel_exception = None
+
+        try:
+            new_decision = self._preflight_canonical_draft_check(project_id, user_message)
+        except Exception as e:
+            new_channel_exception = {"stage": "preflight", "message": str(e)[:200]}
+            try:
+                self._record_draft_decision_exception_event(
+                    project_id, turn_id=turn_id, stage="preflight",
+                    exception_class=type(e).__name__, exception_message=str(e),
+                )
+            except Exception:
+                pass  # silent: compare writer must not affect turn (intentional swallow)
+
+        # 反查本 turn 的 fallback / block 事件
+        # 用一个简单 turn-window 标记：compare writer 只数本 turn 内的 event
+        # 简化：调用前记录 events 长度，事件就是这之后追加的
+        fallback_used = False
+        fallback_tool = None
+        fallback_intent = None
+        blocked_missing_tag = False
+        blocked_tool = None
+
+        try:
+            state = self._load_conversation_state(project_id, [])
+            # 反查本 turn 内事件——按 recorded_at 时间戳取最近的（简化）
+            # 更稳妥：在 turn 开始记 baseline_event_count，结束反查 baseline 之后追加的
+            baseline = self._turn_context.get("compare_baseline_event_count", 0)
+            new_events = (state.get("events") or [])[baseline:]
+            for ev in new_events:
+                if ev.get("type") == "tagless_draft_fallback":
+                    fallback_used = True
+                    fallback_tool = ev.get("fallback_tool")
+                    fallback_intent = ev.get("fallback_intent")
+                elif ev.get("type") == "draft_gate_block":
+                    blocked_missing_tag = True
+                    blocked_tool = ev.get("tool_name")
+        except Exception:
+            pass  # silent: state load failure must not affect turn
+
+        tags = self._turn_context.get("draft_action_events") or []
+
+        try:
+            self._record_draft_decision_compare_event(
+                project_id, turn_id=turn_id, user_message=user_message,
+                old_decision=old_decision, new_decision=new_decision,
+                tags=tags,
+                fallback_used=fallback_used, fallback_tool=fallback_tool, fallback_intent=fallback_intent,
+                blocked_missing_tag=blocked_missing_tag, blocked_tool=blocked_tool,
+                new_channel_exception=new_channel_exception,
+            )
+        except Exception:
+            pass  # silent: compare event write failure must not affect turn
+
     def _build_system_prompt(self, project_id: str) -> str:
         """构建系统提示"""
         skill_prompt = self.skill_engine.get_skill_prompt()
@@ -6421,6 +6606,7 @@ class ChatHandler:
             "checkpoint_event": None,
             "draft_action_events": [],
             "pending_stage_keyword": None,
+            "compare_baseline_event_count": 0,
         }
 
     def _is_question(self, text: str) -> bool:
@@ -6530,6 +6716,8 @@ class ChatHandler:
             generic_non_plan_write_allowed
             or canonical_draft_decision.get("mode") == "require"
         )
+        state = self._load_conversation_state(project_id, [])
+        self._turn_context["compare_baseline_event_count"] = len(state.get("events") or [])
         return self._turn_context
 
     def _immediate_canonical_draft_reject_message(self) -> str | None:
@@ -6837,6 +7025,11 @@ class ChatHandler:
             [],
             user_message=str(current_user_message.get("content") or ""),
         )
+        user_message_text = self._extract_user_message_text(current_user_message)
+        try:
+            self._run_phase2a_compare_writer(project_id, user_message_text)
+        except Exception:
+            pass
         self._persist_draft_followup_state_for_turn(
             project_id,
             result_content,

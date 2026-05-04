@@ -12492,3 +12492,130 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
+class DraftDecisionCompareEventTests(ChatRuntimeTests):
+    def test_compare_event_written_per_turn(self):
+        """跑一个常规 turn，conversation_state 应含一条 draft_decision_compare 事件。"""
+        handler = self._make_handler_with_project()
+        # 触发 _record_draft_decision_compare_event 直接调用（不走完整 turn）
+        handler._record_draft_decision_compare_event(
+            self.project_id,
+            turn_id="t1", user_message="开始写报告吧",
+            old_decision={"mode": "no_write", "priority": "P10"},
+            new_decision={"mode": "require", "priority": "P_PREFLIGHT_OK",
+                          "preflight_keyword_intent": "begin"},
+            tags=[],
+            fallback_used=False, fallback_tool=None, fallback_intent=None,
+            blocked_missing_tag=False, blocked_tool=None,
+            new_channel_exception=None,
+        )
+        state = handler._load_conversation_state(self.project_id, [])
+        events = [e for e in state.get("events", []) if e.get("type") == "draft_decision_compare"]
+        self.assertEqual(len(events), 1)
+        e = events[-1]
+        for key in ("turn_id", "user_message_hash", "old_decision", "new_decision",
+                    "agreement", "divergence_reason", "tag_present", "fallback_used",
+                    "fallback_tool", "fallback_intent", "blocked_missing_tag",
+                    "blocked_tool", "new_channel_exception", "recorded_at"):
+            self.assertIn(key, e)
+
+    def test_compare_agreement_correctly_computed(self):
+        handler = self._make_handler_with_project()
+        handler._record_draft_decision_compare_event(
+            self.project_id, turn_id="t1", user_message="x",
+            old_decision={"mode": "no_write"},
+            new_decision={"mode": "no_write"},
+            tags=[], fallback_used=False, fallback_tool=None, fallback_intent=None,
+            blocked_missing_tag=False, blocked_tool=None, new_channel_exception=None,
+        )
+        state = handler._load_conversation_state(self.project_id, [])
+        e = state["events"][-1]
+        self.assertTrue(e["agreement"])
+        self.assertIsNone(e["divergence_reason"])
+
+    def test_compare_disagreement_records_divergence(self):
+        handler = self._make_handler_with_project()
+        handler._record_draft_decision_compare_event(
+            self.project_id, turn_id="t1", user_message="x",
+            old_decision={"mode": "no_write"},
+            new_decision={"mode": "require"},
+            tags=[], fallback_used=False, fallback_tool=None, fallback_intent=None,
+            blocked_missing_tag=False, blocked_tool=None, new_channel_exception=None,
+        )
+        state = handler._load_conversation_state(self.project_id, [])
+        e = state["events"][-1]
+        self.assertFalse(e["agreement"])
+        self.assertIn("no_write", e["divergence_reason"])
+
+    def test_exception_event_written_when_new_channel_crashes(self):
+        handler = self._make_handler_with_project()
+        handler._record_draft_decision_exception_event(
+            self.project_id, turn_id="t2", stage="preflight",
+            exception_class="ValueError", exception_message="test",
+        )
+        state = handler._load_conversation_state(self.project_id, [])
+        events = [e for e in state["events"] if e.get("type") == "draft_decision_exception"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["stage"], "preflight")
+        self.assertEqual(events[0]["exception_class"], "ValueError")
+
+    def test_compare_includes_tag_present_per_intent(self):
+        from backend.draft_action import DraftActionEvent
+        handler = self._make_handler_with_project()
+        tags = [
+            DraftActionEvent(raw="...", intent="begin", executable=True),
+            DraftActionEvent(raw="...", intent="section", executable=False),
+        ]
+        handler._record_draft_decision_compare_event(
+            self.project_id, turn_id="t3", user_message="x",
+            old_decision={"mode": "require"}, new_decision={"mode": "require"},
+            tags=tags,
+            fallback_used=False, fallback_tool=None, fallback_intent=None,
+            blocked_missing_tag=False, blocked_tool=None, new_channel_exception=None,
+        )
+        state = handler._load_conversation_state(self.project_id, [])
+        tp = state["events"][-1]["tag_present"]
+        self.assertTrue(tp["begin"])
+        self.assertFalse(tp["section"])  # executable=False 不算
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in DraftDecisionCompareEventTests.__dict__
+    ):
+        setattr(DraftDecisionCompareEventTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class ExtractUserMessageTextTests(ChatRuntimeTests):
+    def test_str_content_returns_as_is(self):
+        handler = self._make_handler_with_project()
+        self.assertEqual(handler._extract_user_message_text({"content": "plain"}), "plain")
+
+    def test_multipart_extracts_text_parts_only(self):
+        handler = self._make_handler_with_project()
+        msg = {"content": [
+            {"type": "text", "text": "first"},
+            {"type": "image_url", "image_url": {"url": "data:..."}},
+            {"type": "text", "text": "second"},
+        ]}
+        result = handler._extract_user_message_text(msg)
+        self.assertEqual(result, "first\n\nsecond")
+
+    def test_none_message_returns_empty(self):
+        handler = self._make_handler_with_project()
+        self.assertEqual(handler._extract_user_message_text(None), "")
+
+    def test_image_only_multipart_returns_empty(self):
+        handler = self._make_handler_with_project()
+        msg = {"content": [{"type": "image_url", "image_url": {"url": "..."}}]}
+        self.assertEqual(handler._extract_user_message_text(msg), "")
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in ExtractUserMessageTextTests.__dict__
+    ):
+        setattr(ExtractUserMessageTextTests, _inherited_test_name, None)
+del _inherited_test_name
