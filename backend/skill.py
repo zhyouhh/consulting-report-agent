@@ -1101,7 +1101,10 @@ class SkillEngine:
             skipped_items,
             manual_lines,
         )
-        progress_text = self._render_progress_markdown(stage_code, status, next_actions, completed_items)
+        progress_text = self._render_progress_markdown(
+            stage_code, status, next_actions, completed_items,
+            stage_state=stage_state,
+        )
         tasks_text = self._render_tasks_markdown(stage_code, next_actions)
 
         self._write_tracking_file(stage_gates_path, stage_gates_text)
@@ -1243,6 +1246,8 @@ class SkillEngine:
         status: str,
         next_actions: list[str],
         completed_items: list[str],
+        *,
+        stage_state: dict | None = None,
     ) -> str:
         current_task = next_actions[0] if next_actions else "当前阶段任务已完成，等待推进下一阶段。"
         completed_summary = " / ".join(completed_items[-3:]) if completed_items else "-"
@@ -1254,12 +1259,22 @@ class SkillEngine:
             f"**阶段**: {stage_code}",
             f"**状态**: {status}",
             f"**当前任务**: {current_task}",
+        ]
+        # v5: S2/S3 阶段渲染 quality_progress 行
+        if stage_state and stage_code in {"S2", "S3"}:
+            qp = stage_state.get("quality_progress")
+            if qp and isinstance(qp.get("target"), int) and qp["target"] > 0:
+                label = qp.get("label", "")
+                current = qp.get("current", 0)
+                target = qp["target"]
+                lines.append(f"**质量进度**: {current}/{target} {label}")
+        lines.extend([
             f"**更新日期**: {datetime.now().strftime('%Y-%m-%d')}",
             "",
             "## 执行摘要",
             f"- 已完成: {completed_summary}",
             f"- 下一步: {next_summary}",
-        ]
+        ])
         return "\n".join(lines).strip() + "\n"
 
     def _render_tasks_markdown(self, stage_code: str, next_actions: list[str]) -> str:

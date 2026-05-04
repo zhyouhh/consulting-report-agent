@@ -1742,3 +1742,102 @@ class S0SchemaMigrationTests(unittest.TestCase):
         self.engine._backfill_stage_checkpoints_if_missing(self.project_path)
         second = self._read_checkpoints()
         self.assertEqual(first, second)
+
+
+class ProgressMarkdownQualityProgressTests(unittest.TestCase):
+    def _engine(self, tmp):
+        from pathlib import Path
+        return SkillEngine(Path(tmp) / "p", Path(tmp) / "s")
+
+    def test_s2_renders_quality_progress_when_target_gt_zero(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp)
+            md = engine._render_progress_markdown(
+                stage_code="S2", status="进行中",
+                next_actions=["sample"], completed_items=[],
+                stage_state={
+                    "stage_code": "S2",
+                    "quality_progress": {
+                        "label": "条 有效来源", "current": 5, "target": 7,
+                    },
+                },
+            )
+            self.assertIn("**质量进度**: 5/7 条 有效来源", md)
+
+    def test_s3_renders_analysis_ref_count(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp)
+            md = engine._render_progress_markdown(
+                stage_code="S3", status="进行中",
+                next_actions=[], completed_items=[],
+                stage_state={
+                    "stage_code": "S3",
+                    "quality_progress": {
+                        "label": "项 分析引用", "current": 3, "target": 4,
+                    },
+                },
+            )
+            self.assertIn("**质量进度**: 3/4 项 分析引用", md)
+
+    def test_s0_does_not_render_quality_progress(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp)
+            md = engine._render_progress_markdown(
+                stage_code="S0", status="进行中",
+                next_actions=[], completed_items=[],
+                stage_state={"stage_code": "S0", "quality_progress": None},
+            )
+            self.assertNotIn("**质量进度**", md)
+
+    def test_s4_does_not_render_quality_progress(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp)
+            md = engine._render_progress_markdown(
+                stage_code="S4", status="进行中",
+                next_actions=[], completed_items=[],
+                stage_state={"stage_code": "S4", "quality_progress": None},
+            )
+            self.assertNotIn("**质量进度**", md)
+
+    def test_target_zero_suppresses_render(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp)
+            md = engine._render_progress_markdown(
+                stage_code="S2", status="进行中",
+                next_actions=[], completed_items=[],
+                stage_state={
+                    "stage_code": "S2",
+                    "quality_progress": {
+                        "label": "条 有效来源", "current": 0, "target": 0,
+                    },
+                },
+            )
+            self.assertNotIn("**质量进度**", md)
+
+    def test_stage_state_none_falls_back_to_old_behavior(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp)
+            md = engine._render_progress_markdown(
+                stage_code="S2", status="进行中",
+                next_actions=[], completed_items=[],
+                stage_state=None,
+            )
+            self.assertNotIn("**质量进度**", md)
+            self.assertIn("**阶段**: S2", md)
+
+    def test_quality_progress_field_absent_no_render(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp)
+            md = engine._render_progress_markdown(
+                stage_code="S2", status="进行中",
+                next_actions=[], completed_items=[],
+                stage_state={"stage_code": "S2"},
+            )
+            self.assertNotIn("**质量进度**", md)
