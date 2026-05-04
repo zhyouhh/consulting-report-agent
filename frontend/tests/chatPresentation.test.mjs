@@ -14,6 +14,7 @@ import {
   stripStageAckTags,
   takeStreamingTextSlice,
 } from "../src/utils/chatPresentation.js";
+import { stripToolLogComments } from "../src/utils/toolLogStrip.mjs";
 
 test("takeStreamingTextSlice consumes a fixed number of characters", () => {
   assert.deepEqual(
@@ -211,4 +212,16 @@ test("sanitizeAssistantMessage keeps user role with same text", () => {
 test("sanitizeAssistantMessage keeps normal assistant", () => {
   const msg = { role: "assistant", content: "real reply" };
   assert.deepEqual(sanitizeAssistantMessage(msg), msg);
+});
+
+test("copy button output strips tool-log", () => {
+  const original = "Reply.\n<!-- tool-log\n- x ✓\n-->";
+  const copyText = stripToolLogComments(original);
+  assert.equal(copyText, "Reply.");
+});
+
+test("render input has tool-log stripped before markdown", () => {
+  const original = "Reply\n<!-- tool-log\n- x ✓\n-->\n# Title";
+  const rendered = stripToolLogComments(original);
+  assert.equal(rendered.includes("<!-- tool-log"), false);
 });

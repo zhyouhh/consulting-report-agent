@@ -27,6 +27,7 @@ import {
   splitPendingAttachments,
 } from '../utils/pendingAttachments'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
+import { stripToolLogComments } from '../utils/toolLogStrip.mjs'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 
 export default function ChatPanel({
@@ -284,7 +285,8 @@ export default function ChatPanel({
   }
 
   const copyMessage = (content) => {
-    navigator.clipboard.writeText(content).then(() => {
+    const cleanText = stripToolLogComments(content || '')
+    navigator.clipboard.writeText(cleanText).then(() => {
       // 简单提示，不打断用户
     }).catch(() => {
       showError('复制失败，请手动选择文本')
@@ -695,9 +697,12 @@ export default function ChatPanel({
             )
           }
 
+          const cleanContent = msg.role === 'assistant'
+            ? stripToolLogComments(msg.content || '')
+            : msg.content
           const assistantBlocks = msg.role === 'assistant'
-            ? splitAssistantMessageBlocks(msg.content)
-            : [{ type: 'text', content: msg.content }]
+            ? splitAssistantMessageBlocks(cleanContent)
+            : [{ type: 'text', content: cleanContent }]
 
           return (
             <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
