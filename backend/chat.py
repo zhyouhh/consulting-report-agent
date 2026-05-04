@@ -3066,7 +3066,8 @@ class ChatHandler:
                     "path": notice.path,
                     "reason": notice.reason,
                     "user_action": notice.user_action,
-            }
+                    "surface_to_user": notice.surface_to_user,
+                }
             yield {
                 "type": "usage",
                 "data": token_usage,
@@ -3088,6 +3089,7 @@ class ChatHandler:
                     "path": notice.path,
                     "reason": notice.reason,
                     "user_action": notice.user_action,
+                    "surface_to_user": notice.surface_to_user,
                 }
             yield {
                 "type": "usage",
@@ -3317,6 +3319,7 @@ class ChatHandler:
                             "path": notice.get("path"),
                             "reason": notice["reason"],
                             "user_action": notice["user_action"],
+                            "surface_to_user": notice["surface_to_user"],
                         }
                     result_icon = "✅" if result.get("status") == "success" else "⚠️"
                     yield {"type": "tool", "data": f"{result_icon} 结果: {str(result)[:160]}..."}
@@ -3689,6 +3692,7 @@ class ChatHandler:
                 path=notice.get("path"),
                 reason=notice["reason"],
                 user_action=notice["user_action"],
+                surface_to_user=notice["surface_to_user"],
             )
             for notice in self._turn_context.pop("pending_system_notices", [])
         ]
@@ -4381,6 +4385,7 @@ class ChatHandler:
                     path=None,
                     reason=str(e),
                     user_action="请根据提示调整写入目标或内容后再重试。",
+                    surface_to_user=False,
                 )
             return {"status": "error", "message": str(e)}
         except Exception as e:
@@ -4391,6 +4396,7 @@ class ChatHandler:
                     path=None,
                     reason=f"工具执行失败: {str(e)}",
                     user_action="请检查写入条件是否满足，然后重试。",
+                    surface_to_user=False,
                 )
             return {"status": "error", "message": f"工具执行失败: {str(e)}"}
 
@@ -4526,6 +4532,7 @@ class ChatHandler:
                 path=normalized_preview,
                 reason=reason,
                 user_action=f"请改写到 `{self.skill_engine.REPORT_DRAFT_PATH}` 后再继续。",
+                surface_to_user=True,
             )
             return {"status": "error", "message": reason}
         if project_path and normalized_early in self._S0_BLOCKED_PLAN_FILES:
@@ -4543,6 +4550,7 @@ class ChatHandler:
                         "请先按 SKILL.md §S0 发一轮 3-5 个打包追问，"
                         "用户回答或跳过后再写正式产出文件。"
                     ),
+                    surface_to_user=True,
                 )
                 return {"status": "error", "message": reason}
         non_plan_write_block_reason = self._non_plan_write_block_reason(project_id, file_path)
@@ -4553,6 +4561,7 @@ class ChatHandler:
                 path=None,
                 reason=reason,
                 user_action="请先让用户确认大纲或明确要求继续正文后，再尝试写正式内容。",
+                surface_to_user=True,
             )
             return {"status": "error", "message": reason}
         if self._should_require_fetch_url_before_write(project_id, file_path):
@@ -4562,6 +4571,7 @@ class ChatHandler:
                 path=None,
                 reason=reason,
                 user_action="请先读取候选网页正文，再把外部信息写入正式文件。",
+                surface_to_user=False,
             )
             return {"status": "error", "message": reason}
         normalized_path = self.skill_engine.validate_plan_write(project_id, file_path)
@@ -4582,6 +4592,7 @@ class ChatHandler:
                         "正文首次成稿或续写请用 `append_report_draft`；"
                         "修改已有正文请先 `read_file`，再用 `edit_file`。"
                     ),
+                    surface_to_user=True,
                 )
                 return {"status": "error", "message": canonical_write_file_error}
         mutation_limit_error = self._validate_canonical_draft_turn_mutation_limit(
@@ -4593,6 +4604,7 @@ class ChatHandler:
                 path=normalized_path,
                 reason=mutation_limit_error,
                 user_action="请基于当前已落盘的正文结果直接向用户汇报，本轮不要继续改动正文。",
+                surface_to_user=True,
             )
             return {"status": "error", "message": mutation_limit_error}
         read_before_write_error = self._validate_existing_file_read_before_write(
@@ -4606,6 +4618,7 @@ class ChatHandler:
                 path=normalized_path,
                 reason=read_before_write_error,
                 user_action="请先读取目标文件最新内容，再重新提交写入。",
+                surface_to_user=False,
             )
             return {"status": "error", "message": read_before_write_error}
         destructive_write_error = self._validate_required_report_draft_prewrite(
@@ -4624,6 +4637,7 @@ class ChatHandler:
                     "续写或新增章节请用 `append_report_draft`；"
                     "改写已有正文请先 `read_file`，再用 `edit_file` 处理对应范围。"
                 ),
+                surface_to_user=True,
             )
             return {"status": "error", "message": destructive_write_error}
         if self.skill_engine.is_protected_stage_checkpoints_path(normalized_path):
@@ -4636,6 +4650,7 @@ class ChatHandler:
                 path=normalized_path,
                 reason=reason,
                 user_action="请告知用户需要他们点击工作区按钮来推进阶段；不要尝试直接写这个文件。",
+                surface_to_user=True,
             )
             return {"status": "error", "message": reason}
         project_path = self.skill_engine.get_project_path(project_id)
@@ -4651,6 +4666,7 @@ class ChatHandler:
                 path=normalized_path,
                 reason=signature_error,
                 user_action="请联系用户在右侧工作区完成对应的确认后再写入",
+                surface_to_user=True,
             )
             return {"status": "error", "message": signature_error}
         analysis_refs_error = self._validate_analysis_notes_refs_for_write(
@@ -4667,6 +4683,7 @@ class ChatHandler:
                     "请在每条关键发现后补充明确的 data-log 引用，"
                     "例如 `[DL-2026-01]` 或 `[DL-2026-01/06]`，再重新写入。"
                 ),
+                surface_to_user=False,
             )
             return {"status": "error", "message": analysis_refs_error}
         should_emit_data_log_hint = self._is_first_data_log_write(project_id, normalized_path)
@@ -4693,6 +4710,7 @@ class ChatHandler:
                     "下方带 URL / `material:xxx` / `访谈:` / `调研:` 来源标记。"
                 ),
                 user_action="不要用 Markdown 表格记录事实；请拆成独立 DL-id 条目后继续写入。",
+                surface_to_user=False,
             )
         self._persist_successful_tool_result(
             project_id,
@@ -5930,7 +5948,8 @@ class ChatHandler:
             "web_search_performed": False,
             "fetch_url_performed": False,
             "web_search_count": 0,
-            "system_notice_emitted": False,
+            "user_notice_emitted": False,
+            "internal_notice_emitted": False,
             "pending_system_notices": [],
             "required_write_snapshots": {},
             "canonical_draft_decision": None,
@@ -6032,6 +6051,7 @@ class ChatHandler:
                                 path=notice["path"],
                                 reason=notice["reason"],
                                 user_action=notice["user_action"],
+                                surface_to_user=True,
                             )
                         else:
                             raise exc
@@ -6363,6 +6383,7 @@ class ChatHandler:
                 path=notice.get("path"),
                 reason=notice["reason"],
                 user_action=notice["user_action"],
+                surface_to_user=notice["surface_to_user"],
             )
             for notice in self._turn_context.pop("pending_system_notices", [])
         ]
@@ -6407,6 +6428,7 @@ class ChatHandler:
                             path=notice["path"],
                             reason=notice["reason"],
                             user_action=notice["user_action"],
+                            surface_to_user=True,
                         )
                 else:
                     self._turn_context["checkpoint_event"] = {"action": action, "key": key}
@@ -6430,6 +6452,7 @@ class ChatHandler:
                     "请模型按 SKILL.md §S0 先发 3-5 个澄清问题，"
                     "下一轮再发 tag。"
                 ),
+                surface_to_user=True,
             )
             return
 
@@ -6445,6 +6468,7 @@ class ChatHandler:
                     path=notice["path"],
                     reason=notice["reason"],
                     user_action=notice["user_action"],
+                    surface_to_user=True,
                 )
         else:
             self._turn_context["checkpoint_event"] = {
@@ -6459,8 +6483,10 @@ class ChatHandler:
         path: str | None = None,
         reason: str,
         user_action: str,
+        surface_to_user: bool,
     ) -> None:
-        if self._turn_context.get("system_notice_emitted"):
+        flag_key = "user_notice_emitted" if surface_to_user else "internal_notice_emitted"
+        if self._turn_context.get(flag_key):
             return
         notice = {
             "type": "system_notice",
@@ -6468,8 +6494,9 @@ class ChatHandler:
             "path": path,
             "reason": reason,
             "user_action": user_action,
+            "surface_to_user": surface_to_user,
         }
-        self._turn_context["system_notice_emitted"] = True
+        self._turn_context[flag_key] = True
         queue = self._turn_context.setdefault("pending_system_notices", [])
         queue.append(notice)
 

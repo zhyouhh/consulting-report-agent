@@ -8253,7 +8253,8 @@ class ChatRuntimeTests(unittest.TestCase):
             "can_write_non_plan": True,
             "web_search_disabled": False,
             "pending_system_notices": [],
-            "system_notice_emitted": False,
+            "user_notice_emitted": False,
+            "internal_notice_emitted": False,
         }
         self._read_file_for_turn(handler, "plan/analysis-notes.md")
 
@@ -8285,7 +8286,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(notices[0]["category"], "analysis_refs_missing")
 
     @mock.patch("backend.chat.OpenAI")
-    def test_system_notice_deduplicated_within_turn(self, mock_openai):
+    def test_system_notice_dual_class_notices_can_coexist_within_turn(self, mock_openai):
         handler = self._make_handler_with_project()
         first_call = self._make_stream_tool_call_chunk(
             0,
@@ -8319,7 +8320,11 @@ class ChatRuntimeTests(unittest.TestCase):
         events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
         notices = [event for event in events if event["type"] == "system_notice"]
 
-        self.assertEqual(len(notices), 1)
+        self.assertEqual(len(notices), 2)
+        self.assertEqual(
+            [notice["surface_to_user"] for notice in notices],
+            [False, True],
+        )
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_notice_reset_between_turns(self, mock_openai):
@@ -10525,6 +10530,7 @@ class ChatRuntimeTests(unittest.TestCase):
                     "path": "plan/outline.md",
                     "reason": "需要先生成有效报告大纲，才能确认大纲并进入资料采集。",
                     "user_action": "请先让助手补齐 `plan/outline.md`，再确认大纲。",
+                    "surface_to_user": True,
                 }
             ],
         )
@@ -11472,3 +11478,90 @@ class SystemNoticeFieldTests(unittest.TestCase):
             category="test", reason="r", user_action="a", surface_to_user=False,
         )
         self.assertFalse(notice.surface_to_user)
+
+
+class SystemNoticeDualDedupeTests(ChatRuntimeTests):
+    def test_user_and_internal_can_coexist_same_turn(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._emit_system_notice_once(
+            category="write_blocked", path=None,
+            reason="internal hint", user_action="model fix",
+            surface_to_user=False,
+        )
+        handler._emit_system_notice_once(
+            category="non_plan_write_blocked", path=None,
+            reason="user must confirm", user_action="please click",
+            surface_to_user=True,
+        )
+        notices = handler._turn_context["pending_system_notices"]
+        self.assertEqual(len(notices), 2)
+        self.assertEqual(notices[0]["surface_to_user"], False)
+        self.assertEqual(notices[1]["surface_to_user"], True)
+
+    def test_internal_notice_does_not_block_user_notice(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._emit_system_notice_once(
+            category="write_blocked", reason="r1", user_action="a1",
+            surface_to_user=False,
+        )
+        handler._emit_system_notice_once(
+            category="s0_write_blocked", reason="r2", user_action="a2",
+            surface_to_user=True,
+        )
+        notices = handler._turn_context["pending_system_notices"]
+        self.assertEqual(len(notices), 2)
+
+    def test_user_notice_does_not_block_internal_notice(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._emit_system_notice_once(
+            category="s0_write_blocked", reason="r", user_action="a",
+            surface_to_user=True,
+        )
+        handler._emit_system_notice_once(
+            category="write_blocked", reason="r2", user_action="a2",
+            surface_to_user=False,
+        )
+        notices = handler._turn_context["pending_system_notices"]
+        self.assertEqual(len(notices), 2)
+
+    def test_same_class_internal_still_deduped(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        for _ in range(3):
+            handler._emit_system_notice_once(
+                category="write_blocked", reason="r", user_action="a",
+                surface_to_user=False,
+            )
+        notices = handler._turn_context["pending_system_notices"]
+        self.assertEqual(len(notices), 1)
+
+    def test_same_class_user_still_deduped(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        for _ in range(3):
+            handler._emit_system_notice_once(
+                category="s0_write_blocked", reason="r", user_action="a",
+                surface_to_user=True,
+            )
+        notices = handler._turn_context["pending_system_notices"]
+        self.assertEqual(len(notices), 1)
+
+    def test_surface_to_user_required_param(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        with self.assertRaises(TypeError):
+            handler._emit_system_notice_once(
+                category="x", reason="r", user_action="a",
+            )
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in SystemNoticeDualDedupeTests.__dict__
+    ):
+        setattr(SystemNoticeDualDedupeTests, _inherited_test_name, None)
+del _inherited_test_name
