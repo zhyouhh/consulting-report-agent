@@ -10611,6 +10611,59 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
+class EmptyAssistantFallbackTests(ChatRuntimeTests):
+    def test_finalize_empty_assistant_does_not_persist_assistant(self):
+        handler = self._make_handler_with_project()
+        history = []
+        current_user = {"role": "user", "content": "test", "attached_material_ids": []}
+        fallback = handler._finalize_empty_assistant_turn(
+            self.project_id, history, current_user,
+            diagnostic="stream_truncated",
+        )
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[-1]["role"], "user")
+
+    def test_finalize_empty_assistant_returns_user_visible_fallback(self):
+        handler = self._make_handler_with_project()
+        history = []
+        current_user = {"role": "user", "content": "test", "attached_material_ids": []}
+        fallback = handler._finalize_empty_assistant_turn(
+            self.project_id, history, current_user,
+            diagnostic="stream_truncated",
+        )
+        self.assertIn("没有产出可见回复", fallback)
+        self.assertIn("换个说法再发", fallback)
+
+    def test_finalize_empty_assistant_records_event(self):
+        handler = self._make_handler_with_project()
+        from backend.chat import USER_VISIBLE_FALLBACK
+        history = []
+        current_user = {"role": "user", "content": "test", "attached_material_ids": []}
+        handler._finalize_empty_assistant_turn(
+            self.project_id, history, current_user,
+            diagnostic="tool_only_no_text",
+        )
+        state = handler._load_conversation_state(self.project_id, history)
+        events = state.get("events", [])
+        empty_events = [e for e in events if e.get("type") == "empty_assistant"]
+        self.assertGreaterEqual(len(empty_events), 1)
+        self.assertEqual(empty_events[-1]["diagnostic"], "tool_only_no_text")
+
+    def test_user_visible_fallback_constant_exists(self):
+        from backend.chat import USER_VISIBLE_FALLBACK
+        self.assertIsInstance(USER_VISIBLE_FALLBACK, str)
+        self.assertIn("没有产出可见回复", USER_VISIBLE_FALLBACK)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in EmptyAssistantFallbackTests.__dict__
+    ):
+        setattr(EmptyAssistantFallbackTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 class S0SoftGateTests(ChatRuntimeTests):
     def _write_conversation(self, messages):
         import json

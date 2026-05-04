@@ -58,6 +58,14 @@ CUSTOM_STREAM_READ_TIMEOUT_SECONDS = 90.0
 SLOW_MODEL_STREAM_READ_TIMEOUT_SECONDS = 180.0
 AUTO_COMPACT_TRIGGER_RATIO = 0.9
 POST_COMPACT_SIDECAR_TARGET_BYTES = 24_000
+USER_VISIBLE_FALLBACK = (
+    "（这一轮我没有产出可见回复，可能是处理过程中断了。"
+    "请把刚才的需求换个说法再发一次。）"
+)
+LEGACY_EMPTY_ASSISTANT_FALLBACKS = frozenset({
+    "（本轮" "无回复）",
+    USER_VISIBLE_FALLBACK,
+})
 _STAGE_ACK_MARKER = "<stage-ack"
 _CONVERSATION_STATE_LOCKS: dict[str, threading.RLock] = {}
 _CONVERSATION_STATE_LOCKS_GUARD = threading.Lock()
@@ -980,6 +988,38 @@ class ChatHandler:
                 mutated = state
             self._save_conversation_state_atomically(project_id, mutated)
             return mutated
+
+    def _record_empty_assistant_event(self, project_id: str, diagnostic: str) -> None:
+        timestamp = datetime.now().isoformat(timespec="seconds")
+
+        def mutate(state: Dict):
+            state.setdefault("events", []).append({
+                "type": "empty_assistant",
+                "diagnostic": diagnostic,
+                "recorded_at": timestamp,
+            })
+            return state
+
+        self._mutate_conversation_state(project_id, mutate)
+
+    def _finalize_empty_assistant_turn(
+        self,
+        project_id: str,
+        history: List[Dict],
+        current_user_message: Dict,
+        *,
+        diagnostic: str = "stream_truncated",
+    ) -> str:
+        """Unify empty-assistant fallback handling.
+        1. Do NOT persist empty assistant (avoid polluting next turn's prompt)
+        2. Persist user message (else next turn missing one)
+        3. Record empty_assistant event in conversation_state
+        Returns: USER_VISIBLE_FALLBACK string (caller yields to frontend)
+        """
+        history.append(current_user_message)
+        self._save_conversation(project_id, history)
+        self._record_empty_assistant_event(project_id, diagnostic)
+        return USER_VISIBLE_FALLBACK
 
     def _build_tool_persistence_metadata(
         self,
@@ -3461,10 +3501,14 @@ class ChatHandler:
             assistant_message,
             user_message=str(current_user_message.get("content") or ""),
         )
-        # 上游偶尔会返回只有空白的 assistant（stream 截断、tag strip 后变空等），
-        # 原样落盘会在下一轮产生 parts=[] 的 model turn，Gemini 拒收。用占位文本保底。
         if not assistant_message.strip():
-            assistant_message = "（本轮无回复）"
+            fallback_text = self._finalize_empty_assistant_turn(
+                project_id, history, current_user_message,
+                diagnostic="stream_truncated",
+            )
+            yield {"type": "content", "data": fallback_text}
+            yield {"type": "usage", "data": token_usage}
+            return
         already_emitted_len = (
             0
             if buffer_required_write_content
@@ -3726,7 +3770,11 @@ class ChatHandler:
             user_message=str(current_user_message.get("content") or ""),
         )
         if not assistant_message.strip():
-            assistant_message = "（本轮无回复）"
+            fallback_text = self._finalize_empty_assistant_turn(
+                project_id, history, current_user_message,
+                diagnostic="non_stream_empty",
+            )
+            return {"content": fallback_text, "token_usage": token_usage}
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, token_usage)
@@ -6415,7 +6463,13 @@ class ChatHandler:
             user_message=str(current_user_message.get("content") or ""),
         )
         if not assistant_message.strip():
-            assistant_message = "（本轮无回复）"
+            fallback_text = self._finalize_empty_assistant_turn(
+                project_id, history, current_user_message,
+                diagnostic="early_finalize_empty",
+            )
+            token_usage = self._finalize_post_turn_compaction(project_id, history, None)
+            system_notices = self._collect_user_visible_system_notices()
+            return fallback_text, token_usage, system_notices
         history.extend([current_user_message, {"role": "assistant", "content": assistant_message}])
         self._save_conversation(project_id, history)
         token_usage = self._finalize_post_turn_compaction(project_id, history, None)
