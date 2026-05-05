@@ -12273,6 +12273,12 @@ class StreamSplitSafeTailDraftActionTests(unittest.TestCase):
 
 
 class PreflightCheckTests(ChatRuntimeTests):
+    def _put_draft(self, body: str) -> None:
+        """fix4 test helper: write content/report_draft_v1.md under self.project_dir."""
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(body, encoding="utf-8")
+
     def test_preflight_keyword_intent_begin_for_start_writing(self):
         handler = self._make_handler_with_project()
         decision = handler._preflight_canonical_draft_check(
@@ -12294,16 +12300,77 @@ class PreflightCheckTests(ChatRuntimeTests):
         )
         self.assertIsNone(decision["preflight_keyword_intent"])
 
-    def test_preflight_keyword_intent_never_section_or_replace(self):
+    def test_preflight_keyword_intent_never_section_replace_when_target_unresolved(self):
+        """v5 §4.12 安全契约：keyword 命中但 target 未 resolve 时仍返回 None。
+        （v4 原 test 'never section/replace' 在 v5 失效——target 能 resolve 时允许返回 section/replace。）"""
         handler = self._make_handler_with_project()
-        # spec §4.2 硬约束
+        # 无 draft 文件 → section/replace 都 resolve 不出 target
         for msg in ["重写第二章", "把 X 改成 Y", "section:foo", "replace this"]:
             decision = handler._preflight_canonical_draft_check(
                 self.project_id, msg, stage_code="S4",
             )
-            self.assertNotIn(
-                decision["preflight_keyword_intent"], {"section", "replace"},
+            self.assertIsNone(
+                decision["preflight_keyword_intent"],
+                f"target unresolved but got intent={decision.get('preflight_keyword_intent')} for msg={msg!r}",
             )
+
+    def test_preflight_section_keyword_with_unique_heading_returns_section(self):
+        """fix4 v5: '把第二章重写一下' + draft 含唯一第二章 heading → preflight_keyword_intent='section'"""
+        handler = self._make_handler_with_project()
+        self._put_draft("## 第一章 引言\n\n内容A\n\n## 第二章 战力演化\n\n内容B\n")
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "把第二章重写一下",
+        )
+        self.assertEqual(decision.get("preflight_keyword_intent"), "section")
+        self.assertEqual(decision.get("rewrite_target_label"), "第二章 战力演化")
+        self.assertIn("内容B", str(decision.get("rewrite_target_snapshot") or ""))
+
+    def test_preflight_section_keyword_without_draft_returns_none(self):
+        """fix4 v5: '重写第二章' 但 draft 不存在 → preflight_keyword_intent=None"""
+        handler = self._make_handler_with_project()
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "重写第二章",
+        )
+        self.assertIsNone(decision.get("preflight_keyword_intent"))
+
+    def test_preflight_section_ambiguous_prefix_returns_none(self):
+        """fix4 v5: prefix '第二章' 在 draft 中匹配 0 个 → preflight=None"""
+        handler = self._make_handler_with_project()
+        self._put_draft("## 第一章 引言\n\n内容A\n")
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "把第二章重写一下",
+        )
+        self.assertIsNone(decision.get("preflight_keyword_intent"))
+
+    def test_preflight_replace_keyword_with_unique_old_text_returns_replace(self):
+        """fix4 v5: '把"体能"改成"力量"' + draft 含唯一"体能" → preflight_keyword_intent='replace'"""
+        handler = self._make_handler_with_project()
+        self._put_draft("## 第一章\n体能很重要\n")
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "把报告里的体能改成力量",
+        )
+        self.assertEqual(decision.get("preflight_keyword_intent"), "replace")
+        self.assertEqual(decision.get("old_text"), "体能")
+        self.assertEqual(decision.get("new_text"), "力量")
+
+    def test_preflight_replace_old_text_not_in_draft_returns_none(self):
+        """fix4 v5: replace 关键词命中但 draft 不含 old_text → preflight=None"""
+        handler = self._make_handler_with_project()
+        self._put_draft("## 第一章\n力量很重要\n")
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "把报告里的体能改成力量",
+        )
+        self.assertIsNone(decision.get("preflight_keyword_intent"))
+
+    def test_preflight_begin_keyword_takes_priority_over_section(self):
+        """fix4 v5: begin 优先级仍然 > section（dict 顺序保留）"""
+        handler = self._make_handler_with_project()
+        self._put_draft("## 第一章\n内容\n")
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "开始写报告吧，再重写一下",
+        )
+        # 含 "开始写报告" begin 关键词 + "重写" section 关键词；begin 应优先
+        self.assertEqual(decision.get("preflight_keyword_intent"), "begin")
 
     def test_preflight_s0_with_draft_intent_rejects(self):
         handler = self._make_handler_with_project()
@@ -12482,6 +12549,90 @@ class GateCanonicalDraftToolCallTests(ChatRuntimeTests):
         )
         self.assertIsNotNone(result)  # 必须 block，不能因为缺 file_path 就 pass
 
+    def test_gate_edit_file_section_keyword_fallback_passes(self):
+        """fix4 v5: edit_file + tag_intents 空 + keyword_intent='section' → pass + record fallback"""
+        handler = self._make_handler_with_project()
+        decision = handler._make_canonical_draft_decision(
+            stage_code="S4", mode="require", priority="P_PREFLIGHT_OK",
+            preflight_keyword_intent="section",
+            rewrite_target_label="第二章 战力演化",
+        )
+        block = handler._gate_canonical_draft_tool_call(
+            self.project_id,
+            tool_name="edit_file",
+            tool_args={"file_path": "content/report_draft_v1.md"},
+            decision=decision,
+            tags=[],
+        )
+        self.assertIsNone(block)
+        events = handler._load_conversation_state(self.project_id).get("events", [])
+        self.assertTrue(
+            any(e.get("type") == "tagless_draft_fallback"
+                and e.get("fallback_intent") == "section" for e in events),
+        )
+
+    def test_gate_edit_file_replace_keyword_fallback_passes(self):
+        """fix4 v5: edit_file + tag_intents 空 + keyword_intent='replace' → pass + record"""
+        handler = self._make_handler_with_project()
+        decision = handler._make_canonical_draft_decision(
+            stage_code="S4", mode="require", priority="P_PREFLIGHT_OK",
+            preflight_keyword_intent="replace",
+            old_text="体能", new_text="力量",
+        )
+        block = handler._gate_canonical_draft_tool_call(
+            self.project_id,
+            tool_name="edit_file",
+            tool_args={"file_path": "content/report_draft_v1.md"},
+            decision=decision,
+            tags=[],
+        )
+        self.assertIsNone(block)
+        events = handler._load_conversation_state(self.project_id).get("events", [])
+        self.assertTrue(
+            any(e.get("type") == "tagless_draft_fallback"
+                and e.get("fallback_intent") == "replace" for e in events),
+        )
+
+    def test_gate_edit_file_no_tag_no_keyword_blocks(self):
+        """fix4 v5: tag 空 + keyword_intent=None → block (UX 跟旧通道一致 fail-fast)"""
+        handler = self._make_handler_with_project()
+        decision = handler._make_canonical_draft_decision(
+            stage_code="S4", mode="no_write", priority="P_PREFLIGHT_OK",
+            preflight_keyword_intent=None,
+        )
+        block = handler._gate_canonical_draft_tool_call(
+            self.project_id,
+            tool_name="edit_file",
+            tool_args={"file_path": "content/report_draft_v1.md"},
+            decision=decision,
+            tags=[],
+        )
+        self.assertIsNotNone(block)
+        self.assertIn("draft-action", block)
+
+    def test_gate_edit_file_with_section_tag_still_passes(self):
+        """fix4 v5 regression: 显式 section tag 仍优先放行（不依赖 fallback）"""
+        from backend.draft_action import DraftActionEvent
+        handler = self._make_handler_with_project()
+        decision = handler._make_canonical_draft_decision(
+            stage_code="S4", mode="require", priority="P_PREFLIGHT_OK",
+            preflight_keyword_intent=None,
+        )
+        tag = DraftActionEvent(
+            raw="<draft-action>section:第二章</draft-action>",
+            intent="section", section_label="第二章",
+            old_text=None, new_text=None, start=0, end=10,
+            executable=True, ignored_reason=None,
+        )
+        block = handler._gate_canonical_draft_tool_call(
+            self.project_id,
+            tool_name="edit_file",
+            tool_args={"file_path": "content/report_draft_v1.md"},
+            decision=decision,
+            tags=[tag],
+        )
+        self.assertIsNone(block)
+
     def test_execute_plan_write_invokes_gate_before_legacy_block(self):
         """Task 19 fix2 P0 regression: gate must run BEFORE _non_plan_write_block_reason.
 
@@ -12611,6 +12762,41 @@ class GateCanonicalDraftToolCallTests(ChatRuntimeTests):
             "请先在回复中发 <draft-action>",
             msg,
             f"gate blocked despite keyword fallback eligibility; result={result}",
+        )
+
+    def test_execute_plan_write_section_fallback_passes_for_tagless_section_request(self):
+        """fix4 v5 e2e: '把第二章重写一下' + draft 含唯一第二章 →
+        _execute_plan_write 不返回 'draft-action' block message"""
+        handler = self._make_handler_with_project()
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(
+            "## 第一章 引言\n内容A\n## 第二章 战力演化\n内容B\n", encoding="utf-8",
+        )
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        decision = handler._turn_context.get("canonical_draft_decision") or {}
+        self.assertEqual(decision.get("preflight_keyword_intent"), "section")
+        result = handler._execute_plan_write(
+            self.project_id,
+            file_path="content/report_draft_v1.md",
+            content="## 第二章 战力演化\n新内容B\n",
+            source_tool_name="edit_file",
+            source_tool_args={
+                "file_path": "content/report_draft_v1.md",
+                "old_string": "## 第二章 战力演化\n内容B",
+                "new_string": "## 第二章 战力演化\n新内容B",
+            },
+            persist_func_name="edit_file",
+            persist_args={
+                "file_path": "content/report_draft_v1.md",
+                "old_string": "## 第二章 战力演化\n内容B",
+                "new_string": "## 第二章 战力演化\n新内容B",
+            },
+        )
+        msg = result.get("message") or ""
+        self.assertNotIn(
+            "请先在回复中发 <draft-action>", msg,
+            f"gate blocked despite section keyword fallback eligibility; result={result}",
         )
 
 

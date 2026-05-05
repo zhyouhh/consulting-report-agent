@@ -125,11 +125,10 @@ description: Use when writing consulting reports, strategy analysis, market rese
 tag 必须独立一行、在回复尾部、代码块外。系统检测到合法 tag 后才会放行写正文工具。
 不发 tag 直接调写正文工具会被拒绝。
 
+**例外（fallback）**：当用户消息**明确指定了章节数字前缀**（如"把第二章重写"）或**给出 OLD/NEW 配对**（如"把'体能'改成'力量'"）时，即使你忘记发 tag，系统也会尝试自动 fallback 放行写工具。但**不要依赖 fallback**——明确发 tag 是首选，能让用户更清楚地看到你的动作意图。
+
 模型不需要遍历用户中文表达——只要能从用户消息中识别出"用户希望我做正文动作"，就发对应 tag；
 不确定时不发 tag，先问用户澄清。
-
-如果只调工具不输出文本（少见情况），系统会按本轮 preflight 推断的意图兜底放行
-（仅 `append_report_draft` begin/continue 类，不放行 `edit_file`）。
 
 ### S5 质量审查
 - 完成 `review-checklist.md`

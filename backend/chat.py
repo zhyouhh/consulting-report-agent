@@ -89,6 +89,19 @@ _DRAFT_INTENT_PREFLIGHT_KEYWORDS = {
         "写下一章",
         "写下一段",
     ),
+    # fix4 (v5): section/replace gating keywords (presence is necessary but not
+    # sufficient — preflight still must resolve a unique target before emitting
+    # preflight_keyword_intent="section"/"replace")
+    "section": (
+        "重写",
+        "改写",
+        "重做",
+    ),
+    "replace": (
+        "改成",
+        "替换成",
+        "换成",
+    ),
 }
 _CONVERSATION_STATE_LOCKS: dict[str, threading.RLock] = {}
 _CONVERSATION_STATE_LOCKS_GUARD = threading.Lock()
@@ -350,6 +363,8 @@ class ChatHandler:
         r"(?:改成|改为|替换成|换成)"
         r"\s*(?P<new_text>[^，,、。！？!?；;：:\n]{1,80})"
     )
+    # fix4 (v5 §4.12): section keyword fallback only accepts explicit numeric prefixes.
+    _SECTION_PREFIX_RE = re.compile(r"第([一二三四五六七八九十百千万0-9]+)(?:[章节]|部分)")
 
     NON_PLAN_WRITE_ALLOW_KEYWORDS = [
         "确认大纲",
@@ -1822,8 +1837,8 @@ class ChatHandler:
 
         # 仅依赖 preflight_keyword_intent 字段（v4/v5 强制）
         keyword_intent = decision.get("preflight_keyword_intent")
-        if keyword_intent not in {"begin", "continue", None}:
-            # 防御：如果实施有 bug 让其他值进来，强制 block
+        # v5 (§4.12): valid set extended to include "section" / "replace"
+        if keyword_intent not in {"begin", "continue", "section", "replace", None}:
             block_reason = self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
             self._record_draft_gate_block_event(
                 project_id, tool_name=tool_name, reason=block_reason,
@@ -1851,6 +1866,14 @@ class ChatHandler:
 
         if tool_name == "edit_file":
             if tag_intents & {"section", "replace"}:
+                return None
+            # v5 §4.12 fix4: tagless fallback when preflight resolved a unique target
+            if not tag_intents and keyword_intent in {"section", "replace"}:
+                self._record_tagless_fallback_event(
+                    project_id, fallback_tool="edit_file",
+                    fallback_intent=keyword_intent,
+                )
+                logging.warning("draft_edit without explicit tag, fallback path used")
                 return None
             block_reason = self.CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE
             self._record_draft_gate_block_event(
@@ -2055,6 +2078,46 @@ class ChatHandler:
         )
         return decision
 
+    def _preflight_resolve_section_target(
+        self,
+        user_message: str,
+        draft_text: str,
+    ) -> dict[str, str] | None:
+        """fix4 (v5 §4.12): user_message 中抽章节数字前缀，prefix-match draft heading.
+
+        返回 {label, snapshot} 当且仅当 user_message 含 `第N章/节/部分` 这类前缀且
+        draft heading 中**恰好一个** label 以该前缀开头；否则返回 None。
+        """
+        if not user_message or not draft_text:
+            return None
+
+        matches = list(self._SECTION_PREFIX_RE.finditer(user_message))
+        if not matches:
+            return None
+
+        heading_nodes = self._extract_markdown_heading_nodes(draft_text)
+        if not heading_nodes:
+            return None
+
+        for prefix_match in matches:
+            prefix = prefix_match.group(0)  # e.g. "第二章"
+            candidates = [
+                node for node in heading_nodes
+                if isinstance(node, dict)
+                and isinstance(node.get("label"), str)
+                and str(node.get("label")).startswith(prefix)
+            ]
+            if len(candidates) != 1:
+                continue
+            node = candidates[0]
+            label = str(node.get("label") or "")
+            snapshot = str(node.get("section_snapshot") or "")
+            if not label or not snapshot:
+                continue
+            return {"label": label, "snapshot": snapshot}
+
+        return None
+
     def _preflight_canonical_draft_check(
         self,
         project_id: str,
@@ -2070,7 +2133,7 @@ class ChatHandler:
         3. mixed-intent 拆轮？
 
         返回 _make_canonical_draft_decision dict，preflight_keyword_intent 字段填值。
-        不再做 begin/continue/section/replace 的细分（细分由 draft-action tag 决定）。
+        section/replace 仅在能严格 resolve 唯一目标时输出 fallback 信号（v5 §4.12）。
 
         Phase 2a 期间：仅供 Task 20 compare 使用，不参与实际决策。
         Phase 2b 切主时：替代旧 classifier 成为唯一 preflight。
@@ -2090,12 +2153,57 @@ class ChatHandler:
         if not text:
             return self._empty_canonical_draft_decision(stage_code=normalized_stage)
 
-        # Step 1: preflight_keyword_intent 检测（dict 顺序定义优先级：begin 在前）
-        preflight_intent = None
+        # Step 1: preflight_keyword_intent 检测（dict 顺序定义优先级：begin > continue > section > replace）
+        preflight_intent: str | None = None
         for intent, kws in _DRAFT_INTENT_PREFLIGHT_KEYWORDS.items():
+            if intent in {"section", "replace"}:
+                continue  # section/replace 走 Step 1.5 严格 resolve（v5 §4.12）
             if self._phrase_hits(text, list(kws)):
-                preflight_intent = intent  # "begin" 或 "continue"
-                break  # 首匹配赢——begin 比 continue 优先
+                preflight_intent = intent
+                break
+
+        # Step 1.5 (fix4 v5 §4.12): begin/continue 都没命中时，尝试 section/replace 严格 fallback
+        preflight_old_text: str | None = None
+        preflight_new_text: str | None = None
+        preflight_target_label: str | None = None
+        preflight_target_snapshot: str | None = None
+
+        if preflight_intent is None:
+            # 1.5a replace: 精确正则 + draft 中 unique old_text
+            replace_intent = self._parse_report_body_replacement_intent(text)
+            if replace_intent and self._phrase_hits(
+                text, list(_DRAFT_INTENT_PREFLIGHT_KEYWORDS["replace"]),
+            ):
+                old_text = str(replace_intent.get("old_text") or "")
+                new_text = str(replace_intent.get("new_text") or "")
+                if old_text and new_text:
+                    draft_text = (
+                        self._read_project_file_text(
+                            project_id, self.skill_engine.REPORT_DRAFT_PATH
+                        )
+                        or ""
+                    )
+                    if draft_text and draft_text.count(old_text) == 1:
+                        preflight_intent = "replace"
+                        preflight_old_text = old_text
+                        preflight_new_text = new_text
+
+        if preflight_intent is None:
+            # 1.5b section: 关键词 hit + heading 数字前缀 unique resolve
+            if self._phrase_hits(
+                text, list(_DRAFT_INTENT_PREFLIGHT_KEYWORDS["section"]),
+            ):
+                draft_text = (
+                    self._read_project_file_text(
+                        project_id, self.skill_engine.REPORT_DRAFT_PATH
+                    )
+                    or ""
+                )
+                target = self._preflight_resolve_section_target(text, draft_text)
+                if target:
+                    preflight_intent = "section"
+                    preflight_target_label = target["label"]
+                    preflight_target_snapshot = target["snapshot"]
 
         # Step 2: 含意图但 stage 不对 → reject
         if preflight_intent is not None:
@@ -2114,6 +2222,10 @@ class ChatHandler:
                     priority="P_PREFLIGHT_STAGE",
                     fixed_message=self.CANONICAL_DRAFT_STAGE_GATE_MESSAGE,
                     preflight_keyword_intent=preflight_intent,
+                    old_text=preflight_old_text,
+                    new_text=preflight_new_text,
+                    rewrite_target_label=preflight_target_label,
+                    rewrite_target_snapshot=preflight_target_snapshot,
                 )
 
         # Step 3: mixed-intent 拆轮（保留现有 helper）
@@ -2125,6 +2237,10 @@ class ChatHandler:
                 priority="P_PREFLIGHT_MULTI",
                 fixed_message=self.CANONICAL_DRAFT_SPLIT_TURN_MESSAGE,
                 preflight_keyword_intent=preflight_intent,
+                old_text=preflight_old_text,
+                new_text=preflight_new_text,
+                rewrite_target_label=preflight_target_label,
+                rewrite_target_snapshot=preflight_target_snapshot,
             )
 
         return self._make_canonical_draft_decision(
@@ -2132,6 +2248,10 @@ class ChatHandler:
             mode="no_write" if preflight_intent is None else "require",
             priority="P_PREFLIGHT_OK",
             preflight_keyword_intent=preflight_intent,
+            old_text=preflight_old_text,
+            new_text=preflight_new_text,
+            rewrite_target_label=preflight_target_label,
+            rewrite_target_snapshot=preflight_target_snapshot,
         )
 
     def _classify_canonical_draft_turn(

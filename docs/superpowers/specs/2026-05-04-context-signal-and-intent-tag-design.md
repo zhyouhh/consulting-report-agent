@@ -414,6 +414,8 @@ turn end → strip tags + tool-log → persist
 - 这是 preflight **唯一**输出的细分信号，专门为 §4.8 tool-only fallback 设计；不允许在其他地方使用
 - 测试硬约束：`preflight_keyword_intent` 永远不能等于 `"section"` 或 `"replace"`
 
+**v5 amendment**: 取值放宽至 section/replace，详见 §4.12。
+
 #### 4.3 draft-action tag 语法（细粒度）
 
 四种意图，三种语法形式：
@@ -534,6 +536,8 @@ _DRAFT_INTENT_PREFLIGHT_KEYWORDS = (
 
 不兜 `section` / `replace`——这两类用户表达更复杂，缺 tag 时直接拒绝让模型重发。
 
+**v5 amendment**: section/replace 在能 resolve 唯一目标时也走 keyword fallback，详见 §4.12。
+
 #### 4.8 tool-only turn 的 fallback（v3 收紧）
 
 [chat.py:3423-3426](../../backend/chat.py:3423) 已经承认存在"只出 tool_call 没 final text"的 turn——这种 turn 里 LLM 没有 content 可放 tag。
@@ -548,6 +552,8 @@ _DRAFT_INTENT_PREFLIGHT_KEYWORDS = (
 | `edit_file` 写 `content/report_draft_v1.md`（任何 section / 全文 / replace） | ✗ **必须**带 tag（draft-action section / draft-action-replace），否则 reject + notice "请先发 `<draft-action>` tag 声明改动类型" |
 | `write_file` 写 `content/report_draft_v1.md` | ✗ 永久禁止（已有规则，不变） |
 | `write_file` / `edit_file` 写 `plan/*` | ✓ 放行（不属于正文写工具，不受 draft-action 约束） |
+
+**v5 amendment**: edit_file 也允许 keyword fallback，前提是 preflight 已 resolve 目标，详见 §4.12。
 
 实现：[`_validate_canonical_draft_write_call`](../../backend/chat.py)（新增 / 沿用现有命名）在工具放行检查时区分两类目标：
 
@@ -664,6 +670,30 @@ tag 必须独立一行、在回复尾部、代码块外。系统检测到合法 
 
 如果只调工具不输出文本（少见情况），系统会按本轮 preflight 推断的意图兜底放行。
 ```
+
+#### 4.12 v5 amendment — section/replace keyword fallback (fix4)
+
+**背景**：Phase 2a cutover smoke (4 reality_test sessions) 发现 model 在 section/replace 路径**几乎从不发 tag**（B/C 两节 0 hit），gate 死循环 19 次到 max_iter。旧通道 `_resolve_section_rewrite_targets` 因为"完整 heading label 是 user_message 子串"硬约束也几乎不 work，所以新通道比旧通道更差（dead loop vs. fail fast）。详见 `docs/superpowers/cutover_report_2026-05-05_fix3.md`、`docs/superpowers/handoffs/2026-05-05-phase2-section-replace-pending.md`。
+
+**修订**（v5 替代 v4 §4.2 / §4.7 / §4.8 的严格表述）：
+
+1. **`preflight_keyword_intent` 取值放宽**：从 `{"begin", "continue", None}` 扩展为 `{"begin", "continue", "section", "replace", None}`。
+2. **严格安全契约**：preflight 输出 `"section"` / `"replace"` 时**必须已 resolve 出唯一目标**——否则保持 `None`，gate 仍然 block（fail-fast，UX ≥ 旧通道）。
+3. **target resolve 规则**：
+   - **replace**：复用 `_parse_report_body_replacement_intent`（已有，正则 `REPORT_BODY_REPLACE_TEXT_INTENT_RE`）抽 `old_text`/`new_text`；要求 draft 存在且 `draft_text.count(old_text) == 1`；满足则填 `preflight_keyword_intent="replace"`、`old_text`、`new_text`。
+   - **section**：在 user_message 中抽**章节数字前缀**（正则 `r"第([一二三四五六七八九十百千万0-9]+)(?:[章节]|部分)"`），用 `label.startswith(prefix)` 在 draft heading nodes 中找候选；唯一命中 → 填 `preflight_keyword_intent="section"`、`rewrite_target_label`、`rewrite_target_snapshot`；多个或 0 个候选 → 保持 `None`。
+4. **gate edit_file 分支放行**：当 `tag_intents` 为空且 `preflight_keyword_intent ∈ {"section", "replace"}` 时，记录 `tagless_draft_fallback` 事件后放行。其他情况仍按 v4 §4.8 执行（必须 tag 或 begin/continue keyword）。
+5. **测试硬约束更新**：`preflight_keyword_intent` 不能等于除上述五种之外的任何值；`begin`/`continue` 优先级仍高于 `section`/`replace`（dict 顺序保留）。
+
+**为什么是"严格安全 fallback"而非"弱兜底"**：弱兜底（仅看关键词不看目标）会让 gate 在 model 改错章节/改错字符串时也 pass；严格 fallback 要求 preflight 自己能 resolve target，确保 fallback pass 时目标信息跟"有 tag"等价，安全性不降级。
+
+**SKILL.md 更新**：§S4 保留 tag 鼓励，但说明缺 tag 时只要意图明确（指定章节/old-new 配对）系统也能 fallback；不要教用户依赖 fallback。
+
+**实施引用**：
+- `_preflight_canonical_draft_check` 扩展（`backend/chat.py`）
+- `_preflight_resolve_section_target`（新增 helper，heading 数字前缀匹配）
+- `_gate_canonical_draft_tool_call` edit_file 分支扩 fallback
+- 完整 commit/test 见实施记录。
 
 ### 5. 工具调用可见化（C1）
 
