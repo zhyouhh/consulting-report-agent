@@ -3577,11 +3577,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_append_report_draft_creates_canonical_draft_via_write_gate(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-        from backend.draft_action import DraftActionEvent
-        handler._turn_context["draft_action_events"] = [
-            DraftActionEvent(raw="...", intent="begin", executable=True)
-        ]
+        self._start_report_writing_turn(handler, "开始写报告")
 
         result = handler._execute_tool(
             self.project_id,
@@ -3599,10 +3595,11 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_append_report_draft_appends_with_clean_blank_line_boundary(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
         draft_path = self.project_dir / "content" / "report_draft_v1.md"
         draft_path.parent.mkdir(parents=True, exist_ok=True)
         draft_path.write_text("# Draft\n\n## 第一章\n\n已有正文\n", encoding="utf-8")
+        self._start_report_writing_turn(handler, "继续写正文")
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -3734,104 +3731,24 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("write_file", result["message"])
         self.assertIn("append_report_draft", result["message"])
+        self.assertIn("rewrite_report_draft", result["message"])
         self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_append_report_draft_is_exempt_from_same_turn_read_before_write(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-        draft_path = self._write_partial_report_draft("已有正文" * 120)
-        before = draft_path.read_text(encoding="utf-8")
 
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_tool_call(
-                "append_report_draft",
-                json.dumps({"content": "## 第二章\n\n" + ("新增正文" * 60)}, ensure_ascii=False),
-            ),
-        )
-
-        self.assertEqual(result["status"], "success")
-        self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_edit_file_requires_same_turn_read_before_write(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        draft_path = self._write_partial_report_draft("执行摘要保留旧版表述。")
-        original = draft_path.read_text(encoding="utf-8")
-        exec_summary = "## 第一章\n\n执行摘要保留旧版表述。"
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S5"),
-        ):
-            handler._turn_context = handler._build_turn_context(
-                self.project_id,
-                "把第一章改强一点",
-            )
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id,
-                "把第一章改强一点",
-            )
-        handler._turn_context["required_write_snapshots"] = snapshots
-
-        blocked = handler._execute_tool(
-            self.project_id,
-            self._make_edit_report_tool_call(
-                old_string=exec_summary,
-                new_string="## 第一章\n\n更强的章节版本。",
-            ),
-        )
-
-        self.assertEqual(blocked["status"], "error")
-        self.assertIn("read_file", blocked["message"])
-        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
-
-        read_result = handler._execute_tool(
-            self.project_id,
-            self._make_tool_call(
-                "read_file",
-                json.dumps({"file_path": "content/report_draft_v1.md"}, ensure_ascii=False),
-            ),
-        )
-        allowed = handler._execute_tool(
-            self.project_id,
-            self._make_edit_report_tool_call(
-                old_string=exec_summary,
-                new_string="## 第一章\n\n更强的章节版本。",
-            ),
-        )
-
-        self.assertEqual(read_result["status"], "success")
-        self.assertEqual(allowed["status"], "success")
-        self.assertIn("更强的章节版本", draft_path.read_text(encoding="utf-8"))
 
     @mock.patch("backend.chat.OpenAI")
     def test_canonical_draft_mutation_blocks_second_successful_mutation_in_same_turn(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
         draft_path = self._write_partial_report_draft("既有正文" * 120)
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S4"),
-        ):
-            handler._turn_context = handler._build_turn_context(
-                self.project_id,
-                "继续写正文",
-            )
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id,
-                "继续写正文",
-            )
+        self._start_report_writing_turn(handler, "继续写正文")
+        snapshots = handler._build_required_write_snapshots(
+            self.project_id,
+            "继续写正文",
+        )
         handler._turn_context["required_write_snapshots"] = snapshots
-        handler._turn_context["canonical_draft_decision"]["preflight_keyword_intent"] = "continue"
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
 
         first = handler._execute_tool(
             self.project_id,
@@ -3845,14 +3762,14 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(first["status"], "success")
         self.assertEqual(second["status"], "error")
-        self.assertIn("本轮已经成功", second["message"])
+        self.assertIn("本轮已经修改过", second["message"])
         self.assertEqual(draft_path.read_text(encoding="utf-8"), after_first)
 
     @mock.patch("backend.chat.OpenAI")
     def test_append_report_draft_rejects_short_content(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        self._start_report_writing_turn(handler, "开始写报告")
 
         result = handler._execute_tool(
             self.project_id,
@@ -3866,29 +3783,12 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("至少 80", result["message"])
         self.assertFalse((self.project_dir / "content" / "report_draft_v1.md").exists())
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_append_report_draft_blocked_when_non_plan_write_disallowed(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=False)
-
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_tool_call(
-                "append_report_draft",
-                json.dumps({"content": "## 第三章：IP 强度对比\n\n" + ("正文" * 80)}, ensure_ascii=False),
-            ),
-        )
-
-        self.assertEqual(result["status"], "error")
-        self.assertIn("先确认大纲", result["message"])
-        self.assertFalse((self.project_dir / "content" / "report_draft_v1.md").exists())
 
     @mock.patch("backend.chat.OpenAI")
     def test_append_report_draft_memory_entry_refreshes_canonical_source_key(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        self._start_report_writing_turn(handler, "开始写报告")
 
         result = handler._execute_tool(
             self.project_id,
@@ -3915,7 +3815,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_append_report_draft_event_tool_name_stays_real_tool_name(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        self._start_report_writing_turn(handler, "开始写报告")
 
         result = handler._execute_tool(
             self.project_id,
@@ -4029,18 +3929,24 @@ class ChatRuntimeTests(unittest.TestCase):
         ):
             return set(handler._build_required_write_snapshots(self.project_id, user_message))
 
-    def _classify_canonical_draft_for_stage(
+
+    def _start_report_writing_turn(
         self,
         handler: ChatHandler,
-        stage_code: str,
-        user_message: str,
-    ) -> dict:
-        with mock.patch.object(
+        user_message: str = "开始写报告",
+        *,
+        stage_code: str = "S4",
+    ) -> None:
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        stage_patcher = mock.patch.object(
             handler.skill_engine,
             "_infer_stage_state",
             return_value=self._mock_stage_state(stage_code),
-        ):
-            return handler._classify_canonical_draft_turn(self.project_id, user_message)
+        )
+        stage_patcher.start()
+        self.addCleanup(stage_patcher.stop)
+        handler._turn_context = handler._build_turn_context(self.project_id, user_message)
+
 
     def _save_draft_followup_state(
         self,
@@ -4276,185 +4182,17 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         return result
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_s4_first_draft_request_requires_append(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
 
-        decision = self._classify_canonical_draft_for_stage(handler, "S4", "开始写正文")
 
-        self.assertEqual(decision["mode"], "require")
-        self.assertEqual(decision["priority"], "P4")
-        self.assertEqual(decision["expected_tool_family"], "append_report_draft")
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_edit_only_without_draft_returns_fixed_reject(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
 
-        decision = self._classify_canonical_draft_for_stage(handler, "S5", "把报告里旧结论改成新结论")
 
-        self.assertEqual(decision["mode"], "reject")
-        self.assertEqual(
-            decision["fixed_message"],
-            "当前还没有正文草稿，请先用 append_report_draft 起草第一版。",
-        )
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_chat_immediately_rejects_no_draft_replace_without_provider_execution(self, mock_openai):
-        handler = self._make_handler_with_project()
 
-        result = handler.chat(self.project_id, "把报告里旧结论改成新结论")
 
-        self.assertEqual(
-            result["content"],
-            "当前还没有正文草稿，请先用 append_report_draft 起草第一版。",
-        )
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_chat_immediately_rejects_no_draft_full_rewrite_without_provider_execution(self, mock_openai):
-        handler = self._make_handler_with_project()
 
-        result = handler.chat(self.project_id, "请全文重写这份报告正文")
 
-        self.assertEqual(
-            result["content"],
-            "当前还没有正文草稿，请先用 append_report_draft 起草第一版。",
-        )
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_chat_immediately_rejects_split_turn_case_without_provider_execution(self, mock_openai):
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节。" * 120)
-
-        result = handler.chat(self.project_id, "先扩到 5000 字再导出并运行质量检查")
-
-        self.assertIn("拆成多个回合", result["content"])
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_threshold_recheck_p5a_already_met_returns_guidance_only_without_mutation(self, mock_openai):
-        handler = self._make_handler_with_project()
-        draft_path = self._write_partial_report_draft("现有章节。" * 120)
-        before = draft_path.read_text(encoding="utf-8")
-
-        result = handler.chat(self.project_id, "先扩到 500 字再导出")
-
-        self.assertIn("导出", result["content"])
-        self.assertIn("下一轮", result["content"])
-        self.assertIn("500", result["content"])
-        self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_whole_draft_rewrite_uses_full_file_edit_path(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("执行摘要保留旧版表述。")
-
-        decision = self._classify_canonical_draft_for_stage(handler, "S5", "请全文重写这份报告正文")
-
-        self.assertEqual(decision["mode"], "require")
-        self.assertEqual(decision["priority"], "P3")
-        self.assertEqual(decision["expected_tool_family"], "edit_file")
-        self.assertEqual(decision["required_edit_scope"], "full_draft")
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_whole_draft_rewrite_without_draft_returns_fixed_reject(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-
-        decision = self._classify_canonical_draft_for_stage(handler, "S5", "请全文重写这份报告正文")
-
-        self.assertEqual(decision["mode"], "reject")
-        self.assertEqual(
-            decision["fixed_message"],
-            "当前还没有正文草稿，请先用 append_report_draft 起草第一版。",
-        )
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_followup_state_unlocks_implicit_append_in_s4(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节偏短。" * 120)
-        self._save_draft_followup_state(
-            handler,
-            current_count=1800,
-            target_word_count=3000,
-            continuation_threshold_count=5000,
-        )
-
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S4",
-            "目标5000字喔？而且每章现在都太单薄了",
-        )
-
-        self.assertEqual(decision["mode"], "require")
-        self.assertEqual(decision["priority"], "P8")
-        self.assertEqual(decision["expected_tool_family"], "append_report_draft")
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_followup_state_does_not_force_append_for_unrelated_action(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节偏短。" * 120)
-        self._save_draft_followup_state(handler, current_count=1800, target_word_count=3000)
-
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S4",
-            "目标5000字喔？而且每章现在都太单薄了，先开始审查",
-        )
-
-        self.assertEqual(decision["mode"], "no_write")
-        self.assertEqual(decision["priority"], "P6")
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_p8_does_not_match_distinct_non_expansion_action(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节偏短。" * 120)
-        self._save_draft_followup_state(
-            handler,
-            current_count=1800,
-            target_word_count=3000,
-            continuation_threshold_count=5000,
-        )
-
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S4",
-            "太单薄了，顺便把封面标题改一下",
-        )
-
-        self.assertNotEqual(decision["mode"], "require")
-        self.assertNotEqual(decision["priority"], "P8")
-        self.assertNotEqual(decision["expected_tool_family"], "append_report_draft")
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_followup_state_is_s4_only(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节偏短。" * 120)
-        self._save_draft_followup_state(
-            handler,
-            current_count=1800,
-            target_word_count=3000,
-            continuation_threshold_count=5000,
-        )
-
-        for stage_code in ("S5", "done"):
-            with self.subTest(stage_code=stage_code):
-                decision = self._classify_canonical_draft_for_stage(
-                    handler,
-                    stage_code,
-                    "目标5000字喔？而且每章现在都太单薄了",
-                )
-                self.assertNotEqual(decision["mode"], "require")
-                self.assertNotEqual(decision["priority"], "P8")
 
     @mock.patch("backend.chat.OpenAI")
     def test_load_draft_followup_state_reads_sidecar_without_conversation_history(self, mock_openai):
@@ -4475,372 +4213,24 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(decision["mode"], "require")
         self.assertEqual(decision["priority"], "P8")
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_explicit_continuation_authorizes_append_without_history(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("已有章节。" * 100)
 
-        for message in ("继续写正文", "扩写正文"):
-            with self.subTest(message=message):
-                decision = self._classify_canonical_draft_for_stage(handler, "S7", message)
-                self.assertEqual(decision["mode"], "require")
-                self.assertEqual(decision["priority"], "P9")
-                self.assertEqual(decision["expected_tool_family"], "append_report_draft")
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_mixed_intent_canonical_draft_decision_routes_target_then_export(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节。" * 120)
 
-        decision = self._classify_canonical_draft_for_stage(handler, "S4", "先扩到 5000 字再导出")
 
-        self.assertEqual(decision["mode"], "require")
-        self.assertEqual(decision["priority"], "P5A")
-        self.assertEqual(decision["expected_tool_family"], "append_report_draft")
-        self.assertEqual(decision["mixed_intent_secondary_family"], "export")
-        self.assertEqual(decision["effective_turn_target_count"], 5000)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_mixed_intent_canonical_draft_decision_already_at_target_returns_p5a_no_write(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节。" * 1200)
 
-        decision = self._classify_canonical_draft_for_stage(handler, "S4", "先扩到 500 字再导出")
 
-        self.assertEqual(decision["mode"], "no_write")
-        self.assertEqual(decision["priority"], "P5A")
-        self.assertEqual(decision["mixed_intent_secondary_family"], "export")
-        self.assertEqual(decision["effective_turn_target_count"], 500)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_mixed_intent_canonical_draft_decision_without_draft_but_with_first_draft_intent_falls_to_p4(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
 
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S4",
-            "开始写正文，写到 5000 字再导出",
-        )
 
-        self.assertEqual(decision["mode"], "require")
-        self.assertEqual(decision["priority"], "P4")
-        self.assertEqual(decision["expected_tool_family"], "append_report_draft")
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_mixed_intent_canonical_draft_decision_routes_inspect_then_continue_if_needed(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节。" * 120)
 
-        decision = self._classify_canonical_draft_for_stage(handler, "S4", "看看现在多少字，不够就继续写")
 
-        self.assertEqual(decision["mode"], "require")
-        self.assertEqual(decision["priority"], "P5A")
-        self.assertEqual(decision["expected_tool_family"], "append_report_draft")
-        self.assertEqual(decision["mixed_intent_secondary_family"], "inspect_word_count")
-        self.assertEqual(decision["effective_turn_target_count"], 3000)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_mixed_intent_canonical_draft_decision_does_not_treat_incidental_digit_phrase_as_explicit_target(
-        self,
-        mock_openai,
-    ):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节。" * 120)
 
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S4",
-            "看看现在多少字，结合 2025 字节跳动案例，不够就继续写",
-        )
 
-        self.assertEqual(decision["mode"], "require")
-        self.assertEqual(decision["priority"], "P5A")
-        self.assertEqual(decision["mixed_intent_secondary_family"], "inspect_word_count")
-        self.assertEqual(decision["effective_turn_target_count"], 3000)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_mixed_intent_canonical_draft_decision_routes_section_edit_before_export(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft(
-            "## 执行摘要\n\n旧版摘要。\n\n## 第一章\n\n现有章节。"
-        )
 
-        decision = self._classify_canonical_draft_for_stage(handler, "S5", "把执行摘要改强一点后导出")
-
-        self.assertEqual(decision["mode"], "require")
-        self.assertEqual(decision["priority"], "P5B")
-        self.assertEqual(decision["expected_tool_family"], "edit_file")
-        self.assertEqual(decision["required_edit_scope"], "section")
-        self.assertEqual(decision["mixed_intent_secondary_family"], "export")
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_parent_and_child_heading_phrase_targets_single_deepest_section(
-        self,
-        mock_openai,
-    ):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        draft_path.write_text(
-            "# 报告草稿\n\n"
-            "## 第一章\n\n"
-            "章节总述。\n\n"
-            "### 市场分析\n\n"
-            "市场分析原文。\n\n"
-            "### 竞争态势\n\n"
-            "竞争态势原文。",
-            encoding="utf-8",
-        )
-
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S5",
-            "把第一章市场分析改强一点",
-        )
-
-        self.assertEqual(decision["mode"], "require")
-        self.assertEqual(decision["expected_tool_family"], "edit_file")
-        self.assertEqual(decision["required_edit_scope"], "section")
-        self.assertEqual(decision["rewrite_target_label"], "市场分析")
-        self.assertNotEqual(decision["priority"], "P2_MULTI_SECTION")
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_canonical_draft_decision_duplicate_headings_require_specific_section(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        draft_path.write_text(
-            "# 报告草稿\n\n"
-            "## 第一章\n\n"
-            "### 市场分析\n\n"
-            "第一章市场分析原文。\n\n"
-            "## 第二章\n\n"
-            "### 市场分析\n\n"
-            "第二章市场分析原文。",
-            encoding="utf-8",
-        )
-
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S5",
-            "把市场分析改强一点",
-        )
-
-        self.assertEqual(decision["mode"], "reject")
-        self.assertEqual(decision["fixed_message"], "请指明具体章节。")
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_mixed_intent_canonical_draft_decision_rejects_multiple_secondary_actions(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节。" * 120)
-
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S4",
-            "先扩到 5000 字再导出并运行质量检查",
-        )
-
-        self.assertEqual(decision["mode"], "reject")
-        self.assertEqual(decision["priority"], "P5_MULTI")
-        self.assertIn("拆成", decision["fixed_message"])
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_mixed_intent_canonical_draft_decision_rejects_multiple_secondary_actions_for_implicit_p8_candidate(
-        self,
-        mock_openai,
-    ):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节偏短。" * 120)
-        self._save_draft_followup_state(
-            handler,
-            current_count=1800,
-            target_word_count=3000,
-            continuation_threshold_count=5000,
-        )
-
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S4",
-            "太单薄了，看看现在多少字再导出",
-        )
-
-        self.assertEqual(decision["mode"], "reject")
-        self.assertEqual(decision["priority"], "P5_MULTI")
-        self.assertIn("拆成", decision["fixed_message"])
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_required_draft_write_snapshots_include_canonical_path_for_s4_body_intent(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-        self.assertTrue(
-            handler._message_has_report_body_write_intent(self.project_id, "继续写正文", "S4")
-        )
-        self.assertEqual(
-            self._required_write_paths_for_stage(handler, "S4", "继续写正文"),
-            {"content/report_draft_v1.md"},
-        )
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_non_table_s4_phrases_do_not_authorize_canonical_draft_write(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-
-        for message in ("写第三章", "继续写吧", "扩写第三章"):
-            with self.subTest(message=message):
-                handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-                self.assertFalse(
-                    handler._message_has_report_body_write_intent(self.project_id, message, "S4")
-                )
-                self.assertEqual(
-                    self._required_write_paths_for_stage(handler, "S4", message),
-                    set(),
-                )
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_report_body_write_intent_ignores_generic_s4_short_continue_prompt(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-
-        for assistant_message in (
-            "如果需要我继续检查资料，请回复“继续”。",
-            "请回复“继续”。",
-            "报告正文已经生成。若无问题，请回复“继续”开始审查。",
-        ):
-            with self.subTest(assistant_message=assistant_message):
-                handler._save_conversation(
-                    self.project_id,
-                    [{"role": "assistant", "content": assistant_message}],
-                )
-                handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-
-                self.assertFalse(
-                    handler._message_has_report_body_write_intent(self.project_id, "继续", "S4")
-                )
-                self.assertEqual(
-                    self._required_write_paths_for_stage(handler, "S4", "继续"),
-                    set(),
-                )
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_report_body_write_intent_ignores_contextual_short_continue_without_structured_followup_state(
-        self,
-        mock_openai,
-    ):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        handler._save_conversation(
-            self.project_id,
-            [
-                {
-                    "role": "assistant",
-                    "content": "若无问题，请回复“继续”，我将补全剩余章节。",
-                },
-                {
-                    "role": "assistant",
-                    "content": "报告正文仍偏短。若无问题，请回复“继续”开始扩写。",
-                }
-            ],
-        )
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-
-        self.assertFalse(handler._message_has_report_body_write_intent(self.project_id, "继续", "S4"))
-        self.assertEqual(
-            self._required_write_paths_for_stage(handler, "S4", "继续"),
-            set(),
-        )
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_report_body_write_intent_ignores_s4_questions_and_review_transition(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-
-        for message in ("现在字数多少？", "开始审查"):
-            with self.subTest(message=message):
-                handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-                self.assertFalse(
-                    handler._message_has_report_body_write_intent(self.project_id, message, "S4")
-                )
-                self.assertEqual(
-                    self._required_write_paths_for_stage(handler, "S4", message),
-                    set(),
-                )
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_required_draft_write_is_not_created_when_non_plan_write_disallowed(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=False)
-
-        self.assertFalse(
-            handler._message_has_report_body_write_intent(self.project_id, "先别继续写", "S4")
-        )
-        self.assertEqual(
-            self._required_write_paths_for_stage(
-                handler,
-                "S4",
-                "先别继续写",
-                can_write_non_plan=False,
-            ),
-            set(),
-        )
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_report_body_write_intent_for_s5_plus_requires_explicit_body_edit(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-
-        cases = [
-            ("S5", "开始审查", False, False),
-            ("S5", "开始第三章质量检查", False, False),
-            ("S5", "扩写正文", True, True),
-            ("S5", "把报告里 X 改成 Y", True, False),
-            ("S6", "把报告里 X 改成 Y", True, False),
-            ("S7", "继续写报告正文", True, True),
-            ("done", "继续写报告正文", True, True),
-            ("S6", "导出可审草稿", False, False),
-            ("S7", "归档", False, False),
-        ]
-        for stage_code, message, expected_intent, expected_required_path in cases:
-            with self.subTest(stage_code=stage_code, message=message):
-                handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-                self.assertEqual(
-                    handler._message_has_report_body_write_intent(self.project_id, message, stage_code),
-                    expected_intent,
-                )
-                expected_paths = {"content/report_draft_v1.md"} if expected_required_path else set()
-                self.assertEqual(
-                    self._required_write_paths_for_stage(handler, stage_code, message),
-                    expected_paths,
-                )
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_required_draft_write_is_never_created_before_s4(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-
-        for stage_code in ("S0", "S1", "S2", "S3"):
-            with self.subTest(stage_code=stage_code):
-                handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-                self.assertFalse(
-                    handler._message_has_report_body_write_intent(self.project_id, "继续写正文", stage_code)
-                )
-                self.assertEqual(
-                    self._required_write_paths_for_stage(handler, stage_code, "继续写正文"),
-                    set(),
-                )
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_snapshots_use_hash_and_substantive_new_file(self, mock_openai):
@@ -5548,245 +4938,10 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertGreater(current["word_count"], 0)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_section_rewrite_request_rejects_full_draft_or_multi_section_new_string_with_exact_old_snapshot(
-        self,
-        mock_openai,
-    ):
-        del mock_openai
-        payloads = {
-            "full_draft": (
-                "# 报告草稿\n\n"
-                "## 执行摘要\n\n新的整篇执行摘要。\n\n"
-                "## 第一章\n\n新的第一章内容。\n\n"
-                "## 第二章\n\n新的第二章内容。"
-            ),
-            "multi_section": (
-                "## 执行摘要\n\n更强的章节摘要。\n\n"
-                "## 第一章\n\n这一整章不该出现在章节级改写里。"
-            ),
-        }
 
-        for payload_name, new_payload in payloads.items():
-            with self.subTest(payload_name=payload_name):
-                handler = self._make_handler_with_project()
-                normalized_path = "content/report_draft_v1.md"
-                draft_path = self.project_dir / "content" / "report_draft_v1.md"
-                draft_path.parent.mkdir(parents=True, exist_ok=True)
-                section = (
-                    "## 执行摘要\n\n"
-                    "先说明总体判断。\n\n"
-                    "### 关键发现\n\n"
-                    "这里是细化发现。\n\n"
-                    "### 行动建议\n\n"
-                    "这里是细化建议。"
-                )
-                chapter_one = "## 第一章\n\n" + ("第一章保留原有详细分析。" * 60)
-                chapter_two = "## 第二章\n\n" + ("第二章保留原有详细分析。" * 40)
-                original = "# 报告草稿\n\n" + section + "\n\n" + chapter_one + "\n\n" + chapter_two
-                draft_path.write_text(original, encoding="utf-8")
 
-                with mock.patch.object(
-                    handler.skill_engine,
-                    "_infer_stage_state",
-                    return_value=self._mock_stage_state("S5"),
-                ):
-                    handler._turn_context = handler._build_turn_context(
-                        self.project_id,
-                        "把执行摘要改强一点",
-                    )
-                    snapshots = handler._build_required_write_snapshots(
-                        self.project_id,
-                        "把执行摘要改强一点",
-                    )
-                handler._turn_context["required_write_snapshots"] = snapshots
-                self._read_file_for_turn(handler, normalized_path)
 
-                target_section = snapshots[normalized_path]["rewrite_target_snapshot"]
-                result = handler._execute_tool(
-                    self.project_id,
-                    self._make_edit_report_tool_call(
-                        old_string=target_section,
-                        new_string=new_payload,
-                    ),
-                )
 
-                self.assertEqual(result["status"], "error")
-                self.assertIn("new_string", result["message"])
-                self.assertIn("目标章节", result["message"])
-                self.assertIn("局部范围", result["message"])
-                self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_section_rewrite_request_rejects_whole_file_edit_file_and_preserves_file(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        original = (
-            "# 报告草稿\n\n"
-            "## 执行摘要\n\n"
-            + ("这里是很长的执行摘要说明。" * 60)
-            + "\n\n## 第一章\n\n"
-            + ("第一章保留原有详细分析。" * 80)
-        )
-        draft_path.write_text(original, encoding="utf-8")
-
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S5"),
-        ):
-            handler._turn_context = handler._build_turn_context(
-                self.project_id,
-                "把执行摘要改强一点",
-            )
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id,
-                "把执行摘要改强一点",
-            )
-        handler._turn_context["required_write_snapshots"] = snapshots
-        self._read_file_for_turn(handler, "content/report_draft_v1.md")
-
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_edit_report_tool_call(
-                old_string=original,
-                new_string=original.replace("这里是很长的执行摘要说明。", "更短摘要。"),
-            ),
-        )
-
-        self.assertEqual(result["status"], "error")
-        self.assertIn("目标章节", result["message"])
-        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_section_rewrite_request_rejects_append_report_draft_and_preserves_file(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        original = (
-            "# 报告草稿\n\n"
-            "## 执行摘要\n\n"
-            + ("这里是很长的执行摘要说明。" * 60)
-            + "\n\n## 第一章\n\n"
-            + ("第一章保留原有详细分析。" * 80)
-        )
-        draft_path.write_text(original, encoding="utf-8")
-
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S5"),
-        ):
-            handler._turn_context = handler._build_turn_context(
-                self.project_id,
-                "把第一章改强一点",
-            )
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id,
-                "把第一章改强一点",
-            )
-        handler._turn_context["required_write_snapshots"] = snapshots
-
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_append_report_tool_call(
-                content="## 第一章\n\n" + ("新的补写内容。" * 80),
-            ),
-        )
-
-        self.assertEqual(result["status"], "error")
-        self.assertIn("append_report_draft", result["message"])
-        self.assertIn("edit_file", result["message"])
-        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_full_draft_rewrite_request_rejects_partial_edit_file_and_preserves_file(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        original = (
-            "# 报告草稿\n\n"
-            "## 执行摘要\n\n"
-            + ("执行摘要原文。" * 60)
-            + "\n\n## 第一章\n\n"
-            + ("第一章原文。" * 80)
-        )
-        draft_path.write_text(original, encoding="utf-8")
-        partial_old_string = "## 执行摘要\n\n" + ("执行摘要原文。" * 60)
-
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S5"),
-        ):
-            handler._turn_context = handler._build_turn_context(
-                self.project_id,
-                "请全文重写这份报告正文",
-            )
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id,
-                "请全文重写这份报告正文",
-            )
-        handler._turn_context["required_write_snapshots"] = snapshots
-        self._read_file_for_turn(handler, "content/report_draft_v1.md")
-
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_edit_report_tool_call(
-                old_string=partial_old_string,
-                new_string="## 执行摘要\n\n新的局部摘要。",
-            ),
-        )
-
-        self.assertEqual(result["status"], "error")
-        self.assertIn("整份旧稿", result["message"])
-        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_full_draft_rewrite_request_rejects_append_report_draft_and_preserves_file(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        original = (
-            "# 报告草稿\n\n"
-            "## 执行摘要\n\n"
-            + ("执行摘要原文。" * 60)
-            + "\n\n## 第一章\n\n"
-            + ("第一章原文。" * 80)
-        )
-        draft_path.write_text(original, encoding="utf-8")
-
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S5"),
-        ):
-            handler._turn_context = handler._build_turn_context(
-                self.project_id,
-                "请全文重写这份报告正文",
-            )
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id,
-                "请全文重写这份报告正文",
-            )
-        handler._turn_context["required_write_snapshots"] = snapshots
-
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_append_report_tool_call(
-                content="## 新版报告\n\n" + ("重写后的完整草稿。" * 80),
-            ),
-        )
-
-        self.assertEqual(result["status"], "error")
-        self.assertIn("append_report_draft", result["message"])
-        self.assertIn("edit_file", result["message"])
-        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
 
     @mock.patch("backend.chat.OpenAI")
     def test_full_draft_rewrite_missing_old_string_guidance_uses_read_then_edit(self, mock_openai):
@@ -5824,47 +4979,6 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("edit_file", result["message"])
         self.assertNotIn("write_file", result["message"])
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_multi_section_rewrite_request_rejects_one_section_edit_and_preserves_file(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        exec_summary = "## 执行摘要\n\n" + ("执行摘要原文。" * 30)
-        chapter_one = "## 第一章\n\n" + ("第一章原文。" * 40)
-        original = "# 报告草稿\n\n" + exec_summary + "\n\n" + chapter_one
-        draft_path.write_text(original, encoding="utf-8")
-
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S5"),
-        ):
-            handler._turn_context = handler._build_turn_context(
-                self.project_id,
-                "把执行摘要和第一章改强一点",
-            )
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id,
-                "把执行摘要和第一章改强一点",
-            )
-        handler._turn_context["required_write_snapshots"] = snapshots
-        self._read_file_for_turn(handler, "content/report_draft_v1.md")
-
-        decision = handler._turn_context["canonical_draft_decision"]
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_edit_report_tool_call(
-                old_string=exec_summary,
-                new_string="## 执行摘要\n\n更强的单章节摘要。",
-            ),
-        )
-
-        self.assertEqual(decision["expected_tool_family"], "edit_file")
-        self.assertEqual(decision["required_edit_scope"], "full_draft")
-        self.assertEqual(result["status"], "error")
-        self.assertIn("整份旧稿", result["message"])
-        self.assertEqual(draft_path.read_text(encoding="utf-8"), original)
 
     @mock.patch("backend.chat.OpenAI")
     def test_full_rewrite_retry_and_error_messages_never_recommend_write_file(self, mock_openai):
@@ -5908,62 +5022,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("edit_file", prewrite_error)
         self.assertNotIn("write_file", prewrite_error)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_required_draft_write_snapshot_carries_inline_replacement_intent(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("旧结论\n\n原始段落")
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
 
-        for message in (
-            "把报告里旧结论改成新结论",
-            "把正文中旧结论改为新结论",
-            "把报告里的旧结论替换成新结论",
-            "把报告里旧结论，换成新结论",
-            "把报告里旧结论 换成 新结论",
-        ):
-            with self.subTest(message=message), mock.patch.object(
-                handler.skill_engine,
-                "_infer_stage_state",
-                return_value=self._mock_stage_state("S5"),
-            ):
-                snapshots = handler._build_required_write_snapshots(self.project_id, message)
-
-            snapshot = snapshots["content/report_draft_v1.md"]
-            self.assertEqual(snapshot["intent_kind"], "replace_text")
-            self.assertEqual(snapshot["old_text"], "旧结论")
-            self.assertEqual(snapshot["new_text"], "新结论")
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_required_draft_write_rejects_append_that_leaves_replaced_text_in_place(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S5"),
-        ):
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id,
-                "把报告里旧结论改成新结论",
-            )
-
-        draft_path.write_text(
-            draft_path.read_text(encoding="utf-8") + "\n\n## 追加说明\n\n" + ("新结论" * 80),
-            encoding="utf-8",
-        )
-
-        satisfied, missing = handler._required_writes_satisfied(
-            self.project_id,
-            snapshots,
-            {"content/report_draft_v1.md": {"append_report_draft"}},
-        )
-
-        self.assertFalse(satisfied)
-        self.assertEqual(missing, ["content/report_draft_v1.md"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_rejects_destructive_tiny_rewrite_for_replacement(self, mock_openai):
@@ -6053,41 +5112,6 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertNotEqual(updated, "新结论")
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 4)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_required_draft_write_punctuation_replace_intent_rejects_append_only(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        draft_path = self._write_partial_report_draft("旧结论\n\n原始段落")
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S5"),
-        ):
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id,
-                "把报告里旧结论，换成新结论",
-            )
-
-        snapshot = snapshots["content/report_draft_v1.md"]
-        self.assertEqual(snapshot["intent_kind"], "replace_text")
-        self.assertEqual(snapshot["old_text"], "旧结论")
-        self.assertEqual(snapshot["new_text"], "新结论")
-
-        draft_path.write_text(
-            draft_path.read_text(encoding="utf-8") + "\n\n## 追加说明\n\n" + ("新结论" * 80),
-            encoding="utf-8",
-        )
-
-        satisfied, missing = handler._required_writes_satisfied(
-            self.project_id,
-            snapshots,
-            {"content/report_draft_v1.md": {"append_report_draft"}},
-        )
-
-        self.assertFalse(satisfied)
-        self.assertEqual(missing, ["content/report_draft_v1.md"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_snapshot_rejects_unvalidated_paths(self, mock_openai):
@@ -6580,51 +5604,6 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("<!-- tool-log", saved[-1]["content"])
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_chat_persists_followup_state_from_structured_under_target_report_and_p8_uses_real_runtime_state(
-        self,
-        mock_openai,
-    ):
-        handler = self._make_handler_with_project()
-        draft_path = self._write_partial_report_draft("现有章节偏短。" * 120)
-        before = draft_path.read_text(encoding="utf-8")
-        initial_count = handler._snapshot_project_file(
-            self.project_id,
-            "content/report_draft_v1.md",
-        )["word_count"]
-        state_path = Path(handler._get_conversation_state_path(self.project_id))
-        mock_openai.return_value.chat.completions.create.side_effect = [
-            self._make_non_stream_response("当前正文约 1800/3000 字。"),
-            self._make_non_stream_tool_response(
-                self._make_append_report_tool_call(
-                    content="## 第二章：策略建议\n\n" + ("新增正文" * 80),
-                )
-            ),
-            self._make_non_stream_response("已追加第二章正文。"),
-        ]
-
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S4"),
-        ):
-            first = handler.chat(self.project_id, "看看现在多少字", max_iterations=2)
-            first_state = json.loads(state_path.read_text(encoding="utf-8"))["draft_followup_state"]
-            second = handler.chat(
-                self.project_id,
-                "目标5000字喔？而且每章现在都太单薄了",
-                max_iterations=4,
-            )
-
-        self.assertIn("1800/3000", first["content"])
-        self.assertIsNotNone(first_state)
-        self.assertTrue(first_state["reported_under_target"])
-        self.assertFalse(first_state["asked_continue_expand"])
-        self.assertEqual(first_state["current_count"], initial_count)
-        self.assertEqual(first_state["target_word_count"], 3000)
-        self.assertIn("已追加第二章正文。", second["content"])
-        self.assertNotEqual(draft_path.read_text(encoding="utf-8"), before)
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
 
     @mock.patch("backend.chat.OpenAI")
     def test_draft_followup_state_defaults_to_null_and_missing_field_loads_as_null(self, mock_openai):
@@ -6827,151 +5806,8 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(saved["target_word_count"], 3000)
         self.assertEqual(saved["continuation_threshold_count"], 5000)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_second_p8_append_turn_preserves_carried_threshold_and_keeps_next_implicit_append_authority(
-        self,
-        mock_openai,
-    ):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("正文" * 1800)
-        current_count = handler._snapshot_project_file(
-            self.project_id,
-            "content/report_draft_v1.md",
-        )["word_count"]
-        self.assertGreaterEqual(current_count, 3000)
-        self.assertLess(current_count, 5000)
-        self._save_draft_followup_state(
-            handler,
-            current_count=current_count,
-            target_word_count=3000,
-            continuation_threshold_count=5000,
-        )
 
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S4"),
-        ):
-            handler._turn_context = handler._build_turn_context(
-                self.project_id,
-                "太单薄了，再展开一点",
-            )
-        decision = handler._turn_context["canonical_draft_decision"]
-        self.assertEqual(decision["priority"], "P8")
 
-        append_result = handler._execute_tool(
-            self.project_id,
-            self._make_append_report_tool_call(content="补充分析" * 30),
-        )
-        handler._persist_draft_followup_state_for_turn(
-            self.project_id,
-            "已继续补写正文。",
-            user_message="太单薄了，再展开一点",
-        )
-        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
-        next_decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S4",
-            "还是太单薄了",
-        )
-
-        self.assertEqual(append_result["status"], "success")
-        self.assertIsNotNone(saved)
-        self.assertGreaterEqual(saved["current_count"], 3000)
-        self.assertLess(saved["current_count"], 5000)
-        self.assertEqual(saved["target_word_count"], 3000)
-        self.assertEqual(saved["continuation_threshold_count"], 5000)
-        self.assertEqual(next_decision["mode"], "require")
-        self.assertEqual(next_decision["priority"], "P8")
-        self.assertEqual(next_decision["expected_tool_family"], "append_report_draft")
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_p7_inspect_turn_preserves_carried_threshold_above_default_target(
-        self,
-        mock_openai,
-    ):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("正文" * 1800)
-        current_count = handler._snapshot_project_file(
-            self.project_id,
-            "content/report_draft_v1.md",
-        )["word_count"]
-        self.assertGreaterEqual(current_count, 3000)
-        self.assertLess(current_count, 5000)
-        self._save_draft_followup_state(
-            handler,
-            current_count=current_count,
-            target_word_count=3000,
-            continuation_threshold_count=5000,
-        )
-
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S4"),
-        ):
-            handler._turn_context = handler._build_turn_context(
-                self.project_id,
-                "看看现在多少字",
-            )
-        decision = handler._turn_context["canonical_draft_decision"]
-        self.assertEqual(decision["priority"], "P7")
-
-        handler._persist_draft_followup_state_for_turn(
-            self.project_id,
-            "当前正文约 3608/3000 字。",
-            user_message="看看现在多少字",
-        )
-        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
-
-        self.assertIsNotNone(saved)
-        self.assertTrue(saved["reported_under_target"])
-        self.assertFalse(saved["asked_continue_expand"])
-        self.assertEqual(saved["current_count"], current_count)
-        self.assertEqual(saved["target_word_count"], 3000)
-        self.assertEqual(saved["continuation_threshold_count"], 5000)
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_intervening_nonwriting_turn_clears_priority8_authority(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("现有章节偏短。" * 120)
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-        handler._turn_context["draft_followup_flags"] = {
-            "reported_under_target": True,
-            "asked_continue_expand": True,
-            "continuation_threshold_count": 5000,
-        }
-
-        handler._persist_draft_followup_state_for_turn(
-            self.project_id,
-            "普通说明，不带旧版提示关键词。",
-        )
-        first_state = handler._load_conversation_state(self.project_id)["draft_followup_state"]
-        self.assertIsNotNone(first_state)
-
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-        handler._turn_context["draft_followup_flags"] = {
-            "reported_under_target": False,
-            "asked_continue_expand": False,
-            "continuation_threshold_count": None,
-        }
-        handler._persist_draft_followup_state_for_turn(
-            self.project_id,
-            "这轮先不写正文。",
-        )
-        second_state = handler._load_conversation_state(self.project_id)["draft_followup_state"]
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S4",
-            "目标5000字喔？而且每章现在都太单薄了",
-        )
-
-        self.assertIsNone(second_state)
-        self.assertEqual(decision["mode"], "no_write")
-        self.assertEqual(decision["priority"], "P10")
 
     @mock.patch("backend.chat.OpenAI")
     def test_required_draft_write_tool_rejects_longer_write_file_substitute_before_append_turn(self, mock_openai):
@@ -7005,33 +5841,6 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("append_report_draft", result["message"])
         self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
 
-    @mock.patch("backend.chat.OpenAI")
-    def test_p5a_inherits_followup_threshold_count_over_default_target(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        self._write_partial_report_draft("正文" * 1800)
-        current_count = handler._snapshot_project_file(
-            self.project_id,
-            "content/report_draft_v1.md",
-        )["word_count"]
-        self.assertGreater(current_count, 3000)
-        self.assertLess(current_count, 5000)
-        self._save_draft_followup_state(
-            handler,
-            current_count=current_count,
-            target_word_count=3000,
-            continuation_threshold_count=5000,
-        )
-
-        decision = self._classify_canonical_draft_for_stage(
-            handler,
-            "S4",
-            "看看现在多少字，不够就继续写",
-        )
-
-        self.assertEqual(decision["mode"], "require")
-        self.assertEqual(decision["priority"], "P5A")
-        self.assertEqual(decision["effective_turn_target_count"], 5000)
 
     @mock.patch("backend.chat.OpenAI")
     def test_append_report_draft_returns_final_on_disk_report_progress_and_effective_turn_target(
@@ -7041,16 +5850,8 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         self._write_partial_report_draft("正文" * 1800)
-
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S4"),
-        ):
-            handler._turn_context = handler._build_turn_context(
-                self.project_id,
-                "先扩到 5000 字再导出",
-            )
+        self._start_report_writing_turn(handler, "先扩到 5000 字再导出")
+        self._read_file_for_turn(handler, "content/report_draft_v1.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -7072,8 +5873,6 @@ class ChatRuntimeTests(unittest.TestCase):
                 "meets_target": True,
             },
         )
-        self.assertEqual(result["effective_turn_target_count"], 5000)
-        self.assertFalse(result["effective_turn_target_met"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_canonical_edit_file_returns_final_on_disk_report_progress(self, mock_openai):
@@ -10653,134 +9452,6 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
-from backend.draft_action import DraftActionEvent
-
-
-class DraftActionPreCheckTests(ChatRuntimeTests):
-    def _seed_outline_confirmed(self, handler):
-        """Helper: 让 outline_confirmed_at checkpoint 已 set + stage 推到 S4，
-        否则 _validate_draft_action_event 会先在 stage_too_early/outline_not_confirmed
-        分支拒绝，测不到 no_draft/section/replace 校验。"""
-        # 用现有 _write_stage_one_prerequisites 准备 outline + research-plan
-        self._write_stage_one_prerequisites(self.project_dir)
-        # mock _infer_stage_state 返回 S4 + outline_confirmed_at 已 set
-        # 简化：直接落 checkpoints + stage S4 推断逻辑会自然认到
-        from datetime import datetime
-        ckpt_path = self.project_dir / "stage_checkpoints.json"
-        ckpt_path.write_text(
-            json.dumps({"outline_confirmed_at": datetime.now().isoformat(timespec="seconds")}),
-            encoding="utf-8",
-        )
-        stage_patcher = mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value={"stage_code": "S4"},
-        )
-        stage_patcher.start()
-        self.addCleanup(stage_patcher.stop)
-
-    def _seed_draft(self, content: str):
-        """Helper: 写 content/report_draft_v1.md"""
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        draft_path.write_text(content, encoding="utf-8")
-
-    def test_section_intent_no_draft_returns_no_draft_message(self):
-        handler = self._make_handler_with_project()
-        self._seed_outline_confirmed(handler)
-        # 故意不调 _seed_draft → draft 不存在
-        event = DraftActionEvent(
-            raw="...", intent="section", section_label="第二章",
-        )
-        result = handler._validate_draft_action_event(self.project_id, event)
-        self.assertFalse(result.executable)
-        self.assertEqual(result.ignored_reason, "no_draft")
-
-    def test_replace_intent_no_draft_returns_no_draft_message(self):
-        handler = self._make_handler_with_project()
-        self._seed_outline_confirmed(handler)
-        event = DraftActionEvent(
-            raw="...", intent="replace", old_text="x", new_text="y",
-        )
-        result = handler._validate_draft_action_event(self.project_id, event)
-        self.assertFalse(result.executable)
-        self.assertEqual(result.ignored_reason, "no_draft")
-
-    def test_continue_intent_no_draft_auto_degrade_to_begin(self):
-        handler = self._make_handler_with_project()
-        self._seed_outline_confirmed(handler)
-        event = DraftActionEvent(raw="...", intent="continue")
-        result = handler._validate_draft_action_event(self.project_id, event)
-        self.assertTrue(result.executable)
-        self.assertEqual(result.intent, "begin")  # 降级
-
-    def test_section_label_unique_match(self):
-        handler = self._make_handler_with_project()
-        self._seed_outline_confirmed(handler)
-        self._seed_draft(
-            "# 报告\n\n## 第一章 序言\n背景内容\n\n## 第二章 战力演化\n演化分析\n"
-        )
-        event = DraftActionEvent(
-            raw="...", intent="section", section_label="第二章 战力演化",
-        )
-        result = handler._validate_draft_action_event(self.project_id, event)
-        self.assertTrue(result.executable)
-
-    def test_section_label_partial_match_ambiguous(self):
-        handler = self._make_handler_with_project()
-        self._seed_outline_confirmed(handler)
-        self._seed_draft(
-            "# 报告\n\n## 第二章 战力演化\n正文\n\n## 第二章附录\n附录内容\n"
-        )
-        event = DraftActionEvent(
-            raw="...", intent="section", section_label="第二章",
-        )
-        result = handler._validate_draft_action_event(self.project_id, event)
-        self.assertFalse(result.executable)
-        self.assertEqual(result.ignored_reason, "section_ambiguous")
-
-    def test_section_label_with_extra_suffix_rejects(self):
-        """v2 fix1 regression: tag with extra text after heading must NOT match.
-
-        Old code used `_resolve_section_rewrite_targets` which checks
-        `heading.label in section_label` (wrong direction). A tag like
-        'section:第二章 战力演化 请重写' would falsely match heading
-        '第二章 战力演化'. New matcher requires section_label to be a
-        prefix of heading.
-        """
-        handler = self._make_handler_with_project()
-        self._seed_outline_confirmed(handler)
-        self._seed_draft(
-            "# 报告\n\n## 第二章 战力演化\n演化分析\n"
-        )
-        event = DraftActionEvent(
-            raw="...", intent="section",
-            section_label="第二章 战力演化 请重写",
-        )
-        result = handler._validate_draft_action_event(self.project_id, event)
-        self.assertFalse(result.executable)
-        self.assertEqual(result.ignored_reason, "section_not_found")
-
-    def test_replace_old_text_not_unique_rejects(self):
-        handler = self._make_handler_with_project()
-        self._seed_outline_confirmed(handler)
-        self._seed_draft("X 出现一次。\n然后 X 又出现一次。\n")  # X 出现两次
-        event = DraftActionEvent(
-            raw="...", intent="replace", old_text="X", new_text="Y",
-        )
-        result = handler._validate_draft_action_event(self.project_id, event)
-        self.assertFalse(result.executable)
-        self.assertEqual(result.ignored_reason, "replace_target_invalid")
-
-
-for _inherited_test_name in dir(ChatRuntimeTests):
-    if (
-        _inherited_test_name.startswith("test_")
-        and _inherited_test_name not in DraftActionPreCheckTests.__dict__
-    ):
-        setattr(DraftActionPreCheckTests, _inherited_test_name, None)
-del _inherited_test_name
-
 
 class EmptyAssistantFallbackTests(ChatRuntimeTests):
     def test_finalize_empty_assistant_does_not_persist_assistant(self):
@@ -12228,31 +10899,10 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
-class StreamSplitSafeTailDraftActionTests(unittest.TestCase):
+class StreamSplitSafeTailStageAckTests(unittest.TestCase):
     """模块级 helper 独立测试，不需要 ChatHandler。"""
 
-    def test_draft_action_simple_marker_held(self):
-        from backend.chat import stream_split_safe_tail
-        # buffer 中段就含 "<draft-action" → 从此位置起全部 hold
-        emit, hold = stream_split_safe_tail("Hello <draft-action>begin</draft-action>")
-        self.assertEqual(emit, "Hello ")
-        self.assertEqual(hold, "<draft-action>begin</draft-action>")
-
-    def test_draft_action_replace_marker_held(self):
-        from backend.chat import stream_split_safe_tail
-        emit, hold = stream_split_safe_tail("Reply <draft-action-replace>")
-        self.assertEqual(emit, "Reply ")
-        self.assertEqual(hold, "<draft-action-replace>")
-
-    def test_draft_action_partial_prefix_at_tail_held(self):
-        from backend.chat import stream_split_safe_tail
-        # 末尾恰好是某 marker 的前缀（如 "<draft-act"）→ hold 该尾段
-        emit, hold = stream_split_safe_tail("Ok content <draft-act")
-        self.assertEqual(emit, "Ok content ")
-        self.assertEqual(hold, "<draft-act")
-
-    def test_stage_ack_marker_still_held(self):
-        # 回归：stage-ack marker 行为不变
+    def test_stage_ack_marker_held(self):
         from backend.chat import stream_split_safe_tail
         emit, hold = stream_split_safe_tail("Hi <stage-ack>x</stage-ack>")
         self.assertEqual(emit, "Hi ")
@@ -12263,785 +10913,6 @@ class StreamSplitSafeTailDraftActionTests(unittest.TestCase):
         emit, hold = stream_split_safe_tail("plain text no markers here")
         self.assertEqual(emit, "plain text no markers here")
         self.assertEqual(hold, "")
-
-    def test_earliest_marker_anchors_hold(self):
-        from backend.chat import stream_split_safe_tail
-        # 同时含 stage-ack 和 draft-action，靠前的赢
-        emit, hold = stream_split_safe_tail("Hi <draft-action>x</draft-action> <stage-ack>y</stage-ack>")
-        self.assertEqual(emit, "Hi ")
-        self.assertTrue(hold.startswith("<draft-action"))
-
-
-class PreflightCheckTests(ChatRuntimeTests):
-    def _put_draft(self, body: str) -> None:
-        """fix4 test helper: write content/report_draft_v1.md under self.project_dir."""
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        draft_path.write_text(body, encoding="utf-8")
-
-    def test_preflight_keyword_intent_begin_for_start_writing(self):
-        handler = self._make_handler_with_project()
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "开始写报告吧", stage_code="S4",
-        )
-        self.assertEqual(decision["preflight_keyword_intent"], "begin")
-
-    def test_preflight_keyword_intent_continue_for_continue_writing(self):
-        handler = self._make_handler_with_project()
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "继续写", stage_code="S4",
-        )
-        self.assertEqual(decision["preflight_keyword_intent"], "continue")
-
-    def test_preflight_keyword_intent_none_for_unrelated(self):
-        handler = self._make_handler_with_project()
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "你好", stage_code="S4",
-        )
-        self.assertIsNone(decision["preflight_keyword_intent"])
-
-    def test_preflight_keyword_intent_never_section_replace_when_target_unresolved(self):
-        """v5 §4.12 安全契约：keyword 命中但 target 未 resolve 时仍返回 None。
-        （v4 原 test 'never section/replace' 在 v5 失效——target 能 resolve 时允许返回 section/replace。）"""
-        handler = self._make_handler_with_project()
-        # 无 draft 文件 → section/replace 都 resolve 不出 target
-        for msg in ["重写第二章", "把 X 改成 Y", "section:foo", "replace this"]:
-            decision = handler._preflight_canonical_draft_check(
-                self.project_id, msg, stage_code="S4",
-            )
-            self.assertIsNone(
-                decision["preflight_keyword_intent"],
-                f"target unresolved but got intent={decision.get('preflight_keyword_intent')} for msg={msg!r}",
-            )
-
-    def test_preflight_section_keyword_with_unique_heading_returns_section(self):
-        """fix4 v5: '把第二章重写一下' + draft 含唯一第二章 heading → preflight_keyword_intent='section'"""
-        handler = self._make_handler_with_project()
-        self._put_draft("## 第一章 引言\n\n内容A\n\n## 第二章 战力演化\n\n内容B\n")
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把第二章重写一下", stage_code="S4",
-        )
-        self.assertEqual(decision.get("preflight_keyword_intent"), "section")
-        self.assertEqual(decision.get("mode"), "require")
-        self.assertEqual(decision.get("priority"), "P_PREFLIGHT_OK")
-        self.assertEqual(decision.get("rewrite_target_label"), "第二章 战力演化")
-        self.assertIn("内容B", str(decision.get("rewrite_target_snapshot") or ""))
-
-    def test_preflight_section_keyword_without_draft_returns_none(self):
-        """fix4 v5: '重写第二章' 但 draft 不存在 → preflight_keyword_intent=None"""
-        handler = self._make_handler_with_project()
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "重写第二章",
-        )
-        self.assertIsNone(decision.get("preflight_keyword_intent"))
-
-    def test_preflight_section_zero_candidates_returns_none(self):
-        """fix4 v5: prefix '第二章' 在 draft 中匹配 0 个 → preflight=None"""
-        handler = self._make_handler_with_project()
-        self._put_draft("## 第一章 引言\n\n内容A\n")
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把第二章重写一下",
-        )
-        self.assertIsNone(decision.get("preflight_keyword_intent"))
-
-    def test_preflight_section_multi_candidate_returns_none(self):
-        """fix4-fix1 v5: prefix '第二章' 在 draft 中匹配 ≥2 个 heading → preflight=None"""
-        handler = self._make_handler_with_project()
-        self._put_draft(
-            "## 第一章 引言\n内容0\n"
-            "## 第二章 战力演化\n内容A\n"
-            "## 第二章 战略意义\n内容B\n"
-        )
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把第二章重写一下",
-        )
-        self.assertIsNone(decision.get("preflight_keyword_intent"))
-
-    def test_preflight_section_multi_prefix_distinct_targets_returns_none(self):
-        """fix4-fix1: user msg 含多个章节前缀且分别命中不同 heading → preflight=None (避免兜底改错章节)"""
-        handler = self._make_handler_with_project()
-        self._put_draft(
-            "## 第一章 引言\n内容0\n"
-            "## 第二章 战力演化\n内容A\n"
-            "## 第三章 战略意义\n内容B\n"
-        )
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把第二章和第三章都重写一下",
-        )
-        self.assertIsNone(decision.get("preflight_keyword_intent"))
-
-    def test_preflight_section_partial_multi_prefix_returns_none(self):
-        """fix4-fix2 (Bug 7): user msg 含两个章节前缀，一个 unique resolve 一个未命中 →
-        preflight=None (fail-fast，不能只 fallback 一个把另一个丢了)"""
-        handler = self._make_handler_with_project()
-        self._put_draft(
-            "## 第一章 引言\n内容0\n"
-            "## 第二章 战力演化\n内容A\n"
-            # NO 第四章 in draft
-        )
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把第二章和第四章都重写一下",
-        )
-        self.assertIsNone(decision.get("preflight_keyword_intent"))
-
-    def test_preflight_section_ambiguous_prefix_plus_unique_returns_none(self):
-        """fix4-fix2 (Bug 7): 一个 prefix 多重命中 + 另一个 unique resolve →
-        preflight=None (任意一个 prefix 没 resolve 就 fail-fast)"""
-        handler = self._make_handler_with_project()
-        self._put_draft(
-            "## 第二章 战力演化\n内容A\n"
-            "## 第二章 战略意义\n内容B\n"  # 第二章 ambiguous (2 candidates)
-            "## 第三章 总结\n内容C\n"
-        )
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把第二章和第三章都重写一下",
-        )
-        self.assertIsNone(decision.get("preflight_keyword_intent"))
-
-    def test_preflight_replace_keyword_with_unique_old_text_returns_replace(self):
-        """fix4 v5: '把"体能"改成"力量"' + draft 含唯一"体能" → preflight_keyword_intent='replace'"""
-        handler = self._make_handler_with_project()
-        self._put_draft("## 第一章\n体能很重要\n")
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把报告里的体能改成力量", stage_code="S4",
-        )
-        self.assertEqual(decision.get("preflight_keyword_intent"), "replace")
-        self.assertEqual(decision.get("mode"), "require")
-        self.assertEqual(decision.get("priority"), "P_PREFLIGHT_OK")
-        self.assertEqual(decision.get("old_text"), "体能")
-        self.assertEqual(decision.get("new_text"), "力量")
-
-    def test_preflight_replace_keyword_change_to_synonym_works(self):
-        """fix4-fix1: '改为' 同义词应跟 '改成' 一样触发 replace fallback"""
-        handler = self._make_handler_with_project()
-        self._put_draft("## 第一章\n体能很重要\n")
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把报告里的体能改为力量", stage_code="S4",
-        )
-        self.assertEqual(decision.get("preflight_keyword_intent"), "replace")
-        self.assertEqual(decision.get("old_text"), "体能")
-        self.assertEqual(decision.get("new_text"), "力量")
-
-    def test_preflight_replace_old_text_not_in_draft_returns_none(self):
-        """fix4 v5: replace 关键词命中但 draft 不含 old_text → preflight=None"""
-        handler = self._make_handler_with_project()
-        self._put_draft("## 第一章\n力量很重要\n")
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把报告里的体能改成力量",
-        )
-        self.assertIsNone(decision.get("preflight_keyword_intent"))
-
-    def test_preflight_begin_keyword_takes_priority_over_section(self):
-        """fix4 v5: begin 优先级仍然 > section（dict 顺序保留）"""
-        handler = self._make_handler_with_project()
-        self._put_draft("## 第一章\n内容\n")
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "开始写报告吧，再重写一下",
-        )
-        # 含 "开始写报告" begin 关键词 + "重写" section 关键词；begin 应优先
-        self.assertEqual(decision.get("preflight_keyword_intent"), "begin")
-
-    def test_preflight_s0_with_draft_intent_rejects(self):
-        handler = self._make_handler_with_project()
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "开始写报告吧", stage_code="S0",
-        )
-        self.assertEqual(decision["mode"], "reject")
-        # surface_to_user system_notice 应被发出
-        notices = handler._turn_context.get("pending_system_notices", [])
-        user_notices = [n for n in notices if n.get("surface_to_user")]
-        self.assertTrue(any("S0" in (n.get("reason") or "") or "大纲" in (n.get("reason") or "") for n in user_notices))
-
-    def test_preflight_no_decisions_no_keyword_no_change(self):
-        # "你好" 在 S4 → no_write
-        handler = self._make_handler_with_project()
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "你好", stage_code="S4",
-        )
-        self.assertEqual(decision["mode"], "no_write")
-
-    def test_preflight_begin_wins_over_continue_when_both_match(self):
-        """v2 显式：begin/continue 双命中时，按 dict 顺序 begin 在前，begin 赢"""
-        handler = self._make_handler_with_project()
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "开始写报告，然后继续写", stage_code="S4",
-        )
-        self.assertEqual(decision["preflight_keyword_intent"], "begin")
-
-
-for _inherited_test_name in dir(ChatRuntimeTests):
-    if (
-        _inherited_test_name.startswith("test_")
-        and _inherited_test_name not in PreflightCheckTests.__dict__
-    ):
-        setattr(PreflightCheckTests, _inherited_test_name, None)
-del _inherited_test_name
-
-
-class GateCanonicalDraftToolCallTests(ChatRuntimeTests):
-    """注意：append_report_draft 真实 schema 只有 content（chat.py:4187-4202）；
-    write_file/edit_file 写 content/* 才有 file_path。"""
-
-    def test_append_report_draft_with_begin_tag_passes(self):
-        from backend.draft_action import DraftActionEvent
-        handler = self._make_handler_with_project()
-        tags = [DraftActionEvent(raw="...", intent="begin", executable=True)]
-        decision = {"preflight_keyword_intent": None}
-        result = handler._gate_canonical_draft_tool_call(
-            self.project_id, "append_report_draft",
-            {"content": "new section"},  # 真实 schema 只有 content
-            decision, tags,
-        )
-        self.assertIsNone(result)  # pass
-
-    def test_append_report_draft_with_keyword_fallback_passes(self):
-        handler = self._make_handler_with_project()
-        decision = {"preflight_keyword_intent": "begin"}
-        result = handler._gate_canonical_draft_tool_call(
-            self.project_id, "append_report_draft",
-            {"content": "new section"},
-            decision, [],
-        )
-        self.assertIsNone(result)
-
-    def test_append_report_draft_with_conflicting_section_tag_blocks(self):
-        """v2 fix1 regression: section/replace tag is incompatible with append_report_draft.
-        Even if keyword_intent is begin/continue, the tagless fallback MUST NOT fire when
-        an executable non-{begin,continue} tag is present - that's a contradictory turn,
-        not a tagless turn.
-        """
-        from backend.draft_action import DraftActionEvent
-        handler = self._make_handler_with_project()
-        tags = [DraftActionEvent(raw="...", intent="section", section_label="x", executable=True)]
-        decision = {"preflight_keyword_intent": "begin"}
-        result = handler._gate_canonical_draft_tool_call(
-            self.project_id, "append_report_draft",
-            {"content": "new section"},
-            decision, tags,
-        )
-        self.assertIsNotNone(result)  # must block
-
-    def test_edit_file_no_tag_blocked_for_canonical_draft_path(self):
-        handler = self._make_handler_with_project()
-        decision = {"preflight_keyword_intent": "begin"}  # 即使 keyword 命中也不放行 edit_file
-        result = handler._gate_canonical_draft_tool_call(
-            self.project_id, "edit_file",
-            {"file_path": "content/report_draft_v1.md", "old_string": "x", "new_string": "y"},
-            decision, [],
-        )
-        self.assertIsNotNone(result)  # block
-
-    def test_edit_file_with_section_tag_passes(self):
-        from backend.draft_action import DraftActionEvent
-        handler = self._make_handler_with_project()
-        tags = [DraftActionEvent(raw="...", intent="section", section_label="x", executable=True)]
-        decision = {"preflight_keyword_intent": None}
-        result = handler._gate_canonical_draft_tool_call(
-            self.project_id, "edit_file",
-            {"file_path": "content/report_draft_v1.md", "old_string": "x", "new_string": "y"},
-            decision, tags,
-        )
-        self.assertIsNone(result)
-
-    def test_edit_file_with_replace_tag_passes(self):
-        from backend.draft_action import DraftActionEvent
-        handler = self._make_handler_with_project()
-        tags = [DraftActionEvent(raw="...", intent="replace", old_text="x", new_text="y", executable=True)]
-        decision = {"preflight_keyword_intent": None}
-        result = handler._gate_canonical_draft_tool_call(
-            self.project_id, "edit_file",
-            {"file_path": "content/report_draft_v1.md", "old_string": "x", "new_string": "y"},
-            decision, tags,
-        )
-        self.assertIsNone(result)
-
-    def test_fallback_signal_only_from_preflight_keyword_intent(self):
-        """关键防御测试：偷偷塞 intent_kind="section" 不能让 gate 放行 edit_file"""
-        handler = self._make_handler_with_project()
-        decision = {
-            "preflight_keyword_intent": None,
-            "intent_kind": "section",  # 偷塞
-            "expected_tool_family": "edit_file",
-        }
-        result = handler._gate_canonical_draft_tool_call(
-            self.project_id, "edit_file",
-            {"file_path": "content/report_draft_v1.md", "old_string": "x", "new_string": "y"},
-            decision, [],
-        )
-        self.assertIsNotNone(result)  # 必须 block
-
-    def test_non_executable_tag_does_not_pass(self):
-        from backend.draft_action import DraftActionEvent
-        handler = self._make_handler_with_project()
-        tags = [DraftActionEvent(raw="...", intent="section", section_label="x",
-                                  executable=False, ignored_reason="no_draft")]
-        decision = {"preflight_keyword_intent": None}
-        result = handler._gate_canonical_draft_tool_call(
-            self.project_id, "edit_file",
-            {"file_path": "content/report_draft_v1.md", "old_string": "x", "new_string": "y"},
-            decision, tags,
-        )
-        self.assertIsNotNone(result)
-
-    def test_non_canonical_path_passes_unchecked(self):
-        """写其他路径不归 gate 管"""
-        handler = self._make_handler_with_project()
-        result = handler._gate_canonical_draft_tool_call(
-            self.project_id, "write_file",
-            {"file_path": "plan/notes.md", "content": "..."},
-            {}, [],
-        )
-        self.assertIsNone(result)
-
-    def test_record_tagless_fallback_event_writes_state(self):
-        handler = self._make_handler_with_project()
-        decision = {"preflight_keyword_intent": "begin"}
-        handler._gate_canonical_draft_tool_call(
-            self.project_id, "append_report_draft",
-            {"content": "x"},
-            decision, [],
-        )
-        state = handler._load_conversation_state(self.project_id, [])
-        events = [e for e in state.get("events", []) if e.get("type") == "tagless_draft_fallback"]
-        self.assertGreaterEqual(len(events), 1)
-
-    def test_append_report_draft_no_file_path_still_gated(self):
-        """v3 关键回归测试：append_report_draft 真实 schema 没 file_path，
-        但 gate 不能因此绕过——它按工具名识别 canonical draft 目标"""
-        handler = self._make_handler_with_project()
-        # 没 file_path、没 tag、没 keyword_intent → 必须 block
-        result = handler._gate_canonical_draft_tool_call(
-            self.project_id, "append_report_draft",
-            {"content": "any text"},  # 真实 schema 只有 content
-            {"preflight_keyword_intent": None},
-            [],
-        )
-        self.assertIsNotNone(result)  # 必须 block，不能因为缺 file_path 就 pass
-
-    def test_gate_edit_file_section_keyword_fallback_passes(self):
-        """fix4 v5: edit_file + tag_intents 空 + keyword_intent='section' → pass + record fallback"""
-        handler = self._make_handler_with_project()
-        decision = handler._make_canonical_draft_decision(
-            stage_code="S4", mode="require", priority="P_PREFLIGHT_OK",
-            preflight_keyword_intent="section",
-            rewrite_target_label="第二章 战力演化",
-        )
-        block = handler._gate_canonical_draft_tool_call(
-            self.project_id,
-            tool_name="edit_file",
-            tool_args={"file_path": "content/report_draft_v1.md"},
-            decision=decision,
-            tags=[],
-        )
-        self.assertIsNone(block)
-        events = handler._load_conversation_state(self.project_id).get("events", [])
-        self.assertTrue(
-            any(e.get("type") == "tagless_draft_fallback"
-                and e.get("fallback_intent") == "section" for e in events),
-        )
-
-    def test_gate_edit_file_replace_keyword_fallback_passes(self):
-        """fix4 v5: edit_file + tag_intents 空 + keyword_intent='replace' → pass + record"""
-        handler = self._make_handler_with_project()
-        decision = handler._make_canonical_draft_decision(
-            stage_code="S4", mode="require", priority="P_PREFLIGHT_OK",
-            preflight_keyword_intent="replace",
-            old_text="体能", new_text="力量",
-        )
-        block = handler._gate_canonical_draft_tool_call(
-            self.project_id,
-            tool_name="edit_file",
-            tool_args={"file_path": "content/report_draft_v1.md"},
-            decision=decision,
-            tags=[],
-        )
-        self.assertIsNone(block)
-        events = handler._load_conversation_state(self.project_id).get("events", [])
-        self.assertTrue(
-            any(e.get("type") == "tagless_draft_fallback"
-                and e.get("fallback_intent") == "replace" for e in events),
-        )
-
-    def test_gate_edit_file_no_tag_no_keyword_blocks(self):
-        """fix4 v5: tag 空 + keyword_intent=None → block (UX 跟旧通道一致 fail-fast)"""
-        handler = self._make_handler_with_project()
-        decision = handler._make_canonical_draft_decision(
-            stage_code="S4", mode="no_write", priority="P_PREFLIGHT_OK",
-            preflight_keyword_intent=None,
-        )
-        block = handler._gate_canonical_draft_tool_call(
-            self.project_id,
-            tool_name="edit_file",
-            tool_args={"file_path": "content/report_draft_v1.md"},
-            decision=decision,
-            tags=[],
-        )
-        self.assertIsNotNone(block)
-        self.assertIn("draft-action", block)
-
-    def test_gate_edit_file_with_section_tag_still_passes(self):
-        """fix4 v5 regression: 显式 section tag 仍优先放行（不依赖 fallback）"""
-        from backend.draft_action import DraftActionEvent
-        handler = self._make_handler_with_project()
-        decision = handler._make_canonical_draft_decision(
-            stage_code="S4", mode="require", priority="P_PREFLIGHT_OK",
-            preflight_keyword_intent=None,
-        )
-        tag = DraftActionEvent(
-            raw="<draft-action>section:第二章</draft-action>",
-            intent="section", section_label="第二章",
-            old_text=None, new_text=None, start=0, end=10,
-            executable=True, ignored_reason=None,
-        )
-        block = handler._gate_canonical_draft_tool_call(
-            self.project_id,
-            tool_name="edit_file",
-            tool_args={"file_path": "content/report_draft_v1.md"},
-            decision=decision,
-            tags=[tag],
-        )
-        self.assertIsNone(block)
-
-    def test_execute_plan_write_invokes_gate_before_legacy_block(self):
-        """Task 19 fix2 P0 regression: gate must run BEFORE _non_plan_write_block_reason.
-
-        Setup: turn_context has canonical_draft_decision with mode=no_write (the Bug A
-        legacy-classifier path) AND draft_action_events containing executable begin tag
-        (model correctly emitted tag). Without fix2, legacy block fires first and gate
-        never runs (gate_block event count stays 0). With fix2, gate sees the begin tag
-        and the canonical write passes through, advancing to subsequent checks.
-        """
-        from backend.draft_action import DraftActionEvent
-
-        handler = self._make_handler_with_project()
-        # Set turn_context: legacy classified no_write (Bug A symptom)
-        handler._turn_context["canonical_draft_decision"] = {
-            "mode": "no_write",
-            "stage_code": "S4",
-        }
-        # Model emitted explicit begin tag (Phase 2 happy path)
-        handler._turn_context["draft_action_events"] = [
-            DraftActionEvent(
-                raw="<draft-action>begin</draft-action>",
-                intent="begin",
-                executable=True,
-            ),
-        ]
-        # Call _execute_plan_write with canonical draft path
-        result = handler._execute_plan_write(
-            self.project_id,
-            file_path="content/report_draft_v1.md",
-            content="# Report\n\nFirst draft body.\n",
-            source_tool_name="append_report_draft",
-            source_tool_args={"content": "First draft body."},
-            persist_func_name="write_file",
-            persist_args={
-                "file_path": "content/report_draft_v1.md",
-                "content": "# Report\n\nFirst draft body.\n",
-            },
-        )
-        # Must NOT return the legacy "本轮用户没有要求修改正文草稿" message
-        msg = result.get("message") or ""
-        self.assertNotIn(
-            "本轮用户没有要求修改正文草稿",
-            msg,
-            f"legacy non_plan_write_block_reason fired before gate; result={result}",
-        )
-
-    def test_execute_plan_write_blocks_when_no_tag_no_keyword(self):
-        """Task 19 fix2 regression: when neither tag nor preflight_keyword_intent,
-        gate blocks at _execute_plan_write level (not legacy block)."""
-        handler = self._make_handler_with_project()
-        handler._turn_context["canonical_draft_decision"] = {
-            "mode": "require",  # legacy allows
-            "stage_code": "S4",
-            "preflight_keyword_intent": None,  # no preflight signal
-        }
-        handler._turn_context["draft_action_events"] = []  # no tags
-        result = handler._execute_plan_write(
-            self.project_id,
-            file_path="content/report_draft_v1.md",
-            content="x" * 100,
-            source_tool_name="append_report_draft",
-            source_tool_args={"content": "x" * 100},
-            persist_func_name="write_file",
-            persist_args={
-                "file_path": "content/report_draft_v1.md",
-                "content": "x" * 100,
-            },
-        )
-        self.assertEqual(result.get("status"), "error")
-        msg = result.get("message") or ""
-        # gate block message contains "请先在回复中发 <draft-action> tag"
-        self.assertIn("<draft-action>", msg)
-
-    def test_build_turn_context_injects_preflight_keyword_intent_for_begin(self):
-        """Task 19 fix3 P0 regression: _build_turn_context must inject
-        preflight_keyword_intent into canonical_draft_decision so gate fallback
-        (spec §4.8) can fire for tagless 'begin' utterances."""
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "开始写报告吧")
-        decision = handler._turn_context.get("canonical_draft_decision") or {}
-        self.assertEqual(decision.get("preflight_keyword_intent"), "begin")
-
-    def test_build_turn_context_injects_keyword_intent_for_continue(self):
-        """Phase 2a continue keyword recognition: '继续写第三章' should resolve
-        to continue intent via the silent preflight injection."""
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "继续写第三章")
-        decision = handler._turn_context.get("canonical_draft_decision") or {}
-        self.assertEqual(decision.get("preflight_keyword_intent"), "continue")
-
-    def test_build_required_write_snapshots_uses_injected_decision_for_section_fallback(self):
-        """fix4-fix2 (Bug 8): tagless section fallback should populate
-        required_write_snapshots with rewrite_target_label/snapshot/required_edit_scope.
-        Without the cached-decision fix, snapshots are empty (legacy classify alone
-        can't see section keyword fallback)."""
-        handler = self._make_handler_with_project()
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        draft_path.write_text(
-            "## 第一章 引言\n内容0\n## 第二章 战力演化\n内容B\n", encoding="utf-8",
-        )
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value=self._mock_stage_state("S4"),
-        ):
-            handler._build_turn_context(self.project_id, "把第二章重写一下")
-            # Sanity: inject promoted mode + populated target fields
-            decision = handler._turn_context.get("canonical_draft_decision") or {}
-            self.assertEqual(decision.get("mode"), "require")
-            self.assertEqual(decision.get("required_edit_scope"), "section")
-            self.assertEqual(decision.get("rewrite_target_label"), "第二章 战力演化")
-
-            # Now snapshot builder should pick up the injected decision
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id, "把第二章重写一下",
-            )
-        canonical_path = handler.skill_engine.REPORT_DRAFT_PATH
-        self.assertIn(canonical_path, snapshots)
-        snap = snapshots[canonical_path]
-        self.assertEqual(snap.get("required_edit_scope"), "section")
-        self.assertEqual(snap.get("rewrite_target_label"), "第二章 战力演化")
-        self.assertIn("内容B", str(snap.get("rewrite_target_snapshot") or ""))
-
-    def test_build_turn_context_silent_no_user_notice_on_s0_reject(self):
-        """Silent contract: when silent preflight rejects (S0 + draft intent),
-        no surface_to_user notice may be emitted by the inject path."""
-        handler = self._make_handler_with_project()
-        # Project has no S0 prereq -> preflight will reject in S0
-        handler._build_turn_context(self.project_id, "开始写报告吧")
-        notices = handler._turn_context.get("pending_system_notices", [])
-        user_notices = [n for n in notices if n.get("surface_to_user")]
-        self.assertEqual(
-            user_notices, [],
-            f"silent preflight injection leaked user-visible notice: {user_notices}",
-        )
-
-    def test_execute_plan_write_fallback_passes_for_tagless_begin(self):
-        """End-to-end: with fix3, '开始写报告吧' -> preflight_keyword_intent=begin
-        injected -> gate fallback path passes append_report_draft -> write is
-        NOT blocked at gate level (may still error for other reasons; key is
-        gate doesn't return CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE)."""
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "开始写报告吧")
-        # Sanity: the inject worked
-        decision = handler._turn_context.get("canonical_draft_decision") or {}
-        self.assertEqual(decision.get("preflight_keyword_intent"), "begin")
-        # Gate should not block append_report_draft via tag-required message
-        result = handler._execute_plan_write(
-            self.project_id,
-            file_path="content/report_draft_v1.md",
-            content="x" * 200,
-            source_tool_name="append_report_draft",
-            source_tool_args={"content": "x" * 200},
-            persist_func_name="write_file",
-            persist_args={"file_path": "content/report_draft_v1.md", "content": "x" * 200},
-        )
-        msg = result.get("message") or ""
-        # Gate-block message contains "<draft-action>" - must NOT appear
-        self.assertNotIn(
-            "请先在回复中发 <draft-action>",
-            msg,
-            f"gate blocked despite keyword fallback eligibility; result={result}",
-        )
-
-    def test_execute_plan_write_section_fallback_passes_for_tagless_section_request(self):
-        """fix4 v5 e2e: '把第二章重写一下' + draft 含唯一第二章 →
-        _execute_plan_write 不返回 'draft-action' block message"""
-        handler = self._make_handler_with_project()
-        draft_path = self.project_dir / "content" / "report_draft_v1.md"
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        draft_path.write_text(
-            "## 第一章 引言\n内容A\n## 第二章 战力演化\n内容B\n", encoding="utf-8",
-        )
-        handler._build_turn_context(self.project_id, "把第二章重写一下")
-        decision = handler._turn_context.get("canonical_draft_decision") or {}
-        self.assertEqual(decision.get("preflight_keyword_intent"), "section")
-        # fix4-fix1 (Bug 2): target enforcement fields must be propagated by inject
-        self.assertEqual(decision.get("rewrite_target_label"), "第二章 战力演化")
-        self.assertEqual(decision.get("required_edit_scope"), "section")
-        self.assertIn("内容B", str(decision.get("rewrite_target_snapshot") or ""))
-        result = handler._execute_plan_write(
-            self.project_id,
-            file_path="content/report_draft_v1.md",
-            content="## 第二章 战力演化\n新内容B\n",
-            source_tool_name="edit_file",
-            source_tool_args={
-                "file_path": "content/report_draft_v1.md",
-                "old_string": "## 第二章 战力演化\n内容B",
-                "new_string": "## 第二章 战力演化\n新内容B",
-            },
-            persist_func_name="edit_file",
-            persist_args={
-                "file_path": "content/report_draft_v1.md",
-                "old_string": "## 第二章 战力演化\n内容B",
-                "new_string": "## 第二章 战力演化\n新内容B",
-            },
-        )
-        msg = result.get("message") or ""
-        self.assertNotIn(
-            "请先在回复中发 <draft-action>", msg,
-            f"gate blocked despite section keyword fallback eligibility; result={result}",
-        )
-
-
-for _inherited_test_name in dir(ChatRuntimeTests):
-    if (
-        _inherited_test_name.startswith("test_")
-        and _inherited_test_name not in GateCanonicalDraftToolCallTests.__dict__
-    ):
-        setattr(GateCanonicalDraftToolCallTests, _inherited_test_name, None)
-del _inherited_test_name
-
-
-class DraftDecisionCompareEventTests(ChatRuntimeTests):
-    def test_compare_event_written_per_turn(self):
-        """跑一个常规 turn，conversation_state 应含一条 draft_decision_compare 事件。"""
-        handler = self._make_handler_with_project()
-        # 触发 _record_draft_decision_compare_event 直接调用（不走完整 turn）
-        handler._record_draft_decision_compare_event(
-            self.project_id,
-            turn_id="t1", user_message="开始写报告吧",
-            old_decision={"mode": "no_write", "priority": "P10"},
-            new_decision={"mode": "require", "priority": "P_PREFLIGHT_OK",
-                          "preflight_keyword_intent": "begin"},
-            tags=[],
-            fallback_used=False, fallback_tool=None, fallback_intent=None,
-            blocked_missing_tag=False, blocked_tool=None,
-            new_channel_exception=None,
-        )
-        state = handler._load_conversation_state(self.project_id, [])
-        events = [e for e in state.get("events", []) if e.get("type") == "draft_decision_compare"]
-        self.assertEqual(len(events), 1)
-        e = events[-1]
-        for key in ("turn_id", "user_message_hash", "old_decision", "new_decision",
-                    "agreement", "divergence_reason", "tag_present", "fallback_used",
-                    "fallback_tool", "fallback_intent", "blocked_missing_tag",
-                    "blocked_tool", "new_channel_exception", "recorded_at"):
-            self.assertIn(key, e)
-
-    def test_compare_agreement_correctly_computed(self):
-        handler = self._make_handler_with_project()
-        handler._record_draft_decision_compare_event(
-            self.project_id, turn_id="t1", user_message="x",
-            old_decision={"mode": "no_write"},
-            new_decision={"mode": "no_write"},
-            tags=[], fallback_used=False, fallback_tool=None, fallback_intent=None,
-            blocked_missing_tag=False, blocked_tool=None, new_channel_exception=None,
-        )
-        state = handler._load_conversation_state(self.project_id, [])
-        e = state["events"][-1]
-        self.assertTrue(e["agreement"])
-        self.assertIsNone(e["divergence_reason"])
-
-    def test_compare_disagreement_records_divergence(self):
-        handler = self._make_handler_with_project()
-        handler._record_draft_decision_compare_event(
-            self.project_id, turn_id="t1", user_message="x",
-            old_decision={"mode": "no_write"},
-            new_decision={"mode": "require"},
-            tags=[], fallback_used=False, fallback_tool=None, fallback_intent=None,
-            blocked_missing_tag=False, blocked_tool=None, new_channel_exception=None,
-        )
-        state = handler._load_conversation_state(self.project_id, [])
-        e = state["events"][-1]
-        self.assertFalse(e["agreement"])
-        self.assertIn("no_write", e["divergence_reason"])
-
-    def test_exception_event_written_when_new_channel_crashes(self):
-        handler = self._make_handler_with_project()
-        handler._record_draft_decision_exception_event(
-            self.project_id, turn_id="t2", stage="preflight",
-            exception_class="ValueError", exception_message="test",
-        )
-        state = handler._load_conversation_state(self.project_id, [])
-        events = [e for e in state["events"] if e.get("type") == "draft_decision_exception"]
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["stage"], "preflight")
-        self.assertEqual(events[0]["exception_class"], "ValueError")
-
-    def test_compare_includes_tag_present_per_intent(self):
-        from backend.draft_action import DraftActionEvent
-        handler = self._make_handler_with_project()
-        tags = [
-            DraftActionEvent(raw="...", intent="begin", executable=True),
-            DraftActionEvent(raw="...", intent="section", executable=False),
-        ]
-        handler._record_draft_decision_compare_event(
-            self.project_id, turn_id="t3", user_message="x",
-            old_decision={"mode": "require"}, new_decision={"mode": "require"},
-            tags=tags,
-            fallback_used=False, fallback_tool=None, fallback_intent=None,
-            blocked_missing_tag=False, blocked_tool=None, new_channel_exception=None,
-        )
-        state = handler._load_conversation_state(self.project_id, [])
-        tp = state["events"][-1]["tag_present"]
-        self.assertTrue(tp["begin"])
-        self.assertFalse(tp["section"])  # executable=False 不算
-
-    def test_compare_writer_silent_does_not_emit_notice_in_s0_reject(self):
-        """v2 fix1 P0 regression: when compare writer's preflight rejects in S0/S1,
-        it MUST NOT emit a user-visible system_notice (Phase 2a silent channel contract)."""
-        handler = self._make_handler_with_project()
-        # Force project into S0 by NOT writing any stage prerequisites.
-        # turn_context starts empty.
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=False)
-        # Run compare writer with a draft-intent message in S0.
-        handler._run_phase2a_compare_writer(self.project_id, "开始写报告吧")
-        # surface_to_user notice MUST NOT have been emitted by the new channel.
-        notices = handler._turn_context.get("pending_system_notices", [])
-        user_notices = [
-            n for n in notices
-            if (isinstance(n, dict) and n.get("surface_to_user") is True)
-        ]
-        self.assertEqual(
-            user_notices, [],
-            f"compare writer leaked user-visible notice into pending: {user_notices}",
-        )
-
-    def test_preflight_silent_param_skips_notice(self):
-        """Direct test of silent param: preflight in silent mode does not emit notice."""
-        handler = self._make_handler_with_project()
-        decision = handler._preflight_canonical_draft_check(
-            self.project_id, "开始写报告吧", stage_code="S0", silent=True,
-        )
-        # decision still rejects (return value contract unchanged)
-        self.assertEqual(decision["mode"], "reject")
-        # but no surface_to_user notice was emitted
-        notices = handler._turn_context.get("pending_system_notices", [])
-        user_notices = [n for n in notices if n.get("surface_to_user")]
-        self.assertEqual(user_notices, [])
-
-
-for _inherited_test_name in dir(ChatRuntimeTests):
-    if (
-        _inherited_test_name.startswith("test_")
-        and _inherited_test_name not in DraftDecisionCompareEventTests.__dict__
-    ):
-        setattr(DraftDecisionCompareEventTests, _inherited_test_name, None)
-del _inherited_test_name
 
 
 class ExtractUserMessageTextTests(ChatRuntimeTests):
@@ -13556,10 +11427,7 @@ class ReplaceReportTextLivePathTests(_WriteToolTestMixin, ChatRuntimeTests):
         handler._build_turn_context(self.project_id, user_message)
         snapshots = handler._build_required_write_snapshots(self.project_id, user_message)
         handler._turn_context["required_write_snapshots"] = snapshots
-        self.assertEqual(
-            snapshots["content/report_draft_v1.md"].get("intent_kind"),
-            "replace_text",
-        )
+        self.assertIn("content/report_draft_v1.md", snapshots)
         handler._execute_tool(
             self.project_id,
             self._make_tool_call(
@@ -13588,7 +11456,9 @@ class ReplaceReportTextLivePathTests(_WriteToolTestMixin, ChatRuntimeTests):
     ):
         handler = self._make_handler_with_project()
         self._setup_outline_confirmed_s4(handler)
-        draft_path = self._put_draft("# 报告\n## 第一章\n旧结论\n")
+        draft_path = self._put_draft(
+            "# 报告\n## 第一章\n旧结论\n" + ("原始段落" * 50) + "\n"
+        )
         final_message = "已将报告中的旧结论改成新结论。"
         mock_openai.return_value.chat.completions.create.side_effect = [
             self._make_non_stream_tool_response(
