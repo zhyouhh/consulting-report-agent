@@ -6745,6 +6745,19 @@ class ChatHandler:
                 else:
                     self._turn_context["pending_stage_keyword"] = (action, key)
         canonical_draft_decision = self._classify_canonical_draft_turn(project_id, user_message)
+        # Task 19 fix3: legacy classifier doesn't set preflight_keyword_intent.
+        # Run new silent preflight and inject just that field into the decision dict
+        # so gate fallback (spec §4.8) sees the keyword intent. silent=True ensures
+        # no user-visible notice leaks (Phase 2a "silent shadow channel" contract).
+        try:
+            silent_preflight = self._preflight_canonical_draft_check(
+                project_id, user_message, silent=True,
+            )
+            canonical_draft_decision["preflight_keyword_intent"] = silent_preflight.get(
+                "preflight_keyword_intent"
+            )
+        except Exception:
+            pass  # silent: preflight failure must not affect real turn
         generic_non_plan_write_allowed = self._should_allow_generic_non_plan_write(project_id, user_message)
         self._turn_context["canonical_draft_decision"] = canonical_draft_decision
         self._turn_context["generic_non_plan_write_allowed"] = generic_non_plan_write_allowed

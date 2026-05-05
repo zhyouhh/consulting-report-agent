@@ -12555,6 +12555,64 @@ class GateCanonicalDraftToolCallTests(ChatRuntimeTests):
         # gate block message contains "请先在回复中发 <draft-action> tag"
         self.assertIn("<draft-action>", msg)
 
+    def test_build_turn_context_injects_preflight_keyword_intent_for_begin(self):
+        """Task 19 fix3 P0 regression: _build_turn_context must inject
+        preflight_keyword_intent into canonical_draft_decision so gate fallback
+        (spec §4.8) can fire for tagless 'begin' utterances."""
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "开始写报告吧")
+        decision = handler._turn_context.get("canonical_draft_decision") or {}
+        self.assertEqual(decision.get("preflight_keyword_intent"), "begin")
+
+    def test_build_turn_context_injects_keyword_intent_for_continue(self):
+        """Phase 2a continue keyword recognition: '继续写第三章' should resolve
+        to continue intent via the silent preflight injection."""
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "继续写第三章")
+        decision = handler._turn_context.get("canonical_draft_decision") or {}
+        self.assertEqual(decision.get("preflight_keyword_intent"), "continue")
+
+    def test_build_turn_context_silent_no_user_notice_on_s0_reject(self):
+        """Silent contract: when silent preflight rejects (S0 + draft intent),
+        no surface_to_user notice may be emitted by the inject path."""
+        handler = self._make_handler_with_project()
+        # Project has no S0 prereq -> preflight will reject in S0
+        handler._build_turn_context(self.project_id, "开始写报告吧")
+        notices = handler._turn_context.get("pending_system_notices", [])
+        user_notices = [n for n in notices if n.get("surface_to_user")]
+        self.assertEqual(
+            user_notices, [],
+            f"silent preflight injection leaked user-visible notice: {user_notices}",
+        )
+
+    def test_execute_plan_write_fallback_passes_for_tagless_begin(self):
+        """End-to-end: with fix3, '开始写报告吧' -> preflight_keyword_intent=begin
+        injected -> gate fallback path passes append_report_draft -> write is
+        NOT blocked at gate level (may still error for other reasons; key is
+        gate doesn't return CANONICAL_DRAFT_REQUIRES_EXPLICIT_TAG_MESSAGE)."""
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "开始写报告吧")
+        # Sanity: the inject worked
+        decision = handler._turn_context.get("canonical_draft_decision") or {}
+        self.assertEqual(decision.get("preflight_keyword_intent"), "begin")
+        # Gate should not block append_report_draft via tag-required message
+        result = handler._execute_plan_write(
+            self.project_id,
+            file_path="content/report_draft_v1.md",
+            content="x" * 200,
+            source_tool_name="append_report_draft",
+            source_tool_args={"content": "x" * 200},
+            persist_func_name="write_file",
+            persist_args={"file_path": "content/report_draft_v1.md", "content": "x" * 200},
+        )
+        msg = result.get("message") or ""
+        # Gate-block message contains "<draft-action>" - must NOT appear
+        self.assertNotIn(
+            "请先在回复中发 <draft-action>",
+            msg,
+            f"gate blocked despite keyword fallback eligibility; result={result}",
+        )
+
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
