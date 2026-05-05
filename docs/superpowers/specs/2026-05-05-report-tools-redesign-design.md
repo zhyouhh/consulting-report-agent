@@ -171,7 +171,7 @@ backend 强制要求 model 在 `edit_file.old_string` 提交**目标章节的完
 
 成功路径：调底层 `edit_file(file_path=REPORT_DRAFT_PATH, old_string=current_draft_text, new_string=content)`。
 
-**用户消息检测**：reject 第 4 条要求 user 消息含明确"整篇重写"关键词，沿用现有 `REPORT_BODY_WHOLE_REWRITE_KEYWORDS`（"整篇重写", "全文重写", "推倒重写", "全部改写"）。如果工具被调用但 user 消息不含这些关键词 → reject 并引导。
+**用户消息检测**：reject 第 4 条要求 user 消息含明确"整篇重写"关键词。沿用现有 `REPORT_BODY_WHOLE_REWRITE_KEYWORDS`（"整篇重写", "全文重写", "推倒重写", "全部改写"）**并扩充 "推倒重来"**（per spec r2 reviewer 校对：tool description 用"推倒重来"，但常量列表只有"推倒重写"，必须同步）。如果工具被调用但 user 消息不含这些关键词 → reject 并引导。
 
 ### 2.5 不动：现有禁用规则
 
@@ -293,16 +293,59 @@ def _detect_canonical_draft_write_obligation(self, user_message: str, project_id
 
 返回非 None 时，cache 到 `turn_context["canonical_draft_write_obligation"]`（NEW field）。
 
-**turn-end 对账**：复用现有 `_required_writes_satisfied` 思路（chat.py:3153+）。`_finalize_assistant_turn` 临近末尾检查：
+**turn-end 对账**：retry 入口**不在** `_finalize_assistant_turn`（该函数负责 finalize/persist，不重试）；retry 入口在外层 chat loop——具体两处 model emit 完后、`_finalize_assistant_turn` 调用前：
+
+- `_chat_stream_unlocked` 的 no-tool-call 分支（流式路径）
+- `_chat_unlocked` 的 no-tool-call 分支（非流式路径）
+
+伪代码（两处对称插入）：
 
 ```python
+# 在 model emit 完成、判断本轮是否还要 loop 时
 obligation = self._turn_context.get("canonical_draft_write_obligation")
-if obligation and not self._turn_context.get("canonical_draft_mutation"):
-    # user 让写但 model 一次也没成功调写工具
+mutation = self._turn_context.get("canonical_draft_mutation")
+if obligation and not mutation:
     if assistant_text_claims_modification(assistant_message):
-        # model 在文本里说"已修改" / "已起草" 但 0 个 tool_call
-        return retry_with_correction(...)  # 同 fix4 现有 retry 机制
+        # model 在文本里说"已修改"但 0 个 mutation event → 强行再 loop 一次
+        corrective = (
+            "你在回复中声称已修改正文（"
+            f"obligation={obligation['tool_family']}），"
+            "但本轮没有成功调用任何写正文工具（append_report_draft / "
+            "rewrite_report_section / replace_report_text / rewrite_report_draft）。"
+            "请实际调用对应工具完成写入，不要只在文字中声明已完成。"
+        )
+        # 注入 corrective 进 messages 后 continue 主 loop（max_iter 仍生效）
+        self._inject_synthetic_user_correction(corrective)
+        continue  # 进下一轮 model emit
 ```
+
+**关键决策**：retry 不是 `_finalize_assistant_turn` 的责任（它只 persist），而是 chat loop 层的责任。这跟 fix4 现有的 `required_write_snapshots` 触发的 retry 路径**位置一致**——所以不是新机制，是现有机制的简化复用。
+
+**`assistant_text_claims_modification(text)` 启发式（per spec r2 reviewer §13 提议的 regex）**：
+
+```python
+_TEXT_CLAIM_RE_1 = re.compile(
+    r"(?:已|已经|完成|写完|改完|重写完|替换完|同步|落盘)"
+    r"[^。！？!?\n]{0,30}"
+    r"(?:正文|草稿|报告|章节|第[一二三四五六七八九十0-9]+章|content/report_draft_v1\.md)"
+)
+_TEXT_CLAIM_RE_2 = re.compile(
+    r"(?:正文|草稿|报告|章节|第[一二三四五六七八九十0-9]+章)"
+    r"[^。！？!?\n]{0,30}"
+    r"(?:已|已经|完成|写完|改完|重写完|替换完|同步|落盘)"
+)
+_INTENT_RE = re.compile(r"我会|我准备|我将|我正在|我可以|让我")  # 排除：意图陈述非声称完成
+
+def assistant_text_claims_modification(text: str) -> bool:
+    if _INTENT_RE.search(text):
+        # "我会重写第二章" / "我将修改正文" — 是动作意图，不是已完成声明
+        # 但如果同时含 _TEXT_CLAIM_RE_1/2 ，仍算（model 可能既声明意图又声称已完成混合）
+        if not (_TEXT_CLAIM_RE_1.search(text) or _TEXT_CLAIM_RE_2.search(text)):
+            return False
+    return bool(_TEXT_CLAIM_RE_1.search(text) or _TEXT_CLAIM_RE_2.search(text))
+```
+
+放入 `backend/report_writing.py`，单测 cover 经典正反例（"已完成第二章重写" → True；"我会重写第二章" → False；"我会重写第二章，已完成" → True 兜底）。
 
 **这样保留了 fix4 当前的 "model 撒谎说写了但实际没写" 保护**，但 detector 简化（只回答 yes/no，不分类），且不再驱动 gate（gate 删除）。
 
@@ -314,7 +357,7 @@ if obligation and not self._turn_context.get("canonical_draft_mutation"):
 
 当前 fix4 在某处用 `turn_context["canonical_draft_mutation"]` track 已经做过 canonical draft 修改，防 model 一轮内反复改坏。
 
-**保留**：每个写正文工具入口加共享 helper：
+**保留**：所有 4 个写正文工具入口都加共享 helper：
 
 ```python
 def check_no_prior_canonical_mutation_in_turn(turn_context) -> str | None:
@@ -323,7 +366,16 @@ def check_no_prior_canonical_mutation_in_turn(turn_context) -> str | None:
     return None
 ```
 
-工具成功写盘后 set `turn_context["canonical_draft_mutation"] = {...metadata...}`。
+**全部 4 个写工具的入口 check 列表显式包含 `check_no_prior_canonical_mutation_in_turn`**：
+
+- `append_report_draft` 入口 — §3.2 模板 + §2.1 reject table
+- `rewrite_report_section` 入口 — §3.2 模板 + §2.2 reject table
+- `replace_report_text` 入口 — §3.2 模板 + §2.3 reject table
+- `rewrite_report_draft` 入口 — §3.2 模板 + §2.4 reject table
+
+工具**成功写盘后**才 set `turn_context["canonical_draft_mutation"] = {...metadata...}`。**Reject 路径不 set**（已经 fail 了，让 model 用别的工具或重试时还能写一次）。
+
+**Cross-turn 行为**：新 turn 调 `_new_turn_context` 时，`canonical_draft_mutation` 默认 None，所以新 turn 可以正常写。
 
 ### 3.7 read-before-write mtime 跟踪（具体机制）
 
@@ -402,7 +454,8 @@ stage-ack 部分保持原样（独立系统）。
 | `backend/chat.py` | `_record_tagless_fallback_event`, `_record_draft_decision_compare_event`, `_record_draft_decision_exception_event`, `_record_draft_gate_block_event` | -100 | **删** |
 | `backend/chat.py` | `_make_canonical_draft_decision`, `_empty_canonical_draft_decision` | -80 | **删** |
 | `backend/chat.py` | `_validate_required_report_draft_prewrite`：lines 5507-5520 (replace_text dispatch) + 5531-5615 (canonical draft scope/section enforcement for edit_file) + 5636-5716 (related branches per reviewer's grep) | -200 | **删** — 新工具不走这个函数；删后这些 reject paths 移到工具入口 |
-| `backend/chat.py` | `_validate_required_report_draft_prewrite`：line 5522-5529 (`_validate_append_turn_canonical_draft_write` 调用) + 5617-5634 (generic edit/write fallthrough) | 0 | **保留**（如果 `append_report_draft` 现有 turn-end 校验仍需要，则保留；否则随 `_validate_append_turn_canonical_draft_write` 整套迁移） |
+| `backend/chat.py` | `_validate_append_turn_canonical_draft_write` 函数体 + `_validate_required_report_draft_prewrite` line 5522-5529 调用点 | -80 | **删** — 把 append-turn 校验逻辑 inline 迁移到 `append_report_draft` 工具入口（per spec r2 reviewer §C16）。这样消除 fix4 隐藏的"老 hidden-decision coupling"。 |
+| `backend/chat.py` | `_validate_required_report_draft_prewrite` line 5617-5634 (generic edit/write fallthrough) | 0 | **保留** — 服务于 `edit_file` / `write_file` 写非 canonical 路径的通用校验，与 canonical draft 工具无关 |
 | `backend/chat.py` | full-draft rewrite branch lines 5547-5584 | 0 | **保留**（被新 `rewrite_report_draft` 工具 inline 替代后再决定，第一轮 spec 实施保留）|
 | `backend/chat.py` | `_run_phase2a_compare_writer` | -50 | **删**（compare 不再有意义） |
 | `backend/chat.py` | `_extract_user_message_text` | 0 | **保留** — 仍是 utility，新工具内会用 |
@@ -547,9 +600,18 @@ stage-ack 部分保持原样（独立系统）。
 
 **风险残留**：model 把多章节内容塞进单 content 字段，但用 `### ` 三级标题假装只有一个章节。工具校验通过（开头 `## ` + 只有 1 个 `## `），但写入后第二章实际嵌入了不属于第二章的小节内容。
 
-**评估**：这种 case 在 model 行为上等价于"model 完全误解'重写第二章'的范围"，工具的 schema 表述 + SKILL.md 引导已经明确告知"目标章节的新版完整内容"。如果 model 仍然这样做，是 model 严重 misuse；rewrite_report_section 写入后的草稿可见性高，user 容易发现。**v1 不加额外校验**（YAGNI），等观察到这种 model 行为再针对性修。
+**v1 缓解（mandatory，per spec r2 reviewer §C13）**：
 
-**进一步缓解**（option，**不一定纳入 v1**）：limit content 总长度（如 ≤ rewrite_target_snapshot 长度的 3 倍）；或加一个 sanity check "content 中不能含 `### 第N章/节` 这种 pattern 暗示新章节" 的启发式拒绝。
+每个 rewrite 类工具内 enforce 简单 content 长度上限：
+
+```python
+MAX_CONTENT_LEN = max(3000, 3 * len(rewrite_target_snapshot))  # rewrite_report_section
+MAX_CONTENT_LEN = max(8000, 2 * len(current_draft_text))        # rewrite_report_draft
+```
+
+content 超出 cap → reject "提交内容超过预期范围（X 字 vs target 上限 Y 字），请只提交目标章节/草稿的内容"。这个 cap 是廉价的 sanity check：catch model 把整份草稿当章节内容塞进来的明显 misuse。
+
+**其他更严的检查**（**不在 v1**）：检测 `### 第N章` pattern 暗示新章节标题——观察 v1 实际 model 行为再决定是否需要。
 
 ### 7.2 Risk β — 工具间选错
 
@@ -629,10 +691,13 @@ stage-ack 部分保持原样（独立系统）。
 6. **Spec / SKILL.md**: 旧 spec §4.3-§4.12 标注 superseded；本 spec doc 进 main；SKILL.md §S4 替换为新表格；附录 draft-action 章节删除
 7. **工具选择正确率 smoke**（per §7.8）: 10 个 user message × tool schema 模式调用，正确率 ≥ 80%
 8. **Cutover smoke**: 5 sessions （A 起草 / B 重写第二章 / C 替换文本 / D 续写第三章 / E 整篇重写）至少 4 个写盘成功（含 B 章节实际被替换 + E 整份草稿被替换）；剩 1 个允许 model behavior issue 但**工具不卡 dead-loop**
-9. **No regression**:
-   - stage-ack 系统所有现有 test pass；`<stage-ack>` tag 在 cutover 期间正常工作
-   - 现有 plan/* 写文件路径不受影响（grep 验证 `_required_writes_satisfied` 仍能 detect plan/* 文件 missing）
-   - Phase 2a 13 commits + fix4 三轮 commits 的非删除部分行为保持（用 git diff 看每一个非整删的 helper 是否仍有等价覆盖）
+9. **No regression**（具体测试 / smoke cases，**per spec r2 reviewer §C10 要求 mechanically verifiable**）:
+   - stage-ack 系统：以下 test 必须 pass — `StageAckParserParseRawTests` / `StageAckParserStripTests` / `StreamSplitSafeTailStageAckTests`（保留部分）/ `StageAckRegressionTests`（新增）
+   - 现有 plan/* 写文件路径：以下 smoke 必须 pass — 用户说 "确认大纲" → 触发 `outline_confirmed_at` checkpoint set；plan/* 文件 missing 时 `_required_writes_satisfied` 仍 detect
+   - 现有 stage advance 路径：用户说 "推进 S5" → S4→S5 切换 + `<stage-ack>review_started</stage-ack>` 执行成功
+   - 现有 fetch_url gate：先 web_search 再 write 必须 fail；fetch_url 后 write 必须 pass
+   - mixed-intent split：用户消息含 "重写第二章并导出 PDF" → reject 让 model 拆轮
+   - 这些 case 必须以 named tests 在 `tests/test_chat_runtime.py` 或 `tests/test_report_writing.py` 中存在；CI run 全部 pass
 
 ## §9 与现有 Phase 3 plan 的关系
 
@@ -650,15 +715,19 @@ stage-ack 部分保持原样（独立系统）。
 - ✅ 方案 X vs Y → **方案 Y（一次性替换）**，但内部分 6 个 commit 顺序（§6.4）以降低风险
 - ✅ `REPORT_BODY_REPLACE_TEXT_INTENT_RE` → **删**（per reviewer grep，仅 `_parse_report_body_replacement_intent` 使用，被旧 preflight/classifier 调用，不被 `_should_allow_non_plan_write`）
 - ✅ `_validate_required_report_draft_prewrite` 边界 → §5.1 详述（删 5507-5520 + 5531-5615 + 5636-5716；保留 5522-5529 / 5617-5634 with caveats）
-- ✅ content 长度 cap → **v1 加 cap**（§7.1 修订：max(3000, 3× target_snapshot.length)）
+- ✅ content 长度 cap → **v1 加 cap mandatory**（§7.1 v3 修订：rewrite_report_section 用 `max(3000, 3× target_snapshot.length)`；rewrite_report_draft 用 `max(8000, 2× current_draft_text.length)`；超出立即 reject）— 已在 §7.1 由 r2 reviewer 推论确认
 - ✅ `backend/report_writing.py` 模块 → **新模块**，仅放 pure helpers + target resolution + text scanner；dispatch / stateful tool execution 保留在 `chat.py`
 
-**spec r2 reviewer 待评估（剩余）**：
+**spec r2 reviewer 已 answered (resolved)**：
 
-1. **§3.5 `_detect_canonical_draft_write_obligation` 实施细节**：detector 的 keyword list 是从原 `_classify_canonical_draft_turn` 整体迁移还是只取部分？
-2. **§7.6 `assistant_text_claims_modification` 启发式**：用什么具体 regex / pattern？误报率 vs 漏报率 trade-off？是否覆盖"我会去修改"（intent statement）vs"我已修改"（claim of completion）的区分？
-3. **§7.7 mutation limit 是否适用于"读后写不通过"的 reject 路径**：如果 model 调 `rewrite_report_section` 但工具内 reject（target unresolved），mutation 是否 count？建议：**只在写盘成功后 set mutation**——本 spec §3.6 已暗示但未明说，r2 reviewer 应明确确认。
-4. **§7.8 工具选择 benchmark 的 baseline**：10 个 message 中具体哪 10 个？谁拟定这个 benchmark suite？建议在 plan 阶段定义。
-5. **`_validate_append_turn_canonical_draft_write` (chat.py:5522-5529 调用) 是否保留**：spec §5.1 标"保留 with caveats"，r2 reviewer 应确认实际是 keep 还是迁移。
+- ✅ Q1: detector keyword source — 用 raw intent signals（phrase-hit sets + `REPORT_BODY_REPLACE_TEXT_INTENT_RE`），不迁移 stage gate / scope / target resolution / priority logic（§3.5 文本已对齐）
+- ✅ Q2: `assistant_text_claims_modification` 启发式 — 用 §3.5 给出的 `_TEXT_CLAIM_RE_1/2` + `_INTENT_RE` regex 组合，含 intent-statement 排除
+- ✅ Q3: mutation flag on reject — confirmed only-on-success（§3.6 已 explicitly 写明 reject 不 set）
+- ✅ Q4: 10-message benchmark suite — reviewer 给出具体 10 messages（§8 验收标准 + plan 阶段 implement）
+- ✅ Q5: `_validate_append_turn_canonical_draft_write` retention — **inline migrate** to `append_report_draft` tool entry，删 legacy（§5.1 已修订）
 
-应在 spec r2 review 中拍板上述 5 点，或在 plan 阶段细化（取决于复杂度）。
+**剩余待评估（plan 阶段）**：
+
+1. **scope split 决策（per r2 reviewer §C17）**：reviewer 建议 split into Phase B-1 (新工具 + schemas + SKILL cleanup + write-obligation retry) + B-2 (mutation hardening + mtime snapshots + legacy deletion)。**保持单一 spec design 不变**，但在 plan 阶段切分为两个独立 plans，每个 plan 自己走 codex review + cutover smoke。**plan stage 决定**。
+
+应在 plan 阶段细化以上 1 点。
