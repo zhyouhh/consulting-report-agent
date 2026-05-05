@@ -1,8 +1,18 @@
 # Current Worklist
 
-最后更新：2026-05-04（context-signal-and-intent-tag Phase 1 实施完成 16 commit 在 `claude/happy-jackson-938bd1`，5 reality_test bug 中 4 修 1 留 Phase 2，pytest 713 passed / dist 91MB 待实测；详见"最近已解决"第 0 条）
+最后更新：2026-05-05（Phase 2a 灰度通道实施完成 13 commits 已合 main，cutover smoke 暴露 section/replace fallback 缺口；下一步 fix4 修 section/replace keyword fallback 后才能 Phase 3 切主，详见"当前未解决" 0a + "最近已解决" 第 0 条 + handoff `docs/superpowers/handoffs/2026-05-05-phase2-section-replace-pending.md`）
 
 ## 当前未解决 / 待验证
+
+0a. **Section/replace 路径架构缺口（Phase 2a 暴露，必须修后才能 Phase 3 切主）**
+- 状态：`待修 fix4`（2026-05-05 cutover smoke 4 sessions 实测发现）
+- 现象：`<draft-action>` tag 设计假设 model 会发 section/replace tag，但 reality_test 实测 model 不发——19 次 retry 全 gate block → max_iterations 死循环退出。**比旧通道（fail fast）UX 更差**。
+- 根因：spec §4.2 给 begin/continue 留了 keyword fallback (preflight_keyword_intent)，section/replace 没有，model 不发 tag 就死锁
+- 旧通道 `_resolve_section_rewrite_targets` 实际也几乎不 work（heading 完整 label 必须是 user msg 子串，"把第二章重写一下"不命中 "第二章 战力模拟" heading）
+- 推荐方案 A'：spec §4.2 amendment 加 section/replace keyword fallback（heading 数字前缀 prefix-match）+ 改 preflight 输出 section/replace + 改 gate edit_file 分支加 keyword fallback
+- 工作量：~2-3 小时
+- 详细 plan + 实施步骤见 [handoff doc](superpowers/handoffs/2026-05-05-phase2-section-replace-pending.md)
+- **修完后才能去 Phase 3**（Task 24-27 删旧 keyword classifier + 切主）
 
 1. 二轮重打包已完成，主链路已跑完
 - 状态：`已走二轮 smoke（暴露新 3 bug，见 1b；后续已全部修复）`
@@ -132,7 +142,22 @@
 
 ## 最近已解决
 
-0. ⭐ **context-signal-and-intent-tag Phase 1 实施完成（2026-05-04，16 commits 在 `claude/happy-jackson-938bd1`）**
+0. ⭐ **context-signal-and-intent-tag Phase 2a 实施完成（2026-05-05，13 commits 已合 main）**
+- 状态：`Phase 2a 13/13 task done + 5 fix（reviewer catch 真问题）；待 fix4 修 section/replace fallback 后进 Phase 3`
+- 关联文档：
+  - spec [2026-05-04-context-signal-and-intent-tag-design.md](superpowers/specs/2026-05-04-context-signal-and-intent-tag-design.md)（5 轮 APPROVED）
+  - plan [2026-05-04-context-signal-and-intent-tag.md](superpowers/plans/2026-05-04-context-signal-and-intent-tag.md)（6 轮 APPROVED）
+  - handoff [2026-05-05-phase2-section-replace-pending.md](superpowers/handoffs/2026-05-05-phase2-section-replace-pending.md)（下次 session cold-start brief）
+  - cutover artifact [cutover_report_2026-05-05_fix3.md](superpowers/cutover_report_2026-05-05_fix3.md)
+- Phase 2a 实施 task：
+  - Task 15-22：13 commits（parser module / tail-guard / preflight 并行 / validate-apply / gate / compare event / report 脚本 / SKILL §S4）
+  - Task 19 fix1/2/3 + Task 18 fix1 + Task 20 fix1：5 个 fix 都修了 reviewer catch 的真问题
+- 测试基线：GateCanonicalDraftToolCallTests 17/17 + 70 wider sanity 0 failed
+- 关键 commits：`8940d70` parser → `234c0fb` tail-guard → `dda3aef` preflight → `1a15b12+6e956fb` validate → `dc2a321+d603042` gate → `cf445e2+ab91fda` compare event → `5a6a5b8` script → `f6ed0e9` SKILL → `a89b081` fix2 → `6112a75` fix3
+- Cutover smoke 实测：begin/continue Bug A 修复（fallback work），section/replace 暴露架构缺口（见 0a）
+- **下一步**：（1）fix4 修 section/replace keyword fallback → （2）重测 cutover → （3）Phase 3 (Task 24-27) 切主 + 删旧
+
+1. ⭐ **context-signal-and-intent-tag Phase 1 实施完成（2026-05-04，16 commits 在 `claude/happy-jackson-938bd1`）**
 - 状态：`Phase 1 13/13 task done，待 reality_test 实测 + Phase 2/3`
 - 关联文档：
   - spec `docs/superpowers/specs/2026-05-04-context-signal-and-intent-tag-design.md`（5 轮 review APPROVED）
