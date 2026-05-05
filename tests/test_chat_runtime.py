@@ -13197,3 +13197,39 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(ReadFileSnapshotHookTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class ToolSchemaRegistrationTests(ChatRuntimeTests):
+    def test_get_tools_lists_all_4_write_tools(self):
+        handler = self._make_handler_with_project()
+        tools = handler._get_tools()
+        names = {t["function"]["name"] for t in tools if "function" in t}
+        self.assertIn("append_report_draft", names)
+        self.assertIn("rewrite_report_section", names)
+        self.assertIn("replace_report_text", names)
+        self.assertIn("rewrite_report_draft", names)
+
+    def test_rewrite_report_section_schema_only_content_param(self):
+        handler = self._make_handler_with_project()
+        tools = handler._get_tools()
+        sec = next(t for t in tools if t.get("function", {}).get("name") == "rewrite_report_section")
+        params = sec["function"]["parameters"]
+        self.assertEqual(set(params["properties"].keys()), {"content"})
+        self.assertEqual(params["required"], ["content"])
+
+    def test_replace_report_text_schema_old_new(self):
+        handler = self._make_handler_with_project()
+        tools = handler._get_tools()
+        rep = next(t for t in tools if t.get("function", {}).get("name") == "replace_report_text")
+        params = rep["function"]["parameters"]
+        self.assertEqual(set(params["properties"].keys()), {"old", "new"})
+        self.assertEqual(set(params["required"]), {"old", "new"})
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in ToolSchemaRegistrationTests.__dict__
+    ):
+        setattr(ToolSchemaRegistrationTests, _inherited_test_name, None)
+del _inherited_test_name

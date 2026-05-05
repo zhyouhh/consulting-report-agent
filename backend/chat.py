@@ -4919,6 +4919,82 @@ class ChatHandler:
             {
                 "type": "function",
                 "function": {
+                    "name": "rewrite_report_section",
+                    "description": (
+                        "重写正文草稿（content/report_draft_v1.md）中已存在的某一章/节。"
+                        "目标章节由系统从用户消息中自动定位（要求消息中含'第N章/节/部分'前缀，"
+                        "且草稿中存在唯一对应 heading）。仅在 S4 阶段、草稿存在、目标可唯一定位时可用。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": (
+                                    "目标章节的新版完整内容，从 `## 章节标题` 行开始，"
+                                    "到下一个同级 `##` 之前为止。不能包含其他 `##` 级别的标题。"
+                                ),
+                            },
+                        },
+                        "required": ["content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "replace_report_text",
+                    "description": (
+                        "把正文草稿（content/report_draft_v1.md）中的某段文字替换为新文字。"
+                        "要求 `old` 在草稿中**唯一**出现（恰好 1 次）。仅在 S4 阶段、草稿存在时可用。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "old": {
+                                "type": "string",
+                                "description": (
+                                    "要替换的原文片段。必须在草稿中唯一出现，"
+                                    "长度建议 5-200 字以确保唯一性。"
+                                ),
+                            },
+                            "new": {
+                                "type": "string",
+                                "description": "替换后的新文字。可以为空（删除场景）。",
+                            },
+                        },
+                        "required": ["old", "new"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "rewrite_report_draft",
+                    "description": (
+                        "重写整份正文草稿（content/report_draft_v1.md）。仅在用户明确要求"
+                        "'整篇重写' / '推倒重来' / '全文重写' 时使用；个别章节调整请用 "
+                        "`rewrite_report_section`，文字替换用 `replace_report_text`。"
+                        "仅在 S4 阶段、草稿存在时可用。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": (
+                                    "完整新草稿内容，从 `# 报告标题` 开始。"
+                                    "必须含至少一个 `## ` 级别章节标题。"
+                                ),
+                            },
+                        },
+                        "required": ["content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "read_file",
                     "description": "读取项目文件",
                     "parameters": {
