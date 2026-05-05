@@ -70,5 +70,40 @@ class ResolveSectionTargetTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
+from backend.report_writing import assistant_text_claims_modification
+
+
+class AssistantTextClaimsModificationTests(unittest.TestCase):
+    def test_explicit_completion_returns_true(self):
+        self.assertTrue(assistant_text_claims_modification(
+            "我已经把第二章重写完毕，请查看。",
+        ))
+        self.assertTrue(assistant_text_claims_modification(
+            "正文已同步更新到 content/report_draft_v1.md。",
+        ))
+        self.assertTrue(assistant_text_claims_modification(
+            "草稿完成第三章的扩写。",
+        ))
+
+    def test_intent_only_returns_false(self):
+        self.assertFalse(assistant_text_claims_modification(
+            "我会重写第二章，请稍等。",
+        ))
+        self.assertFalse(assistant_text_claims_modification(
+            "我准备开始起草正文。",
+        ))
+
+    def test_unrelated_text_returns_false(self):
+        self.assertFalse(assistant_text_claims_modification(
+            "我不太确定这块怎么处理。",
+        ))
+
+    def test_intent_plus_completion_returns_true(self):
+        # "我会修改" + "已完成" 混合 — 仍按完成处理（model 在文本里同时混合时算撒谎风险）
+        self.assertTrue(assistant_text_claims_modification(
+            "我会重写第二章，已经完成了起草。",
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()
