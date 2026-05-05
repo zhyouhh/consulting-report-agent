@@ -12319,9 +12319,11 @@ class PreflightCheckTests(ChatRuntimeTests):
         handler = self._make_handler_with_project()
         self._put_draft("## 第一章 引言\n\n内容A\n\n## 第二章 战力演化\n\n内容B\n")
         decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把第二章重写一下",
+            self.project_id, "把第二章重写一下", stage_code="S4",
         )
         self.assertEqual(decision.get("preflight_keyword_intent"), "section")
+        self.assertEqual(decision.get("mode"), "require")
+        self.assertEqual(decision.get("priority"), "P_PREFLIGHT_OK")
         self.assertEqual(decision.get("rewrite_target_label"), "第二章 战力演化")
         self.assertIn("内容B", str(decision.get("rewrite_target_snapshot") or ""))
 
@@ -12333,7 +12335,7 @@ class PreflightCheckTests(ChatRuntimeTests):
         )
         self.assertIsNone(decision.get("preflight_keyword_intent"))
 
-    def test_preflight_section_ambiguous_prefix_returns_none(self):
+    def test_preflight_section_zero_candidates_returns_none(self):
         """fix4 v5: prefix '第二章' 在 draft 中匹配 0 个 → preflight=None"""
         handler = self._make_handler_with_project()
         self._put_draft("## 第一章 引言\n\n内容A\n")
@@ -12342,12 +12344,51 @@ class PreflightCheckTests(ChatRuntimeTests):
         )
         self.assertIsNone(decision.get("preflight_keyword_intent"))
 
+    def test_preflight_section_multi_candidate_returns_none(self):
+        """fix4-fix1 v5: prefix '第二章' 在 draft 中匹配 ≥2 个 heading → preflight=None"""
+        handler = self._make_handler_with_project()
+        self._put_draft(
+            "## 第一章 引言\n内容0\n"
+            "## 第二章 战力演化\n内容A\n"
+            "## 第二章 战略意义\n内容B\n"
+        )
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "把第二章重写一下",
+        )
+        self.assertIsNone(decision.get("preflight_keyword_intent"))
+
+    def test_preflight_section_multi_prefix_distinct_targets_returns_none(self):
+        """fix4-fix1: user msg 含多个章节前缀且分别命中不同 heading → preflight=None (避免兜底改错章节)"""
+        handler = self._make_handler_with_project()
+        self._put_draft(
+            "## 第一章 引言\n内容0\n"
+            "## 第二章 战力演化\n内容A\n"
+            "## 第三章 战略意义\n内容B\n"
+        )
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "把第二章和第三章都重写一下",
+        )
+        self.assertIsNone(decision.get("preflight_keyword_intent"))
+
     def test_preflight_replace_keyword_with_unique_old_text_returns_replace(self):
         """fix4 v5: '把"体能"改成"力量"' + draft 含唯一"体能" → preflight_keyword_intent='replace'"""
         handler = self._make_handler_with_project()
         self._put_draft("## 第一章\n体能很重要\n")
         decision = handler._preflight_canonical_draft_check(
-            self.project_id, "把报告里的体能改成力量",
+            self.project_id, "把报告里的体能改成力量", stage_code="S4",
+        )
+        self.assertEqual(decision.get("preflight_keyword_intent"), "replace")
+        self.assertEqual(decision.get("mode"), "require")
+        self.assertEqual(decision.get("priority"), "P_PREFLIGHT_OK")
+        self.assertEqual(decision.get("old_text"), "体能")
+        self.assertEqual(decision.get("new_text"), "力量")
+
+    def test_preflight_replace_keyword_change_to_synonym_works(self):
+        """fix4-fix1: '改为' 同义词应跟 '改成' 一样触发 replace fallback"""
+        handler = self._make_handler_with_project()
+        self._put_draft("## 第一章\n体能很重要\n")
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "把报告里的体能改为力量", stage_code="S4",
         )
         self.assertEqual(decision.get("preflight_keyword_intent"), "replace")
         self.assertEqual(decision.get("old_text"), "体能")
@@ -12776,6 +12817,10 @@ class GateCanonicalDraftToolCallTests(ChatRuntimeTests):
         handler._build_turn_context(self.project_id, "把第二章重写一下")
         decision = handler._turn_context.get("canonical_draft_decision") or {}
         self.assertEqual(decision.get("preflight_keyword_intent"), "section")
+        # fix4-fix1 (Bug 2): target enforcement fields must be propagated by inject
+        self.assertEqual(decision.get("rewrite_target_label"), "第二章 战力演化")
+        self.assertEqual(decision.get("required_edit_scope"), "section")
+        self.assertIn("内容B", str(decision.get("rewrite_target_snapshot") or ""))
         result = handler._execute_plan_write(
             self.project_id,
             file_path="content/report_draft_v1.md",

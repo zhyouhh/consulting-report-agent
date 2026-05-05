@@ -99,6 +99,7 @@ _DRAFT_INTENT_PREFLIGHT_KEYWORDS = {
     ),
     "replace": (
         "改成",
+        "改为",
         "替换成",
         "换成",
     ),
@@ -364,7 +365,9 @@ class ChatHandler:
         r"\s*(?P<new_text>[^，,、。！？!?；;：:\n]{1,80})"
     )
     # fix4 (v5 §4.12): section keyword fallback only accepts explicit numeric prefixes.
-    _SECTION_PREFIX_RE = re.compile(r"第([一二三四五六七八九十百千万0-9]+)(?:[章节]|部分)")
+    _SECTION_PREFIX_RE = re.compile(
+        r"第([一二三四五六七八九十百千万0-9]+)(?:章(?!节)|节(?!章)|部分)"
+    )
 
     NON_PLAN_WRITE_ALLOW_KEYWORDS = [
         "确认大纲",
@@ -2099,6 +2102,7 @@ class ChatHandler:
         if not heading_nodes:
             return None
 
+        resolved: list[dict] = []
         for prefix_match in matches:
             prefix = prefix_match.group(0)  # e.g. "第二章"
             candidates = [
@@ -2107,16 +2111,25 @@ class ChatHandler:
                 and isinstance(node.get("label"), str)
                 and str(node.get("label")).startswith(prefix)
             ]
-            if len(candidates) != 1:
-                continue
-            node = candidates[0]
-            label = str(node.get("label") or "")
-            snapshot = str(node.get("section_snapshot") or "")
-            if not label or not snapshot:
-                continue
-            return {"label": label, "snapshot": snapshot}
+            if len(candidates) == 1:
+                resolved.append(candidates[0])
 
-        return None
+        if not resolved:
+            return None
+
+        # Dedupe by heading position; require exactly one unique target across all prefixes.
+        unique_keys = {
+            (int(n.get("start", -1)), int(n.get("end", -1))) for n in resolved
+        }
+        if len(unique_keys) != 1:
+            return None
+
+        node = resolved[0]
+        label = str(node.get("label") or "")
+        snapshot = str(node.get("section_snapshot") or "")
+        if not label or not snapshot:
+            return None
+        return {"label": label, "snapshot": snapshot}
 
     def _preflight_canonical_draft_check(
         self,
@@ -2167,6 +2180,9 @@ class ChatHandler:
         preflight_new_text: str | None = None
         preflight_target_label: str | None = None
         preflight_target_snapshot: str | None = None
+        preflight_expected_tool_family: str | None = None
+        preflight_required_edit_scope: str | None = None
+        preflight_intent_kind: str | None = None
 
         if preflight_intent is None:
             # 1.5a replace: 精确正则 + draft 中 unique old_text
@@ -2187,6 +2203,9 @@ class ChatHandler:
                         preflight_intent = "replace"
                         preflight_old_text = old_text
                         preflight_new_text = new_text
+                        preflight_expected_tool_family = "edit_file"
+                        preflight_required_edit_scope = "replacement"
+                        preflight_intent_kind = "replace_text"
 
         if preflight_intent is None:
             # 1.5b section: 关键词 hit + heading 数字前缀 unique resolve
@@ -2204,6 +2223,8 @@ class ChatHandler:
                     preflight_intent = "section"
                     preflight_target_label = target["label"]
                     preflight_target_snapshot = target["snapshot"]
+                    preflight_expected_tool_family = "edit_file"
+                    preflight_required_edit_scope = "section"
 
         # Step 2: 含意图但 stage 不对 → reject
         if preflight_intent is not None:
@@ -2226,6 +2247,9 @@ class ChatHandler:
                     new_text=preflight_new_text,
                     rewrite_target_label=preflight_target_label,
                     rewrite_target_snapshot=preflight_target_snapshot,
+                    expected_tool_family=preflight_expected_tool_family,
+                    required_edit_scope=preflight_required_edit_scope,
+                    intent_kind=preflight_intent_kind,
                 )
 
         # Step 3: mixed-intent 拆轮（保留现有 helper）
@@ -2241,6 +2265,9 @@ class ChatHandler:
                 new_text=preflight_new_text,
                 rewrite_target_label=preflight_target_label,
                 rewrite_target_snapshot=preflight_target_snapshot,
+                expected_tool_family=preflight_expected_tool_family,
+                required_edit_scope=preflight_required_edit_scope,
+                intent_kind=preflight_intent_kind,
             )
 
         return self._make_canonical_draft_decision(
@@ -2252,6 +2279,9 @@ class ChatHandler:
             new_text=preflight_new_text,
             rewrite_target_label=preflight_target_label,
             rewrite_target_snapshot=preflight_target_snapshot,
+            expected_tool_family=preflight_expected_tool_family,
+            required_edit_scope=preflight_required_edit_scope,
+            intent_kind=preflight_intent_kind,
         )
 
     def _classify_canonical_draft_turn(
@@ -6873,9 +6903,26 @@ class ChatHandler:
             silent_preflight = self._preflight_canonical_draft_check(
                 project_id, user_message, silent=True,
             )
-            canonical_draft_decision["preflight_keyword_intent"] = silent_preflight.get(
-                "preflight_keyword_intent"
-            )
+            silent_intent = silent_preflight.get("preflight_keyword_intent")
+            canonical_draft_decision["preflight_keyword_intent"] = silent_intent
+            # fix4-fix1 (v5 §4.12 safety contract): when silent preflight resolved
+            # a section/replace target, propagate the target-enforcement fields into
+            # the legacy decision so downstream snapshot/scope validation fires.
+            # Only override when silent preflight has the value AND legacy didn't already
+            # set it (legacy's mode/priority remain authoritative; we only fill blanks).
+            if silent_intent in {"section", "replace"}:
+                for field in (
+                    "rewrite_target_label",
+                    "rewrite_target_snapshot",
+                    "old_text",
+                    "new_text",
+                    "expected_tool_family",
+                    "required_edit_scope",
+                    "intent_kind",
+                ):
+                    silent_value = silent_preflight.get(field)
+                    if silent_value and not canonical_draft_decision.get(field):
+                        canonical_draft_decision[field] = silent_value
         except Exception:
             pass  # silent: preflight failure must not affect real turn
         generic_non_plan_write_allowed = self._should_allow_generic_non_plan_write(project_id, user_message)
