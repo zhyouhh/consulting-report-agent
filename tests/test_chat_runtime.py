@@ -13658,3 +13658,141 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(RewriteReportDraftToolTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class AppendReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
+    """Tests for _tool_append_report_draft (spec §2.1 refactored entry)."""
+
+    _VALID_APPEND_CONTENT = "## 第一章 引言\n\n" + ("正文内容" * 60)  # > 80 substantive chars
+
+    def test_happy_path_first_draft(self):
+        """首次起草：draft 不存在，无需 read_file，append 创建文件."""
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        # 不 put_draft，首次起草
+        handler._build_turn_context(self.project_id, "开始写报告")
+        # 不 trigger_read_file（首次无需）
+        result = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        self.assertEqual(result.get("status"), "success")
+        self.assertTrue((self.project_dir / "content" / "report_draft_v1.md").exists())
+
+    def test_happy_path_continue_draft(self):
+        """续写：draft 存在 + 本轮已 read_file → append 成功."""
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n已有内容\n")
+        handler._build_turn_context(self.project_id, "继续写第二章")
+        self._trigger_read_file(handler)
+        result = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        self.assertEqual(result.get("status"), "success")
+
+    def test_stage_pre_s4_rejects(self):
+        handler = self._make_handler_with_project()
+        # 不 setup S4
+        handler._build_turn_context(self.project_id, "开始写报告")
+        result = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("S4", result.get("message", ""))
+
+    def test_outline_unconfirmed_rejects(self):
+        handler = self._make_handler_with_project()
+        # S4 但无 outline_confirmed_at
+        original_infer = handler.skill_engine._infer_stage_state
+        def _mock_infer_s4(project_path):
+            result = dict(original_infer(project_path))
+            result["stage_code"] = "S4"
+            return result
+        handler.skill_engine._infer_stage_state = _mock_infer_s4
+        handler._build_turn_context(self.project_id, "开始写报告")
+        result = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("确认大纲", result.get("message", ""))
+
+    def test_mutation_limit_blocks_second_call(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        handler._build_turn_context(self.project_id, "开始写报告")
+        # 第一次成功（首次，无需 read）
+        handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        # mutation 已 set，第二次应 reject
+        result = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("本轮已经修改过", result.get("message", ""))
+
+    def test_fetch_url_pending_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        handler._build_turn_context(self.project_id, "开始写报告")
+        # 模拟 web_search 已做但未 fetch_url
+        handler._turn_context["web_search_performed"] = True
+        handler._turn_context["fetch_url_performed"] = False
+        result = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("fetch_url", result.get("message", ""))
+
+    def test_mixed_intent_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        # 设置多个 secondary action families（bypass 实现细节，直接 patch）
+        original = handler._secondary_action_families_in_message
+        handler._secondary_action_families_in_message = lambda msg: ["export", "quality_check"]
+        handler._build_turn_context(self.project_id, "写完之后导出并质检")
+        handler._secondary_action_families_in_message = lambda msg: ["export", "quality_check"]
+        result = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("多个动作", result.get("message", ""))
+
+    def test_no_read_before_write_rejects_when_draft_exists(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n已有内容\n")
+        handler._build_turn_context(self.project_id, "继续写第二章")
+        # 不 trigger_read_file，但 draft 已存在
+        result = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("read_file", result.get("message", ""))
+
+    def test_first_draft_skips_read_check(self):
+        """首次起草（draft 不存在）→ require_read=False → 无需 read_file."""
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        # 不 put_draft，也不 trigger_read_file
+        handler._build_turn_context(self.project_id, "开始写报告")
+        result = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        # 首次起草应该成功，不报 read_file 错误
+        self.assertEqual(result.get("status"), "success")
+
+    def test_cross_turn_mutation_default_none(self):
+        """_new_turn_context 中 canonical_draft_mutation 默认为 None."""
+        handler = self._make_handler_with_project()
+        fresh_ctx = handler._new_turn_context(can_write_non_plan=True)
+        self.assertIsNone(fresh_ctx.get("canonical_draft_mutation"))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in AppendReportDraftToolTests.__dict__
+    ):
+        setattr(AppendReportDraftToolTests, _inherited_test_name, None)
+del _inherited_test_name
