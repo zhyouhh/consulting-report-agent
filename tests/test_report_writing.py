@@ -70,7 +70,18 @@ class ResolveSectionTargetTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
-from backend.report_writing import assistant_text_claims_modification
+from backend.report_writing import (
+    assistant_text_claims_modification,
+    check_no_prior_canonical_mutation_in_turn,
+    check_no_fetch_url_pending,
+)
+
+# Also import remaining helpers for forward reference (used in CheckHelpersTests)
+from backend.report_writing import (
+    check_report_writing_stage, check_outline_confirmed,
+    check_no_mixed_intent_in_turn,
+    check_read_before_write_canonical_draft,
+)
 
 
 class AssistantTextClaimsModificationTests(unittest.TestCase):
@@ -102,6 +113,36 @@ class AssistantTextClaimsModificationTests(unittest.TestCase):
         # "我会修改" + "已完成" 混合 — 仍按完成处理（model 在文本里同时混合时算撒谎风险）
         self.assertTrue(assistant_text_claims_modification(
             "我会重写第二章，已经完成了起草。",
+        ))
+
+
+class CheckHelpersTests(unittest.TestCase):
+    def test_check_no_prior_canonical_mutation_in_turn_pass(self):
+        self.assertIsNone(check_no_prior_canonical_mutation_in_turn({}))
+        self.assertIsNone(check_no_prior_canonical_mutation_in_turn(
+            {"canonical_draft_mutation": None},
+        ))
+
+    def test_check_no_prior_canonical_mutation_in_turn_reject(self):
+        msg = check_no_prior_canonical_mutation_in_turn(
+            {"canonical_draft_mutation": {"tool": "rewrite_report_section"}},
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("本轮已经修改过", msg)
+
+    def test_check_no_fetch_url_pending_no_search_pass(self):
+        self.assertIsNone(check_no_fetch_url_pending({}))
+
+    def test_check_no_fetch_url_pending_search_no_fetch_reject(self):
+        msg = check_no_fetch_url_pending(
+            {"web_search_performed": True, "fetch_url_performed": False},
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("fetch_url", msg)
+
+    def test_check_no_fetch_url_pending_both_pass(self):
+        self.assertIsNone(check_no_fetch_url_pending(
+            {"web_search_performed": True, "fetch_url_performed": True},
         ))
 
 
