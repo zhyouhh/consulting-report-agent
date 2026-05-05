@@ -59,9 +59,26 @@ backend 强制要求 model 在 `edit_file.old_string` 提交**目标章节的完
 
 ## §2 工具集
 
-### 2.1 保留：`append_report_draft(content)`
+### 2.1 保留 + 重构：`append_report_draft(content)`
 
-不变。当前实现（chat.py:4187-4202）已经覆盖 begin / continue 两种意图。fix3 cutover Session A/D 实测正确。
+工具签名不变（只接 content 参数，覆盖 begin / continue 两种意图）。fix3 cutover Session A/D 实测正确。
+
+**改造**：入口校验从分散在 `_validate_append_turn_canonical_draft_write` / `_validate_required_report_draft_prewrite` 等多处迁移到工具内部 inline check（per spec r2 §C16），统一调用 §3.1 共享 helpers。
+
+**Reject 路径**（统一到工具入口，不再走旧的 `_validate_required_report_draft_prewrite` 路径）:
+| 失败原因 | 引导消息 |
+|---|---|
+| 阶段 < S4 | "本工具仅在 S4 阶段可用。当前阶段：X" |
+| outline 未确认 | "请先在工作区确认大纲，再起草正文" |
+| 本轮含多个 action family（mixed-intent） | "请把'起草正文'拆成单独一轮处理" |
+| **已有本轮 canonical draft mutation** | "本轮已经修改过正文草稿一次，请等用户回应再做下一次修改" |
+| draft 已存在但本轮未 `read_file` 过 canonical draft | "draft 已存在，续写前请先 `read_file` 读最新正文" |
+| 本轮已 `read_file` 但 mtime 已变 | "草稿在你阅读后被修改，请先重新 `read_file` 再提交" |
+| web_search 后未 `fetch_url`（按 fetch_url gate） | "请先 `fetch_url` 读取候选网页正文，再写正文" |
+
+**首次起草例外（draft 不存在）**：read-before-write 不强制；其他 check 仍生效。
+
+成功路径：调用现有 file mutation infrastructure（`append_report_draft` 内部已有的 append 逻辑）。**写盘成功后** set `turn_context["canonical_draft_mutation"] = {...}`。
 
 ### 2.2 新增：`rewrite_report_section(content)`
 
@@ -90,13 +107,18 @@ backend 强制要求 model 在 `edit_file.old_string` 提交**目标章节的完
 |---|---|
 | 阶段 < S4 | "本工具仅在 S4 阶段可用。当前阶段：X" |
 | outline 未确认 | "请先在工作区确认大纲，再修改正文章节" |
+| 本轮含多个 action family（mixed-intent） | "请把章节重写拆成单独一轮处理" |
+| **已有本轮 canonical draft mutation** | "本轮已经修改过正文草稿一次，请等用户回应再做下一次修改" |
 | draft 不存在 | "当前还没有正文草稿，请先用 `append_report_draft` 起草第一版" |
 | user 消息不含章节前缀 | "请在消息中明确说明要改哪一章/节，例如'重写第二章'" |
 | 章节前缀未唯一定位到 heading | "找不到 '第X章' 对应的 heading，请用 `read_file` 核对章节标题" |
 | 多个章节前缀指向不同 heading（partial multi-prefix） | "本轮只支持改写一个章节。请单独发起每个章节的修改请求" |
 | content 不以 `## ` 开头 | "`content` 必须以 `## 章节标题` 开头" |
 | content 含多个 `## ` heading | "`content` 不能涉及多个章节。请只提交目标章节的完整内容" |
+| content 长度超过 cap（max(3000, 3× target_snapshot 长度)） | "提交内容超过预期范围（X 字 vs 上限 Y 字），请只提交目标章节的内容" |
+| 本轮未 `read_file` 过 canonical draft | "请先 `read_file` 读取正文，再修改" |
 | 本轮已调用过 read_file 但 draft mtime 已变 | "草稿在你阅读后被修改，请先重新 `read_file` 再提交" |
+| web_search 后未 `fetch_url` | "请先 `fetch_url` 读取候选网页正文，再写正文" |
 
 成功路径：调底层 `edit_file(file_path=REPORT_DRAFT_PATH, old_string=rewrite_target_snapshot, new_string=content)`，复用现有 file mutation infrastructure。
 
@@ -129,10 +151,14 @@ backend 强制要求 model 在 `edit_file.old_string` 提交**目标章节的完
 |---|---|
 | 阶段 < S4 | "本工具仅在 S4 阶段可用" |
 | outline 未确认 | "请先确认大纲" |
+| 本轮含多个 action family（mixed-intent） | "请把文字替换拆成单独一轮处理" |
+| **已有本轮 canonical draft mutation** | "本轮已经修改过正文草稿一次，请等用户回应再做下一次修改" |
 | draft 不存在 | "当前还没有正文草稿..." |
 | `old` 在 draft 中 0 次出现 | "目标文本 `<old>` 在草稿中未找到。请先 `read_file` 核对原文" |
 | `old` 在 draft 中 ≥ 2 次出现 | "目标文本 `<old>` 在草稿中出现 N 次（不唯一）。请提供更具体的上下文使其唯一" |
+| 本轮未 `read_file` 过 canonical draft | "请先 `read_file` 读取正文，再修改" |
 | 本轮已调用过 read_file 但 draft mtime 已变 | 同 §2.2 |
+| web_search 后未 `fetch_url` | 同 §2.2 |
 
 成功路径：调底层 `edit_file(file_path=REPORT_DRAFT_PATH, old_string=old, new_string=new)`。
 
@@ -162,12 +188,16 @@ backend 强制要求 model 在 `edit_file.old_string` 提交**目标章节的完
 |---|---|
 | 阶段 < S4 | "本工具仅在 S4 阶段可用" |
 | outline 未确认 | "请先确认大纲" |
+| 本轮含多个 action family（mixed-intent） | "请把整篇重写拆成单独一轮处理" |
+| **已有本轮 canonical draft mutation** | "本轮已经修改过正文草稿一次，请等用户回应再做下一次修改" |
 | draft 不存在 | "当前还没有正文草稿，请先用 `append_report_draft` 起草第一版" |
 | user 消息不含全文重写关键词 | "看起来你只想改一部分。重写整章请用 `rewrite_report_section`，替换文字用 `replace_report_text`。如果确实要整篇重写，请明确说'整篇重写'或'全文重写'" |
 | `content` 不以 `# ` 开头 | "`content` 必须以 `# 报告标题` 开头" |
 | `content` 不含 `## ` heading | "`content` 必须含至少一个章节标题（`## `级别）" |
-| 已有本轮 canonical draft mutation | "本轮已经修改过正文草稿一次，请等用户回应再做下一次修改" |
+| content 长度超过 cap（max(8000, 2× current_draft_text 长度)） | "提交内容超过预期范围（X 字 vs 上限 Y 字），请只提交完整草稿" |
+| 本轮未 `read_file` 过 canonical draft | "请先 `read_file` 读取正文，再修改" |
 | 本轮已 read_file 但 mtime 已变 | "草稿在你阅读后被修改，请先重新 `read_file` 再提交" |
+| web_search 后未 `fetch_url` | 同 §2.2 |
 
 成功路径：调底层 `edit_file(file_path=REPORT_DRAFT_PATH, old_string=current_draft_text, new_string=content)`。
 
@@ -205,41 +235,64 @@ def resolve_section_target(user_message, draft_text) -> dict | None:
 
 ### 3.2 工具调用入口模板
 
-每个工具入口统一调用这些 helpers，**显式 inline**，不依赖外层 turn_context decision 变量：
+每个工具入口**统一**调用 §3.1 helpers，**显式 inline**，不依赖外层 turn_context decision 变量。所有 4 个写工具共享的 check 列表（顺序固定）：
 
 ```python
-def append_report_draft(self, project_id, content):
-    for check in (check_report_writing_stage, check_outline_confirmed,
-                  check_no_mixed_intent_in_turn, check_no_fetch_url_pending):
-        err = check(...)
-        if err: return {"status": "error", "message": err}
-    # ... business logic
-    
+SHARED_PRE_WRITE_CHECKS = (
+    check_report_writing_stage,
+    check_outline_confirmed,
+    check_no_mixed_intent_in_turn,
+    check_no_prior_canonical_mutation_in_turn,  # mutation limit
+    check_no_fetch_url_pending,
+)
+```
+
+工具入口示例：
+
+```python
 def rewrite_report_section(self, project_id, content):
-    for check in (check_report_writing_stage, check_outline_confirmed,
-                  check_no_mixed_intent_in_turn,
-                  check_read_before_write_canonical_draft,
-                  check_no_fetch_url_pending):
-        err = check(...)
-        if err: return {"status": "error", "message": err}
-    # 工具特定 check：draft 必须 exist + target 必须 unique resolve
     user_message = self._turn_context.get("user_message_text") or ""
+    
+    # 1. 共享 pre-write checks（含 mutation limit）
+    for check in SHARED_PRE_WRITE_CHECKS:
+        err = check(self.skill_engine, project_id, self._turn_context, user_message)
+        if err: return {"status": "error", "message": err}
+    
+    # 2. 工具特定 check（read-before-write + draft 存在 + target unique resolve）
+    err = check_read_before_write_canonical_draft(self._turn_context, project_id)
+    if err: return {"status": "error", "message": err}
+    
     draft_text = self._read_project_file_text(project_id, REPORT_DRAFT_PATH) or ""
     if not draft_text:
         return {"status": "error", "message": "当前还没有正文草稿..."}
+    
     target = resolve_section_target(user_message, draft_text)
     if target is None:
         return {"status": "error", "message": "请明确说明要改哪一章/节..."}
-    # content 校验（## 开头 + 不含多 ##）
+    
+    # 3. content 校验（## 开头 + 不含多 ## + 长度 cap）
     if not content.startswith("## "):
         return {"status": "error", "message": "`content` 必须以 `## 章节标题` 开头"}
     extra_h2 = sum(1 for line in content.split("\n") if line.startswith("## "))
     if extra_h2 != 1:
         return {"status": "error", "message": "`content` 不能涉及多个章节..."}
-    # 写盘
-    return self._do_edit_file(REPORT_DRAFT_PATH, old_string=target["snapshot"],
-                              new_string=content)
+    cap = max(3000, 3 * len(target["snapshot"]))
+    if len(content) > cap:
+        return {"status": "error", "message": f"提交内容超过预期范围（{len(content)} 字 vs 上限 {cap} 字）..."}
+    
+    # 4. 写盘 → 成功后 set canonical_draft_mutation
+    result = self._do_edit_file(REPORT_DRAFT_PATH, old_string=target["snapshot"],
+                                new_string=content)
+    if result.get("status") == "success":
+        self._turn_context["canonical_draft_mutation"] = {
+            "tool": "rewrite_report_section",
+            "label": target["label"],
+            "ts": now(),
+        }
+    return result
 ```
+
+`append_report_draft` / `replace_report_text` / `rewrite_report_draft` 入口模板同构，差异只在工具特定 check（如 append 首次起草放宽 read-before-write、replace 检查 unique old、rewrite_draft 检查 user 消息含全文重写关键词等）。**所有 4 个工具入口都包含 `SHARED_PRE_WRITE_CHECKS` 全套**（含 mutation limit）。
 
 ### 3.3 与 `_turn_context` 的关系
 
@@ -249,7 +302,7 @@ def rewrite_report_section(self, project_id, content):
 
 **新增**：
 - `user_message_text`（**new**）— 在 `_build_turn_context` 中用现有 helper `_extract_user_message_text(current_user_message)` 取出 raw user msg 字符串并 cache。新工具在 `rewrite_report_section` / `rewrite_report_draft` 入口读这个字段做 keyword 检测和 `resolve_section_target`。
-- `canonical_draft_write_obligation`（**new**, §3.5）— 由 `_detect_canonical_draft_write_obligation` 在 turn-start 写入；turn-end 时 `_finalize_assistant_turn` 检查"obligation 存在但 mutation 没发生" 触发 retry。
+- `canonical_draft_write_obligation`（**new**, §3.5）— 由 `_detect_canonical_draft_write_obligation` 在 turn-start 写入；turn-end 时 `_chat_stream_unlocked` / `_chat_unlocked` 的 no-tool-call 分支检查"obligation 存在但 mutation 没发生" 触发 retry。**retry 不在 `_finalize_assistant_turn` 内**（该函数只 finalize/persist）。
 - `read_file_snapshots: dict[path, mtime]`（**new**, §3.7）— `read_file` 工具完成时写入；写正文工具入口检查 mtime 未变。
 
 **保留**：
@@ -463,7 +516,7 @@ stage-ack 部分保持原样（独立系统）。
 | `backend/chat.py` | 保留常量：`REPORT_BODY_INSPECT_WORD_COUNT_KEYWORDS`、`REPORT_BODY_INSPECT_FILE_KEYWORDS`（被 `_should_allow_non_plan_write` 等仍用） | 0 | **保留** |
 | `backend/chat.py` | turn_context 新增 3 字段：`user_message_text`、`canonical_draft_write_obligation`、`read_file_snapshots` 默认 `""/None/{}` | +10 | **新增** |
 | `backend/chat.py` | 3 个新工具的 callable（`rewrite_report_section` / `replace_report_text` / `rewrite_report_draft`）+ tool schema 注册（`_get_tools` per reviewer grep）+ dispatch 路由（`_execute_tool` per reviewer grep）| +280 | **新增** |
-| `backend/chat.py` | `_detect_canonical_draft_write_obligation` 函数 + `_finalize_assistant_turn` 末尾 obligation 对账分支 | +60 | **新增** |
+| `backend/chat.py` | `_detect_canonical_draft_write_obligation` 函数 + `_chat_stream_unlocked` / `_chat_unlocked` 的 no-tool-call 分支 obligation 对账（retry 注入） | +60 | **新增** — retry 入口在 chat loop 层不在 `_finalize_assistant_turn`（§3.5）|
 | `backend/chat.py` | `read_file` 工具完成 hook：写入 `read_file_snapshots[REPORT_DRAFT_PATH] = mtime` | +5 | **新增** |
 | `backend/report_writing.py` | 新模块（共享 helpers + `resolve_section_target` 迁移自 fix4 fix2 + `assistant_text_claims_modification` text scanner） | +220 | **新增** |
 | `backend/chat.py` | `_finalize_assistant_turn` 7-step orchestrator 中的 draft-action 步骤 | -40 | 删 |
@@ -631,14 +684,16 @@ content 超出 cap → reject "提交内容超过预期范围（X 字 vs target 
 
 迁移后必须 port 对应的 unit tests（fix4 fix2 的 `test_preflight_section_partial_multi_prefix_returns_none` 等）。**reviewer 必须检查这一点**。
 
-### 7.4 Risk δ — `_validate_required_report_draft_prewrite` 中保留部分
+### 7.4 Risk δ — `_validate_required_report_draft_prewrite` 拆解（与 §5.1 对齐）
 
-该函数当前同时服务于：
-- `append_report_draft` 的"轮内必须实际写入" 校验（保留）
-- `edit_file` 写 canonical draft 的 old_string 校验（删，因为新工具替代）
-- `_required_write_snapshots` 对账（删，因为不再有跨工具调用对账需求）
+该函数当前同时服务于多种场景；本 spec 拆解如下（与 §5.1 deletion 表 + §10 reviewer Q5 的 inline-migrate 决议一致）：
 
-**reviewer 需确认**：保留部分是否仍正确触发；删除部分是否有别的代码路径调用（如 `chat.py:7156` 的另一调用点）。
+- `append_report_draft` 的"轮内必须实际写入" 校验：**inline migrate 到 `append_report_draft` 工具入口**（§3.2 SHARED_PRE_WRITE_CHECKS + 工具特定 check）；旧函数 `_validate_append_turn_canonical_draft_write` **删除**
+- `edit_file` 写 canonical draft 的 old_string 校验：**整段删**（line 5531-5615 / 5636-5716，per §5.1），因为通用 edit_file 不再写 canonical draft（§2.5 enforce）
+- `_required_write_snapshots` 对账：仅删除 canonical draft 部分；plan/* 文件保留 turn-end 对账（per §3.3 turn_context 字段保留说明）
+- `chat.py:7156` 第二调用点：reviewer 要求实施前 grep 确认是否触达 canonical draft 路径；如触达，按上述规则改写
+
+**实施 confirm**：删除范围跟 §5.1 deletion table 一一对应，不重不漏。spec 不再有"保留 canonical draft prewrite"的描述（v3 之前 §7.4 错误地说"保留"，v3 修正）。
 
 ### 7.5 Risk ε — frontend 影响
 
@@ -653,7 +708,7 @@ content 超出 cap → reject "提交内容超过预期范围（X 字 vs target 
 - model 输出 "好的我来重写" 但 stop reason 是 length（被截断）→ 不应视为撒谎，应 retry/continue 不带特定提示
 - model 调了 `read_file` 但没调写工具 → 取决于 obligation：如果 obligation=section_rewrite 但 0 mutation，触发 retry
 
-`assistant_text_claims_modification(text)` 启发式：检测 "已"/"完成"/"修改"+"正文"/"草稿"等词。复用现有 `assistant_message` 文本扫描思路。
+`assistant_text_claims_modification(text)` 启发式：具体 regex 见 §3.5 `_TEXT_CLAIM_RE_1` / `_TEXT_CLAIM_RE_2` / `_INTENT_RE` 三组合。**正面 case**（return True）：含 "已 + 正文" / "草稿 + 完成" 这类完成声明短语；**负面 case**（return False）：仅含 "我会修改" / "我准备重写" 这类意图陈述。`backend/report_writing.py` 实现 + 单测 cover 5+ 正反例。
 
 ### 7.7 Risk η — 一轮一次 mutation 限制不严格（reviewer §A3 提出）
 
@@ -691,13 +746,13 @@ content 超出 cap → reject "提交内容超过预期范围（X 字 vs target 
 6. **Spec / SKILL.md**: 旧 spec §4.3-§4.12 标注 superseded；本 spec doc 进 main；SKILL.md §S4 替换为新表格；附录 draft-action 章节删除
 7. **工具选择正确率 smoke**（per §7.8）: 10 个 user message × tool schema 模式调用，正确率 ≥ 80%
 8. **Cutover smoke**: 5 sessions （A 起草 / B 重写第二章 / C 替换文本 / D 续写第三章 / E 整篇重写）至少 4 个写盘成功（含 B 章节实际被替换 + E 整份草稿被替换）；剩 1 个允许 model behavior issue 但**工具不卡 dead-loop**
-9. **No regression**（具体测试 / smoke cases，**per spec r2 reviewer §C10 要求 mechanically verifiable**）:
-   - stage-ack 系统：以下 test 必须 pass — `StageAckParserParseRawTests` / `StageAckParserStripTests` / `StreamSplitSafeTailStageAckTests`（保留部分）/ `StageAckRegressionTests`（新增）
-   - 现有 plan/* 写文件路径：以下 smoke 必须 pass — 用户说 "确认大纲" → 触发 `outline_confirmed_at` checkpoint set；plan/* 文件 missing 时 `_required_writes_satisfied` 仍 detect
-   - 现有 stage advance 路径：用户说 "推进 S5" → S4→S5 切换 + `<stage-ack>review_started</stage-ack>` 执行成功
+9. **No regression**（具体测试 / smoke cases，**per spec r2 reviewer §C10 要求 mechanically verifiable**；测试 class 名以现有 codebase 实际存在的为准）:
+   - stage-ack 系统：以下 test class 必须保持 PASS（实际命名见 `tests/test_chat_runtime.py`）— `StageAckFinalizePipelineTests`、`StreamSplitSafeTailDraftActionTests`（剪枝保留 stage-ack 部分；类名按实际文件保留或重命名为 `StreamSplitSafeTailStageAckTests`，由 plan 阶段决定具体动作），加上新增 `StageAckRegressionTests`（针对 draft-action 删除后 stage-ack 流式扫描 / parse / strip 不受影响）
+   - 现有 plan/* 写文件路径：用户说 "确认大纲" → 触发 `outline_confirmed_at` checkpoint set；plan/* 文件 missing 时 `_required_writes_satisfied` 仍 detect
+   - 现有 stage advance 路径：用户说 "开始审查" → S4→S5 切换 + `<stage-ack>review_started_at</stage-ack>` 执行成功（注意 KEY 是 `review_started_at` 不是 `review_started`，per `backend/skill.py:42` / `backend/stage_ack.py:23` 的 enum 定义）
    - 现有 fetch_url gate：先 web_search 再 write 必须 fail；fetch_url 后 write 必须 pass
    - mixed-intent split：用户消息含 "重写第二章并导出 PDF" → reject 让 model 拆轮
-   - 这些 case 必须以 named tests 在 `tests/test_chat_runtime.py` 或 `tests/test_report_writing.py` 中存在；CI run 全部 pass
+   - 以上 case 必须以 named tests 在 `tests/test_chat_runtime.py` 或 `tests/test_report_writing.py` 中存在；CI run 全部 pass。**plan 阶段**逐项 grep 现有测试名 confirm 命名，避免 spec 跟实现 drift。
 
 ## §9 与现有 Phase 3 plan 的关系
 
