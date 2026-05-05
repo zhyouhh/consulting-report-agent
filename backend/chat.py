@@ -5705,7 +5705,7 @@ class ChatHandler:
                     category="non_plan_write_blocked",
                     path=canonical_normalized,
                     reason=gate_block,
-                    user_action="请按 SKILL.md 附录的 draft-action 标签规范操作",
+                    user_action="请使用 rewrite_report_section / replace_report_text / rewrite_report_draft 工具，不要直接 edit_file",
                     surface_to_user=True,
                 )
                 return {"status": "error", "message": gate_block}
@@ -7958,7 +7958,7 @@ class ChatHandler:
                 self._emit_system_notice_once(
                     category="non_plan_write_blocked", path=None,
                     reason=self.CANONICAL_DRAFT_NO_DRAFT_MESSAGE,
-                    user_action="请先发 <draft-action>begin</draft-action> 起草，再来重写章节",
+                    user_action="请先用 append_report_draft 起草，再用 rewrite_report_section 重写章节",
                     surface_to_user=True,
                 )
                 return event
@@ -8020,7 +8020,7 @@ class ChatHandler:
                 self._emit_system_notice_once(
                     category="non_plan_write_blocked", path=None,
                     reason=self.CANONICAL_DRAFT_NO_DRAFT_MESSAGE,
-                    user_action="请先发 <draft-action>begin</draft-action> 起草",
+                    user_action="请先用 append_report_draft 起草",
                     surface_to_user=True,
                 )
                 return event

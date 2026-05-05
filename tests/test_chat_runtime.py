@@ -13984,6 +13984,30 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
+class UserFacingDraftActionStringsRemovedTests(ChatRuntimeTests):
+    def test_no_draft_action_string_in_chat_py_user_action(self):
+        # 简单 grep（避免 regression 引回 <draft-action> 字符串）
+        from pathlib import Path
+
+        chat_py = (
+            Path(__file__).parent.parent / "backend" / "chat.py"
+        ).read_text(encoding="utf-8")
+        # user_action 字段中不能含 "<draft-action>"
+        # 允许有非 user_action 注释 / 历史 ref（在 backend/draft_action.py 残留时）
+        for line_no, line in enumerate(chat_py.split("\n"), 1):
+            if "user_action" in line and "<draft-action>" in line:
+                self.fail(f"line {line_no} still has <draft-action> in user_action: {line}")
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in UserFacingDraftActionStringsRemovedTests.__dict__
+    ):
+        setattr(UserFacingDraftActionStringsRemovedTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 class WriteObligationRetryTests(ChatRuntimeTests):
     """Spec §3.5 §7.6 retry 入口在 chat loop 层，不在 _finalize_assistant_turn."""
 
