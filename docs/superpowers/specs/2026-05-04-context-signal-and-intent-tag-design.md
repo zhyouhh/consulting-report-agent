@@ -418,6 +418,8 @@ turn end → strip tags + tool-log → persist
 
 #### 4.3 draft-action tag 语法（细粒度）
 
+> **⚠️ SUPERSEDED**: §4.3 - §4.12 (含 v5 amendment) 已被 `2026-05-05-report-tools-redesign-design.md` 替代。tag-based 架构（含 fix4 v5 §4.12）整套删除，改用 4 个专用工具（spec §2.1-§2.4）。本节保留作为历史 context。新代码请参考 redesign spec。
+
 四种意图，三种语法形式：
 
 ```
