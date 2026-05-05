@@ -1,5 +1,7 @@
 # Handoff — Phase 2a Fully Done, Phase 3 Ready
 
+> **⚠️ SUPERSEDED 2026-05-05 深夜**: 本 handoff 写完后又做了一轮 brainstorm + spec/plan 双轮 review，**Phase 3 计划被 redesign 取代**——不再"删 legacy classifier"，而是用 4 个专用工具替换 fix4 v5 整套 tag/gate/scope-enforcement 机制。下一步 cold-start 应该读 [`2026-05-05-tools-redesign-ready-to-implement.md`](2026-05-05-tools-redesign-ready-to-implement.md) 而非本文件。本文件保留作为 fix4 完成时的 snapshot。
+
 **Created:** 2026-05-05 evening (replaces `2026-05-05-phase2-section-replace-pending.md` which is now history)
 **Status:** Phase 2a 灰度通道 + fix4 三轮 (impl + fix1 + fix2) + 双轮 review APPROVED + cutover smoke 验证。Phase 3 (Tasks 24-27, 删 legacy classifier + 切主) **可以开始规划**。
 

@@ -1,19 +1,29 @@
 # Current Worklist
 
-最后更新：2026-05-05 晚（Phase 2a fix4 三轮全部完成 + 双轮 review APPROVED + cutover smoke session A/B 数据足够确认 fix4 设计正确；Phase 3 ready；新 model-narrowing 关注点 fix5 candidate 待跟进，详见"当前未解决" 0a + "最近已解决" 第 0 条 + handoff `docs/superpowers/handoffs/2026-05-05-phase2a-fully-done-phase3-ready.md`）
+最后更新：2026-05-05 深夜（Phase 2a fix4 + 后续 brainstorm 决定 redesign：4 个专用工具替换 `<draft-action>` tag + gate fallback + scope enforcement 整套机制；spec 4 轮 codex review APPROVED_WITH_NOTES + plan 2 轮 codex review APPROVED；待实施 Task 1-6，详见"当前未解决" 0a + "最近已解决" 第 0 条 + handoff `docs/superpowers/handoffs/2026-05-05-tools-redesign-ready-to-implement.md`）
 
 ## 当前未解决 / 待验证
 
-0a. **fix5 candidate — gemini-3-flash 不会缩窄 section/replace fallback 的 new_string（model-behavior issue）**
-- 状态：`fix4 后暴露的独立 model-behavior 问题，不阻塞 Phase 3`（2026-05-05 fix4 cutover smoke session B 实测）
-- 现象：fix4 cutover Session B "把第二章重写一下" — gate fallback 14 次 fired（vs fix3 的 19 次 gate block），但模型反复提交覆盖多 section 的 new_string，被 `_validate_required_report_draft_prewrite` scope enforcement 拒绝，error message 已经精确指出"本轮要求改写 第二章 跨版本战斗力模拟分析，edit_file.old_string 必须等于该章节的完整原文"，模型仍未学会缩窄
-- 区别于 fix3 dead-loop：fix3 卡在 gate（"请先发 tag"），fix4 卡在 scope（"new_string 范围超了"）。后者 error 是 actionable 的，比前者 UX 改善
-- 性质：纯 model 行为问题，fix4 后端逻辑全部正确（preflight resolve + inject + cached decision + scope enforcement 全工作）
-- 候选缓解：(1) SKILL.md §S4 加更强引导（提示 fallback 时 new_string 必须仅限目标章节）；(2) system prompt 加 scope 语义说明；(3) 后端自动 narrow new_string 到 rewrite_target_snapshot ∩ 模型提交的内容（重）
-- 不阻塞 Phase 3：legacy classifier 删了之后 model-narrowing 问题依然存在（与 legacy 存在与否无关），可独立跟进
-- 详见 cutover report `docs/superpowers/cutover_report_2026-05-05_fix4.md`
+0a. **Tools redesign — 4 工具替换 fix4 整套 tag/gate/scope 机制（spec/plan 已 APPROVED，待实施）**
+- 状态：`spec + plan 全套通过 review，待 Task 1-6 实施`（2026-05-05 深夜决定）
+- 触发：fix4 cutover Session B 14 次失败 evidence-based 分析根因——backend 要求 model `edit_file.old_string` 必须等于章节完整原文（精确字符串等价），gemini-3-flash 实测做不到精确复述大段文本
+- 核心修法：让"修改章节"成为**专用工具** `rewrite_report_section(content)`，backend 自己用 preflight resolve 的 `rewrite_target_snapshot` 当 old_string，model 只给 new content。结构性消除 model 控制 old_string 的需求
+- Scope 扩展为 4 工具：`append_report_draft` 重构 + `rewrite_report_section` 新增 + `replace_report_text` 新增 + `rewrite_report_draft` 新增；`<stage-ack>` tag 不动
+- 删除：`<draft-action>` 系列 + classifier + gate + scope enforcement + 各 record helpers + 大量常量（净删 ~1300 行 backend + 一批 dead 测试代码）
+- spec：`docs/superpowers/specs/2026-05-05-report-tools-redesign-design.md` (4 轮 review v1→v4-clean APPROVED_WITH_NOTES，HEAD `7f0d207` 已 push origin)
+- plan：`docs/superpowers/plans/2026-05-05-report-tools-redesign.md` (2 轮 review v1→v2 APPROVED，HEAD `1030d7b` local，待 push)
+- 6 大 Task 拆分（plan §commit map）：(1) helpers module + tests, (2) turn_context 字段 + obligation detector + read_file mtime hook, (3) 4 工具实现 + ToolTests + retry, (4) SKILL.md + reject wording, (5) the big delete, (6) cutover smoke 5 sessions + handoff 更新
+- 预估总 ~5-6 小时（含 codex dispatch + double review per task）
+- fix5 candidate (model new_string narrowing) 被结构性修了——本 redesign 让 backend 自己控制 old_string，model 不需要缩窄；fix5 不再独立 track
 
-0. **Phase 2a fix4 完整集合 — section/replace keyword fallback 实施 + 双轮 review APPROVED + cutover smoke 验证（2026-05-05 17:00-19:00）**
+0. **Tools redesign spec + plan 完整 review 通过（2026-05-05 深夜）**
+- 状态：`spec + plan 全套通过 codex 双轮 review，本地 main HEAD 1030d7b（plan v2 commit）`
+- spec stage：4 commits 4 轮 review（d5bb758 → 5cb5f6b → a936bfb → 2c355c8 → 7f0d207），最终 APPROVED_WITH_NOTES。Reviewer 各轮 catch 真问题：r1 4 结构性 gap (write-obligation / full-draft tool / mutation limit / mtime tracking) → r2 内部一致性 issues (retry 位置 / keyword 不同步 / mutation 全 4 工具列入) → r3 cross-ref stale → r4 1 个最后小 row 矛盾
+- plan stage：2 commits 2 轮 review（1226a67 → 1030d7b），最终 APPROVED。R1 catch placeholder + push 命令跟全局 CLAUDE.md "git push 等我说" 冲突 + TDD 顺序问题
+- 本会话整体输出：spec 788 行 + plan 2203 行 + 5 个 cold-start handoff/spec/plan reviewer prompts (`.codex-run/task-tools-redesign-*-prompt.md` 系列)
+- 详见 [handoff doc (active)](superpowers/handoffs/2026-05-05-tools-redesign-ready-to-implement.md) — 含完整 6 Task 清单 + 关键设计要点 + 实施前 grep 命令
+
+1. **Phase 2a fix4 完整集合 — section/replace keyword fallback 实施 + 双轮 review APPROVED + cutover smoke 验证（2026-05-05 17:00-19:00，已被 redesign 取代）**
 - 状态：`已合 main + 已 push origin`（main HEAD `07a8269`）
 - 16 commits total this Phase 2a 集合（fix4 三轮叠加在 13 commits 之上）：
   - `ec0b327 feat(rollout): section/replace keyword fallback (spec §4.12 v5 fix4)` — Path A 实施：spec §4.12 amendment + chat.py preflight Step 1.5 + gate edit_file fallback + SKILL.md §S4 fallback note + 11 tests
