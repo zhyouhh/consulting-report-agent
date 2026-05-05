@@ -12370,6 +12370,34 @@ class PreflightCheckTests(ChatRuntimeTests):
         )
         self.assertIsNone(decision.get("preflight_keyword_intent"))
 
+    def test_preflight_section_partial_multi_prefix_returns_none(self):
+        """fix4-fix2 (Bug 7): user msg 含两个章节前缀，一个 unique resolve 一个未命中 →
+        preflight=None (fail-fast，不能只 fallback 一个把另一个丢了)"""
+        handler = self._make_handler_with_project()
+        self._put_draft(
+            "## 第一章 引言\n内容0\n"
+            "## 第二章 战力演化\n内容A\n"
+            # NO 第四章 in draft
+        )
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "把第二章和第四章都重写一下",
+        )
+        self.assertIsNone(decision.get("preflight_keyword_intent"))
+
+    def test_preflight_section_ambiguous_prefix_plus_unique_returns_none(self):
+        """fix4-fix2 (Bug 7): 一个 prefix 多重命中 + 另一个 unique resolve →
+        preflight=None (任意一个 prefix 没 resolve 就 fail-fast)"""
+        handler = self._make_handler_with_project()
+        self._put_draft(
+            "## 第二章 战力演化\n内容A\n"
+            "## 第二章 战略意义\n内容B\n"  # 第二章 ambiguous (2 candidates)
+            "## 第三章 总结\n内容C\n"
+        )
+        decision = handler._preflight_canonical_draft_check(
+            self.project_id, "把第二章和第三章都重写一下",
+        )
+        self.assertIsNone(decision.get("preflight_keyword_intent"))
+
     def test_preflight_replace_keyword_with_unique_old_text_returns_replace(self):
         """fix4 v5: '把"体能"改成"力量"' + draft 含唯一"体能" → preflight_keyword_intent='replace'"""
         handler = self._make_handler_with_project()
@@ -12763,6 +12791,40 @@ class GateCanonicalDraftToolCallTests(ChatRuntimeTests):
         handler._build_turn_context(self.project_id, "继续写第三章")
         decision = handler._turn_context.get("canonical_draft_decision") or {}
         self.assertEqual(decision.get("preflight_keyword_intent"), "continue")
+
+    def test_build_required_write_snapshots_uses_injected_decision_for_section_fallback(self):
+        """fix4-fix2 (Bug 8): tagless section fallback should populate
+        required_write_snapshots with rewrite_target_label/snapshot/required_edit_scope.
+        Without the cached-decision fix, snapshots are empty (legacy classify alone
+        can't see section keyword fallback)."""
+        handler = self._make_handler_with_project()
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(
+            "## 第一章 引言\n内容0\n## 第二章 战力演化\n内容B\n", encoding="utf-8",
+        )
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S4"),
+        ):
+            handler._build_turn_context(self.project_id, "把第二章重写一下")
+            # Sanity: inject promoted mode + populated target fields
+            decision = handler._turn_context.get("canonical_draft_decision") or {}
+            self.assertEqual(decision.get("mode"), "require")
+            self.assertEqual(decision.get("required_edit_scope"), "section")
+            self.assertEqual(decision.get("rewrite_target_label"), "第二章 战力演化")
+
+            # Now snapshot builder should pick up the injected decision
+            snapshots = handler._build_required_write_snapshots(
+                self.project_id, "把第二章重写一下",
+            )
+        canonical_path = handler.skill_engine.REPORT_DRAFT_PATH
+        self.assertIn(canonical_path, snapshots)
+        snap = snapshots[canonical_path]
+        self.assertEqual(snap.get("required_edit_scope"), "section")
+        self.assertEqual(snap.get("rewrite_target_label"), "第二章 战力演化")
+        self.assertIn("内容B", str(snap.get("rewrite_target_snapshot") or ""))
 
     def test_build_turn_context_silent_no_user_notice_on_s0_reject(self):
         """Silent contract: when silent preflight rejects (S0 + draft intent),

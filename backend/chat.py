@@ -2111,11 +2111,9 @@ class ChatHandler:
                 and isinstance(node.get("label"), str)
                 and str(node.get("label")).startswith(prefix)
             ]
-            if len(candidates) == 1:
-                resolved.append(candidates[0])
-
-        if not resolved:
-            return None
+            if len(candidates) != 1:
+                return None
+            resolved.append(candidates[0])
 
         # Dedupe by heading position; require exactly one unique target across all prefixes.
         unique_keys = {
@@ -3193,13 +3191,25 @@ class ChatHandler:
         return False
 
     def _required_write_paths_for_turn(self, project_id: str, user_message: str) -> set[str]:
-        decision = self._classify_canonical_draft_turn(project_id, user_message)
+        # fix4-fix2 (Bug 8): prefer turn_context's injected decision when available;
+        # legacy classify alone misses section/replace fallback resolved targets.
+        cached = (self._turn_context or {}).get("canonical_draft_decision")
+        decision = (
+            cached if isinstance(cached, dict)
+            else self._classify_canonical_draft_turn(project_id, user_message)
+        )
         if decision.get("mode") != "require":
             return set()
         return {self.skill_engine.REPORT_DRAFT_PATH}
 
     def _build_required_write_snapshots(self, project_id: str, user_message: str) -> dict[str, dict]:
-        decision = self._classify_canonical_draft_turn(project_id, user_message)
+        # fix4-fix2 (Bug 8): same cache preference so section/replace fallback
+        # turns record the target snapshots needed by scope enforcement.
+        cached = (self._turn_context or {}).get("canonical_draft_decision")
+        decision = (
+            cached if isinstance(cached, dict)
+            else self._classify_canonical_draft_turn(project_id, user_message)
+        )
         snapshots = {
             path: self._snapshot_project_file(project_id, path)
             for path in self._required_write_paths_for_turn(project_id, user_message)
@@ -6908,9 +6918,20 @@ class ChatHandler:
             # fix4-fix1 (v5 §4.12 safety contract): when silent preflight resolved
             # a section/replace target, propagate the target-enforcement fields into
             # the legacy decision so downstream snapshot/scope validation fires.
-            # Only override when silent preflight has the value AND legacy didn't already
-            # set it (legacy's mode/priority remain authoritative; we only fill blanks).
+            # Legacy reject stays authoritative; target fields below still only fill
+            # blanks that legacy did not already set.
             if silent_intent in {"section", "replace"}:
+                silent_mode = silent_preflight.get("mode")
+                legacy_mode = canonical_draft_decision.get("mode")
+                # fix4-fix2 (Bug 8): when silent preflight resolved a target and
+                # legacy classifier did not reject, promote no_write -> require so
+                # downstream snapshot/scope enforcement runs. Legacy rejects stay
+                # authoritative.
+                if silent_mode == "require" and legacy_mode == "no_write":
+                    canonical_draft_decision["mode"] = "require"
+                    canonical_draft_decision["priority"] = (
+                        silent_preflight.get("priority") or "P_PREFLIGHT_OK"
+                    )
                 for field in (
                     "rewrite_target_label",
                     "rewrite_target_snapshot",
