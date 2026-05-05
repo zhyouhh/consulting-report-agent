@@ -6803,6 +6803,9 @@ class ChatHandler:
             "draft_action_events": [],
             "pending_stage_keyword": None,
             "compare_baseline_event_count": 0,
+            "user_message_text": "",                  # spec §3.3 NEW
+            "canonical_draft_write_obligation": None, # spec §3.5 NEW
+            "read_file_snapshots": {},                # spec §3.7 NEW
         }
 
     def _is_question(self, text: str) -> bool:

@@ -13076,3 +13076,29 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(ExtractUserMessageTextTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class NewTurnContextFieldsTests(ChatRuntimeTests):
+    def test_new_turn_context_has_user_message_text(self):
+        handler = self._make_handler_with_project()
+        ctx = handler._new_turn_context(can_write_non_plan=True)
+        self.assertEqual(ctx.get("user_message_text"), "")
+
+    def test_new_turn_context_has_obligation_default_none(self):
+        handler = self._make_handler_with_project()
+        ctx = handler._new_turn_context(can_write_non_plan=True)
+        self.assertIsNone(ctx.get("canonical_draft_write_obligation"))
+
+    def test_new_turn_context_has_read_file_snapshots_empty_dict(self):
+        handler = self._make_handler_with_project()
+        ctx = handler._new_turn_context(can_write_non_plan=True)
+        self.assertEqual(ctx.get("read_file_snapshots"), {})
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in NewTurnContextFieldsTests.__dict__
+    ):
+        setattr(NewTurnContextFieldsTests, _inherited_test_name, None)
+del _inherited_test_name
