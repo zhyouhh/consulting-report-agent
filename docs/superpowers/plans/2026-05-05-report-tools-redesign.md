@@ -1547,27 +1547,55 @@ def _inject_synthetic_user_correction(self, text: str) -> None:
 
 (实际位置取决于 `_chat_stream_unlocked` / `_chat_unlocked` 当前如何 maintain `_messages`，需 grep 现有 retry 路径如 `required_write_snapshots` 触发的 retry 看 pattern。)
 
-- [ ] **Step 3: 加 WriteObligationRetryTests**
+- [ ] **Step 3: 加 WriteObligationRetryTests（完整 4 case）**
 
 ```python
 class WriteObligationRetryTests(ChatRuntimeTests):
+    """Spec §3.5 §7.6 retry 入口在 chat loop 层，不在 _finalize_assistant_turn."""
+
+    def _make_obligation(self, family="rewrite_section"):
+        return {"tool_family": family, "detected": "重写"}
+
     def test_obligation_present_no_mutation_text_claims_triggers_retry(self):
-        # 端到端：obligation set + 0 mutation + assistant 文本含 "已重写第二章" 
-        # → model 下一轮 loop 看到 corrective user message
-        ...
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
+        # 模拟 model 输出 claim text 但 0 tool_call
+        assistant_text = "我已经把第二章重写完毕，请查看正文。"
+        # Hook test：直接调用即将插入的 helper（具体名按实施代码命名）
+        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
+        self.assertTrue(retry_fired)
+        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
 
     def test_obligation_present_no_claim_no_retry(self):
-        # obligation set + 0 mutation + assistant 文本不含完成声明 → 不触发 retry
-        ...
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
+        # 没有完成声明，仅意图陈述
+        assistant_text = "我会重写第二章，让我先 read_file 看看现有内容。"
+        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
+        self.assertFalse(retry_fired)
+        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
 
     def test_obligation_present_with_mutation_no_retry(self):
-        # obligation set + mutation set → 不触发 retry
-        ...
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
+        handler._turn_context["canonical_draft_mutation"] = {"tool": "rewrite_report_section"}
+        assistant_text = "我已经把第二章重写完毕。"
+        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
+        self.assertFalse(retry_fired)
 
     def test_obligation_none_no_retry(self):
-        # obligation None → 跳过整个判断
-        ...
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "你好")
+        handler._turn_context["canonical_draft_write_obligation"] = None
+        assistant_text = "你好，需要什么帮助？"
+        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
+        self.assertFalse(retry_fired)
 ```
+
+**实施提示**：测试调用一个新方法 `_maybe_inject_obligation_retry(assistant_text) -> bool`。这个方法是为了把 "obligation 检查 + claim detect + inject corrective" 的逻辑聚合到一个可单测的 helper，避免要 mock 整个 `_chat_stream_unlocked` / `_chat_unlocked` chain。两条 chat path 实施时各自调一次该 helper，根据返回值决定是否 `continue` 主 loop。
 
 - [ ] **Step 4: Run + commit**
 
@@ -1751,20 +1779,84 @@ grep `from backend.draft_action import` / `import backend.draft_action`，移除
 - [ ] **Step 4: `PreflightCheckTests` 类大幅缩减**：保留 stage gate / outline confirmed 相关 case（迁移到新位置或新 helper 测试）；删 mode/scope/target 相关 case
 - [ ] **Step 5: `StreamSplitSafeTailDraftActionTests` 修剪**：保留只测 stage-ack 的 case，删测 draft-action 的 case；考虑 rename 为 `StreamSplitSafeTailStageAckTests`
 
-### Task 5.4 — 加 StageAckRegressionTests + 整体 sanity
+### Task 5.4 — 标记老 spec superseded + 加 StageAckRegressionTests + 整体 sanity
 
-- [ ] **Step 1: 加 `StageAckRegressionTests`（spec §8 验收 #2）**
+- [ ] **Step 0: 标记老 spec superseded**
+
+编辑 `docs/superpowers/specs/2026-05-04-context-signal-and-intent-tag-design.md`，在 §4.3 开头加 markdown banner：
+
+```markdown
+> **⚠️ SUPERSEDED**: §4.3 - §4.12 (含 v5 amendment) 已被 `2026-05-05-report-tools-redesign-design.md` 替代。tag-based 架构（含 fix4 v5 §4.12）整套删除，改用 4 个专用工具（spec §2.1-§2.4）。本节保留作为历史 context。新代码请参考 redesign spec。
+```
+
+类似 banner 加到 §4.4-§4.12 各章节（或在 §4.3 banner 内一句话覆盖整个 §4.3-§4.12 范围）。
+
+§4.1 时序图 + §4.2 preflight basics 不动（仍可参考的 background）。
+
+
+- [ ] **Step 1: 加 `StageAckRegressionTests`（完整 case，spec §8 验收 #2）**
 
 ```python
 class StageAckRegressionTests(ChatRuntimeTests):
-    def test_stage_ack_finalize_pipeline_unaffected(self):
-        # stage-ack tag 流式扫描 / parsing / strip 在 draft-action 删除后仍正常
-        ...
+    """Spec §8 验收 #2 + §4.1: 删除 draft-action 后 stage-ack 完整功能不受影响."""
 
-    def test_stage_ack_review_started_at_advances_stage(self):
-        # 用户说 "开始审查" + assistant 输出 <stage-ack>review_started_at</stage-ack>
-        # → S4→S5 切换 + checkpoint set
-        ...
+    def test_stage_ack_marker_alone_in_tail_guard(self):
+        """_TAIL_GUARD_MARKERS 应只剩 stage-ack."""
+        from backend.chat import _TAIL_GUARD_MARKERS, _STAGE_ACK_MARKER
+        self.assertEqual(_TAIL_GUARD_MARKERS, (_STAGE_ACK_MARKER,))
+
+    def test_stage_ack_tag_scan_re_matches_stage_ack(self):
+        """TAIL_TAG_SCAN_RE 仍能识别 stage-ack tag (e.g. <stage-ack>outline_confirmed_at</stage-ack>)."""
+        from backend.chat import TAIL_TAG_SCAN_RE
+        match = TAIL_TAG_SCAN_RE.search(
+            "<stage-ack>outline_confirmed_at</stage-ack>",
+        )
+        self.assertIsNotNone(match)
+
+    def test_stage_ack_tag_scan_re_does_not_match_draft_action(self):
+        """TAIL_TAG_SCAN_RE 不再匹配 <draft-action> (已删)."""
+        from backend.chat import TAIL_TAG_SCAN_RE
+        match = TAIL_TAG_SCAN_RE.search(
+            "<draft-action>begin</draft-action>",
+        )
+        self.assertIsNone(match)
+
+    def test_stream_split_safe_tail_holds_stage_ack(self):
+        """stream_split_safe_tail 仍 hold <stage-ack> 前缀."""
+        from backend.chat import stream_split_safe_tail
+        safe, held = stream_split_safe_tail("一些正文 <stage-ack>")
+        self.assertEqual(safe, "一些正文 ")
+        self.assertIn("<stage-ack>", held)
+
+    def test_stream_split_safe_tail_does_not_hold_draft_action(self):
+        """draft-action 前缀不再被 hold（不再 tail-guard）."""
+        from backend.chat import stream_split_safe_tail
+        safe, held = stream_split_safe_tail("一些正文 <draft-action>")
+        # 删除后应该全部 emit
+        self.assertEqual(safe, "一些正文 <draft-action>")
+        self.assertEqual(held, "")
+
+    def test_stage_ack_review_started_at_advances_s4_to_s5(self):
+        """端到端：assistant 输出 <stage-ack>review_started_at</stage-ack> 触发 stage advance."""
+        handler = self._make_handler_with_project()
+        # set up to S4 + outline confirmed + draft ready
+        handler.skill_engine._save_stage_checkpoint(
+            self.project_dir, "outline_confirmed_at",
+        )
+        handler.skill_engine._save_stage_checkpoint(
+            self.project_dir, "report_draft_ready_at",
+        )
+        # simulate assistant tail with stage-ack tag
+        result = self._finalize_assistant_for_test(
+            handler,
+            assistant_message=(
+                "好的，我们进入审查阶段。\n\n<stage-ack>review_started_at</stage-ack>"
+            ),
+            user_message="开始审查",
+        )
+        # checkpoint should be set
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertIn("review_started_at", checkpoints)
 ```
 
 - [ ] **Step 2: Run wider sanity**
@@ -1782,6 +1874,14 @@ cd frontend && node --test tests/
 ```
 
 Expected: 168/168 pass。
+
+- [ ] **Step 3a: Frontend unknown-tool 渲染 smoke（spec §7.5）**
+
+启动 dist app + 在 chat 区手动注入一条含 `tool_name=rewrite_report_section` 的虚假 tool log（或在 single 单测里调 `frontend/utils/chatPresentation.js` 的 tool block 解析函数）。
+
+期望：未知工具名（之前没 hardcoded handler）按 default 路径渲染 — 显示 tool name + args，不 crash。
+
+如果发现 frontend 对未知工具名 crash 或显示异常，加到 `frontend/src/components/ChatPanel.jsx` 的 tool log fallback case。
 
 - [ ] **Step 4: Commit**
 
@@ -1832,15 +1932,23 @@ tests 删：
 
 **Goal**: 重 build + 跑 cutover smoke 5 sessions（A/B/C/D + 新加 E rewrite_draft）+ 写 cutover_report + 更新 worklist/memory/handoff。
 
-### Task 6.1 — Rebuild dist/
+### Task 6.1 — Rebuild dist/ + verify size budget
 
-- [ ] **Step 1: kill 现有 dist app**
+- [ ] **Step 1: 记录 baseline dist 大小**
+
+```bash
+du -sb "dist/咨询报告助手" 2>/dev/null || echo "no baseline"
+# 或读 fix4 cutover_report 中记录的 91 MB
+BASELINE_MB=91  # per Phase 2a fix4 cutover record
+```
+
+- [ ] **Step 2: kill 现有 dist app**
 
 ```powershell
 Get-Process -Name "咨询报告助手" -ErrorAction SilentlyContinue | Stop-Process -Force
 ```
 
-- [ ] **Step 2: rm + build**
+- [ ] **Step 3: rm + build**
 
 ```bash
 rm -rf dist/咨询报告助手
@@ -1851,6 +1959,16 @@ rm -rf dist/咨询报告助手
 ```
 
 期望：build 成功，dist/咨询报告助手.exe 重新生成。
+
+- [ ] **Step 4: verify dist size within ±5%（spec §8 验收 #5）**
+
+```bash
+NEW_MB=$(du -sm dist/咨询报告助手 | cut -f1)
+echo "New dist: ${NEW_MB}MB (baseline ${BASELINE_MB}MB ±5%)"
+# expect: ${NEW_MB} between $((BASELINE_MB * 95 / 100)) and $((BASELINE_MB * 105 / 100))
+```
+
+如果超出 ±5%（86-96 MB 之外），调查原因。预期：删除 ~2000 行 backend 代码后 dist 应该略小或持平（PyInstaller 打包大头是 deps 不是源码）。
 
 ### Task 6.2 — Pre-cutover unit benchmark（工具选择正确率）
 
@@ -1875,10 +1993,40 @@ class ToolSelectionBenchmarkTests(ChatRuntimeTests):
     ]
 
     def test_benchmark_accuracy(self):
-        # 用 mock LLM 跑 schema 模式，看选对工具的比例
-        # 或用 reality_test API 实测（更慢）
-        # 期望：≥ 8/10 选对（含 None 的拒绝）
-        ...
+        """benchmark 实施：用 OpenAI mock 模拟 model 在 schema 模式下的工具选择.
+
+        因为 reality_test API 实测慢且每次调 LLM 不 deterministic，本测试用
+        deterministic mock：mock OpenAI client 的 tool_use 响应，给定 user msg
+        + 4 工具 schema，调用现有 _build_provider_messages + 模拟 LLM 决策。
+
+        实际验收（per spec §8.7）：CI 不强制 ≥ 80%，但 cutover smoke (Task 6.3)
+        实测中 5 sessions 必须 ≥ 4 个 model 选对工具 + 写盘成功。
+
+        本单测仅验证 schema 形态正确（tool description 含足够区分语义），
+        不验证 model 行为。
+        """
+        from backend.chat import ChatHandler
+        handler = self._make_handler_with_project()
+        tools = handler._get_tools()
+        names = {t["function"]["name"] for t in tools}
+        # 4 个工具 schema 都注册
+        self.assertEqual(
+            names & {"append_report_draft", "rewrite_report_section",
+                     "replace_report_text", "rewrite_report_draft"},
+            {"append_report_draft", "rewrite_report_section",
+             "replace_report_text", "rewrite_report_draft"},
+        )
+        # 每个工具 description 含明确语义关键词（防 model confusion）
+        for t in tools:
+            if t.get("function", {}).get("name") == "rewrite_report_section":
+                self.assertIn("章/节", t["function"]["description"])
+            elif t.get("function", {}).get("name") == "replace_report_text":
+                self.assertIn("唯一", t["function"]["description"])
+            elif t.get("function", {}).get("name") == "rewrite_report_draft":
+                self.assertIn("整篇", t["function"]["description"])
+```
+
+**实施提示**：reality_test 用真实 LLM 实测 benchmark 留给 Task 6.3 cutover smoke 5 sessions（每个 session 验证 model 选对工具）。本单测只验证 schema 形态，不模拟 LLM 决策（mock 出来的"决策正确率" 没意义）。
 ```
 
 - [ ] **Step 2: Run benchmark**
@@ -1969,16 +2117,27 @@ git commit -m "docs: tools-redesign cutover smoke + worklist/memory/handoff upda
 fix4 cutover → 7f0d207 spec → ... (Task 1-6 commits) → cutover artifacts."
 ```
 
-### Task 6.5 — Merge to main + push
+### Task 6.5 — Merge to main（push 等用户确认）
 
-- [ ] **Step 1: fast-forward merge**
+- [ ] **Step 1: fast-forward merge to main 本地**
 
 ```bash
 cd /d/MyProject/CodeProject/consulting-report-agent
 git checkout main
 git merge --ff-only claude/phase2-draft-action-tag
+git log --oneline -10
+```
+
+- [ ] **Step 2: 准备 push 命令但不执行**
+
+向用户报告：plan 实施完成 + 所有 commits 在 local main + cutover smoke pass。给用户 push 命令让用户决定何时执行：
+
+```bash
+# 等用户 explicit "push 吧" 后执行：
 git push origin main
 ```
+
+**注意**：项目 `~/.claude/CLAUDE.md` 明确指示 "git push 仅用于跨设备同步，不要自动执行，等我说"。本 plan 严守该规则。Task 6.5 只做 local merge，**不 push**——等用户确认。
 
 ---
 
@@ -2015,6 +2174,25 @@ git push origin main
 - `_turn_context["read_file_snapshots"]` schema：`dict[normalized_path, mtime_float]` 一致
 
 ---
+
+## TDD ordering note (per plan r1 reviewer §E)
+
+Plan r1 reviewer 指出"most tasks implement first, then write tests"违反严格 TDD（write failing test → fail → minimal implementation → pass）。
+
+**plan author response**：本 plan 的 sub-step 顺序在某些 Task 中是按"helper 函数实现 + 测试函数定义并列"组织的（如 Task 1.1 Step 2 同时给出 `resolve_section_target` 实现 + Task 1.1 Step 3 同时给出测试），而不是严格 "test-first" 顺序。
+
+**executor 实际跑时**仍应 follow TDD：
+1. 先看 Step 3 拷贝测试代码到 `tests/test_report_writing.py`
+2. Run pytest verify 测试 fail（因为 implementation 还没贴）
+3. 再看 Step 2 拷贝实现代码到 `backend/report_writing.py`
+4. Run pytest verify 测试 pass
+5. Step 5 commit
+
+**plan 中的 step number 是教学顺序（impl 在前展示完整代码）**，**executor 跑时应反序**：先按 step 3 的 test code 写失败 test → run fail → 再写 step 2 的 impl → run pass → step 5 commit。
+
+如果 executor 严格 follow plan step order 就会先 impl 再 test（看似"实现完整就有测试"），但仍能验证正确性（pytest 仍 run）；只是失去了 TDD 的 "test fail 先证明 test 在测真东西" 价值。
+
+如果 reviewer 要求严格 TDD 顺序，plan 全文 sub-step 重排（impl/test 顺序对调）—— 工作量大但纯机械改动。建议 r2 reviewer 评估这是否 mandatory。
 
 ## Plan Stage Open Question（如 reviewer 想再压）
 
