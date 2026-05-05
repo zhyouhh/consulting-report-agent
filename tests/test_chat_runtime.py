@@ -13796,3 +13796,56 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(AppendReportDraftToolTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class WriteObligationRetryTests(ChatRuntimeTests):
+    """Spec §3.5 §7.6 retry 入口在 chat loop 层，不在 _finalize_assistant_turn."""
+
+    def _make_obligation(self, family="rewrite_section"):
+        return {"tool_family": family, "detected": "重写"}
+
+    def test_obligation_present_no_mutation_text_claims_triggers_retry(self):
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
+        # 模拟 model 输出 claim text 但 0 tool_call
+        assistant_text = "我已经把第二章重写完毕，请查看正文。"
+        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
+        self.assertTrue(retry_fired)
+        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
+
+    def test_obligation_present_no_claim_no_retry(self):
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
+        # 没有完成声明，仅意图陈述
+        assistant_text = "我会重写第二章，让我先 read_file 看看现有内容。"
+        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
+        self.assertFalse(retry_fired)
+        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
+
+    def test_obligation_present_with_mutation_no_retry(self):
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
+        handler._turn_context["canonical_draft_mutation"] = {"tool": "rewrite_report_section"}
+        assistant_text = "我已经把第二章重写完毕。"
+        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
+        self.assertFalse(retry_fired)
+
+    def test_obligation_none_no_retry(self):
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "你好")
+        handler._turn_context["canonical_draft_write_obligation"] = None
+        assistant_text = "你好，需要什么帮助？"
+        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
+        self.assertFalse(retry_fired)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in WriteObligationRetryTests.__dict__
+    ):
+        setattr(WriteObligationRetryTests, _inherited_test_name, None)
+del _inherited_test_name

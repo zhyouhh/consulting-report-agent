@@ -4054,6 +4054,13 @@ class ChatHandler:
                         preflight_compaction_used=compressed,
                     )
                     break
+                obligation = self._turn_context.get("canonical_draft_write_obligation")
+                if obligation and not self._turn_context.get("obligation_retry_fired") and not self._turn_context.get("canonical_draft_mutation"):
+                    current_turn_messages.append({"role": "assistant", "content": candidate_message})
+                    if self._maybe_inject_obligation_retry(candidate_message, current_turn_messages):
+                        continue
+                    # retry not fired (no claim text) — remove the pre-appended assistant msg
+                    current_turn_messages.pop()
                 assistant_message = candidate_message
                 token_usage = self._normalize_provider_usage(
                     stream_usage,
@@ -4330,6 +4337,13 @@ class ChatHandler:
                         preflight_compaction_used=compressed,
                     )
                     break
+                obligation = self._turn_context.get("canonical_draft_write_obligation")
+                if obligation and not self._turn_context.get("obligation_retry_fired") and not self._turn_context.get("canonical_draft_mutation"):
+                    current_turn_messages.append({"role": "assistant", "content": candidate_message})
+                    if self._maybe_inject_obligation_retry(candidate_message, current_turn_messages):
+                        continue
+                    # retry not fired (no claim text) — remove the pre-appended assistant msg
+                    current_turn_messages.pop()
                 assistant_message = candidate_message
                 token_usage = self._normalize_provider_usage(
                     getattr(response, "usage", None),
@@ -7121,6 +7135,41 @@ class ChatHandler:
             f"{skill_prompt}\n\n## 当前轮次约束\n{turn_rule}\n{draft_rule_block}\n"
             f"{evidence_rule}\n{concurrency_rule}\n\n{project_context}"
         )
+
+    def _maybe_inject_obligation_retry(
+        self, assistant_text: str, current_turn_messages: List[Dict] | None = None,
+    ) -> bool:
+        """spec §3.5 §7.6: turn-end obligation reconciliation.
+
+        Returns True if a corrective synthetic user message was injected
+        (caller should `continue` the chat loop). False otherwise.
+        """
+        if self._turn_context.get("obligation_retry_fired"):
+            return False  # 防重复
+        obligation = self._turn_context.get("canonical_draft_write_obligation")
+        if not obligation:
+            return False
+        if self._turn_context.get("canonical_draft_mutation"):
+            return False  # 已有 mutation，无需 retry
+        from backend.report_writing import assistant_text_claims_modification
+        if not assistant_text_claims_modification(assistant_text):
+            return False  # 未声称完成 → 不撒谎，不 retry
+        corrective = (
+            "你在回复中声称已修改正文（"
+            f"obligation={obligation['tool_family']}），但本轮没有成功调用任何写正文工具"
+            "（append_report_draft / rewrite_report_section / replace_report_text / "
+            "rewrite_report_draft）。请实际调用对应工具完成写入，不要只在文字中声明已完成。"
+        )
+        self._inject_synthetic_user_correction(corrective, current_turn_messages)
+        self._turn_context["obligation_retry_fired"] = True
+        return True
+
+    def _inject_synthetic_user_correction(
+        self, text: str, current_turn_messages: List[Dict] | None = None,
+    ) -> None:
+        """注入合成 user message 让 model 在下一轮 loop 看到."""
+        if current_turn_messages is not None:
+            current_turn_messages.append({"role": "user", "content": text})
 
     def _new_turn_context(self, *, can_write_non_plan: bool) -> Dict[str, object]:
         return {
