@@ -5168,6 +5168,18 @@ class ChatHandler:
                     self._turn_context["fetch_url_performed"] = True
                     self._persist_successful_tool_result(project_id, func_name, args, result)
                 return result
+            if func_name == "rewrite_report_section":
+                return self._tool_rewrite_report_section(
+                    project_id, content=args.get("content", ""),
+                )
+            if func_name == "replace_report_text":
+                return self._tool_replace_report_text(
+                    project_id, old=args.get("old", ""), new=args.get("new", ""),
+                )
+            if func_name == "rewrite_report_draft":
+                return self._tool_rewrite_report_draft(
+                    project_id, content=args.get("content", ""),
+                )
             return {"status": "error", "message": f"未知工具: {func_name}"}
         except json.JSONDecodeError as e:
             logging.error(f"工具参数解析失败: {func_name}, 错误: {str(e)}")
@@ -5254,6 +5266,247 @@ class ChatHandler:
             }
         )
         return result
+
+    def _tool_rewrite_report_section(
+        self, project_id: str, content: str,
+    ) -> Dict:
+        """spec §2.2: rewrite_report_section 工具入口."""
+        from backend.report_writing import (
+            check_report_writing_stage, check_outline_confirmed,
+            check_no_mixed_intent_in_turn, check_no_prior_canonical_mutation_in_turn,
+            check_no_fetch_url_pending, check_read_before_write_canonical_draft,
+            resolve_section_target,
+        )
+        user_message = self._turn_context.get("user_message_text") or ""
+
+        for err in (
+            check_report_writing_stage(self.skill_engine, project_id),
+            check_outline_confirmed(self.skill_engine, project_id),
+            check_no_mixed_intent_in_turn(self, user_message),
+            check_no_prior_canonical_mutation_in_turn(self._turn_context),
+            check_no_fetch_url_pending(self._turn_context),
+        ):
+            if err:
+                return {"status": "error", "message": err}
+
+        err = check_read_before_write_canonical_draft(
+            self._turn_context, self.skill_engine, project_id, require_read=True,
+        )
+        if err:
+            return {"status": "error", "message": err}
+
+        draft_text = self._read_project_file_text(
+            project_id, self.skill_engine.REPORT_DRAFT_PATH,
+        ) or ""
+        if not draft_text:
+            return {"status": "error", "message": "当前还没有正文草稿，请先用 append_report_draft 起草第一版"}
+
+        target = resolve_section_target(
+            user_message, draft_text,
+            extract_markdown_heading_nodes=self._extract_markdown_heading_nodes,
+        )
+        if target is None:
+            return {"status": "error", "message": "请在消息中明确说明要改哪一章/节，例如'重写第二章'"}
+
+        if not content.startswith("## "):
+            return {"status": "error", "message": "`content` 必须以 `## 章节标题` 开头"}
+        h2_count = sum(1 for line in content.split("\n") if line.startswith("## "))
+        if h2_count != 1:
+            return {"status": "error", "message": "`content` 不能涉及多个章节。请只提交目标章节的完整内容"}
+        cap = max(3000, 3 * len(target["snapshot"]))
+        if len(content) > cap:
+            return {"status": "error", "message": f"提交内容超过预期范围（{len(content)} 字 vs 上限 {cap} 字），请只提交目标章节的内容"}
+
+        result = self._execute_plan_write(
+            project_id,
+            file_path=self.skill_engine.REPORT_DRAFT_PATH,
+            content=draft_text.replace(target["snapshot"], content, 1),
+            source_tool_name="rewrite_report_section",
+            source_tool_args={"content": content},
+            persist_func_name="edit_file",
+            persist_args={
+                "file_path": self.skill_engine.REPORT_DRAFT_PATH,
+                "old_string": target["snapshot"],
+                "new_string": content,
+            },
+        )
+        if result.get("status") == "success":
+            self._turn_context["canonical_draft_mutation"] = {
+                "tool": "rewrite_report_section",
+                "label": target["label"],
+            }
+        return result
+
+    def _tool_replace_report_text(
+        self, project_id: str, old: str, new: str,
+    ) -> Dict:
+        """spec §2.3: replace_report_text 工具入口."""
+        from backend.report_writing import (
+            check_report_writing_stage, check_outline_confirmed,
+            check_no_mixed_intent_in_turn, check_no_prior_canonical_mutation_in_turn,
+            check_no_fetch_url_pending, check_read_before_write_canonical_draft,
+        )
+        user_message = self._turn_context.get("user_message_text") or ""
+
+        for err in (
+            check_report_writing_stage(self.skill_engine, project_id),
+            check_outline_confirmed(self.skill_engine, project_id),
+            check_no_mixed_intent_in_turn(self, user_message),
+            check_no_prior_canonical_mutation_in_turn(self._turn_context),
+            check_no_fetch_url_pending(self._turn_context),
+        ):
+            if err:
+                return {"status": "error", "message": err}
+
+        err = check_read_before_write_canonical_draft(
+            self._turn_context, self.skill_engine, project_id, require_read=True,
+        )
+        if err:
+            return {"status": "error", "message": err}
+
+        draft_text = self._read_project_file_text(
+            project_id, self.skill_engine.REPORT_DRAFT_PATH,
+        ) or ""
+        if not draft_text:
+            return {"status": "error", "message": "当前还没有正文草稿，请先用 append_report_draft 起草第一版"}
+
+        if not old:
+            return {"status": "error", "message": "`old` 不能为空"}
+        occurrences = draft_text.count(old)
+        if occurrences == 0:
+            return {"status": "error", "message": f"目标文本 '{old}' 在草稿中未找到。请先 read_file 核对原文"}
+        if occurrences > 1:
+            return {"status": "error", "message": f"目标文本 '{old}' 在草稿中出现 {occurrences} 次（不唯一）。请提供更具体的上下文"}
+
+        new_text = draft_text.replace(old, new, 1)
+        result = self._execute_plan_write(
+            project_id,
+            file_path=self.skill_engine.REPORT_DRAFT_PATH,
+            content=new_text,
+            source_tool_name="replace_report_text",
+            source_tool_args={"old": old, "new": new},
+            persist_func_name="edit_file",
+            persist_args={
+                "file_path": self.skill_engine.REPORT_DRAFT_PATH,
+                "old_string": old, "new_string": new,
+            },
+        )
+        if result.get("status") == "success":
+            self._turn_context["canonical_draft_mutation"] = {
+                "tool": "replace_report_text",
+                "old_len": len(old),
+            }
+        return result
+
+    def _tool_rewrite_report_draft(
+        self, project_id: str, content: str,
+    ) -> Dict:
+        """spec §2.4: rewrite_report_draft 工具入口."""
+        from backend.report_writing import (
+            check_report_writing_stage, check_outline_confirmed,
+            check_no_mixed_intent_in_turn, check_no_prior_canonical_mutation_in_turn,
+            check_no_fetch_url_pending, check_read_before_write_canonical_draft,
+        )
+        user_message = self._turn_context.get("user_message_text") or ""
+
+        for err in (
+            check_report_writing_stage(self.skill_engine, project_id),
+            check_outline_confirmed(self.skill_engine, project_id),
+            check_no_mixed_intent_in_turn(self, user_message),
+            check_no_prior_canonical_mutation_in_turn(self._turn_context),
+            check_no_fetch_url_pending(self._turn_context),
+        ):
+            if err:
+                return {"status": "error", "message": err}
+
+        err = check_read_before_write_canonical_draft(
+            self._turn_context, self.skill_engine, project_id, require_read=True,
+        )
+        if err:
+            return {"status": "error", "message": err}
+
+        current_draft = self._read_project_file_text(
+            project_id, self.skill_engine.REPORT_DRAFT_PATH,
+        ) or ""
+        if not current_draft:
+            return {"status": "error", "message": "当前还没有正文草稿，请先用 append_report_draft 起草第一版"}
+
+        # user 消息必须含全文重写关键词
+        whole_kws = ("整篇重写", "全文重写", "推倒重写", "推倒重来", "全部改写")
+        if not any(kw in user_message for kw in whole_kws):
+            return {"status": "error", "message": (
+                "看起来你只想改一部分。重写整章请用 `rewrite_report_section`，"
+                "替换文字用 `replace_report_text`。如果确实要整篇重写，请明确说"
+                "'整篇重写'或'全文重写'"
+            )}
+
+        if not content.startswith("# "):
+            return {"status": "error", "message": "`content` 必须以 `# 报告标题` 开头"}
+        h2_count = sum(1 for line in content.split("\n") if line.startswith("## "))
+        if h2_count == 0:
+            return {"status": "error", "message": "`content` 必须含至少一个章节标题（`## ` 级别）"}
+        cap = max(8000, 2 * len(current_draft))
+        if len(content) > cap:
+            return {"status": "error", "message": f"提交内容超过预期范围（{len(content)} 字 vs 上限 {cap} 字），请只提交完整草稿"}
+
+        result = self._execute_plan_write(
+            project_id,
+            file_path=self.skill_engine.REPORT_DRAFT_PATH,
+            content=content,
+            source_tool_name="rewrite_report_draft",
+            source_tool_args={"content": content},
+            persist_func_name="edit_file",
+            persist_args={
+                "file_path": self.skill_engine.REPORT_DRAFT_PATH,
+                "old_string": current_draft, "new_string": content,
+            },
+        )
+        if result.get("status") == "success":
+            self._turn_context["canonical_draft_mutation"] = {
+                "tool": "rewrite_report_draft",
+            }
+        return result
+
+    def _tool_append_report_draft(
+        self, project_id: str, content: str,
+    ) -> Dict:
+        """spec §2.1: append_report_draft 重构 — 校验从分散迁移到 inline."""
+        from backend.report_writing import (
+            check_report_writing_stage, check_outline_confirmed,
+            check_no_mixed_intent_in_turn, check_no_prior_canonical_mutation_in_turn,
+            check_no_fetch_url_pending, check_read_before_write_canonical_draft,
+        )
+        user_message = self._turn_context.get("user_message_text") or ""
+
+        for err in (
+            check_report_writing_stage(self.skill_engine, project_id),
+            check_outline_confirmed(self.skill_engine, project_id),
+            check_no_mixed_intent_in_turn(self, user_message),
+            check_no_prior_canonical_mutation_in_turn(self._turn_context),
+            check_no_fetch_url_pending(self._turn_context),
+        ):
+            if err:
+                return {"status": "error", "message": err}
+
+        project_path = self.skill_engine.get_project_path(project_id)
+        draft_exists = bool(project_path and (project_path / self.skill_engine.REPORT_DRAFT_PATH).exists())
+        err = check_read_before_write_canonical_draft(
+            self._turn_context, self.skill_engine, project_id,
+            require_read=draft_exists,
+        )
+        if err:
+            return {"status": "error", "message": err}
+
+        result = self._do_append_report_draft(project_id, content)
+        if result.get("status") == "success":
+            self._turn_context["canonical_draft_mutation"] = {
+                "tool": "append_report_draft",
+            }
+        return result
+
+    def _do_append_report_draft(self, project_id: str, content: object) -> Dict:
+        """spec §2.1: 原 _execute_append_report_draft 的文件 mutation 部分（保持不变）."""
+        return self._execute_append_report_draft(project_id, content)
 
     def _validate_append_turn_canonical_draft_write(
         self,

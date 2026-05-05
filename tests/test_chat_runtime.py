@@ -13233,3 +13233,193 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(ToolSchemaRegistrationTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class _WriteToolTestMixin:
+    """Shared test helpers for new write tool tests."""
+
+    def _put_draft(self, body):
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(body, encoding="utf-8")
+        return draft_path
+
+    def _setup_outline_confirmed_s4(self, handler):
+        """Patch skill_engine to report S4 + set outline_confirmed_at checkpoint."""
+        # Save the outline_confirmed_at checkpoint (needed for check_outline_confirmed)
+        handler.skill_engine._save_stage_checkpoint(
+            self.project_dir, "outline_confirmed_at",
+        )
+        # Mock _infer_stage_state to return S4 (avoids needing full file tree)
+        original_infer = handler.skill_engine._infer_stage_state
+        def _mock_infer(project_path):
+            result = original_infer(project_path)
+            result = dict(result)
+            result["stage_code"] = "S4"
+            return result
+        handler.skill_engine._infer_stage_state = _mock_infer
+
+    def _trigger_read_file(self, handler):
+        handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "content/report_draft_v1.md"}),
+            ),
+        )
+
+
+class RewriteReportSectionToolTests(_WriteToolTestMixin, ChatRuntimeTests):
+    def test_happy_path_rewrites_section(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章 引言\n旧内容0\n## 第二章 战力分析\n旧内容B\n")
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        self._trigger_read_file(handler)
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章 战力分析\n新内容B\n",
+        )
+        self.assertEqual(result.get("status"), "success")
+        actual = (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8")
+        self.assertIn("新内容B", actual)
+        self.assertNotIn("旧内容B", actual)
+        self.assertIn("旧内容0", actual)  # 第一章不动
+
+    def test_stage_pre_s4_rejects(self):
+        handler = self._make_handler_with_project()
+        # 不 set outline_confirmed_at, 阶段保持 S0
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章\n新内容\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("S4", result.get("message", ""))
+
+    def test_outline_unconfirmed_rejects(self):
+        handler = self._make_handler_with_project()
+        # 模拟 S4 阶段但没有 outline_confirmed_at 检查点
+        original_infer = handler.skill_engine._infer_stage_state
+        def _mock_infer_s4(project_path):
+            result = dict(original_infer(project_path))
+            result["stage_code"] = "S4"
+            return result
+        handler.skill_engine._infer_stage_state = _mock_infer_s4
+        # 注意：不保存 outline_confirmed_at
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章\n新内容\n",
+        )
+        # check_outline_confirmed 应该报错（outline_confirmed_at 未设置）
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("确认大纲", result.get("message", ""))
+
+    def test_mutation_limit_blocks_second_call(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第二章 战力分析\n内容\n")
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        self._trigger_read_file(handler)
+        # 第一次成功
+        handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章 战力分析\n新内容1\n",
+        )
+        # mutation 已 set，第二次应 reject
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章 战力分析\n新内容2\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("本轮已经修改过", result.get("message", ""))
+
+    def test_draft_missing_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        # 不 put_draft
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章\n新内容\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("草稿", result.get("message", ""))
+
+    def test_user_msg_no_section_prefix_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第二章\n内容\n")
+        handler._build_turn_context(self.project_id, "重写一下")  # 没说哪一章
+        self._trigger_read_file(handler)
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章\n新内容\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("章/节", result.get("message", ""))
+
+    def test_partial_multi_prefix_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第二章\n内容\n")  # 没第三章
+        handler._build_turn_context(self.project_id, "把第二章和第三章重写")
+        self._trigger_read_file(handler)
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章\n新内容\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+
+    def test_content_no_h2_prefix_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第二章\n内容\n")
+        handler._build_turn_context(self.project_id, "把第二章重写")
+        self._trigger_read_file(handler)
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="新内容（缺 ## 标题）",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("`## 章节标题`", result.get("message", ""))
+
+    def test_content_multiple_h2_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第二章\n内容\n")
+        handler._build_turn_context(self.project_id, "把第二章重写")
+        self._trigger_read_file(handler)
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章\nA\n## 第三章\nB\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("多个章节", result.get("message", ""))
+
+    def test_content_exceeds_cap_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        target_snap = "## 第二章 X\n" + "短内容" * 10
+        self._put_draft("# 报告\n" + target_snap + "\n")
+        handler._build_turn_context(self.project_id, "把第二章重写")
+        self._trigger_read_file(handler)
+        # cap = max(3000, 3 * len(target_snap)) ≈ 3000
+        oversized = "## 第二章 X\n" + ("X" * 5000)
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content=oversized,
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("超过", result.get("message", ""))
+
+    def test_no_read_before_write_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第二章\n内容\n")
+        handler._build_turn_context(self.project_id, "把第二章重写")
+        # 不 trigger_read_file
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章\n新内容\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("read_file", result.get("message", ""))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in RewriteReportSectionToolTests.__dict__
+    ):
+        setattr(RewriteReportSectionToolTests, _inherited_test_name, None)
+del _inherited_test_name
