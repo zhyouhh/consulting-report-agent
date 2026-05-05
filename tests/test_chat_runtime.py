@@ -13524,3 +13524,137 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(ReplaceReportTextToolTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class RewriteReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
+    def test_happy_path_rewrites_whole_draft(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 旧报告\n## 第一章\n旧内容\n")
+        handler._build_turn_context(self.project_id, "整篇重写这份报告")
+        self._trigger_read_file(handler)
+        new_content = "# 新报告标题\n## 第一章 新内容\n全新内容\n"
+        result = handler._tool_rewrite_report_draft(
+            self.project_id, content=new_content,
+        )
+        self.assertEqual(result.get("status"), "success")
+        actual = (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8")
+        self.assertIn("新报告标题", actual)
+        self.assertNotIn("旧内容", actual)
+
+    def test_stage_pre_s4_rejects(self):
+        handler = self._make_handler_with_project()
+        # 不 setup S4
+        self._put_draft("# 报告\n## 第一章\n内容\n")
+        handler._build_turn_context(self.project_id, "整篇重写")
+        result = handler._tool_rewrite_report_draft(
+            self.project_id, content="# 新报告\n## 第一章\n新内容\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("S4", result.get("message", ""))
+
+    def test_outline_unconfirmed_rejects(self):
+        handler = self._make_handler_with_project()
+        # 模拟 S4 但无 outline_confirmed_at
+        original_infer = handler.skill_engine._infer_stage_state
+        def _mock_infer_s4(project_path):
+            result = dict(original_infer(project_path))
+            result["stage_code"] = "S4"
+            return result
+        handler.skill_engine._infer_stage_state = _mock_infer_s4
+        self._put_draft("# 报告\n## 第一章\n内容\n")
+        handler._build_turn_context(self.project_id, "整篇重写")
+        self._trigger_read_file(handler)
+        result = handler._tool_rewrite_report_draft(
+            self.project_id, content="# 新报告\n## 第一章\n新内容\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("确认大纲", result.get("message", ""))
+
+    def test_mutation_limit_blocks_second_call(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n旧内容\n")
+        handler._build_turn_context(self.project_id, "整篇重写")
+        self._trigger_read_file(handler)
+        # 第一次成功
+        handler._tool_rewrite_report_draft(
+            self.project_id, content="# 新报告\n## 第一章\n新内容1\n",
+        )
+        # mutation 已 set，第二次应 reject
+        result = handler._tool_rewrite_report_draft(
+            self.project_id, content="# 再新报告\n## 第一章\n新内容2\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("本轮已经修改过", result.get("message", ""))
+
+    def test_draft_missing_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        # 不 put_draft
+        handler._build_turn_context(self.project_id, "整篇重写")
+        result = handler._tool_rewrite_report_draft(
+            self.project_id, content="# 新报告\n## 第一章\n新内容\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("草稿", result.get("message", ""))
+
+    def test_no_whole_rewrite_keyword_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n内容\n")
+        handler._build_turn_context(self.project_id, "改一下第一章")  # 无整篇重写词
+        self._trigger_read_file(handler)
+        result = handler._tool_rewrite_report_draft(
+            self.project_id, content="# 新报告\n## 第一章\n新内容\n",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("整篇重写", result.get("message", ""))
+
+    def test_content_no_h1_prefix_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n内容\n")
+        handler._build_turn_context(self.project_id, "整篇重写")
+        self._trigger_read_file(handler)
+        result = handler._tool_rewrite_report_draft(
+            self.project_id, content="## 第一章\n新内容\n",  # 缺 # 标题
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("`# 报告标题`", result.get("message", ""))
+
+    def test_content_no_h2_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n内容\n")
+        handler._build_turn_context(self.project_id, "整篇重写")
+        self._trigger_read_file(handler)
+        result = handler._tool_rewrite_report_draft(
+            self.project_id, content="# 报告标题\n只有标题没有章节\n",  # 无 ## 章节
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("章节标题", result.get("message", ""))
+
+    def test_content_exceeds_cap_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        current = "# 报告\n## 第一章\n" + "内容" * 100  # ~200 chars
+        self._put_draft(current)
+        handler._build_turn_context(self.project_id, "整篇重写")
+        self._trigger_read_file(handler)
+        # cap = max(8000, 2 * len(current)) = 8000 given short current
+        oversized = "# 新报告\n## 第一章\n" + ("X" * 9000)
+        result = handler._tool_rewrite_report_draft(
+            self.project_id, content=oversized,
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("超过", result.get("message", ""))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in RewriteReportDraftToolTests.__dict__
+    ):
+        setattr(RewriteReportDraftToolTests, _inherited_test_name, None)
+del _inherited_test_name
