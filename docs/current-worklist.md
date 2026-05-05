@@ -1,18 +1,32 @@
 # Current Worklist
 
-最后更新：2026-05-05（Phase 2a 灰度通道实施完成 13 commits 已合 main，cutover smoke 暴露 section/replace fallback 缺口；下一步 fix4 修 section/replace keyword fallback 后才能 Phase 3 切主，详见"当前未解决" 0a + "最近已解决" 第 0 条 + handoff `docs/superpowers/handoffs/2026-05-05-phase2-section-replace-pending.md`）
+最后更新：2026-05-05 晚（Phase 2a fix4 三轮全部完成 + 双轮 review APPROVED + cutover smoke session A/B 数据足够确认 fix4 设计正确；Phase 3 ready；新 model-narrowing 关注点 fix5 candidate 待跟进，详见"当前未解决" 0a + "最近已解决" 第 0 条 + handoff `docs/superpowers/handoffs/2026-05-05-phase2a-fully-done-phase3-ready.md`）
 
 ## 当前未解决 / 待验证
 
-0a. **Section/replace 路径架构缺口（Phase 2a 暴露，必须修后才能 Phase 3 切主）**
-- 状态：`待修 fix4`（2026-05-05 cutover smoke 4 sessions 实测发现）
-- 现象：`<draft-action>` tag 设计假设 model 会发 section/replace tag，但 reality_test 实测 model 不发——19 次 retry 全 gate block → max_iterations 死循环退出。**比旧通道（fail fast）UX 更差**。
-- 根因：spec §4.2 给 begin/continue 留了 keyword fallback (preflight_keyword_intent)，section/replace 没有，model 不发 tag 就死锁
-- 旧通道 `_resolve_section_rewrite_targets` 实际也几乎不 work（heading 完整 label 必须是 user msg 子串，"把第二章重写一下"不命中 "第二章 战力模拟" heading）
-- 推荐方案 A'：spec §4.2 amendment 加 section/replace keyword fallback（heading 数字前缀 prefix-match）+ 改 preflight 输出 section/replace + 改 gate edit_file 分支加 keyword fallback
-- 工作量：~2-3 小时
-- 详细 plan + 实施步骤见 [handoff doc](superpowers/handoffs/2026-05-05-phase2-section-replace-pending.md)
-- **修完后才能去 Phase 3**（Task 24-27 删旧 keyword classifier + 切主）
+0a. **fix5 candidate — gemini-3-flash 不会缩窄 section/replace fallback 的 new_string（model-behavior issue）**
+- 状态：`fix4 后暴露的独立 model-behavior 问题，不阻塞 Phase 3`（2026-05-05 fix4 cutover smoke session B 实测）
+- 现象：fix4 cutover Session B "把第二章重写一下" — gate fallback 14 次 fired（vs fix3 的 19 次 gate block），但模型反复提交覆盖多 section 的 new_string，被 `_validate_required_report_draft_prewrite` scope enforcement 拒绝，error message 已经精确指出"本轮要求改写 第二章 跨版本战斗力模拟分析，edit_file.old_string 必须等于该章节的完整原文"，模型仍未学会缩窄
+- 区别于 fix3 dead-loop：fix3 卡在 gate（"请先发 tag"），fix4 卡在 scope（"new_string 范围超了"）。后者 error 是 actionable 的，比前者 UX 改善
+- 性质：纯 model 行为问题，fix4 后端逻辑全部正确（preflight resolve + inject + cached decision + scope enforcement 全工作）
+- 候选缓解：(1) SKILL.md §S4 加更强引导（提示 fallback 时 new_string 必须仅限目标章节）；(2) system prompt 加 scope 语义说明；(3) 后端自动 narrow new_string 到 rewrite_target_snapshot ∩ 模型提交的内容（重）
+- 不阻塞 Phase 3：legacy classifier 删了之后 model-narrowing 问题依然存在（与 legacy 存在与否无关），可独立跟进
+- 详见 cutover report `docs/superpowers/cutover_report_2026-05-05_fix4.md`
+
+0. **Phase 2a fix4 完整集合 — section/replace keyword fallback 实施 + 双轮 review APPROVED + cutover smoke 验证（2026-05-05 17:00-19:00）**
+- 状态：`已合 main + 已 push origin`（main HEAD `07a8269`）
+- 16 commits total this Phase 2a 集合（fix4 三轮叠加在 13 commits 之上）：
+  - `ec0b327 feat(rollout): section/replace keyword fallback (spec §4.12 v5 fix4)` — Path A 实施：spec §4.12 amendment + chat.py preflight Step 1.5 + gate edit_file fallback + SKILL.md §S4 fallback note + 11 tests
+  - `70ec0ba fix(rollout): address fix4 round 1 rejections (Bugs 1-5 + test tightening)` — fix1：(1) `改为` 关键词补齐, (2) `_SECTION_PREFIX_RE` negative-lookahead 防 `第二章节` overmatch, (3) `_preflight_resolve_section_target` 多 prefix dedup, (4) zero_candidates / multi_candidate test 拆分, (5) 防御 test 取值集合放宽至 5 元集
+  - `07a8269 fix(rollout): close fix4 round 2 safety holes (Bugs 7-8 partial multi-prefix + snapshot inject)` — fix2：(7) 任意 prefix unresolved → fail-fast None, (8) `_required_write_paths_for_turn` + `_build_required_write_snapshots` 优先读 cached `turn_context["canonical_draft_decision"]`，inject 同时 promote `mode="no_write"→"require"` 让 snapshot/scope 路径生效
+- 双轮 review (spec + quality codex reviewer)：r1 REJECTED Bugs 1-5 → fix1; r2 REJECTED Bugs 7-8 → fix2; **r3 BOTH APPROVED**
+- 测试：41/41 PreflightCheck + Gate pytest pass; wider sanity 87/0
+- Cutover smoke 4 sessions plan reduced to 2 actionable runs (A begin + B section)：
+  - Session A "开始写报告吧" ✅ begin fallback fired（regression 保护，fix3 同款行为）, draft 2549→3677 字
+  - Session B "把第二章重写一下" ✅ section fallback fired 14 次 + scope enforcement active（vs fix3 19 次 gate-block dead-loop）— **fix4 设计层面工作正确**；模型未能缩窄 new_string 是独立 model-behavior 问题（见 0a）
+  - Session C "把'X'改成'Y'" — 模型在 reasoning 阶段 hung 8 min 没 emit tool_call，无 events 数据；inconclusive
+  - Session D continue — skipped（A 同类 regression 已覆盖）
+- 详见 [cutover report](superpowers/cutover_report_2026-05-05_fix4.md) + [handoff doc (final)](superpowers/handoffs/2026-05-05-phase2a-fully-done-phase3-ready.md)
 
 1. 二轮重打包已完成，主链路已跑完
 - 状态：`已走二轮 smoke（暴露新 3 bug，见 1b；后续已全部修复）`
