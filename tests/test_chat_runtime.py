@@ -13526,6 +13526,105 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
+class ReplaceReportTextLivePathTests(_WriteToolTestMixin, ChatRuntimeTests):
+    """Round-1 Critical: live replace must pass dispatch + turn-end write checks."""
+
+    def _make_replace_report_tool_call(
+        self,
+        *,
+        old: str = "旧结论",
+        new: str = "新结论",
+        call_id: str = "call-replace-report-text",
+    ):
+        return SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(
+                name="replace_report_text",
+                arguments=json.dumps(
+                    {"old": old, "new": new},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+    def test_replace_through_dispatch_when_fallback_marked_snapshot(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        draft_path = self._put_draft("# 报告\n## 第二章\n旧结论是这样\n")
+
+        user_message = "把报告里旧结论改成新结论"
+        handler._build_turn_context(self.project_id, user_message)
+        snapshots = handler._build_required_write_snapshots(self.project_id, user_message)
+        handler._turn_context["required_write_snapshots"] = snapshots
+        self.assertEqual(
+            snapshots["content/report_draft_v1.md"].get("intent_kind"),
+            "replace_text",
+        )
+        handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "content/report_draft_v1.md"}),
+            ),
+        )
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "replace_report_text",
+                json.dumps({"old": "旧结论", "new": "新结论"}),
+            ),
+        )
+
+        self.assertEqual(result.get("status"), "success", msg=result)
+        actual = draft_path.read_text(encoding="utf-8")
+        self.assertIn("新结论", actual)
+        self.assertNotIn("旧结论", actual)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_non_stream_accepts_replace_report_text_success_without_required_write_retry(
+        self,
+        mock_openai,
+    ):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        draft_path = self._put_draft("# 报告\n## 第一章\n旧结论\n")
+        final_message = "已将报告中的旧结论改成新结论。"
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_tool_response(
+                self._make_read_tool_call("content/report_draft_v1.md")
+            ),
+            self._make_non_stream_tool_response(self._make_replace_report_tool_call()),
+            self._make_non_stream_response(final_message),
+        ]
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value=self._mock_stage_state("S5"),
+        ):
+            result = handler.chat(
+                self.project_id,
+                "把报告里旧结论改成新结论",
+                max_iterations=3,
+            )
+
+        updated = draft_path.read_text(encoding="utf-8")
+        self.assertIn(final_message, result["content"])
+        self.assertIn("新结论", updated)
+        self.assertNotIn("旧结论", updated)
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 3)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in ReplaceReportTextLivePathTests.__dict__
+    ):
+        setattr(ReplaceReportTextLivePathTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 class RewriteReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
     def test_happy_path_rewrites_whole_draft(self):
         handler = self._make_handler_with_project()
@@ -13798,6 +13897,93 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
+class ReportWriteToolArgumentTypeTests(_WriteToolTestMixin, ChatRuntimeTests):
+    def test_rewrite_report_section_rejects_non_string_content_before_generic_exception(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第二章\n旧内容\n")
+        handler._build_turn_context(self.project_id, "把第二章重写")
+        self._trigger_read_file(handler)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "rewrite_report_section",
+                json.dumps({"content": {"text": "## 第二章\n新内容\n"}}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("content 必须是字符串", result.get("message", ""))
+        self.assertNotIn("工具执行失败", result.get("message", ""))
+
+    def test_replace_report_text_rejects_non_string_old_before_generic_exception(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n旧结论\n")
+        handler._build_turn_context(self.project_id, "把旧结论改成新结论")
+        self._trigger_read_file(handler)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "replace_report_text",
+                json.dumps({"old": ["旧结论"], "new": "新结论"}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("old 必须是字符串", result.get("message", ""))
+        self.assertNotIn("工具执行失败", result.get("message", ""))
+
+    def test_replace_report_text_rejects_non_string_new_before_generic_exception(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n旧结论\n")
+        handler._build_turn_context(self.project_id, "把旧结论改成新结论")
+        self._trigger_read_file(handler)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "replace_report_text",
+                json.dumps({"old": "旧结论", "new": ["新结论"]}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("new 必须是字符串", result.get("message", ""))
+        self.assertNotIn("工具执行失败", result.get("message", ""))
+
+    def test_rewrite_report_draft_rejects_non_string_content_before_generic_exception(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n旧内容\n")
+        handler._build_turn_context(self.project_id, "整篇重写这份报告")
+        self._trigger_read_file(handler)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "rewrite_report_draft",
+                json.dumps({"content": ["# 新报告\n## 第一章\n新内容\n"]}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("content 必须是字符串", result.get("message", ""))
+        self.assertNotIn("工具执行失败", result.get("message", ""))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in ReportWriteToolArgumentTypeTests.__dict__
+    ):
+        setattr(ReportWriteToolArgumentTypeTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 class WriteObligationRetryTests(ChatRuntimeTests):
     """Spec §3.5 §7.6 retry 入口在 chat loop 层，不在 _finalize_assistant_turn."""
 
@@ -13810,9 +13996,25 @@ class WriteObligationRetryTests(ChatRuntimeTests):
         handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
         # 模拟 model 输出 claim text 但 0 tool_call
         assistant_text = "我已经把第二章重写完毕，请查看正文。"
-        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
+        current_turn_messages = []
+        retry_fired = handler._maybe_inject_obligation_retry(
+            assistant_text,
+            current_turn_messages,
+        )
         self.assertTrue(retry_fired)
         self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
+        self.assertEqual(current_turn_messages[-1]["role"], "user")
+
+    def test_obligation_retry_returns_false_when_no_message_sink(self):
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
+        assistant_text = "我已经把第二章重写完毕，请查看正文。"
+
+        retry_fired = handler._maybe_inject_obligation_retry(assistant_text, None)
+
+        self.assertFalse(retry_fired)
+        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
 
     def test_obligation_present_no_claim_no_retry(self):
         handler = self._make_handler_with_project()

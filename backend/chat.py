@@ -251,6 +251,11 @@ class ChatHandler:
         "output/final-report.md",
     })
     APPEND_REPORT_DRAFT_MIN_SUBSTANTIVE_CHARS = 80
+    CANONICAL_DRAFT_SEMANTIC_EDIT_TOOLS = frozenset({
+        "rewrite_report_section",
+        "replace_report_text",
+        "rewrite_report_draft",
+    })
     REPORT_BODY_EXPLICIT_WRITE_KEYWORDS = (
         "继续写",
         "继续写吧",
@@ -1686,6 +1691,35 @@ class ChatHandler:
                 "arguments": {},
                 "raw_arguments": arguments,
             }
+        if (
+            func_name in self.CANONICAL_DRAFT_SEMANTIC_EDIT_TOOLS
+            and result.get("status") == "success"
+        ):
+            event = self._turn_context.get("_last_successful_semantic_edit_event")
+            if (
+                isinstance(event, dict)
+                and event.get("source_tool_name") == func_name
+            ):
+                self._turn_context.pop("_last_successful_semantic_edit_event", None)
+                edit_arguments = event.get("arguments")
+                if not isinstance(edit_arguments, dict):
+                    return None
+                file_path = edit_arguments.get("file_path")
+                if not isinstance(file_path, str) or not file_path.strip():
+                    event_path = event.get("path")
+                    if not isinstance(event_path, str) or not event_path.strip():
+                        return None
+                    edit_arguments = {**edit_arguments, "file_path": event_path}
+                    file_path = event_path
+                return {
+                    "path": self._canonical_successful_write_path(
+                        file_path,
+                        project_id=project_id,
+                    ),
+                    "tool": "edit_file",
+                    "arguments": edit_arguments,
+                    "raw_arguments": arguments,
+                }
         if func_name not in {"write_file", "edit_file"} or result.get("status") != "success":
             return None
         try:
@@ -4054,6 +4088,9 @@ class ChatHandler:
                         preflight_compaction_used=compressed,
                     )
                     break
+                # Task 3 fix1: obligation-only streaming still emits text before this
+                # advisory retry decision. Buffer/rollback-safe stream events are
+                # deferred to Task 5 cleanup if cutover smoke shows real impact.
                 obligation = self._turn_context.get("canonical_draft_write_obligation")
                 if obligation and not self._turn_context.get("obligation_retry_fired") and not self._turn_context.get("canonical_draft_mutation"):
                     current_turn_messages.append({"role": "assistant", "content": candidate_message})
@@ -5285,6 +5322,9 @@ class ChatHandler:
         self, project_id: str, content: str,
     ) -> Dict:
         """spec §2.2: rewrite_report_section 工具入口."""
+        if not isinstance(content, str):
+            return {"status": "error", "message": "content 必须是字符串。"}
+
         from backend.report_writing import (
             check_report_writing_stage, check_outline_confirmed,
             check_no_mixed_intent_in_turn, check_no_prior_canonical_mutation_in_turn,
@@ -5355,6 +5395,11 @@ class ChatHandler:
         self, project_id: str, old: str, new: str,
     ) -> Dict:
         """spec §2.3: replace_report_text 工具入口."""
+        if not isinstance(old, str):
+            return {"status": "error", "message": "old 必须是字符串。"}
+        if not isinstance(new, str):
+            return {"status": "error", "message": "new 必须是字符串。"}
+
         from backend.report_writing import (
             check_report_writing_stage, check_outline_confirmed,
             check_no_mixed_intent_in_turn, check_no_prior_canonical_mutation_in_turn,
@@ -5416,6 +5461,9 @@ class ChatHandler:
         self, project_id: str, content: str,
     ) -> Dict:
         """spec §2.4: rewrite_report_draft 工具入口."""
+        if not isinstance(content, str):
+            return {"status": "error", "message": "content 必须是字符串。"}
+
         from backend.report_writing import (
             check_report_writing_stage, check_outline_confirmed,
             check_no_mixed_intent_in_turn, check_no_prior_canonical_mutation_in_turn,
@@ -5568,6 +5616,24 @@ class ChatHandler:
         if not existing:
             return addition
         return f"{existing}\n\n{addition}"
+
+    def _required_gate_edit_args(
+        self,
+        *,
+        source_tool_name: str,
+        source_tool_args: Dict | None,
+        persist_func_name: str | None = None,
+        persist_args: Dict | None = None,
+    ) -> Dict | None:
+        if source_tool_name == "edit_file":
+            return source_tool_args if isinstance(source_tool_args, dict) else None
+        if (
+            source_tool_name in self.CANONICAL_DRAFT_SEMANTIC_EDIT_TOOLS
+            and persist_func_name == "edit_file"
+            and isinstance(persist_args, dict)
+        ):
+            return persist_args
+        return None
 
     def _execute_plan_write(
         self,
@@ -5736,6 +5802,8 @@ class ChatHandler:
             content,
             source_tool_name=source_tool_name,
             source_tool_args=source_tool_args,
+            persist_func_name=persist_func_name,
+            persist_args=persist_args,
         )
         if destructive_write_error:
             self._emit_system_notice_once(
@@ -5821,6 +5889,17 @@ class ChatHandler:
                 user_action="不要用 Markdown 表格记录事实；请拆成独立 DL-id 条目后继续写入。",
                 surface_to_user=False,
             )
+        if (
+            source_tool_name in self.CANONICAL_DRAFT_SEMANTIC_EDIT_TOOLS
+            and persist_func_name == "edit_file"
+            and isinstance(persist_args, dict)
+        ):
+            self._turn_context["_last_successful_semantic_edit_event"] = {
+                "source_tool_name": source_tool_name,
+                "path": normalized_path,
+                "tool": "edit_file",
+                "arguments": dict(persist_args),
+            }
         self._persist_successful_tool_result(
             project_id,
             source_tool_name,
@@ -5853,6 +5932,8 @@ class ChatHandler:
         *,
         source_tool_name: str,
         source_tool_args: Dict | None = None,
+        persist_func_name: str | None = None,
+        persist_args: Dict | None = None,
     ) -> str | None:
         if not self._is_canonical_report_draft_path(normalized_path):
             return None
@@ -5870,6 +5951,8 @@ class ChatHandler:
                 snapshot,
                 source_tool_name=source_tool_name,
                 source_tool_args=source_tool_args,
+                persist_func_name=persist_func_name,
+                persist_args=persist_args,
             )
 
         append_turn_error = self._validate_append_turn_canonical_draft_write(
@@ -5918,11 +6001,20 @@ class ChatHandler:
                         "本轮用户要求改写现有章节，请先用 `read_file` 读取当前草稿，"
                         "再用 `edit_file` 修改目标章节。"
                     )
-            if source_tool_name == "edit_file":
-                if not isinstance(source_tool_args, dict):
+            if (
+                source_tool_name == "edit_file"
+                or source_tool_name in self.CANONICAL_DRAFT_SEMANTIC_EDIT_TOOLS
+            ):
+                edit_args = self._required_gate_edit_args(
+                    source_tool_name=source_tool_name,
+                    source_tool_args=source_tool_args,
+                    persist_func_name=persist_func_name,
+                    persist_args=persist_args,
+                )
+                if not isinstance(edit_args, dict):
                     return "本轮正文改写必须通过 `read_file` 后再用 `edit_file` 提交完整 old_string/new_string。"
-                old_string = source_tool_args.get("old_string")
-                new_string = source_tool_args.get("new_string")
+                old_string = edit_args.get("old_string")
+                new_string = edit_args.get("new_string")
                 if not isinstance(old_string, str) or not old_string:
                     return self._canonical_edit_missing_old_string_guidance(project_id, normalized_path)
                 current_text = self._read_project_file_text(project_id, normalized_path)
@@ -5993,6 +6085,8 @@ class ChatHandler:
         *,
         source_tool_name: str,
         source_tool_args: Dict | None,
+        persist_func_name: str | None = None,
+        persist_args: Dict | None = None,
     ) -> str | None:
         if source_tool_name == "write_file":
             return (
@@ -6009,13 +6103,22 @@ class ChatHandler:
                 "请改用 `edit_file`，通过 old_string/new_string 对目标文字做精确替换。"
             )
 
-        if source_tool_name != "edit_file":
+        if (
+            source_tool_name != "edit_file"
+            and source_tool_name not in self.CANONICAL_DRAFT_SEMANTIC_EDIT_TOOLS
+        ):
             return (
                 "本轮用户要求对报告正文做局部替换，只能用 `edit_file` "
                 "通过 old_string/new_string 做精确替换。"
             )
 
-        if not isinstance(source_tool_args, dict):
+        edit_args = self._required_gate_edit_args(
+            source_tool_name=source_tool_name,
+            source_tool_args=source_tool_args,
+            persist_func_name=persist_func_name,
+            persist_args=persist_args,
+        )
+        if not isinstance(edit_args, dict):
             return (
                 "本轮用户要求对报告正文做局部替换，但未检测到 `edit_file` 的 "
                 "old_string/new_string 参数。请重新用 `edit_file` 精确替换目标文字。"
@@ -6023,8 +6126,8 @@ class ChatHandler:
 
         old_text = str(snapshot.get("old_text") or "")
         new_text = str(snapshot.get("new_text") or "")
-        old_string = source_tool_args.get("old_string")
-        new_string = source_tool_args.get("new_string")
+        old_string = edit_args.get("old_string")
+        new_string = edit_args.get("new_string")
         if not (
             old_text
             and new_text
@@ -7144,6 +7247,8 @@ class ChatHandler:
         Returns True if a corrective synthetic user message was injected
         (caller should `continue` the chat loop). False otherwise.
         """
+        if current_turn_messages is None:
+            return False
         if self._turn_context.get("obligation_retry_fired"):
             return False  # 防重复
         obligation = self._turn_context.get("canonical_draft_write_obligation")
