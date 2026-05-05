@@ -30,7 +30,6 @@ from .config import (
     load_managed_search_pool_config,
 )
 from .context_policy import ResolvedContextPolicy, resolve_context_policy
-from backend.draft_action import DraftActionEvent
 from .models import SystemNotice
 from .search_pool import SearchRouter
 from .search_providers import (
@@ -7801,7 +7800,6 @@ class ChatHandler:
         """
         from backend.stage_ack import StageAckParser
         try:
-            from backend.draft_action import DraftActionParser
             draft_parser = DraftActionParser()
         except ImportError:
             draft_parser = None
@@ -7898,8 +7896,8 @@ class ChatHandler:
     def _validate_draft_action_event(
         self,
         project_id: str,
-        event: DraftActionEvent,
-    ) -> DraftActionEvent:
+        event: object,
+    ) -> object:
         """spec §4.6 前置校验。返回事件本身（可能被改 executable=False / 自动降级）"""
         # v2 新增：preflight_blocked / stage_too_early / outline_not_confirmed 校验
         decision = self._turn_context.get("canonical_draft_decision") or {}
@@ -8051,7 +8049,7 @@ class ChatHandler:
     def _apply_draft_action_event(
         self,
         project_id: str,
-        event: DraftActionEvent,
+        event: object,
     ) -> None:
         """通过校验的 event 追加到 turn_context.draft_action_events 列表（v2 命名统一）"""
         if not event.executable:
