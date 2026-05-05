@@ -13423,3 +13423,104 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(RewriteReportSectionToolTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class ReplaceReportTextToolTests(_WriteToolTestMixin, ChatRuntimeTests):
+    def test_happy_path_replaces_unique_text(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n渠道效率是关键指标。\n")
+        handler._build_turn_context(self.project_id, "把渠道效率改成渠道质量")
+        self._trigger_read_file(handler)
+        result = handler._tool_replace_report_text(
+            self.project_id, old="渠道效率", new="渠道质量",
+        )
+        self.assertEqual(result.get("status"), "success")
+        actual = (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8")
+        self.assertIn("渠道质量", actual)
+        self.assertNotIn("渠道效率", actual)
+
+    def test_zero_occurrences_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n内容A\n")
+        handler._build_turn_context(self.project_id, "把不存在的文字改掉")
+        self._trigger_read_file(handler)
+        result = handler._tool_replace_report_text(
+            self.project_id, old="不存在的文字XYZ", new="新文字",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("未找到", result.get("message", ""))
+
+    def test_multiple_occurrences_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n重复 重复\n")
+        handler._build_turn_context(self.project_id, "把重复改成单次")
+        self._trigger_read_file(handler)
+        result = handler._tool_replace_report_text(
+            self.project_id, old="重复", new="单次",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("不唯一", result.get("message", ""))
+
+    def test_empty_old_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n内容\n")
+        handler._build_turn_context(self.project_id, "替换文字")
+        self._trigger_read_file(handler)
+        result = handler._tool_replace_report_text(
+            self.project_id, old="", new="新内容",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("`old`", result.get("message", ""))
+
+    def test_mutation_limit_blocks_second_call(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n渠道效率是关键。\n")
+        handler._build_turn_context(self.project_id, "把渠道效率改成渠道质量")
+        self._trigger_read_file(handler)
+        # 第一次成功
+        handler._tool_replace_report_text(
+            self.project_id, old="渠道效率", new="渠道质量",
+        )
+        # mutation 已 set，第二次应 reject
+        result = handler._tool_replace_report_text(
+            self.project_id, old="渠道质量", new="其他",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("本轮已经修改过", result.get("message", ""))
+
+    def test_stage_pre_s4_rejects(self):
+        handler = self._make_handler_with_project()
+        # 不 setup S4，阶段保持 S0
+        self._put_draft("# 报告\n## 第一章\n内容\n")
+        handler._build_turn_context(self.project_id, "替换文字")
+        result = handler._tool_replace_report_text(
+            self.project_id, old="内容", new="新内容",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("S4", result.get("message", ""))
+
+    def test_no_read_before_write_rejects(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n内容\n")
+        handler._build_turn_context(self.project_id, "替换文字")
+        # 不 trigger_read_file
+        result = handler._tool_replace_report_text(
+            self.project_id, old="内容", new="新内容",
+        )
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("read_file", result.get("message", ""))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in ReplaceReportTextToolTests.__dict__
+    ):
+        setattr(ReplaceReportTextToolTests, _inherited_test_name, None)
+del _inherited_test_name
