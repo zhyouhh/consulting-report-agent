@@ -13145,3 +13145,55 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(CanonicalDraftWriteObligationTurnContextTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class ReadFileSnapshotHookTests(ChatRuntimeTests):
+    def test_read_file_records_canonical_draft_mtime(self):
+        handler = self._make_handler_with_project()
+        # prepare draft file
+        draft_path = self.project_dir / "content" / "report_draft_v1.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text("# 报告\n## 第一章\n内容\n", encoding="utf-8")
+        handler._build_turn_context(self.project_id, "看一下正文")
+        # trigger read_file
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "content/report_draft_v1.md"}),
+            ),
+        )
+        self.assertEqual(result.get("status"), "success")
+        snapshots = handler._turn_context.get("read_file_snapshots") or {}
+        self.assertIn("content/report_draft_v1.md", snapshots)
+        self.assertAlmostEqual(
+            snapshots["content/report_draft_v1.md"],
+            draft_path.stat().st_mtime,
+            places=3,
+        )
+
+    def test_read_file_does_not_record_for_plan_path(self):
+        handler = self._make_handler_with_project()
+        # plan/* not recorded
+        plan_path = self.project_dir / "plan" / "outline.md"
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text("大纲", encoding="utf-8")
+        handler._build_turn_context(self.project_id, "看一下大纲")
+        handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "plan/outline.md"}),
+            ),
+        )
+        snapshots = handler._turn_context.get("read_file_snapshots") or {}
+        self.assertNotIn("plan/outline.md", snapshots)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in ReadFileSnapshotHookTests.__dict__
+    ):
+        setattr(ReadFileSnapshotHookTests, _inherited_test_name, None)
+del _inherited_test_name

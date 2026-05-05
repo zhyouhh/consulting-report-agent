@@ -5045,6 +5045,15 @@ class ChatHandler:
                 content = self.skill_engine.read_file(project_id, normalized_path)
                 result = {"status": "success", "content": content}
                 self._record_turn_read_file_path(normalized_path)
+                # spec §3.7: record mtime snapshot for canonical draft path only
+                if self._is_canonical_report_draft_path(normalized_path):
+                    project_path = self.skill_engine.get_project_path(project_id)
+                    if project_path:
+                        target = project_path / self.skill_engine.REPORT_DRAFT_PATH
+                        if target.exists():
+                            self._turn_context.setdefault("read_file_snapshots", {})[
+                                self.skill_engine.REPORT_DRAFT_PATH
+                            ] = target.stat().st_mtime
                 self._persist_successful_tool_result(
                     project_id,
                     func_name,
