@@ -13102,3 +13102,22 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(NewTurnContextFieldsTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class BuildTurnContextCachesUserMessageTests(ChatRuntimeTests):
+    def test_build_turn_context_caches_user_message_text(self):
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        self.assertEqual(
+            handler._turn_context.get("user_message_text"),
+            "把第二章重写一下",
+        )
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in BuildTurnContextCachesUserMessageTests.__dict__
+    ):
+        setattr(BuildTurnContextCachesUserMessageTests, _inherited_test_name, None)
+del _inherited_test_name

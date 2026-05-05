@@ -6881,6 +6881,9 @@ class ChatHandler:
 
     def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, object]:
         self._turn_context = self._new_turn_context(can_write_non_plan=False)
+        self._turn_context["user_message_text"] = self._extract_user_message_text(
+            {"role": "user", "content": user_message}
+        )
         project_path = self.skill_engine.get_project_path(project_id)
         if project_path:
             summary = self.skill_engine.get_workspace_summary(project_id)
