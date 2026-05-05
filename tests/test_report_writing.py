@@ -1,6 +1,18 @@
 # tests/test_report_writing.py
+import pathlib
+import tempfile
 import unittest
-from backend.report_writing import resolve_section_target
+
+from backend.report_writing import (
+    assistant_text_claims_modification,
+    check_no_fetch_url_pending,
+    check_no_mixed_intent_in_turn,
+    check_no_prior_canonical_mutation_in_turn,
+    check_outline_confirmed,
+    check_read_before_write_canonical_draft,
+    check_report_writing_stage,
+    resolve_section_target,
+)
 
 
 def _fake_heading_nodes(items):
@@ -70,20 +82,6 @@ class ResolveSectionTargetTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
-from backend.report_writing import (
-    assistant_text_claims_modification,
-    check_no_prior_canonical_mutation_in_turn,
-    check_no_fetch_url_pending,
-)
-
-# Also import remaining helpers for forward reference (used in CheckHelpersTests)
-from backend.report_writing import (
-    check_report_writing_stage, check_outline_confirmed,
-    check_no_mixed_intent_in_turn,
-    check_read_before_write_canonical_draft,
-)
-
-
 class AssistantTextClaimsModificationTests(unittest.TestCase):
     def test_explicit_completion_returns_true(self):
         self.assertTrue(assistant_text_claims_modification(
@@ -144,6 +142,148 @@ class CheckHelpersTests(unittest.TestCase):
         self.assertIsNone(check_no_fetch_url_pending(
             {"web_search_performed": True, "fetch_url_performed": True},
         ))
+
+
+class _FakeSkillEngine:
+    """Minimal stub for invariant-check helpers."""
+    REPORT_DRAFT_PATH = "content/report_draft_v1.md"
+
+    def __init__(self, *, project_path=None, stage_code="S0", checkpoints=None):
+        self._project_path = project_path
+        self._stage_code = stage_code
+        self._checkpoints = checkpoints or {}
+
+    def get_project_path(self, project_id):
+        return self._project_path
+
+    def _infer_stage_state(self, project_path):
+        return {"stage_code": self._stage_code}
+
+    def _load_stage_checkpoints(self, project_path):
+        return self._checkpoints
+
+
+class _FakeHandler:
+    def __init__(self, families):
+        self._families = list(families)
+
+    def _secondary_action_families_in_message(self, user_message):
+        return self._families
+
+
+class CheckReportWritingStageTests(unittest.TestCase):
+    def test_project_missing_returns_error(self):
+        engine = _FakeSkillEngine(project_path=None)
+        self.assertIsNotNone(check_report_writing_stage(engine, "p1"))
+
+    def test_stage_below_s4_rejected(self):
+        engine = _FakeSkillEngine(project_path=pathlib.Path("/tmp/x"), stage_code="S2")
+        msg = check_report_writing_stage(engine, "p1")
+        self.assertIsNotNone(msg)
+        self.assertIn("S4", msg)
+
+    def test_stage_s4_accepted(self):
+        engine = _FakeSkillEngine(project_path=pathlib.Path("/tmp/x"), stage_code="S4")
+        self.assertIsNone(check_report_writing_stage(engine, "p1"))
+
+    def test_stage_s7_accepted(self):
+        engine = _FakeSkillEngine(project_path=pathlib.Path("/tmp/x"), stage_code="S7")
+        self.assertIsNone(check_report_writing_stage(engine, "p1"))
+
+
+class CheckOutlineConfirmedTests(unittest.TestCase):
+    def test_project_missing_returns_error(self):
+        engine = _FakeSkillEngine(project_path=None)
+        self.assertIsNotNone(check_outline_confirmed(engine, "p1"))
+
+    def test_outline_not_confirmed_rejected(self):
+        engine = _FakeSkillEngine(project_path=pathlib.Path("/tmp/x"), checkpoints={})
+        msg = check_outline_confirmed(engine, "p1")
+        self.assertIsNotNone(msg)
+        self.assertIn("大纲", msg)
+
+    def test_outline_confirmed_accepted(self):
+        engine = _FakeSkillEngine(
+            project_path=pathlib.Path("/tmp/x"),
+            checkpoints={"outline_confirmed_at": "2026-05-06T00:00:00"},
+        )
+        self.assertIsNone(check_outline_confirmed(engine, "p1"))
+
+
+class CheckNoMixedIntentInTurnTests(unittest.TestCase):
+    def test_zero_secondary_actions_pass(self):
+        handler = _FakeHandler([])
+        self.assertIsNone(check_no_mixed_intent_in_turn(handler, "重写第二章"))
+
+    def test_one_secondary_action_pass(self):
+        handler = _FakeHandler(["export"])
+        self.assertIsNone(check_no_mixed_intent_in_turn(handler, "重写第二章并导出"))
+
+    def test_two_secondary_actions_reject(self):
+        handler = _FakeHandler(["export", "quality_check"])
+        msg = check_no_mixed_intent_in_turn(handler, "重写并导出并质检")
+        self.assertIsNotNone(msg)
+        self.assertIn("拆", msg)
+
+
+class CheckReadBeforeWriteCanonicalDraftTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.project_root = pathlib.Path(self._tmp.name)
+        (self.project_root / "content").mkdir(parents=True, exist_ok=True)
+        self.engine = _FakeSkillEngine(project_path=self.project_root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _draft_path(self):
+        return self.project_root / self.engine.REPORT_DRAFT_PATH
+
+    def test_draft_missing_returns_none(self):
+        # 首次起草场景：无 draft → require_read 不阻断
+        self.assertIsNone(check_read_before_write_canonical_draft(
+            {}, self.engine, "p1", require_read=True,
+        ))
+
+    def test_require_read_false_skips_check(self):
+        self._draft_path().write_text("# x\n", encoding="utf-8")
+        self.assertIsNone(check_read_before_write_canonical_draft(
+            {}, self.engine, "p1", require_read=False,
+        ))
+
+    def test_no_snapshot_rejects(self):
+        self._draft_path().write_text("# x\n", encoding="utf-8")
+        msg = check_read_before_write_canonical_draft(
+            {"read_file_snapshots": {}}, self.engine, "p1", require_read=True,
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("read_file", msg)
+
+    def test_matching_mtime_passes(self):
+        self._draft_path().write_text("# x\n", encoding="utf-8")
+        mtime = self._draft_path().stat().st_mtime
+        ctx = {"read_file_snapshots": {self.engine.REPORT_DRAFT_PATH: mtime}}
+        self.assertIsNone(check_read_before_write_canonical_draft(
+            ctx, self.engine, "p1", require_read=True,
+        ))
+
+    def test_stale_mtime_rejects(self):
+        self._draft_path().write_text("# x\n", encoding="utf-8")
+        ctx = {"read_file_snapshots": {self.engine.REPORT_DRAFT_PATH: 1.0}}
+        msg = check_read_before_write_canonical_draft(
+            ctx, self.engine, "p1", require_read=True,
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("重新", msg)
+
+    def test_non_numeric_snapshot_rejects(self):
+        # Robustness: malformed snapshot value should not crash
+        self._draft_path().write_text("# x\n", encoding="utf-8")
+        ctx = {"read_file_snapshots": {self.engine.REPORT_DRAFT_PATH: "garbage"}}
+        msg = check_read_before_write_canonical_draft(
+            ctx, self.engine, "p1", require_read=True,
+        )
+        self.assertIsNotNone(msg)
 
 
 if __name__ == "__main__":

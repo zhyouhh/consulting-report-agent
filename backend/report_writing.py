@@ -6,7 +6,7 @@ Pure functions only. No ChatHandler dependency. Tests in tests/test_report_writi
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 
 # ---- Section target resolve (迁移自 fix4 fix2 的 _preflight_resolve_section_target) ----
@@ -52,9 +52,13 @@ def resolve_section_target(
             return None  # fail-fast on any non-unique prefix
         resolved.append(candidates[0])
 
-    unique_keys = {
-        (int(n.get("start", -1)), int(n.get("end", -1))) for n in resolved
-    }
+    unique_keys = set()
+    for n in resolved:
+        s = n.get("start", -1)
+        e = n.get("end", -1)
+        if not isinstance(s, (int, float)) or not isinstance(e, (int, float)):
+            return None  # malformed heading node — fail-closed
+        unique_keys.add((int(s), int(e)))
     if len(unique_keys) != 1:
         return None  # multi-prefix resolving to different headings → ambiguous
 
@@ -78,7 +82,6 @@ _TEXT_CLAIM_RE_2 = re.compile(
     r"[^。！？!?\n]{0,30}"
     r"(?:已|已经|完成|写完|改完|重写完|替换完|同步|落盘)"
 )
-_INTENT_RE = re.compile(r"我会|我准备|我将|我正在|我可以|让我")
 
 
 def assistant_text_claims_modification(text: str) -> bool:
@@ -174,6 +177,9 @@ def check_read_before_write_canonical_draft(
     snapshots = turn_context.get("read_file_snapshots") or {}
     snap_mtime = snapshots.get(draft_path_normalized)
     if snap_mtime is None:
+        return "请先 read_file 读取正文，再修改"
+    if not isinstance(snap_mtime, (int, float)):
+        # 非数值 snapshot → 视作无有效快照，按需重新 read_file。
         return "请先 read_file 读取正文，再修改"
     current_mtime = actual_path.stat().st_mtime
     if abs(current_mtime - snap_mtime) > 1e-6:
