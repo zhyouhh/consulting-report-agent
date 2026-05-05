@@ -41,6 +41,7 @@ from .search_providers import (
     SerperProvider,
     TavilyProvider,
 )
+from .report_writing import detect_canonical_draft_write_obligation
 from .search_state import SearchStateStore
 from .skill import SkillEngine
 
@@ -6883,6 +6884,9 @@ class ChatHandler:
         self._turn_context = self._new_turn_context(can_write_non_plan=False)
         self._turn_context["user_message_text"] = self._extract_user_message_text(
             {"role": "user", "content": user_message}
+        )
+        self._turn_context["canonical_draft_write_obligation"] = (
+            detect_canonical_draft_write_obligation(user_message)
         )
         project_path = self.skill_engine.get_project_path(project_id)
         if project_path:

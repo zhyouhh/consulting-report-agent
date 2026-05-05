@@ -6,7 +6,7 @@ Pure functions only. No ChatHandler dependency. Tests in tests/test_report_writi
 from __future__ import annotations
 
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 
 # ---- Section target resolve (迁移自 fix4 fix2 的 _preflight_resolve_section_target) ----
@@ -195,4 +195,45 @@ def check_no_fetch_url_pending(
         "fetch_url_performed",
     ):
         return "请先 fetch_url 读取候选网页正文，再写正文"
+    return None
+
+
+# ---- Write obligation detection (spec §3.5) ----
+
+# 复用现有 chat.py 的 keyword 列表作为粗粒度 yes/no 信号
+# (per spec r2 reviewer §C12: 不迁移 stage gate / scope / target / priority logic)
+
+_OBLIGATION_REPLACE_RE = re.compile(
+    r"把(?:报告|正文)(?:里的|中的|里|中)?"
+    r"[^，,、。！？!?；;：:\n]{1,80}?"
+    r"\s*[，,、：:]?\s*"
+    r"(?:改成|改为|替换成|换成)"
+)
+
+
+def detect_canonical_draft_write_obligation(user_message: str) -> Optional[Dict[str, Any]]:
+    """粗粒度判定 user 消息是否触发"本轮要写正文"信号。返回 None=无信号；
+    返回 dict={'tool_family': str, 'detected': str} 表示有 obligation。
+
+    `tool_family` 仅供事件记录用，不驱动 gate / scope enforcement.
+    """
+    text = (user_message or "").strip()
+    if not text:
+        return None
+
+    # phrase hits 顺序：begin → continue → rewrite_draft → section → replace
+    for kw in ("开始写报告", "开始写正文", "开始起草", "起草报告", "写第一版"):
+        if kw in text:
+            return {"tool_family": "begin", "detected": kw}
+    for kw in ("继续写", "继续写报告", "继续写正文", "接着写", "写下一章", "写下一段"):
+        if kw in text:
+            return {"tool_family": "continue", "detected": kw}
+    for kw in ("整篇重写", "全文重写", "推倒重写", "推倒重来", "全部改写"):
+        if kw in text:
+            return {"tool_family": "rewrite_draft", "detected": kw}
+    for kw in ("重写", "改写", "重做"):
+        if kw in text:
+            return {"tool_family": "rewrite_section", "detected": kw}
+    if _OBLIGATION_REPLACE_RE.search(text):
+        return {"tool_family": "replace_text", "detected": "replace_pattern"}
     return None

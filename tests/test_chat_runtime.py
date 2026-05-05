@@ -13121,3 +13121,27 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(BuildTurnContextCachesUserMessageTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class CanonicalDraftWriteObligationTurnContextTests(ChatRuntimeTests):
+    def test_obligation_set_for_section_keyword(self):
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "把第二章重写一下")
+        ob = handler._turn_context.get("canonical_draft_write_obligation")
+        self.assertIsNotNone(ob)
+        self.assertEqual(ob["tool_family"], "rewrite_section")
+
+    def test_obligation_none_for_unrelated(self):
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "你好，能介绍一下项目吗？")
+        ob = handler._turn_context.get("canonical_draft_write_obligation")
+        self.assertIsNone(ob)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in CanonicalDraftWriteObligationTurnContextTests.__dict__
+    ):
+        setattr(CanonicalDraftWriteObligationTurnContextTests, _inherited_test_name, None)
+del _inherited_test_name

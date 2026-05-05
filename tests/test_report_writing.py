@@ -11,6 +11,7 @@ from backend.report_writing import (
     check_outline_confirmed,
     check_read_before_write_canonical_draft,
     check_report_writing_stage,
+    detect_canonical_draft_write_obligation,
     resolve_section_target,
 )
 
@@ -284,6 +285,50 @@ class CheckReadBeforeWriteCanonicalDraftTests(unittest.TestCase):
             ctx, self.engine, "p1", require_read=True,
         )
         self.assertIsNotNone(msg)
+
+
+class DetectWriteObligationTests(unittest.TestCase):
+    def test_begin(self):
+        d = detect_canonical_draft_write_obligation("开始写报告正文")
+        self.assertEqual(d["tool_family"], "begin")
+
+    def test_continue(self):
+        d = detect_canonical_draft_write_obligation("继续写下一章")
+        self.assertEqual(d["tool_family"], "continue")
+
+    def test_section_rewrite_explicit(self):
+        d = detect_canonical_draft_write_obligation("请把第二章重写一下")
+        self.assertEqual(d["tool_family"], "rewrite_section")
+
+    def test_section_rewrite_multi(self):
+        d = detect_canonical_draft_write_obligation("重写第二章和第三章")
+        self.assertEqual(d["tool_family"], "rewrite_section")
+
+    def test_replace_text_quoted(self):
+        d = detect_canonical_draft_write_obligation("把正文里的'渠道效率'改成'渠道质量'")
+        self.assertEqual(d["tool_family"], "replace_text")
+
+    def test_replace_text_unquoted(self):
+        d = detect_canonical_draft_write_obligation("把报告里的增长改成高质量增长")
+        self.assertEqual(d["tool_family"], "replace_text")
+
+    def test_whole_rewrite_explicit(self):
+        d = detect_canonical_draft_write_obligation("整篇重写，推倒重来")
+        self.assertEqual(d["tool_family"], "rewrite_draft")
+
+    def test_whole_rewrite_with_constraint(self):
+        d = detect_canonical_draft_write_obligation("全文重写，但保留原来的章节结构")
+        self.assertEqual(d["tool_family"], "rewrite_draft")
+
+    def test_section_strong_change(self):
+        # "改强" 不是关键词 — detector 不识别（known limitation）
+        d = detect_canonical_draft_write_obligation("第二章太弱了，改强一点")
+        self.assertIsNone(d)
+
+    def test_continue_with_export(self):
+        # mixed intent — detector 只输出 first match (continue)
+        d = detect_canonical_draft_write_obligation("继续写到5000字，然后导出")
+        self.assertEqual(d["tool_family"], "continue")
 
 
 if __name__ == "__main__":
