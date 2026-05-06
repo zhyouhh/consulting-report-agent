@@ -41,6 +41,28 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 - 禁止创建 `gate-control.md`
 - 写 `outline.md` / `research-plan.md` 前必须先 `web_search → fetch_url → 写入 notes.md/references.md`，门禁在 `backend/chat.py`（`NON_PLAN_WRITE_ALLOW_KEYWORDS`、`FILE_UPDATE_VERBS`、证据计数逻辑）
 
+## S4 写正文工具（2026-05-06 redesign）
+
+S4 阶段（大纲已确认）model 通过以下 4 个**专用工具**修改 `content/report_draft_v1.md`，统一在 `backend/chat.py:_execute_tool` 派发：
+
+| 工具 | 用途 | 关键约束 |
+|---|---|---|
+| `append_report_draft(content)` | 起草 / 续写 / 写下一章 | 首次起草 draft 不存在时跳过 read-before-write check |
+| `rewrite_report_section(content)` | 重写章节（user 说"重写第N章"） | `content` 必须 `## ` 开头 + 仅 1 个 h2 + 长度 ≤ `max(3000, 3*snapshot.length)`；后端用 `resolve_section_target` 自己定位章节 snapshot |
+| `replace_report_text(old, new)` | 文字替换（"把 X 改成 Y"） | `old` 必须在 draft 中**唯一**出现 |
+| `rewrite_report_draft(content)` | 整篇重写（"整篇重写"/"推倒重来"） | `content` 必须 `# ` 开头 + ≥ 1 个 `## ` + 长度 ≤ `max(8000, 2*current.length)` |
+
+每个工具入口 inline 调 6 个 invariant check helpers（stage / outline / mixed-intent / mutation-limit / read-before-write+mtime / fetch_url-pending），全部定义在 `backend/report_writing.py`（pure functions，无 `chat.py` 反向 import）。后端用 preflight 已 resolve 的 snapshot 自己控制 `old_string`——model 完全不复述大段文本，结构性绕开 gemini-3-flash 等小模型的复述能力约束。
+
+**关键约束**：
+- 不要对 `content/report_draft_v1.md` 用通用 `edit_file` / `write_file`，legacy gate 已只接受这 4 个语义工具（chat.py:5620 + 6081 satisfaction check 白名单）
+- 一轮一改：`turn_context["canonical_draft_mutation"]` 限制每轮 ≤ 1 次 canonical write
+- read-before-write：先 `read_file` 才能改（首次起草除外）；mtime 变了要重读
+
+**Turn-end 对账**：`_chat_*_unlocked` no-tool-call 分支检测 `canonical_draft_write_obligation` set + 0 mutation + assistant 文本声称已写 → 注入 corrective user message + retry。
+
+**历史背景**：原 `<draft-action>` tag system + classifier + gate + scope enforcement 整套（含 fix4 v5 amendment）已于 2026-05-06 整体删除（净减 6300+ 行）。详见 `docs/superpowers/specs/2026-05-05-report-tools-redesign-design.md` + `docs/superpowers/cutover_report_2026-05-06_tools-redesign.md`。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
