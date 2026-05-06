@@ -7,6 +7,7 @@ backend/static/
 .omc/
 .codepilot-uploads/
 .claude/
+.serena/
 reality_test/
 *.pyc
 __pycache__/

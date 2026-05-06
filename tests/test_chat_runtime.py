@@ -9724,6 +9724,10 @@ class RewriteReportSectionToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         )
         self.assertEqual(result.get("status"), "error")
         self.assertIn("本轮已经修改过", result.get("message", ""))
+        self.assertIn("当前", result.get("message", ""))
+        self.assertIn("report_progress", result)
+        self.assertGreater(result["report_progress"]["current_count"], 0)
+        self.assertFalse(result["report_progress"]["meets_target"])
 
     def test_draft_missing_rejects(self):
         handler = self._make_handler_with_project()
@@ -9887,6 +9891,10 @@ class ReplaceReportTextToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         )
         self.assertEqual(result.get("status"), "error")
         self.assertIn("本轮已经修改过", result.get("message", ""))
+        self.assertIn("当前", result.get("message", ""))
+        self.assertIn("report_progress", result)
+        self.assertGreater(result["report_progress"]["current_count"], 0)
+        self.assertFalse(result["report_progress"]["meets_target"])
 
     def test_stage_pre_s4_rejects(self):
         handler = self._make_handler_with_project()
@@ -10080,6 +10088,10 @@ class RewriteReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         )
         self.assertEqual(result.get("status"), "error")
         self.assertIn("本轮已经修改过", result.get("message", ""))
+        self.assertIn("当前", result.get("message", ""))
+        self.assertIn("report_progress", result)
+        self.assertGreater(result["report_progress"]["current_count"], 0)
+        self.assertFalse(result["report_progress"]["meets_target"])
 
     def test_draft_missing_rejects(self):
         handler = self._make_handler_with_project()
@@ -10223,6 +10235,10 @@ class AppendReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         )
         self.assertEqual(result.get("status"), "error")
         self.assertIn("本轮已经修改过", result.get("message", ""))
+        self.assertIn("当前", result.get("message", ""))
+        self.assertIn("report_progress", result)
+        self.assertGreater(result["report_progress"]["current_count"], 0)
+        self.assertFalse(result["report_progress"]["meets_target"])
 
     def test_fetch_url_pending_rejects(self):
         handler = self._make_handler_with_project()

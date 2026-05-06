@@ -1,22 +1,27 @@
 # Current Worklist
 
-最后更新：2026-05-06（Tools redesign 已完成；打包态 Task 6.3 五轮 smoke 全绿；本地已在 `main` 收尾，`git push` 仍等 user 明确指令。详见"最近已解决"第 0 条 + cutover report `docs/superpowers/cutover_report_2026-05-06_tools-redesign.md`）
+最后更新：2026-05-07（S4 mutation-limit 真实字数提示已修复、打包并通过 packaged mock OpenAI smoke；Tools redesign 已完成并 push）
 
 ## 当前未解决 / 待验证
 
-0a. **Push to origin/main（等 user 明确说 push）**
-- 状态：`本地 main 已完成收尾；按项目约定不自动 push`
-- 下一步：等 user 说 "push" 后再执行 `git push origin main`
-
-0b. **Open issues for next session**（low priority）
-- **Streaming retry timing**（Task 3 quality r1 deferred to fix5）：`_chat_stream_unlocked` 中 obligation retry 在 stream 已 yield 之后发生；user 可能看到虚假"已修改"文本 + 后续 corrective msg。code comment at `backend/chat.py:4091` 已标记 fix5 reference。触发条件：cutover smoke 中 model 撒谎 + streaming 模式
-- **Detector regex 扩展已过 smoke 但未单独 review**（Task 6.1+6.2 implementer 自主改）：`_OBLIGATION_REPLACE_RE` 放宽 + 新加 `_OBLIGATION_SECTION_CHANGE_RE` + 修改 `test_section_strong_change` 期望。2026-05-06 打包态 5-session smoke 未发现 false positive；后续若扩展更多中文意图，仍建议走 spec/quality review
-- **旧 app 残留进程**：PID `48620` 仍存在但不占 8080，当前用户 `Stop-Process` 返回"拒绝访问"。本轮重建标准 `dist\咨询报告助手\` 成功，未发现 `dist/*.locked-*` 目录残留
+- 暂无当前阻塞项；下一批工作从下方待开始条目中择优进入。
 
 ## 最近已解决
 
+0b. **S4 mutation-limit 二次写入真实字数提示（2026-05-07）**
+- 状态：`已修复并打包验证`
+- 问题：模型同一轮第二次调用 `append_report_draft` 被“一轮一改”guard 拦截后，旧错误只说“本轮已经修改过”，没有带真实字数；后续 assistant free text 可能自行估算并误称已达标。
+- 修复：4 个 canonical draft 工具在 mutation-limit error 上统一回传 `report_progress`，错误文案包含“当前真实字数：x/y”和是否仍需补全，明确要求模型下一轮继续，不得声称达标。
+- 验证：4 个 targeted regression passed；semantic draft tools + obligation guard 扩展回归 `82 passed, 1 warning`；`build.bat` 重打包成功；新 exe 通过 mock OpenAI `/api/chat/stream` smoke（`read_file → append 成功 → 第二次 append 被 guard 拦截`，stream 与完整 tool payload 均含真实进度）。
+
+0a. **流式输出体感 + open issues 关闭（2026-05-06）**
+- 状态：`已关闭`
+- 流式体感：前端 flush 修复 + 读流超时友好报错已生效，用户确认当前体感正常
+- Streaming retry timing / detector regex 扩展：打包态 5-session smoke 未触发 false positive，旧 app 残留进程不影响功能，整体关闭
+- Push to origin/main：已完成
+
 0. **Tools redesign 实施完成并通过打包态 6.3 smoke（2026-05-06）**
-- 状态：`Tasks 1-6.2 全部 codex spec+quality 双轮 review APPROVED；2026-05-06 补 obligation tool-family guard；根目录 dist 重建；打包态 Task 6.3 五轮 smoke 全绿；本地 main 收尾完成，push 等 user 明确指令`
+- 状态：`Tasks 1-6.2 全部 codex spec+quality 双轮 review APPROVED；2026-05-06 补 obligation tool-family guard；根目录 dist 重建；打包态 Task 6.3 五轮 smoke 全绿；本地 main 已 push origin`
 - 实施 commits（17 commits this implementation phase，全在 local branch `claude/phase2-draft-action-tag`）：
   - **Task 1**（4 commits）：`9d183df` `b80413c` `9e54d88` `9cd071d` — `backend/report_writing.py` + 41 helper tests
   - **Task 2**（4 commits）：`292bf6f` `68eb8a2` `2717760` `43b6c68` — turn_context fields + obligation detector + read_file mtime hook
@@ -148,13 +153,7 @@
 - 测试基线：spec 5 轮 / plan 3 轮 codex review；实施期 19 个 task 各 commit 跑 review
 - 结论：1a Bug C ✅ / 1b Bug 1 ✅ / 1b Bug 3 ✅ 全部由本块覆盖，无需独立追踪
 
-2. 流式输出体感
-- 状态：`待验证`
-- 来源：原 `debug-backlog` 第 1 条
-- 现状：前端正常结束时的强制 flush 已修；默认通道读流超时和友好报错也已修。
-- 仍需确认：真实 exe 里是否还会出现"正文不是平滑流出，而是一大段集中冒出来"的体感问题。
-
-3. 新建项目表单与废 UI 整理
+2. 新建项目表单与废 UI 整理
 - 状态：`待开始`
 - 目标：把"填了像没填"的字段、重复输入项和旧流程遗留 UI 一次性清干净。
 - 当前方向：
@@ -164,23 +163,23 @@
   - 提高项目类型、主题、目标读者、篇幅等字段在初始化和首轮交互中的利用率
 - 关联：Task 7 的 `length_fallback` chip 目前只是非交互提示，因为 `ProjectCreateModal` 没有 edit 模式；如果本项做了"新建项目表单改造 + 加 edit 模式"，可以顺便让 chip 点击打开编辑面板。
 
-4. 默认渠道文案与默认模型决策
+3. 默认渠道文案与默认模型决策
 - 状态：`待开始`
 - 目标：把"推荐/保证可用"类表述改成更中性的"默认渠道 / 开箱即用"。
 - 待定项：
   - 默认模型是否从 `gemini-3-flash` 调整为 `gpt-5.4`
   - 设置页、README、打包文档里的相关表述统一
 
-5. `draw.io skill` 评估
+4. `draw.io skill` 评估
 - 状态：`待开始`
 - 目标：判断它对咨询报告场景是否真有价值，还是只会增加复杂度。
 
-6. 前端生产包优化
+5. 前端生产包优化
 - 状态：`待开始`
 - 现状：`vite build` 已通过，但主 JS chunk 仍接近 `1 MB`。
 - 目标：在不引入复杂度失控的前提下做基本拆包，降低首屏和构建产物压力。
 
-7. 技术债清理
+6. 技术债清理
 - 状态：`待开始`
 - 当前明确项：
   - `pydantic` deprecation warning 仍存在
@@ -188,7 +187,7 @@
 
 8. ~~聊天与文件预览复制体验~~ — ✅ 已修，commit `341de44`。根因：PyWebView 的 WebView2 在 Win 下对非输入元素默认禁选；通过 `.selectable-content` 工具类（`-webkit-user-select: text` + `*` 子选择器）在 ChatPanel 气泡 + FilePreviewPanel 预览区放开。右上角复制按钮保留。已进"最近已解决"。
 
-## 最近已解决
+## 历史已解决
 
 0. ⭐ **context-signal-and-intent-tag Phase 2a 实施完成（2026-05-05，13 commits 已合 main）**
 - 状态：`Phase 2a 13/13 task done + 5 fix（reviewer catch 真问题）；待 fix4 修 section/replace fallback 后进 Phase 3`

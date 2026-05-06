@@ -3906,7 +3906,7 @@ class ChatHandler:
             check_no_fetch_url_pending(self._turn_context),
         ):
             if err:
-                return {"status": "error", "message": err}
+                return self._canonical_draft_tool_error_result(project_id, err)
 
         err = check_read_before_write_canonical_draft(
             self._turn_context, self.skill_engine, project_id, require_read=True,
@@ -3981,7 +3981,7 @@ class ChatHandler:
             check_no_fetch_url_pending(self._turn_context),
         ):
             if err:
-                return {"status": "error", "message": err}
+                return self._canonical_draft_tool_error_result(project_id, err)
 
         err = check_read_before_write_canonical_draft(
             self._turn_context, self.skill_engine, project_id, require_read=True,
@@ -4046,7 +4046,7 @@ class ChatHandler:
             check_no_fetch_url_pending(self._turn_context),
         ):
             if err:
-                return {"status": "error", "message": err}
+                return self._canonical_draft_tool_error_result(project_id, err)
 
         err = check_read_before_write_canonical_draft(
             self._turn_context, self.skill_engine, project_id, require_read=True,
@@ -4116,7 +4116,7 @@ class ChatHandler:
             check_no_fetch_url_pending(self._turn_context),
         ):
             if err:
-                return {"status": "error", "message": err}
+                return self._canonical_draft_tool_error_result(project_id, err)
 
         project_path = self.skill_engine.get_project_path(project_id)
         draft_exists = bool(project_path and (project_path / self.skill_engine.REPORT_DRAFT_PATH).exists())
@@ -5800,6 +5800,31 @@ class ChatHandler:
             f"已写入 {self.skill_engine.REPORT_DRAFT_PATH}；"
             f"当前 {current_count}/{turn_target_count} 字，{status_text}"
         )
+
+    def _canonical_draft_tool_error_result(self, project_id: str, message: str) -> Dict:
+        result = {"status": "error", "message": message}
+        if "本轮已经修改过正文草稿一次" not in message:
+            return result
+
+        snapshot = self._canonical_draft_progress_snapshot(project_id)
+        if not isinstance(snapshot, dict):
+            return result
+
+        result.update(self._canonical_draft_progress_response_payload(snapshot))
+        report_progress = snapshot.get("report_progress")
+        if not isinstance(report_progress, dict):
+            return result
+
+        current_count = int(report_progress.get("current_count") or 0)
+        turn_target_count = int(snapshot.get("turn_target_count") or 0)
+        if turn_target_count <= 0:
+            turn_target_count = int(report_progress.get("target_word_count") or 0)
+        status_text = "已达到本轮目标。" if snapshot.get("turn_target_met") else "仍需继续补全。"
+        result["message"] = (
+            f"{message}。当前真实字数：{current_count}/{turn_target_count} 字，"
+            f"{status_text}请提示用户下一轮继续扩写，不要声称已达标。"
+        )
+        return result
 
     def _validate_canonical_draft_turn_mutation_limit(
         self,
