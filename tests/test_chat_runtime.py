@@ -10175,6 +10175,50 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
+class AppendReportDraftFollowupStateTests(_WriteToolTestMixin, ChatRuntimeTests):
+    """Spec §3.6: append_report_draft preserves progress for follow-up state."""
+
+    def test_append_under_target_preserves_progress_snapshot(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        handler._build_turn_context(self.project_id, "开始写报告")
+
+        result = handler._tool_append_report_draft(
+            self.project_id,
+            content="## 第一章 引言\n\n" + ("正文内容" * 60),
+        )
+
+        mutation = handler._turn_context.get("canonical_draft_mutation")
+        self.assertEqual(result.get("status"), "success", msg=result)
+        self.assertIsInstance(mutation, dict)
+        self.assertEqual(mutation["tool"], "append_report_draft")
+        self.assertEqual(mutation["path"], "content/report_draft_v1.md")
+        self.assertIn("progress_snapshot", mutation)
+        snapshot = mutation["progress_snapshot"]
+        self.assertLess(
+            snapshot["report_progress"]["current_count"],
+            snapshot["turn_target_count"],
+        )
+
+        handler._persist_draft_followup_state_for_turn(
+            self.project_id,
+            "已写入正文，当前字数仍需继续补全。",
+            user_message="开始写报告",
+        )
+        saved = handler._load_conversation_state(self.project_id)["draft_followup_state"]
+        self.assertIsNotNone(saved)
+        self.assertTrue(saved["reported_under_target"])
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in AppendReportDraftFollowupStateTests.__dict__
+    ):
+        setattr(AppendReportDraftFollowupStateTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 class ReportWriteToolArgumentTypeTests(_WriteToolTestMixin, ChatRuntimeTests):
     def test_rewrite_report_section_rejects_non_string_content_before_generic_exception(self):
         handler = self._make_handler_with_project()

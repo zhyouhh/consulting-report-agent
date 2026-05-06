@@ -9,7 +9,6 @@ import requests
 import socket
 import threading
 import time
-import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, List
@@ -109,7 +108,7 @@ def stream_split_safe_tail(buffer: str) -> tuple[str, str]:
     if earliest_idx != -1:
         return buffer[:earliest_idx], buffer[earliest_idx:]
 
-    # Rule 2: 末尾是某 marker 的前缀（"<draft-act" 等）
+    # Rule 2: 末尾是 stage-ack marker 的前缀
     for marker in _TAIL_GUARD_MARKERS:
         marker_len = len(marker)
         max_overlap = min(marker_len - 1, len(buffer))
@@ -3929,10 +3928,11 @@ class ChatHandler:
             },
         )
         if result.get("status") == "success":
-            self._turn_context["canonical_draft_mutation"] = {
-                "tool": "rewrite_report_section",
-                "label": target["label"],
-            }
+            existing = self._turn_context.get("canonical_draft_mutation") or {}
+            merged = dict(existing)
+            merged["tool"] = "rewrite_report_section"
+            merged["label"] = target["label"]
+            self._turn_context["canonical_draft_mutation"] = merged
         return result
 
     def _tool_replace_report_text(
@@ -3995,10 +3995,11 @@ class ChatHandler:
             },
         )
         if result.get("status") == "success":
-            self._turn_context["canonical_draft_mutation"] = {
-                "tool": "replace_report_text",
-                "old_len": len(old),
-            }
+            existing = self._turn_context.get("canonical_draft_mutation") or {}
+            merged = dict(existing)
+            merged["tool"] = "replace_report_text"
+            merged["old_len"] = len(old)
+            self._turn_context["canonical_draft_mutation"] = merged
         return result
 
     def _tool_rewrite_report_draft(
@@ -4068,9 +4069,10 @@ class ChatHandler:
             },
         )
         if result.get("status") == "success":
-            self._turn_context["canonical_draft_mutation"] = {
-                "tool": "rewrite_report_draft",
-            }
+            existing = self._turn_context.get("canonical_draft_mutation") or {}
+            merged = dict(existing)
+            merged["tool"] = "rewrite_report_draft"
+            self._turn_context["canonical_draft_mutation"] = merged
         return result
 
     def _tool_append_report_draft(
@@ -4105,9 +4107,10 @@ class ChatHandler:
 
         result = self._do_append_report_draft(project_id, content)
         if result.get("status") == "success":
-            self._turn_context["canonical_draft_mutation"] = {
-                "tool": "append_report_draft",
-            }
+            existing = self._turn_context.get("canonical_draft_mutation") or {}
+            merged = dict(existing)
+            merged["tool"] = "append_report_draft"
+            self._turn_context["canonical_draft_mutation"] = merged
         return result
 
     def _do_append_report_draft(self, project_id: str, content: object) -> Dict:
