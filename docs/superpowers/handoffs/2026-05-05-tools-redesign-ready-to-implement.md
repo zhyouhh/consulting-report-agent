@@ -1,5 +1,7 @@
 # Handoff — Tools Redesign Spec/Plan APPROVED, Ready to Implement Task 1-6
 
+> **⚠️ SUPERSEDED 2026-05-06**: 实施已完成。下一步看 [`2026-05-06-tools-redesign-impl-done-smoke-pending.md`](2026-05-06-tools-redesign-impl-done-smoke-pending.md)（cutover smoke 5 sessions pending + merge pending）。本文件保留作为历史 context。
+
 **Created:** 2026-05-05 evening (replaces `2026-05-05-phase2a-fully-done-phase3-ready.md` which is now history)
 **Status:** Spec + plan 已通过 codex 双轮 review，待实施 Task 1-6（按 spec §6.4 + plan 6 commit 顺序）。
 

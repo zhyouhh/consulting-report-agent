@@ -1,27 +1,58 @@
 # Current Worklist
 
-最后更新：2026-05-05 深夜（Phase 2a fix4 + 后续 brainstorm 决定 redesign：4 个专用工具替换 `<draft-action>` tag + gate fallback + scope enforcement 整套机制；spec 4 轮 codex review APPROVED_WITH_NOTES + plan 2 轮 codex review APPROVED；待实施 Task 1-6，详见"当前未解决" 0a + "最近已解决" 第 0 条 + handoff `docs/superpowers/handoffs/2026-05-05-tools-redesign-ready-to-implement.md`）
+最后更新：2026-05-06（Tools redesign Tasks 1-6.2 实施完成；Task 6.3 cutover smoke 5 sessions PENDING — 待 user 验收时手动跑；Task 6.5 local merge + push pending；详见"当前未解决" 0a + "最近已解决" 第 0/0a 条 + handoff `docs/superpowers/handoffs/2026-05-06-tools-redesign-impl-done-smoke-pending.md`）
 
 ## 当前未解决 / 待验证
 
-0a. **Tools redesign — 4 工具替换 fix4 整套 tag/gate/scope 机制（spec/plan 已 APPROVED，待实施）**
-- 状态：`spec + plan 全套通过 review，待 Task 1-6 实施`（2026-05-05 深夜决定）
-- 触发：fix4 cutover Session B 14 次失败 evidence-based 分析根因——backend 要求 model `edit_file.old_string` 必须等于章节完整原文（精确字符串等价），gemini-3-flash 实测做不到精确复述大段文本
-- 核心修法：让"修改章节"成为**专用工具** `rewrite_report_section(content)`，backend 自己用 preflight resolve 的 `rewrite_target_snapshot` 当 old_string，model 只给 new content。结构性消除 model 控制 old_string 的需求
-- Scope 扩展为 4 工具：`append_report_draft` 重构 + `rewrite_report_section` 新增 + `replace_report_text` 新增 + `rewrite_report_draft` 新增；`<stage-ack>` tag 不动
-- 删除：`<draft-action>` 系列 + classifier + gate + scope enforcement + 各 record helpers + 大量常量（净删 ~1300 行 backend + 一批 dead 测试代码）
-- spec：`docs/superpowers/specs/2026-05-05-report-tools-redesign-design.md` (4 轮 review v1→v4-clean APPROVED_WITH_NOTES，HEAD `7f0d207` 已 push origin)
-- plan：`docs/superpowers/plans/2026-05-05-report-tools-redesign.md` (2 轮 review v1→v2 APPROVED，HEAD `1030d7b` local，待 push)
-- 6 大 Task 拆分（plan §commit map）：(1) helpers module + tests, (2) turn_context 字段 + obligation detector + read_file mtime hook, (3) 4 工具实现 + ToolTests + retry, (4) SKILL.md + reject wording, (5) the big delete, (6) cutover smoke 5 sessions + handoff 更新
-- 预估总 ~5-6 小时（含 codex dispatch + double review per task）
-- fix5 candidate (model new_string narrowing) 被结构性修了——本 redesign 让 backend 自己控制 old_string，model 不需要缩窄；fix5 不再独立 track
+0a. **Tools redesign — Task 6.3 cutover smoke 5 sessions PENDING（待 user 验收）**
+- 状态：`Tasks 1-6.2 实施完成，0 fail in full pytest，dist build 86.09MB OK；Task 6.3 cutover smoke 5 sessions 待跑`
+- 工作内容（待 user 跑）：5 个 sessions 每个验证 model 选对新工具 + 写盘成功 + canonical_draft_mutation set
+  - A "开始写报告吧" → `append_report_draft`
+  - B "把第二章重写一下" → `rewrite_report_section`
+  - C "把'团队防御蓝领'改成'团队防御核心'" → `replace_report_text`
+  - D "继续写第三章" → `append_report_draft`
+  - E "整篇重写，按 outline 用更精炼的语言重写正文" → `rewrite_report_draft`
+- 怎么跑：详见 handoff `docs/superpowers/handoffs/2026-05-06-tools-redesign-impl-done-smoke-pending.md`（含步骤 + reality_test backup convention）
+- 预期：≥ 4/5 model 选对工具 + 写盘成功
+- 完成后：填实测数据到 `docs/superpowers/cutover_report_2026-05-06_tools-redesign.md` + 走 Task 6.5 local merge
 
-0. **Tools redesign spec + plan 完整 review 通过（2026-05-05 深夜）**
-- 状态：`spec + plan 全套通过 codex 双轮 review，本地 main HEAD 1030d7b（plan v2 commit）`
-- spec stage：4 commits 4 轮 review（d5bb758 → 5cb5f6b → a936bfb → 2c355c8 → 7f0d207），最终 APPROVED_WITH_NOTES。Reviewer 各轮 catch 真问题：r1 4 结构性 gap (write-obligation / full-draft tool / mutation limit / mtime tracking) → r2 内部一致性 issues (retry 位置 / keyword 不同步 / mutation 全 4 工具列入) → r3 cross-ref stale → r4 1 个最后小 row 矛盾
-- plan stage：2 commits 2 轮 review（1226a67 → 1030d7b），最终 APPROVED。R1 catch placeholder + push 命令跟全局 CLAUDE.md "git push 等我说" 冲突 + TDD 顺序问题
-- 本会话整体输出：spec 788 行 + plan 2203 行 + 5 个 cold-start handoff/spec/plan reviewer prompts (`.codex-run/task-tools-redesign-*-prompt.md` 系列)
-- 详见 [handoff doc (active)](superpowers/handoffs/2026-05-05-tools-redesign-ready-to-implement.md) — 含完整 6 Task 清单 + 关键设计要点 + 实施前 grep 命令
+0b. **Task 6.5 — local merge to main + push（等 user 验收 6.3 后 explicit 指令）**
+- 状态：`实施 commit chain 全在 local branch claude/phase2-draft-action-tag (HEAD d482235)，未合并到 main`
+- 等 user 验收 cutover smoke 后：
+  - `git checkout main && git merge --ff-only claude/phase2-draft-action-tag`
+  - 等 user 说 "push" → `git push origin main`（per `~/.claude/CLAUDE.md` "git push 等我说"）
+
+0c. **Open issues for next session**（low priority）
+- **Streaming retry timing**（Task 3 quality r1 deferred to fix5）：`_chat_stream_unlocked` 中 obligation retry 在 stream 已 yield 之后发生；user 可能看到虚假"已修改"文本 + 后续 corrective msg。code comment at `backend/chat.py:4091` 已标记 fix5 reference。触发条件：cutover smoke 中 model 撒谎 + streaming 模式
+- **Detector regex 扩展未经 review**（Task 6.1+6.2 implementer 自主改）：`_OBLIGATION_REPLACE_RE` 放宽 + 新加 `_OBLIGATION_SECTION_CHANGE_RE` + 修改 `test_section_strong_change` 期望。是 plan 内部不一致的合理修正但未走 spec/quality 双轮 review。cutover smoke 时 watch 是否 false positive
+- **dist 进程锁定**：PID `48620` 占着旧 dist；`dist/咨询报告助手.locked-20260506-090048/` 等 user 关闭 app 后清理
+
+## 最近已解决
+
+0. **Tools redesign 实施完成（Tasks 1-6.2，2026-05-06）**
+- 状态：`Tasks 1-6.2 全部 codex spec+quality 双轮 review APPROVED，pytest 360/0 in full chat_runtime; cutover smoke + merge 收尾pending`
+- 实施 commits（17 commits this implementation phase，全在 local branch `claude/phase2-draft-action-tag`）：
+  - **Task 1**（4 commits）：`9d183df` `b80413c` `9e54d88` `9cd071d` — `backend/report_writing.py` + 41 helper tests
+  - **Task 2**（4 commits）：`292bf6f` `68eb8a2` `2717760` `43b6c68` — turn_context fields + obligation detector + read_file mtime hook
+  - **Task 3**（7 commits 含 fix1）：`0c0f387` `c75ff0d` `0404f67` `1644620` `400e433` `dd5a322` + fix1 `5d88e2b` — 4 tools impl + 51 ToolTests + retry hook + Critical fix (legacy gate accepts semantic edit tools)
+  - **Task 4**（2 commits）：`fa3088c` `3f28957` — SKILL.md §S4 重写 + chat.py user_action wording
+  - **Task 5**（5 commits 含 fix1）：`911a9d2` `8bd0abc` `bac9112` `4ab5010` + fix1 `c53b5f3` — the big delete (-6594 lines) + StageAckRegression + wire append dispatch (Task 3 deferral 关闭) + canonical_draft_mutation merge fix
+  - **Task 6.1+6.2**（1 commit）：`d482235` — dist rebuild 86.09MB / 3.16 min + tool-selection benchmark schema sanity
+- Net diff：17 files changed, **+4844 / -6535 = -1691 lines net**
+- Test acceptance：
+  - `pytest tests/test_chat_runtime.py`: **360 passed, 1 skipped, 0 failed** in 1481s（之前 36 pre-existing fails 全部在 Task 5 删除的 deprecated test classes 里，自然消失）
+  - `tests/test_report_writing.py`: 41/41
+  - `tests/test_tool_selection_benchmark.py`: 4/4
+  - frontend `node --test tests/`: 168/168 unchanged
+- Review iterations: Task 3 + Task 5 各走 2 轮 quality review (r1 With fixes → fix1 → r2 Yes)；其他 task 一轮 APPROVED_WITH_NOTES
+- Build：`dist/咨询报告助手/` 86.09 MB（baseline 91 MB ±5%）
+- 详见 [cutover report](superpowers/cutover_report_2026-05-06_tools-redesign.md) + [handoff (active)](superpowers/handoffs/2026-05-06-tools-redesign-impl-done-smoke-pending.md)
+
+0a. **Tools redesign spec + plan review 通过（2026-05-05 深夜，已 superseded by 0 entry above）**
+- 状态：`spec + plan 全套通过 codex 双轮 review`（HEAD `1030d7b` plan v2）
+- spec stage：4 commits 4 轮 review（d5bb758 → 5cb5f6b → a936bfb → 2c355c8 → 7f0d207），最终 APPROVED_WITH_NOTES
+- plan stage：2 commits 2 轮 review（1226a67 → 1030d7b），最终 APPROVED
+- 本会话整体输出：spec 788 行 + plan 2203 行 + 5 个 reviewer prompts
 
 1. **Phase 2a fix4 完整集合 — section/replace keyword fallback 实施 + 双轮 review APPROVED + cutover smoke 验证（2026-05-05 17:00-19:00，已被 redesign 取代）**
 - 状态：`已合 main + 已 push origin`（main HEAD `07a8269`）
