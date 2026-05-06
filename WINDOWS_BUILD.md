@@ -45,7 +45,7 @@ npm --version
 
 ### 方法一：一键打包
 
-1. 双击运行 [build.bat](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/build.bat)
+1. 双击运行 [build.bat](build.bat)
 2. `build.bat` 会自动创建并复用项目根目录的 `.venv`
 3. 提前准备 `managed_client_token.txt`，或设置环境变量 `CONSULTING_REPORT_MANAGED_CLIENT_TOKEN`
    这个文件必须是 `/client` 使用的 client token，不是上游 API key
@@ -71,7 +71,7 @@ npm install
 npm run build
 cd ..
 
-.venv\Scripts\python -m PyInstaller consulting_report.spec
+.venv\Scripts\python -m PyInstaller --noconfirm consulting_report.spec
 ```
 
 打包脚本会先请求 `https://newapi.z0y0h.work/client/v1/models` 预检 token；
@@ -92,7 +92,8 @@ cd ..
 
 如果你不走 `build.bat`，而是直接运行 `pyinstaller consulting_report.spec`，
 就必须先手工把私有搜索池文件放到仓库根目录，并命名为 `managed_search_pool.json`，
-同时也建议使用项目自己的 `.venv`，不要直接用全局 Python 或 Anaconda 环境。
+同时也建议使用项目自己的 `.venv`，不要直接用全局 Python 或 Anaconda 环境。加 `--noconfirm`
+可以覆盖已有的 `dist\咨询报告助手\`，便于重复打包。
 
 ## 打包产物
 

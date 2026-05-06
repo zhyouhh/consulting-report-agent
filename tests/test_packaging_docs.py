@@ -12,6 +12,7 @@ class PackagingDocsTests(unittest.TestCase):
         self.assertIn("build.ps1", wrapper)
         self.assertIn("consulting_report.spec", script)
         self.assertIn("/client/v1/models", script)
+        self.assertIn("--noconfirm", script)
         self.assertIn(".venv", script)
         self.assertIn('"python"', script.lower())
         self.assertIn('"venv"', script.lower())

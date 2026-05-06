@@ -219,6 +219,17 @@ class ChatHandler:
         "replace_report_text",
         "rewrite_report_draft",
     })
+    CANONICAL_DRAFT_OBLIGATION_TOOL_BY_FAMILY = {
+        "begin": "append_report_draft",
+        "continue": "append_report_draft",
+        "rewrite_section": "rewrite_report_section",
+        "replace_text": "replace_report_text",
+        "rewrite_draft": "rewrite_report_draft",
+    }
+    CANONICAL_DRAFT_OBLIGATION_READ_TOOLS = frozenset({
+        "read_file",
+        "read_material_file",
+    })
     REPORT_BODY_INSPECT_WORD_COUNT_KEYWORDS = (
         "现在多少字",
         "字数多少",
@@ -2322,8 +2333,16 @@ class ChatHandler:
         return self.skill_engine._has_substantive_body(text)
 
     def _get_missing_expected_writes(self, assistant_message: str, successful_writes: set[str]) -> list[str]:
+        if self._canonical_draft_obligation_satisfied():
+            return []
         expected = self._expected_plan_writes_for_message(assistant_message)
         return sorted(path for path in expected if path not in successful_writes)
+
+    def _canonical_draft_obligation_satisfied(self) -> bool:
+        return bool(
+            self._turn_context.get("canonical_draft_write_obligation")
+            and self._successful_canonical_draft_mutation()
+        )
 
     def _build_missing_write_feedback(self, missing_files: list[str]) -> str:
         joined = "、".join(f"`{path}`" for path in missing_files)
@@ -3647,6 +3666,9 @@ class ChatHandler:
                 if isinstance(raw_arguments, str)
                 else dict(raw_arguments or {})
             )
+            obligation_guard = self._guard_canonical_draft_obligation_tool(func_name)
+            if obligation_guard is not None:
+                return obligation_guard
 
             if func_name == "write_file":
                 return self._execute_plan_write(
@@ -5462,6 +5484,34 @@ class ChatHandler:
         self._inject_synthetic_user_correction(corrective, current_turn_messages)
         self._turn_context["obligation_retry_fired"] = True
         return True
+
+    def _expected_tool_for_canonical_draft_obligation(self) -> str | None:
+        obligation = self._turn_context.get("canonical_draft_write_obligation")
+        if not isinstance(obligation, dict):
+            return None
+        tool_family = obligation.get("tool_family")
+        if not isinstance(tool_family, str):
+            return None
+        return self.CANONICAL_DRAFT_OBLIGATION_TOOL_BY_FAMILY.get(tool_family)
+
+    def _guard_canonical_draft_obligation_tool(self, func_name: str) -> dict | None:
+        expected_tool = self._expected_tool_for_canonical_draft_obligation()
+        if not expected_tool:
+            return None
+        if func_name == expected_tool or func_name in self.CANONICAL_DRAFT_OBLIGATION_READ_TOOLS:
+            return None
+
+        obligation = self._turn_context.get("canonical_draft_write_obligation") or {}
+        tool_family = obligation.get("tool_family") or "unknown"
+        return {
+            "status": "error",
+            "message": (
+                "本轮用户意图已经识别为正文写入任务"
+                f"（{tool_family}），请不要调用 `{func_name}`。"
+                "如需查看现有内容，可以先调用 `read_file`；随后必须调用 "
+                f"`{expected_tool}` 完成正文落盘。"
+            ),
+        }
 
     def _inject_synthetic_user_correction(
         self, text: str, current_turn_messages: List[Dict] | None = None,

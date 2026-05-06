@@ -1,6 +1,6 @@
 # Cutover Report — Tools Redesign (2026-05-06)
 
-**Status:** Implementation **DONE** through Task 6.2. Cutover smoke 5 sessions (Task 6.3) **PENDING — manual user validation**.
+**Status:** Implementation **DONE**. Packaged cutover smoke 5 sessions (Task 6.3) **PASSED** on 2026-05-06.
 
 ## What shipped
 
@@ -11,6 +11,8 @@
 - `rewrite_report_draft(content)` — 新增
 
 后端用 preflight resolved snapshot 当 old_string，model 完全不复述 — **结构性消除 fix4 cutover Session B 14 次失败的根因**（gemini-3-flash 做不到精确复述 1500 字章节原文）。
+
+Post-smoke hardening added an obligation tool-family guard: once `detect_canonical_draft_write_obligation` identifies a draft-write intent, `_execute_tool` only allows read tools plus the matching semantic draft tool. This keeps small models from drifting into web search, plan writes, generic `write_file` / `edit_file`, or the wrong semantic draft tool.
 
 ## Commit chain (26 commits this implementation)
 
@@ -37,16 +39,18 @@
 | `pytest tests/test_chat_runtime.py` | **360 passed, 1 skipped, 0 failed** in 1481s (24:41) | 36 pre-existing failures 全部消失（Task 5 删除 deprecated test classes） |
 | `pytest tests/test_report_writing.py` | **41/41 passed** | Task 1 + Task 2 helpers + detector |
 | `pytest tests/test_tool_selection_benchmark.py` | **4/4 passed** | Task 6.2 schema sanity |
+| Focused post-smoke regression | **96 passed, 1 warning** | canonical draft obligation + 4 semantic tools + report_writing + benchmark |
 | Frontend `node --test tests/` | **168/168 passed** | unchanged |
 | `python -c "import backend.chat"` | OK | post-deletion sanity |
 
 ## Build acceptance
 
-- **Build time**: 3.16 min (PyInstaller)
+- **Build time**: 3.16 min (original Task 6.2 PyInstaller build); post-smoke root rebuild completed 2026-05-06 22:00
 - **Old dist**: 86.11 MB
 - **New dist**: 86.09 MB (within ±5% of 91 MB baseline)
-- **Build script exit**: 0
-- **Note**: 旧 dist 被 PID `48620` 锁住无法删除，被 implementer rename 为 `dist/咨询报告助手.locked-20260506-090048/`，新 build 在 `dist/咨询报告助手/`。该 .locked 目录不进 git，等 user 关闭运行的 app 后可手动删除。
+- **Post-smoke exe**: `dist/咨询报告助手/咨询报告助手.exe` = 14,069,486 bytes, timestamp 2026-05-06 22:00
+- **Build script note**: `build.bat` initially failed when `dist\咨询报告助手\` already existed because PyInstaller lacked `--noconfirm`; post-smoke cleanup updated `build.ps1` to use `--noconfirm` so repeat builds overwrite the output directory.
+- **Runtime source check**: `/api/settings` confirmed `skill_dir` points to `D:\MyProject\CodeProject\consulting-report-agent\dist\咨询报告助手\_internal\skill`.
 
 ## Review iterations
 
@@ -59,38 +63,32 @@
 | 5 | 1: APPROVED_WITH_NOTES | 1: With fixes → 2: Yes | 1 Important (canonical_draft_mutation overwrite breaks draft_followup_state) → fix1 in commit `c53b5f3` merge pattern + regression test |
 | 6.1+6.2 | n/a | n/a | implementer DONE_WITH_CONCERNS (dist process lock); detector regex 扩展超出原 prompt 范围但合理修正 plan 内部不一致（Task 2.3 unit "改强" → None vs Task 6.2 benchmark "改强" → rewrite_section） |
 
-## Pending — Task 6.3 cutover smoke 5 sessions
+## Task 6.3 cutover smoke 5 sessions
 
-按 plan 应跑 5 个 sessions，每个验证 model 选对新工具 + 写盘成功 + canonical_draft_mutation set：
+打包态 5 个 sessions 已跑完，runner exit 0。Evidence: `reality_test/smoke_backups/6-3-packaged-20260506-221248/summary.json`。每轮结束后 runner 校验工具命中、文件差异和 no missing-write retry；结束时恢复 `reality_test\.consulting-report` baseline。
 
 | Session | User msg | 期望工具 | 期望行为 |
 |---|---|---|---|
-| A | "开始写报告吧" | `append_report_draft` | 写盘成功，draft 字数增加 |
-| B | "把第二章重写一下" | `rewrite_report_section` | 第二章 snapshot 替换为 model content；其他章节不动 |
-| C | "把'团队防御蓝领'改成'团队防御核心'" | `replace_report_text` | unique 字符串替换成功 |
-| D | "继续写第三章" | `append_report_draft` | append 第三章新内容 |
-| E | "整篇重写，按 outline 用更精炼的语言重写正文" | `rewrite_report_draft` | 整份草稿替换 |
-
-每个 session 之间用 mtime backup 区分 events.json。所有 sessions 跑完后填实测数据到此 cutover report。
-
-**为何 pending**：本 session 上下文已大量消耗，user 要求 cutover smoke 留到下次会话或 user 自己跑 + 验收。
+| A | "开始写报告吧" | `append_report_draft` | ✅ wrote via expected tool, draft +1493 chars |
+| B | "把第二章重写一下" | `rewrite_report_section` | ✅ 第二章 changed, other h2 sections unchanged |
+| C | "把'团队防御蓝领'改成'团队防御核心'" | `replace_report_text` | ✅ old phrase decreased, new phrase increased |
+| D | "继续写第三章" | `append_report_draft` | ✅ wrong `rewrite_report_section` / `replace_report_text` attempts blocked, then expected append succeeded |
+| E | "整篇重写，按 outline 用更精炼的语言重写正文" | `rewrite_report_draft` | ✅ generic `write_file` / `edit_file` attempts blocked, then whole-draft rewrite succeeded |
 
 ## Open issues for next session / smoke time
 
-1. **dist process lock** — `D:\MyProject\CodeProject\consulting-report-agent\.claude\worktrees\happy-jackson-938bd1\dist\咨询报告助手.locked-20260506-090048\` 仍存在，等运行 app 退出后 `rm -rf` 清理。
-2. **detector regex 扩展行为**（Task 6.1+6.2 implementer 自主改）：
+1. **Streaming retry timing**（Task 3 quality r1 deferred to fix5）：obligation retry 在 stream 已 yield content chunks 之后发生；user 可能看到"已修改"假文本 + 之后的 corrective msg。code comment at chat.py:4091 已标 reference fix5。
+2. **Detector regex 扩展行为**（Task 6.1+6.2 implementer 自主改）：
    - `_OBLIGATION_REPLACE_RE` 改宽（"正文/报告" 前缀变可选）
    - 新加 `_OBLIGATION_SECTION_CHANGE_RE` (match "第X章...改强/改弱/优化/润色/补强/加强")
    - 修改 `test_section_strong_change` 期望从 `None` → `rewrite_section`
-   - 这些扩展未经 spec/quality 双轮 review，cutover smoke 时 watch 是否引入 false positive
-3. **Streaming retry timing**（Task 3 quality r1 deferred to fix5）：obligation retry 在 stream 已 yield content chunks 之后发生；user 可能看到"已修改"假文本 + 之后的 corrective msg。code comment at chat.py:4091 已标 reference fix5。
-4. **`<draft-act` stale comment**（Task 5 quality r1 → fix1 已修，记录 only）
+   - 这些扩展未经 spec/quality 双轮 review；2026-05-06 packaged smoke 未发现 false positive，后续新增中文意图时仍建议单独 review。
+3. **Old app process** — PID `48620` remains visible as `咨询报告助手` but does not listen on 8080; current user cannot stop it (`Access denied`). Standard root `dist\咨询报告助手\` was rebuilt successfully and no `dist/*.locked-*` directory remains.
 
 ## Hand-off
 
-- Branch: `claude/phase2-draft-action-tag` (HEAD `d482235`)
-- Main not yet merged (Task 6.5 pending)
-- Origin/main: still at `7f0d207` (spec only, not yet plan/impl)
-- 等 user 验收 cutover smoke + explicit "merge / push" 指令
+- Branch: `main`
+- Local main contains the tools-redesign implementation plus post-smoke guard/build cleanup.
+- Push remains pending until user explicitly says `push`.
 
 — 控制器（claude）2026-05-06

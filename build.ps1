@@ -148,7 +148,7 @@ try {
     }
 
     Invoke-Step "[10/10] Package application..." {
-        Invoke-CommandChecked -FilePath $venvPython -Arguments @("-m", "PyInstaller", "consulting_report.spec")
+        Invoke-CommandChecked -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", "consulting_report.spec")
     }
 
     Cleanup-BundleFiles

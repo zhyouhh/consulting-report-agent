@@ -62,12 +62,13 @@ cd ..
 打包结束后自动清理或恢复原文件。
 
 ```bash
-.venv\Scripts\python -m PyInstaller consulting_report.spec
+.venv\Scripts\python -m PyInstaller --noconfirm consulting_report.spec
 ```
 
 如果你跳过 `build.bat` 直接运行 `pyinstaller consulting_report.spec`，
 那就必须先把私有搜索池文件放到仓库根目录，并命名为 `managed_search_pool.json`，
-同时也建议使用项目自己的 `.venv`，不要直接用全局 Python 环境。
+同时也建议使用项目自己的 `.venv`，不要直接用全局 Python 环境。加 `--noconfirm`
+可以覆盖已有的 `dist\咨询报告助手\`，便于重复打包。
 
 生成目录：
 

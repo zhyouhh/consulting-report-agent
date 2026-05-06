@@ -1,7 +1,7 @@
-# Handoff — Tools Redesign Implementation DONE, Cutover Smoke PENDING
+# Handoff — Tools Redesign Complete
 
 **Created:** 2026-05-06 (replaces `2026-05-05-tools-redesign-ready-to-implement.md` which is now history)
-**Status:** Tasks 1-6.2 done, **6.3 cutover smoke pending** (manual user validation), 6.4 docs updated, 6.5 not yet merged.
+**Status:** Tasks 1-6.2 done, packaged **6.3 cutover smoke passed**, docs synced, local `main` cleaned up. Push remains blocked until the user explicitly says `push`.
 
 This is the cold-start brief for the next session. Read this first.
 
@@ -20,30 +20,23 @@ This is the cold-start brief for the next session. Read this first.
 - ✅ SKILL.md §S4 改为 4-tool 表格 + chat.py user_action wording 已切
 - ✅ Old spec §4.3-§4.12 已加 SUPERSEDED banner
 
-🟡 **Pending**: Task 6.3 cutover smoke 5 sessions（启动 dist app + reality_test + 跑 5 个 user message + 验证 events / 工具调用 / 写盘）。User 决定下次会话或自己跑。
+✅ **Task 6.3**: packaged cutover smoke 5 sessions passed on 2026-05-06. Evidence: `reality_test/smoke_backups/6-3-packaged-20260506-221248/summary.json`.
 
-🟡 **Pending**: Task 6.5 merge to main（local fast-forward + 等 user explicit "push" 指令）。
+✅ **Post-smoke hardening**: added `_guard_canonical_draft_obligation_tool`, so detected draft-write intent locks the tool family to the expected semantic report tool while still allowing read tools.
 
-## Cutover smoke 5 sessions（待跑）
+🟡 **Pending**: `git push origin main` only after explicit user instruction.
+
+## Cutover smoke 5 sessions
 
 | Session | User msg | 期望工具 | 期望行为 |
 |---|---|---|---|
-| A | "开始写报告吧" | `append_report_draft` | 写盘成功，draft 字数增加 |
-| B | "把第二章重写一下" | `rewrite_report_section` | 第二章 snapshot 替换；其他章节不动 |
-| C | "把'团队防御蓝领'改成'团队防御核心'" | `replace_report_text` | unique 字符串替换成功 |
-| D | "继续写第三章" | `append_report_draft` | append 第三章 |
-| E | "整篇重写，按 outline 用更精炼的语言重写正文" | `rewrite_report_draft` | 整份草稿替换 |
+| A | "开始写报告吧" | `append_report_draft` | ✅ draft appended |
+| B | "把第二章重写一下" | `rewrite_report_section` | ✅ only 第二章 changed |
+| C | "把'团队防御蓝领'改成'团队防御核心'" | `replace_report_text` | ✅ unique phrase replaced |
+| D | "继续写第三章" | `append_report_draft` | ✅ wrong semantic tools blocked, then append succeeded |
+| E | "整篇重写，按 outline 用更精炼的语言重写正文" | `rewrite_report_draft` | ✅ generic write tools blocked, then whole-draft rewrite succeeded |
 
-每个 session 之间用 mtime backup 区分 events.json。所有完成后填实测数据到 `docs/superpowers/cutover_report_2026-05-06_tools-redesign.md`。
-
-**怎么跑**：
-1. 关闭当前运行的 dist app（PID `48620` 占着旧 dist；新 dist 在 `dist/咨询报告助手/`）
-2. `rm -rf dist/咨询报告助手.locked-20260506-090048` 清理 implementer rename 的旧 dir
-3. 启动新 dist `dist/咨询报告助手/咨询报告助手.exe`
-4. 打开 reality_test 项目（`%USERPROFILE%\.consulting-report\projects\<project_id>\`）
-5. **不要点"清空对话"按钮**（per fix4 cutover lesson — 会清 events）；如需清 chat history，重启 app
-6. backup `conversation_state.json` before each session
-7. 跑 session A → backup events → session B → backup events → ...
+Runner restored `reality_test\.consulting-report` to baseline after the smoke.
 
 ## Documentation
 
@@ -51,12 +44,12 @@ This is the cold-start brief for the next session. Read this first.
 |---|---|---|
 | Spec | `docs/superpowers/specs/2026-05-05-report-tools-redesign-design.md` | 4 轮 codex review APPROVED_WITH_NOTES (HEAD `7f0d207`) |
 | Plan | `docs/superpowers/plans/2026-05-05-report-tools-redesign.md` | 2 轮 codex review APPROVED (HEAD `1030d7b`) |
-| Cutover report | `docs/superpowers/cutover_report_2026-05-06_tools-redesign.md` | impl done, smoke pending — 完整测试 stats + commits + open issues |
-| This handoff | `docs/superpowers/handoffs/2026-05-06-tools-redesign-impl-done-smoke-pending.md` | active |
+| Cutover report | `docs/superpowers/cutover_report_2026-05-06_tools-redesign.md` | complete — implementation stats + packaged smoke results + open issues |
+| This handoff | `docs/superpowers/handoffs/2026-05-06-tools-redesign-complete.md` | active completion brief |
 | Old handoff | `docs/superpowers/handoffs/2026-05-05-tools-redesign-ready-to-implement.md` | superseded（impl 已开始） |
 | Old spec §4.3-§4.12 | `docs/superpowers/specs/2026-05-04-context-signal-and-intent-tag-design.md` §4.3 banner | superseded marker added |
 
-## Final commit chain on `claude/phase2-draft-action-tag`
+## Original implementation commit chain
 
 ```
 d482235 test(benchmark): tool-selection schema sanity benchmark           ← Task 6.2
@@ -88,6 +81,8 @@ b80413c feat(report_writing): add assistant_text_claims_modification      ← Ta
 7f0d207 docs(spec): tools-redesign v4-clean (origin/main)                 ← spec stage
 ```
 
+This chain has since been carried into local `main` with the post-smoke guard/build/docs cleanup.
+
 ## Open issues / future work
 
 1. **Streaming retry timing** (Task 3 quality r1 deferred to fix5)
@@ -105,31 +100,29 @@ b80413c feat(report_writing): add assistant_text_claims_modification      ← Ta
    - 这些扩展是 plan 内部不一致的合理修正（Task 2.3 unit "改强 → None" vs Task 6.2 benchmark "改强 → rewrite_section"），但未经 spec/quality 双轮 review
    - cutover smoke 时 watch 是否 false positive
 
-3. **dist 进程锁定**
-   - PID `48620` 占着旧 dist，无法删除
-   - Implementer 把旧 dir rename 为 `dist/咨询报告助手.locked-20260506-090048/`
-   - 新 build 在标准 path `dist/咨询报告助手/`
-   - 等用户关闭 app 后 `rm -rf dist/咨询报告助手.locked-*`
+3. **旧 app 残留进程**
+   - PID `48620` 仍显示为 `咨询报告助手`，但不占 8080
+   - 当前用户 `Stop-Process` 返回拒绝访问；本轮没有继续强行处理
+   - 标准 `dist\咨询报告助手\` 已重建成功，未发现 `dist/*.locked-*` 目录残留
 
 ## Worktree state
 
-- **Branch**: `claude/phase2-draft-action-tag` (HEAD `d482235`)
-- **main HEAD local**: `80f1c1f` (Task 5.5 实施前的 cleanup commit；尚未 fast-forward 合并 Task 1-6 commits)
-- **origin/main**: `7f0d207` (spec v4-clean 已 push)
-- **未 push commits on local**: plan stage 2 commits + cleanup 1 commit + Task 1-6.2 实施 17 commits = 20 commits ahead of origin
-- **Build**: `dist/咨询报告助手/` 86.09 MB May 6 09:04（new tools redesign build）；`dist/咨询报告助手.locked-20260506-090048/` 锁住等清理
-- **reality_test**: previous fix4 cutover artifacts；下次 smoke 前 backup + clear events
-- **Active app**: PID `48620` 持有旧 dist 文件
+- **Branch**: `main`
+- **Local state**: tools redesign + post-smoke guard/build/docs cleanup are local; push still requires explicit user instruction
+- **Build**: root `dist\咨询报告助手\` rebuilt 2026-05-06 22:00; API settings confirmed packaged `skill_dir`
+- **reality_test**: smoke runner restored `.consulting-report` to baseline after verification
+- **Active app**: no 8080 listener after stopping the packaged app launched for smoke
 
 ## Verification baselines achieved
 
 ✅ chat_runtime full pytest: 360 pass / 0 fail (was 36 pre-existing fails — 都是 deprecated test classes 删了之后消失)
 ✅ test_report_writing.py: 41/41
 ✅ test_tool_selection_benchmark.py: 4/4
+✅ post-smoke focused regression: 96 passed / 0 failed
 ✅ frontend: 168/168
 ✅ python -c "import backend.chat": ok
 ✅ dist rebuild: 86.09 MB / 3.16 min / exit 0
-🟡 cutover smoke 5 sessions: PENDING
+✅ packaged cutover smoke 5 sessions: passed
 
 ## Execution rules (still in force)
 

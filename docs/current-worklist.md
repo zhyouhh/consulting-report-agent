@@ -1,36 +1,22 @@
 # Current Worklist
 
-最后更新：2026-05-06（Tools redesign Tasks 1-6.2 实施完成；Task 6.3 cutover smoke 5 sessions PENDING — 待 user 验收时手动跑；Task 6.5 local merge + push pending；详见"当前未解决" 0a + "最近已解决" 第 0/0a 条 + handoff `docs/superpowers/handoffs/2026-05-06-tools-redesign-impl-done-smoke-pending.md`）
+最后更新：2026-05-06（Tools redesign 已完成；打包态 Task 6.3 五轮 smoke 全绿；本地已在 `main` 收尾，`git push` 仍等 user 明确指令。详见"最近已解决"第 0 条 + cutover report `docs/superpowers/cutover_report_2026-05-06_tools-redesign.md`）
 
 ## 当前未解决 / 待验证
 
-0a. **Tools redesign — Task 6.3 cutover smoke 5 sessions PENDING（待 user 验收）**
-- 状态：`Tasks 1-6.2 实施完成，0 fail in full pytest，dist build 86.09MB OK；Task 6.3 cutover smoke 5 sessions 待跑`
-- 工作内容（待 user 跑）：5 个 sessions 每个验证 model 选对新工具 + 写盘成功 + canonical_draft_mutation set
-  - A "开始写报告吧" → `append_report_draft`
-  - B "把第二章重写一下" → `rewrite_report_section`
-  - C "把'团队防御蓝领'改成'团队防御核心'" → `replace_report_text`
-  - D "继续写第三章" → `append_report_draft`
-  - E "整篇重写，按 outline 用更精炼的语言重写正文" → `rewrite_report_draft`
-- 怎么跑：详见 handoff `docs/superpowers/handoffs/2026-05-06-tools-redesign-impl-done-smoke-pending.md`（含步骤 + reality_test backup convention）
-- 预期：≥ 4/5 model 选对工具 + 写盘成功
-- 完成后：填实测数据到 `docs/superpowers/cutover_report_2026-05-06_tools-redesign.md` + 走 Task 6.5 local merge
+0a. **Push to origin/main（等 user 明确说 push）**
+- 状态：`本地 main 已完成收尾；按项目约定不自动 push`
+- 下一步：等 user 说 "push" 后再执行 `git push origin main`
 
-0b. **Task 6.5 — local merge to main + push（等 user 验收 6.3 后 explicit 指令）**
-- 状态：`实施 commit chain 全在 local branch claude/phase2-draft-action-tag (HEAD d482235)，未合并到 main`
-- 等 user 验收 cutover smoke 后：
-  - `git checkout main && git merge --ff-only claude/phase2-draft-action-tag`
-  - 等 user 说 "push" → `git push origin main`（per `~/.claude/CLAUDE.md` "git push 等我说"）
-
-0c. **Open issues for next session**（low priority）
+0b. **Open issues for next session**（low priority）
 - **Streaming retry timing**（Task 3 quality r1 deferred to fix5）：`_chat_stream_unlocked` 中 obligation retry 在 stream 已 yield 之后发生；user 可能看到虚假"已修改"文本 + 后续 corrective msg。code comment at `backend/chat.py:4091` 已标记 fix5 reference。触发条件：cutover smoke 中 model 撒谎 + streaming 模式
-- **Detector regex 扩展未经 review**（Task 6.1+6.2 implementer 自主改）：`_OBLIGATION_REPLACE_RE` 放宽 + 新加 `_OBLIGATION_SECTION_CHANGE_RE` + 修改 `test_section_strong_change` 期望。是 plan 内部不一致的合理修正但未走 spec/quality 双轮 review。cutover smoke 时 watch 是否 false positive
-- **dist 进程锁定**：PID `48620` 占着旧 dist；`dist/咨询报告助手.locked-20260506-090048/` 等 user 关闭 app 后清理
+- **Detector regex 扩展已过 smoke 但未单独 review**（Task 6.1+6.2 implementer 自主改）：`_OBLIGATION_REPLACE_RE` 放宽 + 新加 `_OBLIGATION_SECTION_CHANGE_RE` + 修改 `test_section_strong_change` 期望。2026-05-06 打包态 5-session smoke 未发现 false positive；后续若扩展更多中文意图，仍建议走 spec/quality review
+- **旧 app 残留进程**：PID `48620` 仍存在但不占 8080，当前用户 `Stop-Process` 返回"拒绝访问"。本轮重建标准 `dist\咨询报告助手\` 成功，未发现 `dist/*.locked-*` 目录残留
 
 ## 最近已解决
 
-0. **Tools redesign 实施完成（Tasks 1-6.2，2026-05-06）**
-- 状态：`Tasks 1-6.2 全部 codex spec+quality 双轮 review APPROVED，pytest 360/0 in full chat_runtime; cutover smoke + merge 收尾pending`
+0. **Tools redesign 实施完成并通过打包态 6.3 smoke（2026-05-06）**
+- 状态：`Tasks 1-6.2 全部 codex spec+quality 双轮 review APPROVED；2026-05-06 补 obligation tool-family guard；根目录 dist 重建；打包态 Task 6.3 五轮 smoke 全绿；本地 main 收尾完成，push 等 user 明确指令`
 - 实施 commits（17 commits this implementation phase，全在 local branch `claude/phase2-draft-action-tag`）：
   - **Task 1**（4 commits）：`9d183df` `b80413c` `9e54d88` `9cd071d` — `backend/report_writing.py` + 41 helper tests
   - **Task 2**（4 commits）：`292bf6f` `68eb8a2` `2717760` `43b6c68` — turn_context fields + obligation detector + read_file mtime hook
@@ -43,10 +29,17 @@
   - `pytest tests/test_chat_runtime.py`: **360 passed, 1 skipped, 0 failed** in 1481s（之前 36 pre-existing fails 全部在 Task 5 删除的 deprecated test classes 里，自然消失）
   - `tests/test_report_writing.py`: 41/41
   - `tests/test_tool_selection_benchmark.py`: 4/4
+  - 2026-05-06 post-smoke focused regression：`96 passed, 1 warning`（canonical draft obligation + 4 semantic tools + report_writing + benchmark）
   - frontend `node --test tests/`: 168/168 unchanged
 - Review iterations: Task 3 + Task 5 各走 2 轮 quality review (r1 With fixes → fix1 → r2 Yes)；其他 task 一轮 APPROVED_WITH_NOTES
-- Build：`dist/咨询报告助手/` 86.09 MB（baseline 91 MB ±5%）
-- 详见 [cutover report](superpowers/cutover_report_2026-05-06_tools-redesign.md) + [handoff (active)](superpowers/handoffs/2026-05-06-tools-redesign-impl-done-smoke-pending.md)
+- Build：根目录 `dist/咨询报告助手/` 重建成功（`咨询报告助手.exe` 14,069,486 bytes，2026-05-06 22:00）
+- Packaged smoke 6.3（evidence: `reality_test/smoke_backups/6-3-packaged-20260506-221248/summary.json`）：
+  - A "开始写报告吧" → `append_report_draft` ✅ draft appended
+  - B "把第二章重写一下" → `rewrite_report_section` ✅ only 第二章 changed
+  - C "把'团队防御蓝领'改成'团队防御核心'" → `replace_report_text` ✅ unique phrase replaced
+  - D "继续写第三章" → wrong semantic tools blocked, then `append_report_draft` ✅
+  - E "整篇重写，按 outline 用更精炼的语言重写正文" → generic `write_file` / `edit_file` blocked, then `rewrite_report_draft` ✅
+- 详见 [cutover report](superpowers/cutover_report_2026-05-06_tools-redesign.md)
 
 0a. **Tools redesign spec + plan review 通过（2026-05-05 深夜，已 superseded by 0 entry above）**
 - 状态：`spec + plan 全套通过 codex 双轮 review`（HEAD `1030d7b` plan v2）

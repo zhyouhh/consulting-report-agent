@@ -56,6 +56,7 @@ S4 阶段（大纲已确认）model 通过以下 4 个**专用工具**修改 `co
 
 **关键约束**：
 - 不要对 `content/report_draft_v1.md` 用通用 `edit_file` / `write_file`，legacy gate 已只接受这 4 个语义工具（chat.py:5620 + 6081 satisfaction check 白名单）
+- 一旦 `detect_canonical_draft_write_obligation` 识别出本轮正文写入意图，`_guard_canonical_draft_obligation_tool` 会把工具家族锁到对应语义工具：`begin/continue → append_report_draft`、`rewrite_section → rewrite_report_section`、`replace_text → replace_report_text`、`rewrite_draft → rewrite_report_draft`。除 `read_file` / `read_material_file` 外，其他工具会被直接拒绝，防止小模型跑去搜索、写 plan 或调错正文工具
 - 一轮一改：`turn_context["canonical_draft_mutation"]` 限制每轮 ≤ 1 次 canonical write
 - read-before-write：先 `read_file` 才能改（首次起草除外）；mtime 变了要重读
 

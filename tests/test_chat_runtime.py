@@ -9548,6 +9548,122 @@ class _WriteToolTestMixin:
         )
 
 
+class ObligationToolFamilyGuardTests(_WriteToolTestMixin, ChatRuntimeTests):
+    def test_begin_obligation_blocks_web_search_before_draft_append(self):
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "开始写报告吧")
+
+        with mock.patch.object(handler, "_web_search") as search:
+            result = handler._execute_tool(
+                self.project_id,
+                self._make_tool_call(
+                    "web_search",
+                    json.dumps({"query": "猪猪侠 超人强"}, ensure_ascii=False),
+                ),
+            )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("append_report_draft", result.get("message", ""))
+        search.assert_not_called()
+        self.assertFalse(handler._turn_context.get("web_search_performed"))
+
+    def test_begin_obligation_blocks_wrong_semantic_draft_tool(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n旧内容\n")
+        handler._build_turn_context(self.project_id, "开始写报告吧")
+        self._trigger_read_file(handler)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "rewrite_report_section",
+                json.dumps({"content": "## 第一章\n新内容\n"}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("append_report_draft", result.get("message", ""))
+        actual = (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8")
+        self.assertIn("旧内容", actual)
+        self.assertNotIn("新内容", actual)
+
+    def test_begin_obligation_still_allows_read_file(self):
+        handler = self._make_handler_with_project()
+        self._put_draft("# 报告\n## 第一章\n旧内容\n")
+        handler._build_turn_context(self.project_id, "开始写报告吧")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "content/report_draft_v1.md"}),
+            ),
+        )
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertIn("旧内容", result.get("content", ""))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_stream_does_not_retry_missing_plan_write_after_canonical_append_success(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告\n## 第一章\n旧内容\n")
+
+        read_stream = [
+            self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-read",
+                        name="read_file",
+                        arguments='{"file_path":"content/report_draft_v1.md"}',
+                    )
+                ]
+            )
+        ]
+        append_content = "## 第二章 延展分析\n\n" + ("新增正文内容" * 60)
+        append_stream = [
+            self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-append",
+                        name="append_report_draft",
+                        arguments=json.dumps({"content": append_content}, ensure_ascii=False),
+                    )
+                ]
+            )
+        ]
+        final_stream = [
+            self._make_chunk(content="已更新 `plan/outline.md`，并补充了正文内容。"),
+        ]
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            iter(read_stream),
+            iter(append_stream),
+            iter(final_stream),
+        ]
+
+        events = list(handler.chat_stream(self.project_id, "开始写报告吧", max_iterations=4))
+
+        tool_messages = [event["data"] for event in events if event["type"] == "tool"]
+        content_messages = [event["data"] for event in events if event["type"] == "content"]
+        self.assertFalse(
+            any("声称已更新文件但未实际写入" in message for message in tool_messages)
+        )
+        self.assertIn("已更新 `plan/outline.md`", "".join(content_messages))
+        self.assertIn("新增正文内容", (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8"))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in ObligationToolFamilyGuardTests.__dict__
+    ):
+        setattr(ObligationToolFamilyGuardTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 class RewriteReportSectionToolTests(_WriteToolTestMixin, ChatRuntimeTests):
     def test_happy_path_rewrites_section(self):
         handler = self._make_handler_with_project()

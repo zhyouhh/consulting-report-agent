@@ -43,7 +43,8 @@ Windows first 的咨询报告桌面客户端，目标是把你自用的咨询报
 ### 1. 安装依赖
 
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
 
 cd frontend
 npm install
@@ -67,16 +68,16 @@ python app.py
 ## Windows 打包
 
 ```bash
-pyinstaller consulting_report.spec
+build.bat
 ```
 
 打包产物在 `dist/咨询报告助手/`。
 
 ## 相关文档
 
-- Windows 打包说明：[WINDOWS_BUILD.md](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/WINDOWS_BUILD.md)
-- 通用打包说明：[BUILD.md](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/BUILD.md)
-- 默认薄中转部署说明：[managed-proxy-deployment.md](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/docs/managed-proxy-deployment.md)
+- Windows 打包说明：[WINDOWS_BUILD.md](WINDOWS_BUILD.md)
+- 通用打包说明：[BUILD.md](BUILD.md)
+- 默认薄中转部署说明：[managed-proxy-deployment.md](docs/managed-proxy-deployment.md)
 
 ## 项目结构
 
