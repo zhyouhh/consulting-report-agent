@@ -204,10 +204,16 @@ def check_no_fetch_url_pending(
 # (per spec r2 reviewer §C12: 不迁移 stage gate / scope / target / priority logic)
 
 _OBLIGATION_REPLACE_RE = re.compile(
-    r"把(?:报告|正文)(?:里的|中的|里|中)?"
+    r"把(?:(?:报告|正文)(?:里的|中的|里|中)?)?"
     r"[^，,、。！？!?；;：:\n]{1,80}?"
     r"\s*[，,、：:]?\s*"
     r"(?:改成|改为|替换成|换成)"
+)
+
+_OBLIGATION_SECTION_CHANGE_RE = re.compile(
+    r"第[一二三四五六七八九十百千万0-9]+(?:章|节|部分)"
+    r".{0,80}?"
+    r"(?:改强|改弱|改好|改一下|调整|优化|润色|补强|加强)"
 )
 
 
@@ -234,6 +240,8 @@ def detect_canonical_draft_write_obligation(user_message: str) -> Optional[Dict[
     for kw in ("重写", "改写", "重做"):
         if kw in text:
             return {"tool_family": "rewrite_section", "detected": kw}
+    if _OBLIGATION_SECTION_CHANGE_RE.search(text):
+        return {"tool_family": "rewrite_section", "detected": "section_change_pattern"}
     if _OBLIGATION_REPLACE_RE.search(text):
         return {"tool_family": "replace_text", "detected": "replace_pattern"}
     return None

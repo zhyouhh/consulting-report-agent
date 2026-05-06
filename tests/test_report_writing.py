@@ -321,9 +321,8 @@ class DetectWriteObligationTests(unittest.TestCase):
         self.assertEqual(d["tool_family"], "rewrite_draft")
 
     def test_section_strong_change(self):
-        # "改强" 不是关键词 — detector 不识别（known limitation）
         d = detect_canonical_draft_write_obligation("第二章太弱了，改强一点")
-        self.assertIsNone(d)
+        self.assertEqual(d["tool_family"], "rewrite_section")
 
     def test_continue_with_export(self):
         # mixed intent — detector 只输出 first match (continue)
