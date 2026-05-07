@@ -27,6 +27,14 @@ class ContextPolicyTests(unittest.TestCase):
         self.assertEqual(policy.effective_context_limit, 200_000)
         self.assertEqual(policy.resolution_source, "exact_match")
 
+    def test_exact_match_for_managed_deepseek_uses_1m_provider_and_256k_effective(self):
+        policy = resolve_context_policy("deepseek-v4-pro")
+
+        self.assertEqual(policy.normalized_model, "deepseek-v4-pro")
+        self.assertEqual(policy.provider_context_limit, 1_000_000)
+        self.assertEqual(policy.effective_context_limit, 256_000)
+        self.assertEqual(policy.resolution_source, "exact_match")
+
     def test_vendor_prefixed_model_is_normalized_before_exact_lookup(self):
         policy = resolve_context_policy("moonshotai/Kimi-K2.5")
 

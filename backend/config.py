@@ -7,7 +7,7 @@ import os
 import sys
 
 DEFAULT_MANAGED_BASE_URL = "https://newapi.z0y0h.work/client/v1"
-DEFAULT_MANAGED_MODEL = "gemini-3-flash"
+DEFAULT_MANAGED_MODEL = "deepseek-v4-pro"
 DEFAULT_MANAGED_SEARCH_API_URL = "https://search.z0y0h.work/search"
 DEFAULT_MANAGED_CLIENT_TOKEN = "managed"
 MANAGED_CLIENT_TOKEN_FILENAME = "managed_client_token.txt"
@@ -326,3 +326,66 @@ def save_settings(settings: Settings):
         data.pop(key, None)
     with open(config_file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _default_managed_models_fetch(url: str, headers: dict[str, str], timeout: float) -> bytes:
+    """默认通过 urllib 调用薄网关 /v1/models（stdlib，不引入额外依赖）。"""
+    import urllib.request  # 局部 import，避免污染模块顶层
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def heal_stale_managed_model(
+    settings: Settings,
+    http_fetch=None,
+    timeout: float = 5.0,
+) -> tuple[Settings, str | None]:
+    """如果 managed 模式下保存的 managed_model 已不在薄网关 /v1/models 列表里，
+    自动切换到第一个可用模型（best-effort：网络/解析失败一律返回原 settings）。
+
+    背景：用户从老版本（gemini-3-flash）升到新版本（deepseek-v4-pro）时，
+    `~/.consulting-report/config.json` 里的 managed_model 字段不会自动迁移
+    （`setdefault` 只填空，不覆盖），导致第一条 chat 直接被薄网关 400 拦死。
+
+    返回 (possibly_updated_settings, info_message_or_None)。
+    msg 非 None 时调用方应：save_settings(settings) + 记日志。
+    """
+    if settings.mode != "managed":
+        return settings, None
+
+    fetch = http_fetch or _default_managed_models_fetch
+    base_url = (settings.managed_base_url or "").rstrip("/")
+    if not base_url:
+        return settings, None
+    url = f"{base_url}/models"
+    headers = {"Authorization": f"Bearer {settings.managed_client_token or ''}"}
+
+    try:
+        body = fetch(url, headers, timeout)
+    except Exception:
+        return settings, None
+
+    try:
+        data = json.loads(body)
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return settings, None
+        allowed = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
+    except Exception:
+        return settings, None
+
+    if not allowed:
+        return settings, None
+
+    if settings.managed_model in allowed:
+        return settings, None
+
+    old = settings.managed_model
+    new = allowed[0]
+    updated = settings.model_copy(update={
+        "managed_model": new,
+        "model": new,
+    })
+    msg = f"管理通道升级：默认模型已从 {old or '(空)'} 自动切换到 {new}（旧值已不在网关白名单内）"
+    return updated, msg

@@ -10,6 +10,7 @@ from backend.config import (
     get_managed_search_pool_path,
     get_search_cache_path,
     get_search_runtime_state_path,
+    heal_stale_managed_model,
     load_settings,
     load_managed_search_pool_config,
     normalize_settings_payload,
@@ -21,7 +22,7 @@ class SettingsPersistenceTests(unittest.TestCase):
     def test_default_settings_use_managed_mode(self):
         settings = Settings()
         self.assertEqual(settings.mode, "managed")
-        self.assertEqual(settings.managed_model, "gemini-3-flash")
+        self.assertEqual(settings.managed_model, "deepseek-v4-pro")
         self.assertTrue(settings.managed_base_url)
         self.assertIn("search.z0y0h.work", settings.managed_search_api_url)
 
@@ -38,7 +39,7 @@ class SettingsPersistenceTests(unittest.TestCase):
             settings = Settings(
                 mode="custom",
                 managed_base_url="https://managed.example/v1",
-                managed_model="gemini-3-flash",
+                managed_model="deepseek-v4-pro",
                 custom_api_base="https://custom.example/v1",
                 custom_api_key="secret",
                 custom_model="gpt-4.1-mini",
@@ -75,7 +76,7 @@ class SettingsPersistenceTests(unittest.TestCase):
             settings = Settings(
                 mode="managed",
                 managed_base_url="https://newapi.z0y0h.work/client/v1",
-                managed_model="gemini-3-flash",
+                managed_model="deepseek-v4-pro",
                 managed_client_token="outdated-config-token",
                 custom_api_base="https://custom.example/v1",
                 custom_api_key="secret",
@@ -91,7 +92,7 @@ class SettingsPersistenceTests(unittest.TestCase):
                 loaded = load_settings()
 
         self.assertEqual(loaded.api_base, "https://newapi.z0y0h.work/client/v1")
-        self.assertEqual(loaded.model, "gemini-3-flash")
+        self.assertEqual(loaded.model, "deepseek-v4-pro")
         self.assertEqual(loaded.api_key, "desktop-managed-token")
         self.assertEqual(loaded.custom_api_key, "secret")
 
@@ -105,7 +106,7 @@ class SettingsPersistenceTests(unittest.TestCase):
                 settings = Settings(
                     mode="managed",
                     managed_base_url="https://newapi.z0y0h.work/client/v1",
-                    managed_model="gemini-3-flash",
+                    managed_model="deepseek-v4-pro",
                     managed_client_token=managed_token,
                 )
                 normalized = normalize_settings_payload(settings.model_dump())
@@ -138,7 +139,7 @@ class SettingsPersistenceTests(unittest.TestCase):
                   "config_version": 3,
                   "mode": "custom",
                   "managed_base_url": "https://newapi.z0y0h.work/client/v1",
-                  "managed_model": "gemini-3-flash",
+                  "managed_model": "deepseek-v4-pro",
                   "managed_client_token": "managed",
                   "custom_api_base": "https://custom.example/v1",
                   "custom_api_key": "secret",
@@ -167,7 +168,7 @@ class SettingsPersistenceTests(unittest.TestCase):
             settings = Settings(
                 mode="custom",
                 managed_base_url="https://newapi.z0y0h.work/client/v1",
-                managed_model="gemini-3-flash",
+                managed_model="deepseek-v4-pro",
                 custom_api_base="https://custom.example/v1",
                 custom_api_key="secret",
                 custom_model="gpt-4.1-mini",
@@ -196,7 +197,7 @@ class SettingsPersistenceTests(unittest.TestCase):
                 {
                   "config_version": 4,
                   "managed_base_url": "https://newapi.z0y0h.work/client/v1",
-                  "managed_model": "gemini-3-flash",
+                  "managed_model": "deepseek-v4-pro",
                   "managed_search_api_url": "https://search.z0y0h.work/search",
                   "custom_api_base": "https://custom.example/v1",
                   "custom_api_key": "secret",
@@ -449,3 +450,122 @@ class SettingsPersistenceTests(unittest.TestCase):
                 resolved = get_search_cache_path()
 
         self.assertEqual(resolved, config_dir / "search_cache.json")
+
+
+class HealStaleManagedModelTests(unittest.TestCase):
+    """Auto-heal: when stored managed_model is no longer in proxy /v1/models,
+    swap to first available so old configs survive an exe upgrade with a
+    renamed managed model.
+    """
+
+    def _models_payload(self, *ids: str) -> bytes:
+        return json.dumps({
+            "object": "list",
+            "data": [{"id": m, "object": "model"} for m in ids],
+        }).encode("utf-8")
+
+    def _make_settings(self, **overrides) -> Settings:
+        defaults = dict(
+            mode="managed",
+            managed_base_url="https://newapi.example/client/v1",
+            managed_model="gemini-3-flash",
+            managed_client_token="dummy-token",
+        )
+        defaults.update(overrides)
+        return Settings(**defaults)
+
+    def test_no_change_when_stored_model_is_in_allowed_list(self):
+        settings = self._make_settings(managed_model="deepseek-v4-pro")
+        calls = []
+
+        def fake_fetch(url, headers, timeout):
+            calls.append((url, headers, timeout))
+            return self._models_payload("deepseek-v4-pro", "deepseek-v4-flash")
+
+        updated, msg = heal_stale_managed_model(settings, http_fetch=fake_fetch)
+
+        self.assertIs(updated, settings)
+        self.assertIsNone(msg)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "https://newapi.example/client/v1/models")
+        self.assertEqual(calls[0][1]["Authorization"], "Bearer dummy-token")
+
+    def test_swaps_stale_model_to_first_allowed_and_returns_message(self):
+        settings = self._make_settings(managed_model="gemini-3-flash")
+
+        def fake_fetch(url, headers, timeout):
+            return self._models_payload("deepseek-v4-pro", "deepseek-v4-flash")
+
+        updated, msg = heal_stale_managed_model(settings, http_fetch=fake_fetch)
+
+        self.assertIsNot(updated, settings)
+        self.assertEqual(updated.managed_model, "deepseek-v4-pro")
+        self.assertEqual(updated.model, "deepseek-v4-pro")
+        # 原对象不可被就地修改
+        self.assertEqual(settings.managed_model, "gemini-3-flash")
+        self.assertIn("gemini-3-flash", msg)
+        self.assertIn("deepseek-v4-pro", msg)
+
+    def test_network_failure_returns_settings_unchanged(self):
+        settings = self._make_settings(managed_model="gemini-3-flash")
+
+        def fake_fetch(url, headers, timeout):
+            raise ConnectionError("dns fail")
+
+        updated, msg = heal_stale_managed_model(settings, http_fetch=fake_fetch)
+
+        self.assertIs(updated, settings)
+        self.assertIsNone(msg)
+
+    def test_malformed_json_returns_settings_unchanged(self):
+        settings = self._make_settings()
+
+        def fake_fetch(url, headers, timeout):
+            return b"not-json-at-all"
+
+        updated, msg = heal_stale_managed_model(settings, http_fetch=fake_fetch)
+
+        self.assertIs(updated, settings)
+        self.assertIsNone(msg)
+
+    def test_empty_allowed_list_returns_settings_unchanged(self):
+        settings = self._make_settings()
+
+        def fake_fetch(url, headers, timeout):
+            return self._models_payload()
+
+        updated, msg = heal_stale_managed_model(settings, http_fetch=fake_fetch)
+
+        self.assertIs(updated, settings)
+        self.assertIsNone(msg)
+
+    def test_custom_mode_skips_check_entirely(self):
+        settings = Settings(
+            mode="custom",
+            managed_model="gemini-3-flash",
+            custom_api_base="https://custom.example/v1",
+            custom_api_key="secret",
+            custom_model="gpt-4.1-mini",
+        )
+        calls = []
+
+        def fake_fetch(url, headers, timeout):
+            calls.append(url)
+            return self._models_payload("anything")
+
+        updated, msg = heal_stale_managed_model(settings, http_fetch=fake_fetch)
+
+        self.assertIs(updated, settings)
+        self.assertIsNone(msg)
+        self.assertEqual(calls, [])  # 不应触发 HTTP
+
+    def test_empty_managed_base_url_returns_settings_unchanged(self):
+        settings = self._make_settings(managed_base_url="")
+
+        def fake_fetch(url, headers, timeout):
+            raise AssertionError("should not fetch when base url is empty")
+
+        updated, msg = heal_stale_managed_model(settings, http_fetch=fake_fetch)
+
+        self.assertIs(updated, settings)
+        self.assertIsNone(msg)

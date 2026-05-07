@@ -18,7 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .chat import ChatHandler, LEGACY_EMPTY_ASSISTANT_FALLBACKS, strip_tool_log_comments
-from .config import Settings, get_base_path, load_settings, save_settings
+from .config import Settings, get_base_path, heal_stale_managed_model, load_settings, save_settings
 from .context_policy import clamp_custom_context_limit_override
 from .models import ChatRequest, ChatResponse, ProjectInfo
 from .report_tools import export_reviewable_draft, run_quality_check
@@ -45,6 +45,18 @@ app.add_middleware(
 )
 
 settings = load_settings()
+
+# 启动时若 managed_model 已不在网关白名单（例如老用户升级 exe 后保留的旧模型名），
+# 自动切到网关 /v1/models 的第一项并持久化。Best-effort：网络失败一律不影响启动。
+try:
+    _healed_settings, _heal_msg = heal_stale_managed_model(settings)
+    if _heal_msg:
+        settings = _healed_settings
+        save_settings(settings)
+        logger.warning(_heal_msg)
+except Exception:
+    logger.exception("heal_stale_managed_model failed unexpectedly; continuing with stored settings")
+
 skill_engine = SkillEngine(settings.projects_dir, settings.skill_dir)
 _chat_handlers = {}
 _settings_lock = threading.Lock()

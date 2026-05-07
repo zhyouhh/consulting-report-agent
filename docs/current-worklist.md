@@ -1,10 +1,37 @@
 # Current Worklist
 
-最后更新：2026-05-07（S4 mutation-limit 真实字数提示已修复、打包并通过 packaged mock OpenAI smoke；Tools redesign 已完成并 push）
+最后更新：2026-05-07（方向转向：换 DeepSeek Pro 替代 gemini-3-flash → 简化 S4 控制层。5 路 agent 调研确认 4 个专用工具设计正确但 guard 控制层过度）
 
 ## 当前未解决 / 待验证
 
-- 暂无当前阻塞项；下一批工作从下方待开始条目中择优进入。
+1. **模型切换：gemini-3-flash → DeepSeek V4 Pro/Flash**
+- 状态：`待用户接入 managed proxy`（计划 2026-05-08）
+- 背景：5 路 agent 调研（系统审计 / 故障分析 / 设计调研 / 技术可行性 / 模型行为）确认 gemini-3-flash 工具调用能力不足是所有 guard 复杂度的根源。DeepSeek V4 Flash 月费 ~￥3.5，中文质量极好，工具调用显著优于 Gemini Flash
+- 用户计划用免费 DeepSeek Pro 站点接入 managed proxy
+- 验证步骤：先用 custom 模式接一个站点 → 新建测试项目跑全流程（S0→大纲→写正文→改章节）→ 对比 gemini-3-flash 体感
+- 下一步：确认后改 managed proxy 默认模型
+
+2. **S4 控制层简化（模型切换确认后执行）**
+- 状态：`待模型切换验证后开始`
+- 目标：删 ~500-800 行 guard 代码，保留 4 个专用工具 + 必要的业务门禁
+- 删除清单：obligation detector（~56 行）+ tool-family locking（~18 行）+ 关键词门禁（~10 行）+ 相关 turn-end 对账逻辑
+- 调整：mutation limit 从 1 提到 3
+- 新增：delete_section + move_section 工具（或 insert_before 参数），补结构重组能力
+- 保留：阶段门禁（S4+）/ read-before-write / turn-end 谎言检测 / resolve_section_target
+- 关联调研文档：本轮 5 路 agent 结果记录在 memory `project-consulting-report-agent-current-focus.md`
+
+3. **默认渠道文案与默认模型决策**（原 #3，与模型切换合并考虑）
+- 状态：`待模型切换确认后统一处理`
+- 目标：managed 默认模型名 + 设置页/README 相关表述统一
+
+4. **图片附件能力按 managed_model 分流**（2026-05-07 模型切换时发现）
+- 状态：`待修复`
+- 现状：`frontend/src/utils/modelCapabilities.js` 的 `supportsImageAttachments` 对 `mode==="managed"` 一律 return true（gemini-3-flash 时代是对的，多模态）
+- 问题：DeepSeek V4 Pro 是 text-only reasoning 模型，前端不拦图片附件 → 用户传图后请求会被上游 400 拒（postMessage、上传按钮、拖拽都不会有 UX 提示）
+- 影响：用户首次传图不会被告知"当前模型不支持图"，只看到一个看似随机的失败
+- 修复方向：把 managed 分支按 `settings.managed_model` 二次判断，复用 `MULTIMODAL_MODEL_MARKERS`（gemini/gpt-4o/vision/vl/claude-3 等）；或维护一份 managed-mode 多模态白名单（当前 managed 池就 1 个模型，做白名单更轻）
+- 同时要：UI 文案 / SettingsModal / README 同步说明 managed 模式当前是 text-only
+- 关联文件：`frontend/src/utils/modelCapabilities.js`、`frontend/tests/modelCapabilities.test.mjs`、各上传/粘贴入口组件
 
 ## 最近已解决
 
@@ -162,13 +189,6 @@
   - 重新审视"已有材料或备注"和"初始材料"的语义重叠
   - 提高项目类型、主题、目标读者、篇幅等字段在初始化和首轮交互中的利用率
 - 关联：Task 7 的 `length_fallback` chip 目前只是非交互提示，因为 `ProjectCreateModal` 没有 edit 模式；如果本项做了"新建项目表单改造 + 加 edit 模式"，可以顺便让 chip 点击打开编辑面板。
-
-3. 默认渠道文案与默认模型决策
-- 状态：`待开始`
-- 目标：把"推荐/保证可用"类表述改成更中性的"默认渠道 / 开箱即用"。
-- 待定项：
-  - 默认模型是否从 `gemini-3-flash` 调整为 `gpt-5.4`
-  - 设置页、README、打包文档里的相关表述统一
 
 4. `draw.io skill` 评估
 - 状态：`待开始`
