@@ -1,39 +1,48 @@
 # Current Worklist
 
-最后更新：2026-05-07（方向转向：换 DeepSeek Pro 替代 gemini-3-flash → 简化 S4 控制层。5 路 agent 调研确认 4 个专用工具设计正确但 guard 控制层过度）
+最后更新：2026-05-08（DeepSeek Migration：Commit 0 foundation 已 ship，spec + plan 经 codex 多轮 review 全部 APPROVED，等 codex 实施 Commit 1-3）
 
 ## 当前未解决 / 待验证
 
-1. **模型切换：gemini-3-flash → DeepSeek V4 Pro/Flash**
-- 状态：`待用户接入 managed proxy`（计划 2026-05-08）
-- 背景：5 路 agent 调研（系统审计 / 故障分析 / 设计调研 / 技术可行性 / 模型行为）确认 gemini-3-flash 工具调用能力不足是所有 guard 复杂度的根源。DeepSeek V4 Flash 月费 ~￥3.5，中文质量极好，工具调用显著优于 Gemini Flash
-- 用户计划用免费 DeepSeek Pro 站点接入 managed proxy
-- 验证步骤：先用 custom 模式接一个站点 → 新建测试项目跑全流程（S0→大纲→写正文→改章节）→ 对比 gemini-3-flash 体感
-- 下一步：确认后改 managed proxy 默认模型
+1. **DeepSeek Migration — Commit 1-3 实施待启动**
+- 状态：`plan APPROVED，等 codex 实施`
+- Spec：[docs/superpowers/specs/2026-05-08-deepseek-migration-toolset-redesign-design.md](superpowers/specs/2026-05-08-deepseek-migration-toolset-redesign-design.md)（3 轮 codex review APPROVED）
+- Plan：[docs/superpowers/plans/2026-05-08-deepseek-migration-toolset-redesign.md](superpowers/plans/2026-05-08-deepseek-migration-toolset-redesign.md)（4 轮 codex review APPROVED，commit `d7afadb`）
+- Commit 0（已 ship 2026-05-07/08，commits `06779b1` / `0b8b968` / `8b3ad16`）：服务器 managed proxy 模型切换 + `heal_stale_managed_model` + `tier_1m_eff_256k` + frontend connectionMode fallback
+- Commit 1 起待实施：
+  - **Commit 1**（Task 1-22，~22 task）：加新 dispatcher + S0 first-turn gate + `<think>` 折叠 + mutation_limit list + canonical_obligation；新旧路径并存
+  - **Commit 2**（Task 23-27）：删 3 个旧专用工具的 schema 注册 + dispatch 路由 + SKILL.md §S4 引用
+  - **Commit 3**（Task 28-39）：删旧 callable + guard 控制层（~700 行净删）+ grep 残留扫描 + cutover report
+- 实施约束：每个 task explicit "Run" 命令限制测试范围（不让 agent 默认全套 pytest）；每个 commit 末尾嵌入 codex review loop，APPROVED 后才进入下一 commit
+- 派活方式：按 CLAUDE.md 子代理派活规则，用 `codex exec --effort xhigh` 接 plan + 设 cron 监控
 
-2. **S4 控制层简化（模型切换确认后执行）**
-- 状态：`待模型切换验证后开始`
-- 目标：删 ~500-800 行 guard 代码，保留 4 个专用工具 + 必要的业务门禁
-- 删除清单：obligation detector（~56 行）+ tool-family locking（~18 行）+ 关键词门禁（~10 行）+ 相关 turn-end 对账逻辑
-- 调整：mutation limit 从 1 提到 3
-- 新增：delete_section + move_section 工具（或 insert_before 参数），补结构重组能力
-- 保留：阶段门禁（S4+）/ read-before-write / turn-end 谎言检测 / resolve_section_target
-- 关联调研文档：本轮 5 路 agent 结果记录在 memory `project-consulting-report-agent-current-focus.md`
-
-3. **默认渠道文案与默认模型决策**（原 #3，与模型切换合并考虑）
-- 状态：`待模型切换确认后统一处理`
-- 目标：managed 默认模型名 + 设置页/README 相关表述统一
-
-4. **图片附件能力按 managed_model 分流**（2026-05-07 模型切换时发现）
-- 状态：`待修复`
-- 现状：`frontend/src/utils/modelCapabilities.js` 的 `supportsImageAttachments` 对 `mode==="managed"` 一律 return true（gemini-3-flash 时代是对的，多模态）
+2. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现，已推后）
+- 状态：`已推后到 UI 重构一并处理`（spec §2.2 Out of Scope）
+- 现状：`frontend/src/utils/modelCapabilities.js` 的 `supportsImageAttachments` 对 `mode==="managed"` 一律 return true（gemini-3-flash 时代多模态行为）
 - 问题：DeepSeek V4 Pro 是 text-only reasoning 模型，前端不拦图片附件 → 用户传图后请求会被上游 400 拒（postMessage、上传按钮、拖拽都不会有 UX 提示）
-- 影响：用户首次传图不会被告知"当前模型不支持图"，只看到一个看似随机的失败
-- 修复方向：把 managed 分支按 `settings.managed_model` 二次判断，复用 `MULTIMODAL_MODEL_MARKERS`（gemini/gpt-4o/vision/vl/claude-3 等）；或维护一份 managed-mode 多模态白名单（当前 managed 池就 1 个模型，做白名单更轻）
-- 同时要：UI 文案 / SettingsModal / README 同步说明 managed 模式当前是 text-only
+- 修复方向：把 managed 分支按 `settings.managed_model` 二次判断，复用 `MULTIMODAL_MODEL_MARKERS`；或维护 managed-mode 多模态白名单
 - 关联文件：`frontend/src/utils/modelCapabilities.js`、`frontend/tests/modelCapabilities.test.mjs`、各上传/粘贴入口组件
+- 触发条件：UI 重构立项时一起做（设计稿在 `docs/design_UI.pdf`）
+
+3. **UI 重构**（推后）
+- 状态：`待 DeepSeek Migration 实施完成后立项`
+- 设计稿：`docs/design_UI.pdf`（用户用 Claude design 做的 3 套初步设计稿）
+- 触发条件：DeepSeek Migration Commit 1-3 实施完成 + 跑通流程后再立项
 
 ## 最近已解决
+
+0c. **DeepSeek Migration Commit 0 + spec + plan 全 APPROVED（2026-05-07~08）**
+- 状态：`Commit 0 已 ship 3 commits + spec 3 轮 codex review APPROVED + plan 4 轮 codex review APPROVED`
+- Spec：`docs/superpowers/specs/2026-05-08-deepseek-migration-toolset-redesign-design.md`
+- Plan：`docs/superpowers/plans/2026-05-08-deepseek-migration-toolset-redesign.md`（HEAD `d7afadb`）
+- Commit 0 已 ship：
+  - 服务器 managed proxy: `MANAGED_PROXY_ALLOWED_MODELS=deepseek-v4-pro` + 容器重建（2026-05-07）
+  - `06779b1` rename default managed model gemini-3-flash → deepseek-v4-pro（含 AGENTS.md / CLAUDE.md / docs/managed-proxy-deployment.md / SettingsModal.jsx / managed_proxy/app.py 5 处）
+  - `0b8b968` heal stale managed_model on startup + tier_1m_eff_256k tier mapping + connectionMode fallback + 7 个 HealStaleManagedModelTests + 1 个 context_policy test + APPROVED design spec + UI 设计稿
+  - `8b3ad16` catch the last two gemini-3-flash refs in README + proxy contract
+- 默认模型名同步覆盖了原 worklist item #3"默认渠道文案与默认模型决策"，整体合入 DeepSeek Migration
+- 2026-05-08 E2E 实测：DeepSeek V4 Pro 9 次工具调用 schema 100% 正确，模型行为本身没问题；6 个产品/工程问题（`<think>` 标签泄露 / S0 门槛被动 / per-turn search 配额过严 / packaged stderr 吞没 / version_info 空 / 老用户 config heal）作为本轮 plan 的 in-scope items 一次性处理
+- 下一步：codex 接 plan 实施 Commit 1（详见上方 Item 1）
 
 0b. **S4 mutation-limit 二次写入真实字数提示（2026-05-07）**
 - 状态：`已修复并打包验证`
