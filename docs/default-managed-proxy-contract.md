@@ -10,7 +10,7 @@ Base URL: `https://newapi.z0y0h.work/client/v1`
 ## Required Behavior
 
 - Return OpenAI-compatible JSON payloads.
-- Force upstream model routing to `gemini-3-flash`.
+- Force upstream model routing to `deepseek-v4-pro`.
 - Reject non-whitelisted model names if the client attempts to override the default model.
 - Remain thin: no database, no queue, no heavy cache layer.
 - Keep resource usage modest on the existing server.

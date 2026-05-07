@@ -7,7 +7,7 @@ Windows first 的咨询报告桌面客户端，目标是把你自用的咨询报
 - 第一阶段只支持 Windows 正式分发
 - 默认模式是 `默认通道`
 - 默认入口是 `https://newapi.z0y0h.work/client/v1`
-- 默认模型是 `gemini-3-flash`
+- 默认模型是 `deepseek-v4-pro`
 - 同时保留 `自定义 API` 入口，供高级用户自行配置
 
 ## 现在已经能做什么
