@@ -4,7 +4,7 @@ import axios from 'axios'
 const defaultForm = {
   mode: 'managed',
   managed_base_url: 'https://newapi.z0y0h.work/client/v1',
-  managed_model: 'gemini-3-flash',
+  managed_model: 'deepseek-v4-pro',
   custom_api_base: '',
   custom_api_key: '',
   custom_model: '',

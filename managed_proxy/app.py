@@ -8,7 +8,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 
-DEFAULT_ALLOWED_MODEL = "gemini-3-flash"
+DEFAULT_ALLOWED_MODEL = "deepseek-v4-pro"
 
 
 @dataclass

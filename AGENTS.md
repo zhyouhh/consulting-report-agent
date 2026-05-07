@@ -12,7 +12,7 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 
 1. `app.py` 启动 `backend/main.py` 里的 FastAPI（`127.0.0.1:8080`），线程化跑在后台
 2. `PyWebView` 打开内嵌窗口，加载同一 FastAPI 挂载的 `frontend/dist/` 静态 SPA
-3. LLM 请求默认走 `managed` 模式（`https://newapi.z0y0h.work/client/v1`，模型 `gemini-3-flash`），由薄中转（见 `managed_proxy/app.py`）注入真实上游 key。用户可切到 `custom` 模式自填 OpenAI 兼容 API
+3. LLM 请求默认走 `managed` 模式（`https://newapi.z0y0h.work/client/v1`，模型 `deepseek-v4-pro`），由薄中转（见 `managed_proxy/app.py`）注入真实上游 key。用户可切到 `custom` 模式自填 OpenAI 兼容 API
 
 `DesktopBridge`（`app.py`）通过 `register_desktop_bridge()` 把原生文件选择器暴露给 FastAPI，这是"本地 HTTP API 能调用原生 OS 对话框"的唯一通道——Web 模式（`run_web.py`）下这些接口会 503。
 
@@ -52,7 +52,7 @@ S4 阶段（大纲已确认）model 通过以下 4 个**专用工具**修改 `co
 | `replace_report_text(old, new)` | 文字替换（"把 X 改成 Y"） | `old` 必须在 draft 中**唯一**出现 |
 | `rewrite_report_draft(content)` | 整篇重写（"整篇重写"/"推倒重来"） | `content` 必须 `# ` 开头 + ≥ 1 个 `## ` + 长度 ≤ `max(8000, 2*current.length)` |
 
-每个工具入口 inline 调 6 个 invariant check helpers（stage / outline / mixed-intent / mutation-limit / read-before-write+mtime / fetch_url-pending），全部定义在 `backend/report_writing.py`（pure functions，无 `chat.py` 反向 import）。后端用 preflight 已 resolve 的 snapshot 自己控制 `old_string`——model 完全不复述大段文本，结构性绕开 gemini-3-flash 等小模型的复述能力约束。
+每个工具入口 inline 调 6 个 invariant check helpers（stage / outline / mixed-intent / mutation-limit / read-before-write+mtime / fetch_url-pending），全部定义在 `backend/report_writing.py`（pure functions，无 `chat.py` 反向 import）。后端用 preflight 已 resolve 的 snapshot 自己控制 `old_string`——model 完全不复述大段文本，结构性绕开小模型的复述能力约束。
 
 **关键约束**：
 - 不要对 `content/report_draft_v1.md` 用通用 `edit_file` / `write_file`，legacy gate 已只接受这 4 个语义工具（chat.py:5620 + 6081 satisfaction check 白名单）

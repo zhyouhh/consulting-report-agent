@@ -31,7 +31,7 @@ Example runtime env:
 ```env
 MANAGED_PROXY_UPSTREAM_BASE_URL=http://127.0.0.1:3000/v1
 MANAGED_PROXY_UPSTREAM_API_KEY=<dedicated-upstream-key>
-MANAGED_PROXY_ALLOWED_MODELS=gemini-3-flash
+MANAGED_PROXY_ALLOWED_MODELS=deepseek-v4-pro
 MANAGED_PROXY_CLIENT_TOKEN=<dedicated-client-token>
 ```
 
@@ -72,7 +72,7 @@ curl -H "Authorization: Bearer <dedicated-client-token>" https://newapi.z0y0h.wo
 Expected:
 
 ```json
-{"object":"list","data":[{"id":"gemini-3-flash"}]}
+{"object":"list","data":[{"id":"deepseek-v4-pro"}]}
 ```
 
 ```bash
@@ -88,7 +88,7 @@ client = OpenAI(
 
 print([m.id for m in client.models.list().data])
 resp = client.chat.completions.create(
-    model="gemini-3-flash",
+    model="deepseek-v4-pro",
     messages=[{"role": "user", "content": "Reply with OK only."}],
     max_tokens=8,
 )
