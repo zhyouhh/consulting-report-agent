@@ -4,10 +4,14 @@ import time
 import unittest
 from unittest import mock
 
+import pytest
 import requests
 import uvicorn
 
 import backend.main as main_module
+
+
+pytestmark = pytest.mark.slow
 
 
 def _pick_free_port() -> int:

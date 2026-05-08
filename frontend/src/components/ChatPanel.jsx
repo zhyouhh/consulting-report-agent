@@ -4,9 +4,11 @@ import ReactMarkdown from 'react-markdown'
 import { showError, showInfo, showSuccess } from '../utils/toast'
 import { buildChatRequest, toggleMaterialSelection } from '../utils/chatMaterials'
 import {
+  appendThinkingEventContent,
   appendToolEventContent,
   buildProjectWelcomeMessage,
   extractSseDataPayload,
+  getCopyableAssistantMessageText,
   getStreamResponseError,
   sanitizeAssistantMessage,
   shouldRenderSystemNoticeMessage,
@@ -29,6 +31,7 @@ import {
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { stripToolLogComments } from '../utils/toolLogStrip.mjs'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
+import ThinkingBlock from './ThinkingBlock'
 
 export default function ChatPanel({
   projectId,
@@ -285,7 +288,7 @@ export default function ChatPanel({
   }
 
   const copyMessage = (content) => {
-    const cleanText = stripToolLogComments(content || '')
+    const cleanText = getCopyableAssistantMessageText(content || '')
     navigator.clipboard.writeText(cleanText).then(() => {
       // 简单提示，不打断用户
     }).catch(() => {
@@ -503,6 +506,15 @@ export default function ChatPanel({
               const parsed = JSON.parse(data)
               if (parsed.type === 'content') {
                 enqueueAssistantContent(assistantId, parsed.data, requestProjectId)
+              } else if (parsed.type === 'thinking') {
+                flushStreamingQueueImmediately(assistantId, requestProjectId)
+                if (!isActiveProjectRequest(requestProjectId)) {
+                  streamCompleted = true
+                  break
+                }
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantId ? { ...m, content: appendThinkingEventContent(m.content, parsed.data) } : m
+                ))
               } else if (parsed.type === 'tool') {
                 if (shouldFlushStreamingQueueImmediately('tool')) {
                   flushStreamingQueueImmediately(assistantId, requestProjectId)
@@ -727,6 +739,8 @@ export default function ChatPanel({
                       <div key={index} className="text-xs bg-[#1a1a2e] px-2 py-1 rounded border border-[#3a3a5a] text-[#8888a8] font-mono">
                         {block.content}
                       </div>
+                    ) : block.type === 'thinking' ? (
+                      <ThinkingBlock key={index} text={block.content} />
                     ) : (
                       <ReactMarkdown key={index} className="prose prose-invert prose-sm max-w-none">
                         {block.content}

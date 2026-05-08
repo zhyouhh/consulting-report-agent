@@ -70,3 +70,29 @@ select, input, textarea {
 .prose-dark ul, .prose-dark ol {
   color: #c8c8e0;
 }
+
+.thinking-block {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-left: 3px solid #3a3a5a;
+  background: #1a1a2e;
+  font-size: 0.85rem;
+  color: #8888a8;
+  border-radius: 4px;
+}
+
+.thinking-block summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: #c8c8e0;
+  user-select: none;
+}
+
+.thinking-block .thinking-content {
+  margin-top: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

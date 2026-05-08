@@ -42,6 +42,15 @@ description: Use when writing consulting reports, strategy analysis, market rese
 
 不要解释这个 tag。不要把 tag 放进代码块、列表、引用、正文中间。
 
+#### 首轮硬约束
+
+项目第一次响应：
+
+1. 你可以先用 `web_search` / `fetch_url` 搜主题相关内容、用 `read_file` 读 seed 和已上传材料；
+2. 然后必须以纯文本输出 3-5 个针对 seed（项目主题 / 受众 / 范围 / 边界）的确认 / 补充问题；
+3. 不允许调用任何写工具（`write_file` / `edit_file` / `append_report_draft`）；
+4. 即便用户首条说"直接推进 / 不用每步都问"，第一轮仍要发问——但格式可以轻：复述你的理解 + 1-2 个真正需要拍板的点。
+
 ### S0 追问维度建议清单
 
 从以下 6 条里选 3-5 条，内容按 seed 自由改写：

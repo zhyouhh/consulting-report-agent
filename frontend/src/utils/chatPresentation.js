@@ -1,3 +1,5 @@
+import { stripToolLogComments } from "./toolLogStrip.mjs";
+
 export function takeStreamingTextSlice(text = "", size = 12) {
   return {
     emitted: text.slice(0, size),
@@ -31,6 +33,58 @@ export function shouldRenderSystemNoticeMessage(message = {}) {
 export function appendToolEventContent(prev = "", toolText = "") {
   const separator = prev && !prev.endsWith("\n") ? "\n" : "";
   return `${prev}${separator}${toolText}\n`;
+}
+
+const THINKING_OPEN_TAG = "<thinking-block>";
+const THINKING_CLOSE_TAG = "</thinking-block>";
+const THINKING_OPEN_ESCAPE = "⟨THINKING_OPEN⟩";
+const THINKING_CLOSE_ESCAPE = "⟨THINKING_CLOSE⟩";
+const THINKING_BLOCK_RE = /<thinking-block>([\s\S]*?)<\/thinking-block>/g;
+const THINKING_BLOCK_WITH_ADJACENT_NEWLINES_RE = /(\r?\n)?<thinking-block>[\s\S]*?<\/thinking-block>(\r?\n)?/g;
+
+function escapeThinkingContent(content = "") {
+  return content
+    .replaceAll(THINKING_OPEN_TAG, THINKING_OPEN_ESCAPE)
+    .replaceAll(THINKING_CLOSE_TAG, THINKING_CLOSE_ESCAPE);
+}
+
+export function unescapeThinkingContent(content = "") {
+  return content
+    .replaceAll(THINKING_OPEN_ESCAPE, THINKING_OPEN_TAG)
+    .replaceAll(THINKING_CLOSE_ESCAPE, THINKING_CLOSE_TAG);
+}
+
+export function stripThinkingBlocks(content = "") {
+  if (!content.includes(THINKING_OPEN_TAG)) {
+    return content;
+  }
+  return content
+    .replace(THINKING_BLOCK_WITH_ADJACENT_NEWLINES_RE, (_match, leading, trailing) => (
+      leading && trailing ? leading : ""
+    ))
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function getCopyableAssistantMessageText(content = "") {
+  return stripThinkingBlocks(stripToolLogComments(content || ""));
+}
+
+export function appendThinkingEventContent(prev = "", delta = "") {
+  if (!delta) return prev;
+
+  const escapedDelta = escapeThinkingContent(delta);
+  if (prev.endsWith(THINKING_CLOSE_TAG)) {
+    const openIndex = prev.lastIndexOf(THINKING_OPEN_TAG);
+    const closeIndex = prev.length - THINKING_CLOSE_TAG.length;
+    if (openIndex >= 0 && openIndex < closeIndex) {
+      const existingContent = prev.slice(openIndex + THINKING_OPEN_TAG.length, closeIndex);
+      return `${prev.slice(0, openIndex)}${THINKING_OPEN_TAG}${existingContent}${escapedDelta}${THINKING_CLOSE_TAG}`;
+    }
+  }
+
+  const separator = prev && !prev.endsWith("\n") ? "\n" : "";
+  return `${prev}${separator}${THINKING_OPEN_TAG}${escapedDelta}${THINKING_CLOSE_TAG}`;
 }
 
 export async function getStreamResponseError(response) {
@@ -67,7 +121,6 @@ export function stripStageAckTags(content = "") {
 
 export function splitAssistantMessageBlocks(content = "") {
   const safeContent = stripStageAckTags(content);
-  const lines = safeContent.split("\n");
   const blocks = [];
   let textBuffer = [];
 
@@ -79,15 +132,27 @@ export function splitAssistantMessageBlocks(content = "") {
     textBuffer = [];
   };
 
-  for (const line of lines) {
-    const isToolLine = line.startsWith("🔧 调用工具:") || line.startsWith("✅ 结果:") || line.startsWith("⚠️ 结果:");
-    if (isToolLine) {
-      flushTextBuffer();
-      blocks.push({ type: "tool", content: line });
-      continue;
+  const appendNonThinkingSegment = (segment = "") => {
+    const lines = segment.split("\n");
+    for (const line of lines) {
+      const isToolLine = line.startsWith("🔧 调用工具:") || line.startsWith("✅ 结果:") || line.startsWith("⚠️ 结果:");
+      if (isToolLine) {
+        flushTextBuffer();
+        blocks.push({ type: "tool", content: line });
+        continue;
+      }
+      textBuffer.push(line);
     }
-    textBuffer.push(line);
+  };
+
+  let cursor = 0;
+  for (const match of safeContent.matchAll(THINKING_BLOCK_RE)) {
+    appendNonThinkingSegment(safeContent.slice(cursor, match.index));
+    flushTextBuffer();
+    blocks.push({ type: "thinking", content: match[1] });
+    cursor = match.index + match[0].length;
   }
+  appendNonThinkingSegment(safeContent.slice(cursor));
 
   flushTextBuffer();
   return blocks;

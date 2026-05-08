@@ -24,6 +24,11 @@ import urllib.request
 from contextlib import closing
 from pathlib import Path
 
+import pytest
+
+
+pytestmark = pytest.mark.slow
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BUNDLE_DIR = REPO_ROOT / "dist" / "咨询报告助手"

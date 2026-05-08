@@ -8,7 +8,7 @@
 
 **Architecture:** 三段式 commit：Commit 1 加新代码（新旧并存）；Commit 2 删 schema 注册（model 不再可见旧工具但 callable 还在）；Commit 3 删旧 callable + guard 控制层 + grep 残留扫描。`edit_file` / `write_file` 加 path-based dispatcher（仅在 `content/report_draft_v1.md` 路径触发分派），保留 `append_report_draft` 唯一 vertical specialty。所有共享 invariant 仍走 `report_writing.py` 6 个 helper（其中 `check_no_prior_canonical_mutation_in_turn` 改阈值 1→3 + 适配 list；`check_read_before_write_canonical_draft` 加 within-turn self-refresh）。
 
-**Tech Stack:** Python 3.11/3.12 + FastAPI + PyWebView + PyInstaller (backend); React + Tailwind (frontend)；测试用 unittest + pytest + node:test。新增依赖：`pytest-xdist>=3.0`。
+**Tech Stack:** Python 3.11/3.12 + FastAPI + PyWebView + PyInstaller (backend); React + Tailwind (frontend)；测试用 unittest + pytest + node:test。新增依赖：`pytest-xdist>=3.2.1`。
 
 ---
 
@@ -25,7 +25,7 @@
 | `consulting_report.spec` | PyInstaller spec | 加 `version='version_info.txt'` |
 | `version_info.txt` (新) | PE32 版本信息块 | 新建 |
 | `pytest.ini` (新) | pytest 默认配置 | 新建 |
-| `requirements.txt` | python 依赖 | 加 `pytest-xdist>=3.0` |
+| `requirements.txt` | python 依赖 | 加 `pytest-xdist>=3.2.1` |
 | `managed_search_pool.json` | 搜索池配置 | `per_turn_searches: 2 → 3` |
 | `skill/SKILL.md` | model 系统提示资产 | 改 §S0 + 改 §S4 工具引用 |
 
@@ -133,7 +133,7 @@ git log --oneline -5 | grep deepseek-migration
 
 **目标**：加新代码，**不删旧代码**，新旧并存。Commit 1 完成后旧 4 工具仍在，新 dispatcher 也在；model 仍可调旧工具（schema 注册保留）。本阶段不会出 regression（旧路径不变）。
 
-### Task 1: pytest infrastructure（pytest-xdist + slow markers + pytest.ini）
+### Task 1: pytest infrastructure（slow markers + pytest.ini + optional pytest-xdist）
 
 > **TDD exception: config-only**（fixed per R1 P2-2）。本 task 是 pytest 基础设施配置 + slow marker 标注，不引入新代码逻辑，因此不是"写 test → fail → implement → pass"序列；改完后 collection 验证就够。
 
@@ -149,18 +149,20 @@ git log --oneline -5 | grep deepseek-migration
 修改 `requirements.txt`（在末尾追加）：
 
 ```
-pytest-xdist>=3.0
+pytest-xdist>=3.2.1
 ```
 
 - [ ] **Step 2: 创建 `pytest.ini`**
 
 ```ini
 [pytest]
-addopts = -m "not slow" -n auto --dist worksteal
+addopts = -m "not slow"
 testpaths = tests
 markers =
     slow: tests that need real uvicorn / packaged exe / minutes-long setup
 ```
+
+默认 fast 测试保持串行，避免 Windows 机器上 xdist worker 启动失败 / hang / OOM；`pytest-xdist` 依赖仍保留，后续在安全环境可显式加 `-n auto --dist worksteal` 使用。
 
 - [ ] **Step 3: 给 stream_api 测试加 slow marker**
 
@@ -193,13 +195,13 @@ class StreamApiTests(unittest.TestCase):
 
 期望：collection 完成，看不到 `test_stream_api.py` 的 case（slow 默认排除）。
 
-- [ ] **Step 6: 验证 fast 集合并行运行**
+- [ ] **Step 6: 验证 fast 集合默认串行运行**
 
 ```bash
 .venv\Scripts\python -m pytest tests/test_config.py tests/test_context_policy.py -q
 ```
 
-期望：用 `-n auto` 并行跑通，全 pass。
+期望：默认串行跑通，全 pass。Windows 上不把 xdist 作为默认路径，避免 worker 启动失败 / OOM；需要并行时手动显式追加 `-n auto --dist worksteal`。
 
 - [ ] **Step 7: 验证 `-m ""` 跑全套（含 slow）能力**
 

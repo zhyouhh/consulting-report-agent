@@ -74,7 +74,7 @@ DeepSeek V4 Pro reasoning 能力把前 2 个弱点消除（实测），第 3 个
 | G | search 配额 | `per_turn_searches` 2 → 3 |
 | I | context tier | 固定 256k effective（`tier_1m_eff_256k`） |
 | J | 打包基础设施 | log file + version_info + start menu shortcut |
-| K | test 分层 | pytest-xdist + slow markers + plan-only convention |
+| K | test 分层 | slow markers + 默认串行 fast tests + 可选显式 pytest-xdist |
 
 ### 2.2 Out of Scope（推后处理）
 
@@ -802,20 +802,20 @@ class StreamApiTests(unittest.TestCase):
 
 ```ini
 [pytest]
-addopts = -m "not slow" -n auto --dist worksteal
+addopts = -m "not slow"
 testpaths = tests
 markers =
     slow: tests that need real uvicorn / packaged exe / minutes-long setup
 ```
 
-效果：默认 `pytest tests/` 跳过 slow + 并行。
+效果：默认 `pytest tests/` 跳过 slow，且保持串行。这样牺牲自动并行速度，换取 Windows 开发机上的稳定性，避免 xdist worker 启动失败 / hang / OOM。`pytest-xdist` 依赖仍保留，后续在确认安全的机器上可显式追加 `-n auto --dist worksteal`。
 
 #### 3.9.3 pytest-xdist 依赖
 
 `requirements.txt` 加：
 
 ```
-pytest-xdist>=3.0
+pytest-xdist>=3.2.1
 ```
 
 #### 3.9.4 慢套件入口
@@ -895,8 +895,8 @@ feat(deepseek-migration): heal stale managed_model on startup + add tier_1m_eff_
 - `frontend/src/components/`: 加 `ThinkingBlock.jsx` + 样式
 - `frontend/src/components/MessageRenderer.jsx`（或对应文件）: 渲染 thinking event
 - `app.py`: 加 `_setup_app_log` rotating FileHandler
-- `requirements.txt`: 加 `pytest-xdist>=3.0`
-- `pytest.ini` (新建): default `-m "not slow"` + `-n auto`
+- `requirements.txt`: 加 `pytest-xdist>=3.2.1`
+- `pytest.ini` (新建): default `-m "not slow"`；保留 pytest-xdist 供显式使用
 - `tests/`: 新增对应单测（不删旧测试）
 
 阶段完成：旧 4 工具 + 新 dispatcher 同时存在，model 仍可调旧工具（schema 注册保留）。
@@ -988,10 +988,10 @@ grep -rn "canonical_draft_write_obligation\|canonical_draft_decision\|required_w
 ```bash
 pytest tests/ -m ""           # 全套（含 slow）
 pytest tests/ -q              # 默认（fast）
-pytest tests/ -q -n auto      # 验证并行不破坏 isolation
+pytest tests/ -q -n auto --dist worksteal  # 可选：安全机器上显式验证并行
 ```
 
-baseline target：fast 集合 < 3 min on `-n auto`。
+baseline target：fast 集合在默认串行路径下可靠完成；不再把 xdist 作为默认门禁，避免 Windows/OOM worker instability。
 
 ### 5.5 desktop E2E smoke
 

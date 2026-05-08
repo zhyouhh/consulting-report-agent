@@ -39,7 +39,10 @@ from .search_providers import (
     SerperProvider,
     TavilyProvider,
 )
-from .report_writing import detect_canonical_draft_write_obligation
+from .report_writing import (
+    detect_canonical_draft_write_obligation,
+    detect_user_message_intent,
+)
 from .search_state import SearchStateStore
 from .skill import SkillEngine
 
@@ -67,6 +70,12 @@ USER_VISIBLE_FALLBACK = (
 LEGACY_EMPTY_ASSISTANT_FALLBACKS = frozenset({
     "（本轮" "无回复）",
     USER_VISIBLE_FALLBACK,
+})
+S0_FIRST_TURN_ALLOWED_TOOLS = frozenset({
+    "read_file",
+    "read_material_file",
+    "web_search",
+    "fetch_url",
 })
 _STAGE_ACK_MARKER = "<stage-ack"
 _TAIL_GUARD_MARKERS = (_STAGE_ACK_MARKER,)
@@ -118,6 +127,78 @@ def stream_split_safe_tail(buffer: str) -> tuple[str, str]:
 
     # Rule 3: 全部安全
     return buffer, ""
+
+
+class ThinkingStreamParser:
+    NORMAL = "NORMAL"
+    INSIDE_THINK = "INSIDE_THINK"
+    OPEN_TAG = "<think>"
+    CLOSE_TAG = "</think>"
+
+    def __init__(self):
+        self.state = self.NORMAL
+        self._buffer = ""
+
+    def feed(self, delta: str) -> list[dict]:
+        if not delta:
+            return []
+
+        self._buffer += delta
+        events = []
+
+        while self._buffer:
+            if self.state == self.NORMAL:
+                open_idx = self._buffer.find(self.OPEN_TAG)
+                if open_idx == -1:
+                    self._emit_safe_prefix(events, "content", self.OPEN_TAG)
+                    break
+
+                self._append_event(events, "content", self._buffer[:open_idx])
+                self._buffer = self._buffer[open_idx + len(self.OPEN_TAG):]
+                self.state = self.INSIDE_THINK
+                continue
+
+            close_idx = self._buffer.find(self.CLOSE_TAG)
+            if close_idx == -1:
+                self._emit_safe_prefix(events, "thinking", self.CLOSE_TAG)
+                break
+
+            self._append_event(events, "thinking", self._buffer[:close_idx])
+            self._buffer = self._buffer[close_idx + len(self.CLOSE_TAG):]
+            self.state = self.NORMAL
+
+        return events
+
+    def flush(self) -> list[dict]:
+        events = []
+        if self._buffer:
+            event_type = "thinking" if self.state == self.INSIDE_THINK else "content"
+            events = [{"type": event_type, "data": self._buffer}]
+        self._buffer = ""
+        self.state = self.NORMAL
+        return events
+
+    def _emit_safe_prefix(self, events: list[dict], event_type: str, tag: str) -> None:
+        hold_len = self._partial_tag_tail_len(self._buffer, tag)
+        emit_len = len(self._buffer) - hold_len
+        if emit_len <= 0:
+            return
+
+        self._append_event(events, event_type, self._buffer[:emit_len])
+        self._buffer = self._buffer[emit_len:]
+
+    @staticmethod
+    def _append_event(events: list[dict], event_type: str, data: str) -> None:
+        if data:
+            events.append({"type": event_type, "data": data})
+
+    @staticmethod
+    def _partial_tag_tail_len(text: str, tag: str) -> int:
+        max_len = min(len(tag) - 1, len(text))
+        for length in range(max_len, 0, -1):
+            if tag.startswith(text[-length:]):
+                return length
+        return 0
 
 
 def _get_project_request_lock(project_id: str) -> threading.RLock:
@@ -750,6 +831,7 @@ class ChatHandler:
             "memory_entries": [],
             "compact_state": None,
             "draft_followup_state": None,
+            "s0_confirmation_completed": False,
         }
 
     def _get_conversation_state_path(self, project_id: str):
@@ -826,6 +908,7 @@ class ChatHandler:
 
             state = self._empty_conversation_state()
             state["compact_state"] = compact_state
+            state["s0_confirmation_completed"] = True
             if self._compact_state_is_drifted(compact_state, history, state["memory_entries"]):
                 state["compact_state"] = None
 
@@ -849,6 +932,9 @@ class ChatHandler:
                 migrated_state = self._load_legacy_compact_state_into_conversation_state(project_id, history)
                 if migrated_state is not None:
                     return migrated_state
+                empty_state["s0_confirmation_completed"] = (
+                    self._infer_missing_state_s0_confirmation_completed(project_id, history)
+                )
                 return empty_state
 
             try:
@@ -867,6 +953,13 @@ class ChatHandler:
                 draft_followup_state = payload.get("draft_followup_state")
                 if isinstance(draft_followup_state, dict):
                     state["draft_followup_state"] = draft_followup_state
+                if "s0_confirmation_completed" in payload:
+                    s0_completed = payload.get("s0_confirmation_completed")
+                    state["s0_confirmation_completed"] = (
+                        s0_completed if isinstance(s0_completed, bool) else True
+                    )
+                else:
+                    state["s0_confirmation_completed"] = True
 
             compact_state = state.get("compact_state")
             if compact_state and self._compact_state_is_drifted(compact_state, history, state["memory_entries"]):
@@ -874,6 +967,44 @@ class ChatHandler:
                 self._save_conversation_state_atomically(project_id, state)
 
             return state
+
+    def _infer_missing_state_s0_confirmation_completed(
+        self,
+        project_id: str,
+        history: List[Dict] | None = None,
+    ) -> bool:
+        """Infer S0 completion for legacy projects without conversation_state.json."""
+        if any(
+            isinstance(message, dict) and message.get("role") == "assistant"
+            for message in (history or [])
+        ):
+            return True
+
+        if self._has_prior_s0_assistant_turn(project_id):
+            return True
+
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return False
+
+        try:
+            checkpoints = self.skill_engine._load_stage_checkpoints(project_path)
+        except Exception:
+            checkpoints = {}
+        if "s0_interview_done_at" in checkpoints:
+            return True
+        if any(
+            key in checkpoints
+            for key in self.skill_engine.STAGE_CHECKPOINT_KEYS
+            if key != "s0_interview_done_at"
+        ):
+            return True
+
+        try:
+            stage_state = self.skill_engine._infer_stage_state(project_path)
+        except Exception:
+            return False
+        return stage_state.get("stage_code") not in (None, "S0")
 
     def _save_conversation_state_atomically(self, project_id: str, payload: Dict):
         state_path = self._get_conversation_state_path(project_id)
@@ -890,6 +1021,9 @@ class ChatHandler:
             draft_followup_state = payload.get("draft_followup_state")
             if isinstance(draft_followup_state, dict):
                 state["draft_followup_state"] = draft_followup_state
+            s0_completed = payload.get("s0_confirmation_completed")
+            if isinstance(s0_completed, bool):
+                state["s0_confirmation_completed"] = s0_completed
 
         state_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = state_path.with_suffix(".json.tmp")
@@ -1091,6 +1225,102 @@ class ChatHandler:
                     result = {"status": "error", "raw": msg.get("content")}
                 pairs.append(ToolPair(name=meta["name"], args=meta["args"], result=result))
         return pairs
+
+    def _extract_tool_call_name(self, tool_call) -> str:
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function") or {}
+            if isinstance(function, dict):
+                name = function.get("name")
+            else:
+                name = getattr(function, "name", None)
+        else:
+            function = getattr(tool_call, "function", None)
+            name = getattr(function, "name", None) if function is not None else None
+        return str(name).strip() if name else ""
+
+    def _current_turn_attempted_tool_names(self, current_turn_messages: List[Dict]) -> list[str]:
+        attempted: list[str] = []
+        known_tool_call_names: dict[str, str] = {}
+        for message in current_turn_messages or []:
+            if not isinstance(message, dict):
+                continue
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for tool_call in tool_calls:
+                call_id = (
+                    tool_call.get("id")
+                    if isinstance(tool_call, dict)
+                    else getattr(tool_call, "id", None)
+                )
+                if isinstance(call_id, str) and call_id.strip():
+                    known_tool_call_names[call_id.strip()] = self._extract_tool_call_name(
+                        tool_call
+                    )
+
+        for message in current_turn_messages or []:
+            if not isinstance(message, dict):
+                continue
+
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for tool_call in tool_calls:
+                    attempted.append(self._extract_tool_call_name(tool_call))
+
+            if message.get("role") == "tool":
+                tool_call_id = message.get("tool_call_id")
+                if (
+                    not isinstance(tool_call_id, str)
+                    or tool_call_id.strip() not in known_tool_call_names
+                ):
+                    attempted.append("__unknown_tool_result__")
+                    continue
+
+                paired_tool_name = known_tool_call_names[tool_call_id.strip()]
+                attempted.append(paired_tool_name or "__unknown_tool_result__")
+        return attempted
+
+    def _current_turn_attempted_non_s0_whitelist_tool(
+        self, current_turn_messages: List[Dict]
+    ) -> bool:
+        if self._turn_context.get("s0_non_whitelist_tool_attempted"):
+            return True
+        return any(
+            tool_name not in S0_FIRST_TURN_ALLOWED_TOOLS
+            for tool_name in self._current_turn_attempted_tool_names(current_turn_messages)
+        )
+
+    def _unlock_s0_confirmation_first_turn(self, project_id: str) -> None:
+        self._turn_context["s0_confirmation_completed"] = True
+
+        def mutate(state: Dict):
+            state["s0_confirmation_completed"] = True
+            return state
+
+        try:
+            self._mutate_conversation_state(project_id, mutate)
+        except Exception:
+            logging.warning(
+                "S0 首轮确认状态写入 conversation_state 失败: project_id=%s",
+                project_id,
+                exc_info=True,
+            )
+
+    def _persist_s0_confirmation_first_turn_pending(self, project_id: str) -> None:
+        self._turn_context["s0_confirmation_completed"] = False
+
+        def mutate(state: Dict):
+            state["s0_confirmation_completed"] = False
+            return state
+
+        try:
+            self._mutate_conversation_state(project_id, mutate)
+        except Exception:
+            logging.warning(
+                "S0 首轮确认待完成状态写入 conversation_state 失败: project_id=%s",
+                project_id,
+                exc_info=True,
+            )
 
     def _format_tool_pair_line(self, pair: ToolPair) -> str:
         """Format: - TOOL_NAME(SHORT_ARGS) ✓ SUMMARY or ✗ ERROR_BRIEF. Max 120 chars.
@@ -2136,11 +2366,23 @@ class ChatHandler:
         mutation = self._successful_canonical_draft_mutation()
         if not isinstance(mutation, dict):
             return False
-        return mutation.get("tool") in {
+        if mutation.get("tool") in {
             "rewrite_report_section",
             "replace_report_text",
             "rewrite_report_draft",
-        }
+        }:
+            return True
+        return (
+            mutation.get("tool") == "edit_file"
+            and mutation.get("canonical_action")
+            in {
+                "section_rewrite",
+                "section_delete",
+                "text_replace",
+                "text_delete",
+                "full_rewrite",
+            }
+        )
 
     def _canonical_edit_missing_old_string_guidance(
         self,
@@ -2488,7 +2730,31 @@ class ChatHandler:
             stream_usage = None
             accumulated = ""
             stream_buffer = ""
+            parser = ThinkingStreamParser()
             self_correction_loop_detected = False
+
+            def emit_parsed_stream_events(parsed_events: list[dict]):
+                nonlocal accumulated, stream_buffer
+                for parsed_event in parsed_events:
+                    event_type = parsed_event.get("type")
+                    event_data = parsed_event.get("data")
+                    if not isinstance(event_data, str) or not event_data:
+                        continue
+                    if event_type == "thinking":
+                        yield parsed_event
+                        continue
+                    if event_type != "content":
+                        continue
+
+                    accumulated += event_data
+                    collected_message["content"] = accumulated
+                    stream_buffer += event_data
+                    if not buffer_required_write_content:
+                        safe, held = stream_split_safe_tail(stream_buffer)
+                        if safe:
+                            yield {"type": "content", "data": safe}
+                        stream_buffer = held
+
             try:
                 for chunk in response:
                     if getattr(chunk, "usage", None) is not None:
@@ -2498,14 +2764,7 @@ class ChatHandler:
 
                     delta = chunk.choices[0].delta
                     if delta.content:
-                        accumulated += delta.content
-                        collected_message["content"] = accumulated
-                        stream_buffer += delta.content
-                        if not buffer_required_write_content:
-                            safe, held = stream_split_safe_tail(stream_buffer)
-                            if safe:
-                                yield {"type": "content", "data": safe}
-                            stream_buffer = held
+                        yield from emit_parsed_stream_events(parser.feed(delta.content))
                         if self._looks_like_self_correction_loop(accumulated):
                             self_correction_loop_detected = True
                             break
@@ -2534,6 +2793,7 @@ class ChatHandler:
                                 announced_tool_call_indexes.add(tc_chunk.index)
                                 yield {"type": "tool", "data": f"🔧 准备调用工具: {tc['function']['name']}"}
             except Exception as e:
+                yield from emit_parsed_stream_events(parser.flush())
                 self._debug_dump_request(request_kwargs, label="stream-iter", error=e, note=f"iteration={iterations}")
                 yield {
                     "type": "error",
@@ -2544,6 +2804,10 @@ class ChatHandler:
                     ),
                 }
                 return
+
+            yield from emit_parsed_stream_events(parser.flush())
+            if self._looks_like_self_correction_loop(accumulated):
+                self_correction_loop_detected = True
 
             if collected_message["tool_calls"]:
                 # 上游（newapi → Gemini OpenAI 兼容层）偶发会把并行 functionCall 的流式
@@ -2566,6 +2830,7 @@ class ChatHandler:
                             malformed_reasons.append(f"{fn_name} 参数 JSON 异常: {exc.msg}")
 
                 if malformed_reasons:
+                    self._turn_context["s0_non_whitelist_tool_attempted"] = True
                     yield {
                         "type": "tool",
                         "data": "⚠️ 上条 tool_calls 被上游合并成畸形条目，本轮作废并让模型重发。",
@@ -2693,8 +2958,7 @@ class ChatHandler:
                 # Task 3 fix1: obligation-only streaming still emits text before this
                 # advisory retry decision. Buffer/rollback-safe stream events are
                 # deferred to Task 5 cleanup if cutover smoke shows real impact.
-                obligation = self._turn_context.get("canonical_draft_write_obligation")
-                if obligation and not self._turn_context.get("obligation_retry_fired") and not self._turn_context.get("canonical_draft_mutation"):
+                if self._has_canonical_obligation_retry_signal():
                     current_turn_messages.append({"role": "assistant", "content": candidate_message})
                     if self._maybe_inject_obligation_retry(candidate_message, current_turn_messages):
                         continue
@@ -2931,8 +3195,7 @@ class ChatHandler:
                         preflight_compaction_used=compressed,
                     )
                     break
-                obligation = self._turn_context.get("canonical_draft_write_obligation")
-                if obligation and not self._turn_context.get("obligation_retry_fired") and not self._turn_context.get("canonical_draft_mutation"):
+                if self._has_canonical_obligation_retry_signal():
                     current_turn_messages.append({"role": "assistant", "content": candidate_message})
                     if self._maybe_inject_obligation_retry(candidate_message, current_turn_messages):
                         continue
@@ -3654,6 +3917,390 @@ class ChatHandler:
             },
         ]
 
+    def _generic_write_file(
+        self,
+        project_id: str,
+        file_path: str,
+        content: str,
+        source_tool_args: Dict | None = None,
+    ) -> Dict:
+        source_args = (
+            source_tool_args
+            if isinstance(source_tool_args, dict)
+            else {"file_path": file_path, "content": content}
+        )
+        return self._execute_plan_write(
+            project_id,
+            file_path=file_path,
+            content=content,
+            source_tool_name="write_file",
+            source_tool_args=source_args,
+            persist_func_name="write_file",
+            persist_args=source_args,
+        )
+
+    def _dispatch_write_file(
+        self,
+        project_id: str,
+        file_path: str,
+        content: str,
+        source_tool_args: Dict | None = None,
+    ) -> Dict:
+        try:
+            normalized_path = self.skill_engine.normalize_file_path(project_id, file_path)
+        except (AttributeError, TypeError, ValueError):
+            return self._generic_write_file(
+                project_id,
+                file_path,
+                content,
+                source_tool_args=source_tool_args,
+            )
+
+        if not self._is_canonical_report_draft_path(normalized_path):
+            return self._generic_write_file(
+                project_id,
+                file_path,
+                content,
+                source_tool_args=source_tool_args,
+            )
+
+        reason = self._canonical_write_file_rejected_message()
+        self._emit_system_notice_once(
+            category="report_draft_destructive_write_blocked",
+            path=self.skill_engine.REPORT_DRAFT_PATH,
+            reason=reason,
+            user_action=(
+                "正文首次成稿或续写请用 `append_report_draft`；"
+                "修改已有正文请先 `read_file`，再用 `edit_file`。"
+            ),
+            surface_to_user=True,
+        )
+        return {"status": "error", "message": reason}
+
+    def _generic_edit_file(
+        self,
+        project_id: str,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+    ) -> Dict:
+        if not file_path:
+            return {"status": "error", "message": "缺少 file_path 参数。"}
+        if not old_string:
+            canonical_edit_guidance = self._canonical_edit_missing_old_string_guidance(
+                project_id, file_path,
+            )
+            if canonical_edit_guidance:
+                return {
+                    "status": "error",
+                    "message": canonical_edit_guidance,
+                }
+            return {
+                "status": "error",
+                "message": "old_string 不能为空；新建文件或整体重写请改用 write_file。",
+            }
+        try:
+            normalized_read = self.skill_engine.normalize_file_path(project_id, file_path)
+            current_content = self.skill_engine.read_file(project_id, normalized_read)
+        except (ValueError, FileNotFoundError) as exc:
+            return {
+                "status": "error",
+                "message": f"读取失败：{str(exc)}（edit_file 要求目标文件已存在；新建用 write_file）",
+            }
+        count = current_content.count(old_string)
+        if count == 0:
+            return {
+                "status": "error",
+                "message": "old_string 在文件中未找到，请先 read_file 核对原文后重试。",
+            }
+        if count > 1:
+            return {
+                "status": "error",
+                "message": f"old_string 在文件中出现 {count} 次，不唯一；请在 old_string 前后补更多上下文让它唯一。",
+            }
+        updated = current_content.replace(old_string, new_string, 1)
+        source_args = {
+            "file_path": file_path,
+            "old_string": old_string,
+            "new_string": new_string,
+        }
+        return self._execute_plan_write(
+            project_id,
+            file_path=file_path,
+            content=updated,
+            source_tool_name="edit_file",
+            source_tool_args=source_args,
+            persist_func_name="write_file",
+            persist_args={"file_path": file_path, "content": updated},
+        )
+
+    def _dispatch_edit_file(
+        self,
+        project_id: str,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        turn_context: Dict | None = None,
+    ) -> Dict:
+        try:
+            normalized_path = self.skill_engine.normalize_file_path(project_id, file_path)
+        except ValueError:
+            return self._generic_edit_file(project_id, file_path, old_string, new_string)
+        if not self._is_canonical_report_draft_path(normalized_path):
+            return self._generic_edit_file(project_id, file_path, old_string, new_string)
+
+        turn_context = turn_context if isinstance(turn_context, dict) else self._turn_context
+        if not isinstance(old_string, str) or not old_string.strip():
+            return {
+                "status": "error",
+                "message": "edit_file 需要 old_string 锚点；新增内容请用 append_report_draft。",
+            }
+        if not isinstance(new_string, str):
+            return {"status": "error", "message": "new_string 必须是字符串。"}
+
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return {"status": "error", "message": f"项目 {project_id} 不存在"}
+        draft_path = project_path / self.skill_engine.REPORT_DRAFT_PATH
+        draft_text = ""
+        if draft_path.exists():
+            draft_text = draft_path.read_text(encoding="utf-8")
+
+        from backend.report_writing import (
+            check_no_fetch_url_pending,
+            check_no_mixed_intent_in_turn,
+            check_no_prior_canonical_mutation_in_turn,
+            check_outline_confirmed,
+            check_read_before_write_canonical_draft,
+            check_report_writing_stage,
+            resolve_section_anchor,
+        )
+
+        canonical_action = ""
+        actual_old = ""
+        target_label = ""
+        if old_string.startswith("## "):
+            section_snapshot = resolve_section_anchor(old_string, draft_text)
+            if section_snapshot is None:
+                return {
+                    "status": "error",
+                    "message": "锚点章节未在 draft 中唯一匹配。",
+                }
+            canonical_action = "section_rewrite" if new_string else "section_delete"
+            actual_old = section_snapshot
+            target_label = old_string.split("\n", 1)[0].strip()
+        else:
+            first_line = draft_text.split("\n", 1)[0].strip() if draft_text else ""
+            is_full_draft_anchor = (
+                old_string == draft_text
+                or bool(draft_text) and old_string.strip() == draft_text.strip()
+            )
+            is_structural_h1_range = (
+                old_string.startswith("# ")
+                and ("\n## " in old_string or "\r\n## " in old_string)
+            )
+            is_full_rewrite_anchor = (
+                old_string.startswith("# ")
+                and "\n" not in old_string
+                and "\r" not in old_string
+                and old_string.strip() == first_line
+            )
+            if is_full_rewrite_anchor or is_full_draft_anchor:
+                user_message = str(turn_context.get("user_message_text") or "")
+                full_rewrite_keywords = ("整篇", "推倒", "全文重写", "重写整")
+                if not any(keyword in user_message for keyword in full_rewrite_keywords):
+                    return {
+                        "status": "error",
+                        "message": (
+                            "整篇重写需要明确用户说“整篇/推倒/全文重写/重写整”。"
+                            "局部修改请用 ## 章节锚点；新增内容请用 append_report_draft。"
+                        ),
+                    }
+                canonical_action = "full_rewrite"
+                actual_old = draft_text
+                target_label = "<full draft>"
+            elif is_structural_h1_range:
+                return {
+                    "status": "error",
+                    "message": (
+                        "old_string 覆盖了从 # 标题开始的结构性范围。"
+                        "整篇重写请明确说“整篇/推倒/全文重写/重写整”；"
+                        "局部修改请用 ## 章节锚点或唯一文字片段。"
+                    ),
+                }
+            else:
+                count = draft_text.count(old_string)
+                if count != 1:
+                    return {
+                        "status": "error",
+                        "message": "old_string 必须在 draft 中唯一出现。",
+                    }
+                canonical_action = "text_replace" if new_string else "text_delete"
+                actual_old = old_string
+                target_label = old_string.splitlines()[0][:50]
+
+        user_message = str(turn_context.get("user_message_text") or "")
+        obligation = turn_context.get("canonical_draft_write_obligation")
+        tool_family = obligation.get("tool_family") if isinstance(obligation, dict) else None
+        if tool_family in {"begin", "continue"}:
+            return {
+                "status": "error",
+                "message": (
+                    "本轮用户意图是新增内容/续写正文，请用 append_report_draft；"
+                    "edit_file 只用于修改已有内容。"
+                ),
+            }
+        if tool_family == "rewrite_section" and canonical_action not in {
+            "section_rewrite",
+            "section_delete",
+        }:
+            return {
+                "status": "error",
+                "message": (
+                    "本轮用户意图是重写/删除章节，请调用 rewrite_report_section，"
+                    "或在 edit_file 中使用 ## 章节锚点完成 section_rewrite/section_delete；"
+                    "不要用唯一文字片段做局部替换。"
+                ),
+            }
+        if tool_family == "replace_text" and canonical_action not in {
+            "text_replace",
+            "text_delete",
+        }:
+            return {
+                "status": "error",
+                "message": (
+                    "本轮用户意图是替换/删除具体文字，请调用 replace_report_text，"
+                    "或在 edit_file 中使用唯一文字片段完成 text_replace/text_delete；"
+                    "章节重写请让用户明确提出重写章节。"
+                ),
+            }
+        if tool_family == "rewrite_draft" and canonical_action != "full_rewrite":
+            return {
+                "status": "error",
+                "message": (
+                    "本轮用户意图是整篇重写，请用整篇 draft 作为锚点完成 full_rewrite；"
+                    "局部修改请让用户明确章节或文字替换。"
+                ),
+            }
+
+        for err in (
+            check_report_writing_stage(self.skill_engine, project_id),
+            check_outline_confirmed(self.skill_engine, project_id),
+            check_no_mixed_intent_in_turn(self, user_message),
+            check_no_prior_canonical_mutation_in_turn(turn_context),
+            check_no_fetch_url_pending(turn_context),
+        ):
+            if err:
+                return self._canonical_draft_tool_error_result(project_id, err)
+
+        err = check_read_before_write_canonical_draft(
+            turn_context,
+            self.skill_engine,
+            project_id,
+            require_read=True,
+        )
+        if err:
+            return self._canonical_draft_tool_error_result(project_id, err)
+
+        if detect_user_message_intent(user_message) == "generative":
+            return {
+                "status": "error",
+                "message": (
+                    "用户消息看起来是想新增内容（起草/续写/写下一章），"
+                    "请用 append_report_draft；edit_file 只用于修改已有内容。"
+                ),
+            }
+
+        if canonical_action == "full_rewrite":
+            if not new_string.startswith("# "):
+                return {"status": "error", "message": "`new_string` 必须以 `# 报告标题` 开头。"}
+            h2_count = sum(1 for line in new_string.split("\n") if line.startswith("## "))
+            if h2_count == 0:
+                return {"status": "error", "message": "`new_string` 必须含至少一个章节标题（`## ` 级别）。"}
+            cap = max(8000, 2 * len(draft_text))
+            if len(new_string) > cap:
+                return {
+                    "status": "error",
+                    "message": f"提交内容超过预期范围（{len(new_string)} 字 vs 上限 {cap} 字），请只提交完整草稿。",
+                }
+
+        if canonical_action == "section_rewrite":
+            if not new_string.startswith("## "):
+                return {"status": "error", "message": "`new_string` 必须以 `## 章节标题` 开头。"}
+            h2_count = sum(1 for line in new_string.split("\n") if line.startswith("## "))
+            if h2_count != 1:
+                return {"status": "error", "message": "`new_string` 只能包含一个 `## ` 章节标题。"}
+            cap = max(3000, 3 * len(actual_old))
+            if len(new_string) > cap:
+                return {
+                    "status": "error",
+                    "message": f"提交章节超过预期范围（{len(new_string)} 字 vs 上限 {cap} 字），请只提交目标章节。",
+                }
+
+        new_draft = draft_text.replace(actual_old, new_string, 1)
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(new_draft, encoding="utf-8")
+        mtime_after = draft_path.stat().st_mtime
+
+        mutation = {
+            "tool": "edit_file",
+            "path": self.skill_engine.REPORT_DRAFT_PATH,
+            "canonical_action": canonical_action,
+            "target_label": target_label,
+            "old_len": len(actual_old),
+            "new_len": len(new_string),
+            "mtime_after": mtime_after,
+            "ts": time.time(),
+        }
+        mutations = turn_context.setdefault("canonical_draft_mutations", [])
+        if not isinstance(mutations, list):
+            mutations = []
+            turn_context["canonical_draft_mutations"] = mutations
+        mutations.append(mutation)
+        turn_context["canonical_draft_mutation"] = {
+            "tool": "edit_file",
+            "path": self.skill_engine.REPORT_DRAFT_PATH,
+            "canonical_action": canonical_action,
+            "target_label": target_label,
+        }
+
+        result = {
+            "status": "success",
+            "message": f"已写入文件: {self.skill_engine.REPORT_DRAFT_PATH}",
+            "path": self.skill_engine.REPORT_DRAFT_PATH,
+            "canonical_action": canonical_action,
+            "target_label": target_label,
+            "old_len": len(actual_old),
+            "new_len": len(new_string),
+        }
+        progress_snapshot = self._canonical_draft_progress_snapshot(project_id)
+        result.update(self._canonical_draft_progress_response_payload(progress_snapshot))
+        progress_message = self._build_canonical_draft_write_success_message(
+            progress_snapshot
+        )
+        if progress_message:
+            result["message"] = progress_message
+        source_args = {
+            "file_path": self.skill_engine.REPORT_DRAFT_PATH,
+            "old_string": old_string,
+            "new_string": new_string,
+        }
+        self._persist_successful_tool_result(
+            project_id,
+            "edit_file",
+            source_args,
+            result,
+            {
+                "normalized_path": self.skill_engine.REPORT_DRAFT_PATH,
+                "metadata_func_name": "write_file",
+                "metadata_args": {
+                    "file_path": self.skill_engine.REPORT_DRAFT_PATH,
+                    "content": new_draft,
+                },
+            },
+        )
+        return result
+
     def _execute_tool(self, project_id: str, tool_call):
         """执行工具调用"""
         import logging
@@ -3666,65 +4313,57 @@ class ChatHandler:
                 if isinstance(raw_arguments, str)
                 else dict(raw_arguments or {})
             )
-            obligation_guard = self._guard_canonical_draft_obligation_tool(func_name)
+            if (
+                self._turn_context.get("s0_confirmation_completed", True) is False
+                and func_name not in S0_FIRST_TURN_ALLOWED_TOOLS
+            ):
+                return {
+                    "status": "error",
+                    "message": (
+                        "当前是项目首轮澄清/确认阶段，除 read_file、read_material_file、"
+                        "web_search、fetch_url 外请不要使用工具。请先用纯文本提出 3-5 个"
+                        "澄清/确认/补充问题，围绕 seed、项目主题、目标受众、范围和边界；"
+                        "等用户回答或明确跳过后，再使用其他工具。"
+                    ),
+                }
+            skip_obligation_guard = False
+            if func_name in {"edit_file", "write_file"}:
+                raw_file_path = args.get("file_path", "")
+                if isinstance(raw_file_path, str):
+                    try:
+                        normalized_write_target = self.skill_engine.normalize_file_path(
+                            project_id, raw_file_path,
+                        )
+                    except ValueError:
+                        normalized_write_target = self._normalize_project_file_path(raw_file_path)
+                    skip_obligation_guard = self._is_canonical_report_draft_path(
+                        normalized_write_target,
+                    )
+            obligation_guard = (
+                None
+                if skip_obligation_guard
+                else self._guard_canonical_draft_obligation_tool(func_name)
+            )
             if obligation_guard is not None:
                 return obligation_guard
 
             if func_name == "write_file":
-                return self._execute_plan_write(
+                return self._dispatch_write_file(
                     project_id,
-                    file_path=args["file_path"],
-                    content=args["content"],
-                    source_tool_name="write_file",
+                    args["file_path"],
+                    args["content"],
                     source_tool_args=args,
-                    persist_func_name="write_file",
-                    persist_args=args,
                 )
             if func_name == "edit_file":
                 file_path = args.get("file_path", "")
                 old_string = args.get("old_string", "")
                 new_string = args.get("new_string", "")
-                if not file_path:
-                    return {"status": "error", "message": "缺少 file_path 参数。"}
-                if not old_string:
-                    canonical_edit_guidance = self._canonical_edit_missing_old_string_guidance(project_id, file_path)
-                    if canonical_edit_guidance:
-                        return {
-                            "status": "error",
-                            "message": canonical_edit_guidance,
-                        }
-                    return {
-                        "status": "error",
-                        "message": "old_string 不能为空；新建文件或整体重写请改用 write_file。",
-                    }
-                try:
-                    normalized_read = self.skill_engine.normalize_file_path(project_id, file_path)
-                    current_content = self.skill_engine.read_file(project_id, normalized_read)
-                except (ValueError, FileNotFoundError) as exc:
-                    return {
-                        "status": "error",
-                        "message": f"读取失败：{str(exc)}（edit_file 要求目标文件已存在；新建用 write_file）",
-                    }
-                count = current_content.count(old_string)
-                if count == 0:
-                    return {
-                        "status": "error",
-                        "message": "old_string 在文件中未找到，请先 read_file 核对原文后重试。",
-                    }
-                if count > 1:
-                    return {
-                        "status": "error",
-                        "message": f"old_string 在文件中出现 {count} 次，不唯一；请在 old_string 前后补更多上下文让它唯一。",
-                    }
-                updated = current_content.replace(old_string, new_string, 1)
-                return self._execute_plan_write(
+                return self._dispatch_edit_file(
                     project_id,
-                    file_path=file_path,
-                    content=updated,
-                    source_tool_name="edit_file",
-                    source_tool_args=args,
-                    persist_func_name="write_file",
-                    persist_args={"file_path": file_path, "content": updated},
+                    file_path,
+                    old_string,
+                    new_string,
+                    self._turn_context,
                 )
             if func_name == "append_report_draft":
                 if not isinstance(args.get("content", ""), str):
@@ -4119,7 +4758,11 @@ class ChatHandler:
                 return self._canonical_draft_tool_error_result(project_id, err)
 
         project_path = self.skill_engine.get_project_path(project_id)
-        draft_exists = bool(project_path and (project_path / self.skill_engine.REPORT_DRAFT_PATH).exists())
+        draft_path = project_path / self.skill_engine.REPORT_DRAFT_PATH if project_path else None
+        draft_exists = bool(draft_path and draft_path.exists())
+        old_len = 0
+        if draft_path and draft_path.exists():
+            old_len = len(draft_path.read_text(encoding="utf-8"))
         err = check_read_before_write_canonical_draft(
             self._turn_context, self.skill_engine, project_id,
             require_read=draft_exists,
@@ -4127,11 +4770,62 @@ class ChatHandler:
         if err:
             return {"status": "error", "message": err}
 
+        user_msg = self._turn_context.get("user_message_text", "") or ""
+        if detect_user_message_intent(user_msg) == "modify":
+            return {
+                "status": "error",
+                "message": (
+                    "用户消息看起来是想改已有内容；"
+                    "请用 edit_file 修改已有正文，append_report_draft 只用于起草或续写。"
+                ),
+            }
+
+        mutations_before = self._turn_context.get("canonical_draft_mutations")
+        mutations_before_len = len(mutations_before) if isinstance(mutations_before, list) else 0
         result = self._do_append_report_draft(project_id, content)
         if result.get("status") == "success":
+            canonical_action = "first_draft" if not draft_exists else "append"
+            target_label = "first chapter" if not draft_exists else "next paragraph/chapter"
+            append_len = len(content.strip()) if isinstance(content, str) else 0
+            mtime_after = draft_path.stat().st_mtime if draft_path and draft_path.exists() else None
+            mutation_entry = {
+                "tool": "append_report_draft",
+                "canonical_action": canonical_action,
+                "target_label": target_label,
+                "old_len": old_len,
+                "new_len": append_len,
+                "mtime_after": mtime_after,
+                "ts": time.time(),
+            }
+            mutations = self._turn_context.setdefault("canonical_draft_mutations", [])
+            if not isinstance(mutations, list):
+                mutations = []
+                self._turn_context["canonical_draft_mutations"] = mutations
+            recorded_append_mutations = [
+                (index, mutation)
+                for index, mutation in enumerate(
+                    mutations[mutations_before_len:],
+                    start=mutations_before_len,
+                )
+                if isinstance(mutation, dict)
+                and mutation.get("tool") == "append_report_draft"
+            ]
+            recorded_append_mutation = (
+                recorded_append_mutations[-1][1]
+                if recorded_append_mutations
+                else None
+            )
+            if recorded_append_mutation is not None:
+                for index, _mutation in reversed(recorded_append_mutations[:-1]):
+                    del mutations[index]
+                recorded_append_mutation.update(mutation_entry)
+            else:
+                mutations.append(mutation_entry)
             existing = self._turn_context.get("canonical_draft_mutation") or {}
             merged = dict(existing)
             merged["tool"] = "append_report_draft"
+            merged["canonical_action"] = canonical_action
+            merged["target_label"] = target_label
             self._turn_context["canonical_draft_mutation"] = merged
         return result
 
@@ -4275,7 +4969,7 @@ class ChatHandler:
                 user_action="请基于当前已落盘的正文结果直接向用户汇报，本轮不要继续改动正文。",
                 surface_to_user=True,
             )
-            return {"status": "error", "message": mutation_limit_error}
+            return self._canonical_draft_tool_error_result(project_id, mutation_limit_error)
         read_before_write_error = self._validate_existing_file_read_before_write(
             project_id,
             normalized_path,
@@ -4412,6 +5106,7 @@ class ChatHandler:
             result=result,
         )
         self._record_successful_canonical_draft_mutation(
+            project_id=project_id,
             source_tool_name=source_tool_name,
             normalized_path=normalized_path,
             progress_snapshot=canonical_progress_snapshot,
@@ -5455,6 +6150,22 @@ class ChatHandler:
             f"{evidence_rule}\n{concurrency_rule}\n\n{project_context}"
         )
 
+    def _has_canonical_obligation_retry_signal(self) -> bool:
+        context = self._turn_context or {}
+        if context.get("obligation_retry_fired"):
+            return False
+        if context.get("canonical_draft_mutation"):
+            return False
+
+        new_obligation = context.get("canonical_obligation") or {}
+        new_intent = (
+            new_obligation.get("intent") if isinstance(new_obligation, dict) else None
+        )
+        return (
+            new_intent in ("generative", "modify")
+            or bool(context.get("canonical_draft_write_obligation"))
+        )
+
     def _maybe_inject_obligation_retry(
         self, assistant_text: str, current_turn_messages: List[Dict] | None = None,
     ) -> bool:
@@ -5467,12 +6178,36 @@ class ChatHandler:
             return False
         if self._turn_context.get("obligation_retry_fired"):
             return False  # 防重复
+        from backend.report_writing import assistant_text_claims_modification
+
+        new_obligation = self._turn_context.get("canonical_obligation") or {}
+        new_intent = (
+            new_obligation.get("intent") if isinstance(new_obligation, dict) else None
+        )
+        if new_intent in ("generative", "modify"):
+            if self._turn_context.get("canonical_draft_mutations"):
+                return False
+            if not assistant_text_claims_modification(assistant_text):
+                return False
+            if new_intent == "generative":
+                tool_hint = "`append_report_draft`"
+            else:
+                tool_hint = "`edit_file`"
+            corrective = (
+                "你在回复中声称已修改正文，但本轮没有成功调用写正文工具。"
+                f"请实际调用 {tool_hint} 完成正文写入，不要只在文字中声明已完成。"
+            )
+            self._inject_synthetic_user_correction(corrective, current_turn_messages)
+            self._turn_context["obligation_retry_fired"] = True
+            return True
+
         obligation = self._turn_context.get("canonical_draft_write_obligation")
         if not obligation:
             return False
         if self._turn_context.get("canonical_draft_mutation"):
             return False  # 已有 mutation，无需 retry
-        from backend.report_writing import assistant_text_claims_modification
+        if self._turn_context.get("canonical_draft_mutations"):
+            return False  # 新 dispatcher 已记录 mutation，无需 legacy retry
         if not assistant_text_claims_modification(assistant_text):
             return False  # 未声称完成 → 不撒谎，不 retry
         corrective = (
@@ -5535,10 +6270,14 @@ class ChatHandler:
             "draft_followup_flags": None,
             "read_file_paths": set(),
             "canonical_draft_mutation": None,
+            "canonical_draft_mutations": [],
             "checkpoint_event": None,
             "pending_stage_keyword": None,
+            "s0_confirmation_completed": True,
+            "s0_non_whitelist_tool_attempted": False,
             "user_message_text": "",                  # spec §3.3 NEW
             "canonical_draft_write_obligation": None, # spec §3.5 NEW
+            "canonical_obligation": {"intent": None, "expected_action": None},
             "read_file_snapshots": {},                # spec §3.7 NEW
         }
 
@@ -5615,12 +6354,27 @@ class ChatHandler:
 
     def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, object]:
         self._turn_context = self._new_turn_context(can_write_non_plan=False)
+        conversation_state = self._load_conversation_state(project_id)
+        s0_completed = conversation_state.get("s0_confirmation_completed", True)
+        self._turn_context["s0_confirmation_completed"] = (
+            s0_completed if isinstance(s0_completed, bool) else True
+        )
         self._turn_context["user_message_text"] = self._extract_user_message_text(
             {"role": "user", "content": user_message}
         )
         self._turn_context["canonical_draft_write_obligation"] = (
             detect_canonical_draft_write_obligation(user_message)
         )
+        intent = detect_user_message_intent(user_message)
+        expected_action = {
+            "generative": "append",
+            "modify": "any_canonical_write",
+            "ambiguous": None,
+        }[intent]
+        self._turn_context["canonical_obligation"] = {
+            "intent": None if intent == "ambiguous" else intent,
+            "expected_action": expected_action,
+        }
         project_path = self.skill_engine.get_project_path(project_id)
         if project_path:
             summary = self.skill_engine.get_workspace_summary(project_id)
@@ -5715,19 +6469,103 @@ class ChatHandler:
     def _record_successful_canonical_draft_mutation(
         self,
         *,
+        project_id: str | None = None,
         source_tool_name: str,
         normalized_path: str,
         progress_snapshot: dict | None = None,
     ) -> None:
-        if not self._is_canonical_report_draft_path(normalized_path):
+        if (
+            not isinstance(normalized_path, str)
+            or not self._is_canonical_report_draft_path(normalized_path)
+        ):
             return
+        tool_name = (
+            source_tool_name
+            if isinstance(source_tool_name, str) and source_tool_name
+            else ""
+        )
         mutation = {
-            "tool": source_tool_name,
+            "tool": tool_name,
             "path": self.skill_engine.REPORT_DRAFT_PATH,
         }
         if isinstance(progress_snapshot, dict):
             mutation["progress_snapshot"] = progress_snapshot
         self._turn_context["canonical_draft_mutation"] = mutation
+
+        event = self._turn_context.get("_last_successful_semantic_edit_event")
+        event_args = {}
+        if isinstance(event, dict) and event.get("source_tool_name") == tool_name:
+            raw_args = event.get("arguments")
+            if isinstance(raw_args, dict):
+                event_args = raw_args
+
+        old_string = event_args.get("old_string")
+        new_string = event_args.get("new_string")
+        old_text = old_string if isinstance(old_string, str) else ""
+        new_text = new_string if isinstance(new_string, str) else ""
+        has_new_text = isinstance(new_string, str)
+
+        def _first_line_label(text: str) -> str:
+            for line in text.splitlines():
+                label = line.strip()
+                if label:
+                    return label[:50]
+            return ""
+
+        canonical_action = "canonical_draft_mutation"
+        target_label = _first_line_label(old_text) or self.skill_engine.REPORT_DRAFT_PATH
+        if tool_name == "rewrite_report_section":
+            canonical_action = (
+                "section_rewrite"
+                if (not has_new_text or new_text)
+                else "section_delete"
+            )
+            target_label = (
+                _first_line_label(old_text)
+                or _first_line_label(new_text)
+                or self.skill_engine.REPORT_DRAFT_PATH
+            )
+        elif tool_name == "replace_report_text":
+            canonical_action = (
+                "text_replace"
+                if (not has_new_text or new_text)
+                else "text_delete"
+            )
+        elif tool_name == "rewrite_report_draft":
+            canonical_action = "full_rewrite"
+            target_label = "<full draft>"
+        elif tool_name == "append_report_draft":
+            canonical_action = "append"
+            target_label = "canonical draft"
+
+        mtime_after = None
+        if isinstance(project_id, str) and project_id:
+            project_path = self.skill_engine.get_project_path(project_id)
+            if project_path:
+                draft_path = project_path / self.skill_engine.REPORT_DRAFT_PATH
+                try:
+                    if draft_path.exists():
+                        mtime_after = draft_path.stat().st_mtime
+                except OSError:
+                    mtime_after = None
+
+        list_entry = {
+            "tool": tool_name,
+            "path": self.skill_engine.REPORT_DRAFT_PATH,
+            "canonical_action": canonical_action,
+            "target_label": target_label,
+            "old_len": len(old_text),
+            "new_len": len(new_text),
+            "mtime_after": mtime_after,
+            "ts": time.time(),
+        }
+        if isinstance(progress_snapshot, dict):
+            list_entry["progress_snapshot"] = progress_snapshot
+        mutations = self._turn_context.setdefault("canonical_draft_mutations", [])
+        if not isinstance(mutations, list):
+            mutations = []
+            self._turn_context["canonical_draft_mutations"] = mutations
+        mutations.append(list_entry)
 
     def _canonical_draft_progress_snapshot(
         self,
@@ -5801,9 +6639,14 @@ class ChatHandler:
             f"当前 {current_count}/{turn_target_count} 字，{status_text}"
         )
 
+    def _is_canonical_draft_mutation_limit_error(self, message: str) -> bool:
+        if "本轮已经修改过正文草稿一次" in message:
+            return True
+        return "本轮已经成功修改正文草稿" in message and "达到上限" in message
+
     def _canonical_draft_tool_error_result(self, project_id: str, message: str) -> Dict:
         result = {"status": "error", "message": message}
-        if "本轮已经修改过正文草稿一次" not in message:
+        if not self._is_canonical_draft_mutation_limit_error(message):
             return result
 
         snapshot = self._canonical_draft_progress_snapshot(project_id)
@@ -5832,18 +6675,15 @@ class ChatHandler:
     ) -> str | None:
         if not self._is_canonical_report_draft_path(normalized_path):
             return None
-        mutation = self._successful_canonical_draft_mutation()
-        if not isinstance(mutation, dict):
-            return None
-        tool_name = mutation.get("tool")
-        tool_hint = (
-            f"`{tool_name}`"
-            if isinstance(tool_name, str) and tool_name.strip()
-            else "前一个工具"
-        )
+        from backend.report_writing import check_no_prior_canonical_mutation_in_turn
+
+        return check_no_prior_canonical_mutation_in_turn(self._turn_context)
+
+    def _canonical_write_file_rejected_message(self) -> str:
         return (
-            f"本轮已经成功通过 {tool_hint} 修改了 `{self.skill_engine.REPORT_DRAFT_PATH}`。"
-            "请基于当前落盘结果直接向用户汇报，不要继续修改该文件。"
+            f"不要对 `{self.skill_engine.REPORT_DRAFT_PATH}` 使用 `write_file`。"
+            "首次成稿或续写请用 `append_report_draft`；"
+            "修改已有正文请先 `read_file`，再用 `edit_file`。"
         )
 
     def _build_canonical_draft_write_file_block_message(
@@ -5853,22 +6693,10 @@ class ChatHandler:
         *,
         source_tool_args: Dict | None = None,
     ) -> str | None:
+        del project_id, source_tool_args
         if not self._is_canonical_report_draft_path(normalized_path):
             return None
-        specific_error = self._validate_required_report_draft_prewrite(
-            project_id,
-            normalized_path,
-            str((source_tool_args or {}).get("content") or ""),
-            source_tool_name="write_file",
-            source_tool_args=source_tool_args,
-        )
-        if specific_error:
-            return specific_error
-        return (
-            f"不要对 `{self.skill_engine.REPORT_DRAFT_PATH}` 使用 `write_file`。"
-            "首次成稿或续写请用 `append_report_draft`；"
-            "修改已有正文请先 `read_file`，再用 `edit_file`。"
-        )
+        return self._canonical_write_file_rejected_message()
 
     def _finalize_assistant_turn(
         self,
@@ -5951,6 +6779,15 @@ class ChatHandler:
                     else "stream_truncated"
                 ),
             )
+
+        if self._turn_context.get("s0_confirmation_completed", True) is False:
+            attempted_non_whitelist = self._current_turn_attempted_non_s0_whitelist_tool(
+                current_turn_messages
+            )
+            if attempted_non_whitelist:
+                self._persist_s0_confirmation_first_turn_pending(project_id)
+            else:
+                self._unlock_s0_confirmation_first_turn(project_id)
 
         # Step 5: append tool-log.
         persisted_content = visible_content

@@ -1,4 +1,51 @@
+import logging
 import threading
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+
+def _setup_app_log():
+    log_dir = Path.home() / ".consulting-report"
+    log_file = log_dir / "app.log"
+    root_logger = logging.getLogger()
+
+    for handler in root_logger.handlers:
+        handler_path = getattr(handler, "baseFilename", None)
+        if (
+            isinstance(handler, RotatingFileHandler)
+            and handler_path
+            and Path(handler_path) == log_file
+        ):
+            return
+
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+
+    handler = None
+    try:
+        handler = RotatingFileHandler(
+            log_file,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        handler.setLevel(logging.INFO)
+        if root_logger.level > logging.INFO:
+            root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(handler)
+    except OSError:
+        if handler is not None:
+            handler.close()
+        return
+
+
+# Install file logging before importing backend modules that may log during import.
+_setup_app_log()
 
 import webview
 

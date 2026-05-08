@@ -17,6 +17,7 @@ from backend.config import (
     ManagedSearchRoutingConfig,
     Settings,
 )
+from backend.report_writing import detect_canonical_draft_write_obligation
 from backend.skill import SkillEngine
 
 
@@ -142,6 +143,11 @@ class ChatRuntimeTests(unittest.TestCase):
         self.project_id = project["id"]
         self.project_dir = Path(project["project_dir"])
         return handler
+
+    def _mark_s0_confirmation_completed(self, handler):
+        state = handler._empty_conversation_state()
+        state["s0_confirmation_completed"] = True
+        handler._save_conversation_state_atomically(self.project_id, state)
 
     def _finalize_assistant_for_test(
         self,
@@ -392,6 +398,64 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(request_timeout.read, 180.0)
         self.assertEqual(request_timeout.write, 30.0)
         self.assertEqual(request_timeout.pool, 30.0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_splits_thinking_events_and_persists_only_visible_content(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="<think>hidden reasoning</think>visible reply"),
+        ])
+        handler = self._make_handler_with_project()
+
+        events = list(handler.chat_stream(self.project_id, "继续"))
+
+        self.assertIn({"type": "thinking", "data": "hidden reasoning"}, events)
+        self.assertIn({"type": "content", "data": "visible reply"}, events)
+        content_text = "".join(
+            event["data"] for event in events if event["type"] == "content"
+        )
+        thinking_text = "".join(
+            event["data"] for event in events if event["type"] == "thinking"
+        )
+        persisted_history = handler._load_conversation(self.project_id)
+        assistant_messages = [
+            message["content"]
+            for message in persisted_history
+            if message.get("role") == "assistant"
+        ]
+
+        self.assertEqual(content_text, "visible reply")
+        self.assertEqual(thinking_text, "hidden reasoning")
+        self.assertEqual(assistant_messages[-1], "visible reply")
+        self.assertNotIn("hidden reasoning", assistant_messages[-1])
+        self.assertNotIn("<think>", assistant_messages[-1])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_flushes_unclosed_thinking_without_persisting_it(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="visible reply<think>hidden reasoning </thi"),
+        ])
+        handler = self._make_handler_with_project()
+
+        events = list(handler.chat_stream(self.project_id, "继续"))
+
+        content_text = "".join(
+            event["data"] for event in events if event["type"] == "content"
+        )
+        thinking_text = "".join(
+            event["data"] for event in events if event["type"] == "thinking"
+        )
+        persisted_history = handler._load_conversation(self.project_id)
+        assistant_messages = [
+            message["content"]
+            for message in persisted_history
+            if message.get("role") == "assistant"
+        ]
+
+        self.assertEqual(content_text, "visible reply")
+        self.assertEqual(thinking_text, "hidden reasoning </thi")
+        self.assertEqual(assistant_messages[-1], "visible reply")
+        self.assertNotIn("hidden reasoning", assistant_messages[-1])
+        self.assertNotIn("</thi", assistant_messages[-1])
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_emits_friendly_error_when_provider_read_times_out_mid_stream(self, mock_openai):
@@ -667,6 +731,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "memory_entries": [],
                 "compact_state": None,
                 "draft_followup_state": None,
+                "s0_confirmation_completed": False,
             },
         )
         self.assertFalse((Path(project["project_dir"]) / "conversation_state.json").exists())
@@ -774,6 +839,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "memory_entries": [],
                 "compact_state": None,
                 "draft_followup_state": None,
+                "s0_confirmation_completed": False,
             },
         )
         self.assertFalse(legacy_path.exists())
@@ -827,6 +893,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "memory_entries": [],
                 "compact_state": None,
                 "draft_followup_state": None,
+                "s0_confirmation_completed": False,
             },
         )
         self.assertFalse(legacy_path.exists())
@@ -935,6 +1002,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "memory_entries": [],
                 "compact_state": None,
                 "draft_followup_state": None,
+                "s0_confirmation_completed": False,
             },
         )
         self.assertFalse(state_path.exists())
@@ -3341,7 +3409,8 @@ class ChatRuntimeTests(unittest.TestCase):
             result = handler._execute_tool(project["id"], tool_call)
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("先确认大纲", result["message"])
+        self.assertIn("append_report_draft", result["message"])
+        self.assertIn("edit_file", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_handler_write_file_rejects_unregistered_plan_file(self, mock_openai):
@@ -3732,7 +3801,7 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("append_report_draft", result["message"])
-        self.assertIn("rewrite_report_draft", result["message"])
+        self.assertIn("edit_file", result["message"])
         self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
 
 
@@ -3754,16 +3823,27 @@ class ChatRuntimeTests(unittest.TestCase):
             self.project_id,
             self._make_append_report_tool_call(),
         )
-        after_first = draft_path.read_text(encoding="utf-8")
         second = handler._execute_tool(
             self.project_id,
             self._make_append_report_tool_call(call_id="call-append-2"),
         )
+        third = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(call_id="call-append-3"),
+        )
+        after_third = draft_path.read_text(encoding="utf-8")
+        fourth = handler._execute_tool(
+            self.project_id,
+            self._make_append_report_tool_call(call_id="call-append-4"),
+        )
 
         self.assertEqual(first["status"], "success")
-        self.assertEqual(second["status"], "error")
-        self.assertIn("本轮已经修改过", second["message"])
-        self.assertEqual(draft_path.read_text(encoding="utf-8"), after_first)
+        self.assertEqual(second["status"], "success", msg=second)
+        self.assertEqual(third["status"], "success", msg=third)
+        self.assertEqual(fourth["status"], "error")
+        self.assertIn("达到上限", fourth["message"])
+        self.assertIn("report_progress", fourth)
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), after_third)
 
     @mock.patch("backend.chat.OpenAI")
     def test_append_report_draft_rejects_short_content(self, mock_openai):
@@ -4268,7 +4348,7 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("rewrite_report_draft", result["message"])
+        self.assertIn("append_report_draft", result["message"])
         self.assertNotIn("write_file", result["message"])
 
 
@@ -4474,15 +4554,9 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         self._write_partial_report_draft("旧结论\n\n" + ("现有正文" * 200))
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        self._start_report_writing_turn(handler, "把旧结论改成新结论")
 
-        read_result = handler._execute_tool(
-            self.project_id,
-            self._make_tool_call(
-                "read_file",
-                json.dumps({"file_path": "content/report_draft_v1.md"}, ensure_ascii=False),
-            ),
-        )
+        read_result = self._read_file_for_turn(handler, "content/report_draft_v1.md")
         result = handler._execute_tool(
             self.project_id,
             self._make_edit_report_tool_call(
@@ -5354,6 +5428,7 @@ class ChatRuntimeTests(unittest.TestCase):
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_yields_system_notice_on_blocked_write(self, mock_openai):
         handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
         blocked_call = self._make_stream_tool_call_chunk(
             0,
             id="call-1",
@@ -5472,6 +5547,7 @@ class ChatRuntimeTests(unittest.TestCase):
     @mock.patch("backend.chat.OpenAI")
     def test_system_notice_dual_class_notices_can_coexist_within_turn(self, mock_openai):
         handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
         first_call = self._make_stream_tool_call_chunk(
             0,
             id="call-1",
@@ -5511,6 +5587,7 @@ class ChatRuntimeTests(unittest.TestCase):
     @mock.patch("backend.chat.OpenAI")
     def test_system_notice_reset_between_turns(self, mock_openai):
         handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
         blocked_call = self._make_stream_tool_call_chunk(
             0,
             id="call-1",
@@ -5541,6 +5618,7 @@ class ChatRuntimeTests(unittest.TestCase):
     @mock.patch("backend.chat.OpenAI")
     def test_chat_non_streaming_includes_system_notices_in_response(self, mock_openai):
         handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
         blocked_tool_call = SimpleNamespace(
             id="call-1",
             function=SimpleNamespace(
@@ -8210,6 +8288,132 @@ class StreamTailGuardHelperTests(unittest.TestCase):
         self.assertGreater(len(tail.encode("utf-8")), 128)
 
 
+class ThinkingStreamParserTests(unittest.TestCase):
+    def _parser(self):
+        from backend.chat import ThinkingStreamParser
+        return ThinkingStreamParser()
+
+    def _collect(self, parser, chunks):
+        events = []
+        for chunk in chunks:
+            events.extend(parser.feed(chunk))
+        events.extend(parser.flush())
+        return events
+
+    def _join(self, events, event_type):
+        return "".join(
+            event["data"] for event in events if event["type"] == event_type
+        )
+
+    def test_normal_text_passes_through(self):
+        parser = self._parser()
+
+        self.assertEqual(
+            parser.feed("hello"),
+            [{"type": "content", "data": "hello"}],
+        )
+        self.assertEqual(parser.flush(), [])
+
+    def test_simple_think_block_splits_thinking_from_content(self):
+        parser = self._parser()
+
+        events = self._collect(
+            parser,
+            ["<think>reasoning</think>actual reply"],
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {"type": "thinking", "data": "reasoning"},
+                {"type": "content", "data": "actual reply"},
+            ],
+        )
+
+    def test_split_tags_across_chunks_preserves_event_order(self):
+        parser = self._parser()
+
+        events = self._collect(
+            parser,
+            ["pre<thi", "nk>reaso", "ning</think>post"],
+        )
+
+        self.assertEqual(self._join(events, "content"), "prepost")
+        self.assertEqual(self._join(events, "thinking"), "reasoning")
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["content", "thinking", "thinking", "content"],
+        )
+
+    def test_unclosed_think_at_eof_treats_remainder_as_thinking(self):
+        parser = self._parser()
+
+        events = parser.feed("<think>reasoning </thi")
+        events.extend(parser.flush())
+
+        self.assertEqual(
+            events,
+            [
+                {"type": "thinking", "data": "reasoning "},
+                {"type": "thinking", "data": "</thi"},
+            ],
+        )
+
+    def test_unclosed_think_flush_resets_reused_parser_to_content(self):
+        parser = self._parser()
+
+        first_events = parser.feed("<think>x")
+        first_events.extend(parser.flush())
+        next_events = parser.feed("next")
+
+        self.assertEqual(
+            first_events,
+            [{"type": "thinking", "data": "x"}],
+        )
+        self.assertEqual(
+            next_events,
+            [{"type": "content", "data": "next"}],
+        )
+
+    def test_no_think_returns_only_content(self):
+        parser = self._parser()
+
+        events = self._collect(parser, ["plain ", "reply"])
+
+        self.assertEqual(self._join(events, "content"), "plain reply")
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["content", "content"],
+        )
+
+    def test_nested_think_open_tag_is_thinking_text(self):
+        parser = self._parser()
+
+        events = self._collect(
+            parser,
+            [
+                "<think>outer <think>inner",
+                " still thinking</think>actual reply",
+            ],
+        )
+
+        self.assertEqual(
+            self._join(events, "thinking"),
+            "outer <think>inner still thinking",
+        )
+        self.assertEqual(self._join(events, "content"), "actual reply")
+
+    def test_stray_closing_tag_in_normal_content_passes_through(self):
+        parser = self._parser()
+
+        events = self._collect(parser, ["pre</think>post"])
+
+        self.assertEqual(
+            events,
+            [{"type": "content", "data": "pre</think>post"}],
+        )
+
+
 class StageAckFinalizePipelineTests(ChatRuntimeTests):
     def _write_effective_outline(self):
         (self.project_dir / "plan" / "outline.md").write_text(
@@ -9373,6 +9577,11 @@ class NewTurnContextFieldsTests(ChatRuntimeTests):
         ctx = handler._new_turn_context(can_write_non_plan=True)
         self.assertEqual(ctx.get("read_file_snapshots"), {})
 
+    def test_new_turn_context_defaults_s0_confirmation_completed_true(self):
+        handler = self._make_handler_with_project()
+        ctx = handler._new_turn_context(can_write_non_plan=True)
+        self.assertIs(ctx.get("s0_confirmation_completed"), True)
+
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
@@ -9380,6 +9589,541 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in NewTurnContextFieldsTests.__dict__
     ):
         setattr(NewTurnContextFieldsTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class S0ConversationStateRoundtripTests(ChatRuntimeTests):
+    def test_missing_conversation_state_defaults_s0_confirmation_completed_false(self):
+        handler = self._make_handler_with_project()
+
+        state = handler._load_conversation_state(self.project_id)
+
+        self.assertIs(state["s0_confirmation_completed"], False)
+        self.assertFalse((self.project_dir / "conversation_state.json").exists())
+
+    def test_legacy_conversation_state_without_s0_field_loads_true(self):
+        handler = self._make_handler_with_project()
+        (self.project_dir / "conversation_state.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "events": [{"type": "note", "content": "legacy"}],
+                    "memory_entries": [],
+                    "compact_state": None,
+                    "draft_followup_state": None,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        state = handler._load_conversation_state(self.project_id)
+
+        self.assertIs(state["s0_confirmation_completed"], True)
+
+    def test_modern_conversation_state_preserves_s0_false(self):
+        handler = self._make_handler_with_project()
+        (self.project_dir / "conversation_state.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "events": [],
+                    "memory_entries": [],
+                    "compact_state": None,
+                    "draft_followup_state": None,
+                    "s0_confirmation_completed": False,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        state = handler._load_conversation_state(self.project_id)
+
+        self.assertIs(state["s0_confirmation_completed"], False)
+
+    def test_save_load_roundtrip_preserves_s0_true(self):
+        handler = self._make_handler_with_project()
+        state = handler._empty_conversation_state()
+        state["s0_confirmation_completed"] = True
+
+        handler._save_conversation_state_atomically(self.project_id, state)
+
+        persisted = json.loads((self.project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+        loaded = handler._load_conversation_state(self.project_id)
+        self.assertIs(persisted["s0_confirmation_completed"], True)
+        self.assertIs(loaded["s0_confirmation_completed"], True)
+
+    def test_save_drops_non_bool_s0_value_to_modern_default_false(self):
+        handler = self._make_handler_with_project()
+        state = handler._empty_conversation_state()
+        state["s0_confirmation_completed"] = "yes"
+
+        handler._save_conversation_state_atomically(self.project_id, state)
+
+        persisted = json.loads((self.project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+        loaded = handler._load_conversation_state(self.project_id)
+        self.assertIs(persisted["s0_confirmation_completed"], False)
+        self.assertIs(loaded["s0_confirmation_completed"], False)
+
+    def test_new_turn_context_defaults_s0_confirmation_completed_true(self):
+        handler = self._make_handler_with_project()
+
+        turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        self.assertIs(turn_context["s0_confirmation_completed"], True)
+
+    def test_build_turn_context_injects_s0_confirmation_completed_from_state(self):
+        handler = self._make_handler_with_project()
+        state = handler._empty_conversation_state()
+        state["s0_confirmation_completed"] = False
+        handler._save_conversation_state_atomically(self.project_id, state)
+
+        turn_context = handler._build_turn_context(self.project_id, "继续")
+
+        self.assertIs(turn_context["s0_confirmation_completed"], False)
+
+    def test_missing_conversation_state_with_prior_assistant_loads_s0_true(self):
+        handler = self._make_handler_with_project()
+        (self.project_dir / "conversation.json").write_text(
+            json.dumps(
+                [
+                    {"role": "user", "content": "项目启动"},
+                    {"role": "assistant", "content": "我先确认几个关键点。"},
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (self.project_dir / "conversation_state.json").unlink(missing_ok=True)
+
+        state = handler._load_conversation_state(self.project_id)
+        turn_context = handler._build_turn_context(self.project_id, "继续")
+
+        self.assertIs(state["s0_confirmation_completed"], True)
+        self.assertIs(turn_context["s0_confirmation_completed"], True)
+
+    def test_missing_conversation_state_with_s0_checkpoint_loads_s0_true(self):
+        handler = self._make_handler_with_project()
+        (self.project_dir / "stage_checkpoints.json").write_text(
+            json.dumps(
+                {"s0_interview_done_at": "2026-05-08T12:00:00"},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (self.project_dir / "conversation_state.json").unlink(missing_ok=True)
+
+        state = handler._load_conversation_state(self.project_id)
+        turn_context = handler._build_turn_context(self.project_id, "继续")
+
+        self.assertIs(state["s0_confirmation_completed"], True)
+        self.assertIs(turn_context["s0_confirmation_completed"], True)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in S0ConversationStateRoundtripTests.__dict__
+    ):
+        setattr(S0ConversationStateRoundtripTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class S0FirstTurnGateTests(ChatRuntimeTests):
+    def _set_s0_confirmation_completed(self, handler, completed: bool) -> None:
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["s0_confirmation_completed"] = completed
+
+    def test_whitelist_constant_exists_and_matches_expected_tools(self):
+        from backend import chat as chat_module
+
+        self.assertTrue(hasattr(chat_module, "S0_FIRST_TURN_ALLOWED_TOOLS"))
+        self.assertEqual(
+            chat_module.S0_FIRST_TURN_ALLOWED_TOOLS,
+            frozenset({"read_file", "read_material_file", "web_search", "fetch_url"}),
+        )
+
+    def test_read_file_whitelist_tool_passes_when_s0_confirmation_false(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_completed(handler, False)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": "plan/project-overview.md"}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn("首轮", result.get("message", ""))
+
+    def test_writer_tool_rejected_when_s0_confirmation_false_without_file_change(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_completed(handler, False)
+        target = self.project_dir / "notes" / "s0-first-turn-gate.md"
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "notes/s0-first-turn-gate.md",
+                        "content": "# Should not be written\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("首轮", result["message"])
+        self.assertIn("澄清/确认/补充问题", result["message"])
+        self.assertFalse(target.exists())
+
+    def test_writer_tool_passes_s0_gate_when_s0_confirmation_true(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_completed(handler, True)
+        target = self.project_dir / "notes" / "s0-first-turn-gate.md"
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "notes/s0-first-turn-gate.md",
+                        "content": "# Allowed after S0\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn("首轮", result.get("message", ""))
+        self.assertEqual(target.read_text(encoding="utf-8"), "# Allowed after S0\n")
+
+    def test_reject_message_mentions_first_turn_clarification_questions(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_completed(handler, False)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "edit_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/project-overview.md",
+                        "old_string": "x",
+                        "new_string": "y",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("首轮", result["message"])
+        self.assertIn("澄清/确认/补充问题", result["message"])
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in S0FirstTurnGateTests.__dict__
+    ):
+        setattr(S0FirstTurnGateTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class S0FirstTurnUnlockTests(ChatRuntimeTests):
+    def _set_s0_confirmation_pending(self, handler) -> None:
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["s0_confirmation_completed"] = False
+        state = handler._empty_conversation_state()
+        state["s0_confirmation_completed"] = False
+        handler._save_conversation_state_atomically(self.project_id, state)
+
+    def _set_s0_confirmation_pending_without_sidecar(self, handler) -> None:
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["s0_confirmation_completed"] = False
+        (self.project_dir / "conversation_state.json").unlink(missing_ok=True)
+
+    def _assistant_tool_call_message(self, name: str, call_id: str = "call-1") -> dict:
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": "{}",
+                    },
+                }
+            ],
+        }
+
+    def _tool_result_message(self, call_id: str = "call-1", status: str = "success") -> dict:
+        return {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": json.dumps({"status": status}, ensure_ascii=False),
+        }
+
+    def test_unlock_when_only_whitelist_tools_called_and_text_nonempty(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending(handler)
+        current_turn_messages = [
+            self._assistant_tool_call_message("web_search", "call-search"),
+            self._tool_result_message("call-search"),
+        ]
+
+        self._finalize_assistant_for_test(
+            handler,
+            "我先确认几个关键点。",
+            current_turn_messages=current_turn_messages,
+        )
+
+        self.assertIs(handler._turn_context["s0_confirmation_completed"], True)
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            True,
+        )
+
+    def test_no_unlock_when_text_empty(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending(handler)
+
+        self._finalize_assistant_for_test(handler, "   \n")
+
+        self.assertIs(handler._turn_context["s0_confirmation_completed"], False)
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            False,
+        )
+
+    def test_no_unlock_when_writer_tool_attempted(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending(handler)
+        current_turn_messages = [
+            self._assistant_tool_call_message("write_file", "call-write"),
+            self._tool_result_message("call-write", status="error"),
+        ]
+
+        self._finalize_assistant_for_test(
+            handler,
+            "我先确认几个关键点。",
+            current_turn_messages=current_turn_messages,
+        )
+
+        self.assertIs(handler._turn_context["s0_confirmation_completed"], False)
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            False,
+        )
+
+    def test_no_unlock_persists_false_for_writer_tool_without_existing_state(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending_without_sidecar(handler)
+        current_turn_messages = [
+            self._assistant_tool_call_message("write_file", "call-write"),
+            self._tool_result_message("call-write", status="error"),
+        ]
+
+        self._finalize_assistant_for_test(
+            handler,
+            "我先确认几个关键点。",
+            current_turn_messages=current_turn_messages,
+        )
+
+        state_path = self.project_dir / "conversation_state.json"
+        self.assertTrue(state_path.exists())
+        self.assertIs(
+            json.loads(state_path.read_text(encoding="utf-8"))["s0_confirmation_completed"],
+            False,
+        )
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            False,
+        )
+
+    def test_no_unlock_when_orphan_tool_result_present(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending(handler)
+
+        self._finalize_assistant_for_test(
+            handler,
+            "我先确认几个关键点。",
+            current_turn_messages=[self._tool_result_message("call-orphan", status="error")],
+        )
+
+        self.assertIs(handler._turn_context["s0_confirmation_completed"], False)
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            False,
+        )
+
+    def test_no_unlock_persists_false_for_orphan_tool_result_without_existing_state(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending_without_sidecar(handler)
+
+        self._finalize_assistant_for_test(
+            handler,
+            "我先确认几个关键点。",
+            current_turn_messages=[self._tool_result_message("call-orphan", status="error")],
+        )
+
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            False,
+        )
+
+    def test_no_unlock_when_named_whitelist_tool_result_is_orphan(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending(handler)
+        orphan_tool_result = self._tool_result_message("call-orphan", status="success")
+        orphan_tool_result["name"] = "web_search"
+
+        self._finalize_assistant_for_test(
+            handler,
+            "我先确认几个关键点。",
+            current_turn_messages=[orphan_tool_result],
+        )
+
+        self.assertIs(handler._turn_context["s0_confirmation_completed"], False)
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            False,
+        )
+
+    def test_no_unlock_when_json_named_whitelist_tool_result_is_orphan(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending(handler)
+        orphan_tool_result = self._tool_result_message("call-orphan", status="success")
+        orphan_tool_result["content"] = json.dumps(
+            {"status": "success", "tool_name": "web_search"},
+            ensure_ascii=False,
+        )
+
+        self._finalize_assistant_for_test(
+            handler,
+            "我先确认几个关键点。",
+            current_turn_messages=[orphan_tool_result],
+        )
+
+        self.assertIs(handler._turn_context["s0_confirmation_completed"], False)
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            False,
+        )
+
+    def test_no_unlock_when_malformed_tool_attempt_recorded(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending(handler)
+        handler._turn_context["s0_non_whitelist_tool_attempted"] = True
+
+        self._finalize_assistant_for_test(
+            handler,
+            "我先确认几个关键点。",
+            current_turn_messages=[],
+        )
+
+        self.assertIs(handler._turn_context["s0_confirmation_completed"], False)
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            False,
+        )
+
+    def test_no_unlock_persists_false_for_malformed_tool_without_existing_state(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending_without_sidecar(handler)
+        handler._turn_context["s0_non_whitelist_tool_attempted"] = True
+
+        self._finalize_assistant_for_test(
+            handler,
+            "我先确认几个关键点。",
+            current_turn_messages=[],
+        )
+
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            False,
+        )
+
+    def test_pending_state_persist_failure_does_not_skip_history_save(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending_without_sidecar(handler)
+        history = []
+        current_turn_messages = [
+            self._assistant_tool_call_message("write_file", "call-write"),
+            self._tool_result_message("call-write", status="error"),
+        ]
+
+        with mock.patch.object(
+            handler,
+            "_mutate_conversation_state",
+            side_effect=RuntimeError("sidecar write failed"),
+        ):
+            persisted = self._finalize_assistant_for_test(
+                handler,
+                "我先确认几个关键点。",
+                history=history,
+                current_turn_messages=current_turn_messages,
+            )
+
+        self.assertIn("我先确认几个关键点", persisted)
+        self.assertEqual(len(history), 2)
+        saved_history = json.loads((self.project_dir / "conversation.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved_history[-1]["content"], persisted)
+
+    def test_unlock_state_persist_failure_does_not_skip_history_save(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending(handler)
+        history = []
+
+        with mock.patch.object(
+            handler,
+            "_mutate_conversation_state",
+            side_effect=RuntimeError("sidecar write failed"),
+        ):
+            persisted = self._finalize_assistant_for_test(
+                handler,
+                "我先确认几个关键点。",
+                history=history,
+            )
+
+        self.assertIn("我先确认几个关键点", persisted)
+        self.assertEqual(len(history), 2)
+        saved_history = json.loads((self.project_dir / "conversation.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved_history[-1]["content"], persisted)
+
+    def test_persisted_to_conversation_state_json(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending(handler)
+
+        self._finalize_assistant_for_test(handler, "我先确认几个关键点。")
+
+        persisted = json.loads(
+            (self.project_dir / "conversation_state.json").read_text(encoding="utf-8")
+        )
+        self.assertIs(persisted["s0_confirmation_completed"], True)
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            True,
+        )
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in S0FirstTurnUnlockTests.__dict__
+    ):
+        setattr(S0FirstTurnUnlockTests, _inherited_test_name, None)
 del _inherited_test_name
 
 
@@ -9423,6 +10167,64 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in CanonicalDraftWriteObligationTurnContextTests.__dict__
     ):
         setattr(CanonicalDraftWriteObligationTurnContextTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class CanonicalObligationFieldTests(ChatRuntimeTests):
+    def test_new_turn_context_defaults_canonical_obligation_empty(self):
+        handler = self._make_handler_with_project()
+        ctx = handler._new_turn_context(can_write_non_plan=True)
+
+        self.assertEqual(
+            ctx.get("canonical_obligation"),
+            {"intent": None, "expected_action": None},
+        )
+
+    def test_generative_message_sets_append_action(self):
+        handler = self._make_handler_with_project()
+        ctx = handler._build_turn_context(self.project_id, "续写下一章")
+
+        self.assertEqual(
+            ctx.get("canonical_obligation"),
+            {"intent": "generative", "expected_action": "append"},
+        )
+
+    def test_modify_message_sets_any_canonical_write_action(self):
+        handler = self._make_handler_with_project()
+        ctx = handler._build_turn_context(self.project_id, "把 X 改成 Y")
+
+        self.assertEqual(
+            ctx.get("canonical_obligation"),
+            {"intent": "modify", "expected_action": "any_canonical_write"},
+        )
+
+    def test_ambiguous_message_sets_empty_canonical_obligation(self):
+        handler = self._make_handler_with_project()
+        ctx = handler._build_turn_context(self.project_id, "看下背景资料")
+
+        self.assertEqual(
+            ctx.get("canonical_obligation"),
+            {"intent": None, "expected_action": None},
+        )
+
+    def test_legacy_obligation_still_populated_with_new_field(self):
+        handler = self._make_handler_with_project()
+        ctx = handler._build_turn_context(self.project_id, "把第二章重写一下")
+
+        self.assertIsNotNone(ctx.get("canonical_draft_write_obligation"))
+        self.assertIn("canonical_obligation", ctx)
+        self.assertEqual(
+            set(ctx["canonical_obligation"].keys()),
+            {"intent", "expected_action"},
+        )
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in CanonicalObligationFieldTests.__dict__
+    ):
+        setattr(CanonicalObligationFieldTests, _inherited_test_name, None)
 del _inherited_test_name
 
 
@@ -9546,6 +10348,34 @@ class _WriteToolTestMixin:
                 json.dumps({"file_path": "content/report_draft_v1.md"}),
             ),
         )
+
+
+class CanonicalDraftToolErrorResultTests(_WriteToolTestMixin, ChatRuntimeTests):
+    def test_list_mutation_limit_error_includes_report_progress(self):
+        handler = self._make_handler_with_project()
+        self._put_draft("# 报告\n## 第一章\n" + ("正文" * 120))
+
+        result = handler._canonical_draft_tool_error_result(
+            self.project_id,
+            "本轮已经成功修改正文草稿 3 次，达到上限 3。\n"
+            "已完成的修改：\n"
+            "  1. text_replace m0 (old=1 -> new=1)\n"
+            "请等用户回应再做下一次修改。",
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("当前真实字数", result.get("message", ""))
+        self.assertIn("report_progress", result)
+        self.assertGreater(result["report_progress"]["current_count"], 0)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in CanonicalDraftToolErrorResultTests.__dict__
+    ):
+        setattr(CanonicalDraftToolErrorResultTests, _inherited_test_name, None)
+del _inherited_test_name
 
 
 class ObligationToolFamilyGuardTests(_WriteToolTestMixin, ChatRuntimeTests):
@@ -9715,15 +10545,23 @@ class RewriteReportSectionToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         handler._build_turn_context(self.project_id, "把第二章重写一下")
         self._trigger_read_file(handler)
         # 第一次成功
-        handler._tool_rewrite_report_section(
+        first = handler._tool_rewrite_report_section(
             self.project_id, content="## 第二章 战力分析\n新内容1\n",
         )
-        # mutation 已 set，第二次应 reject
-        result = handler._tool_rewrite_report_section(
+        second = handler._tool_rewrite_report_section(
             self.project_id, content="## 第二章 战力分析\n新内容2\n",
         )
+        third = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章 战力分析\n新内容3\n",
+        )
+        result = handler._tool_rewrite_report_section(
+            self.project_id, content="## 第二章 战力分析\n新内容4\n",
+        )
+        self.assertEqual(first.get("status"), "success", msg=first)
+        self.assertEqual(second.get("status"), "success", msg=second)
+        self.assertEqual(third.get("status"), "success", msg=third)
         self.assertEqual(result.get("status"), "error")
-        self.assertIn("本轮已经修改过", result.get("message", ""))
+        self.assertIn("达到上限", result.get("message", ""))
         self.assertIn("当前", result.get("message", ""))
         self.assertIn("report_progress", result)
         self.assertGreater(result["report_progress"]["current_count"], 0)
@@ -9882,15 +10720,23 @@ class ReplaceReportTextToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         handler._build_turn_context(self.project_id, "把渠道效率改成渠道质量")
         self._trigger_read_file(handler)
         # 第一次成功
-        handler._tool_replace_report_text(
+        first = handler._tool_replace_report_text(
             self.project_id, old="渠道效率", new="渠道质量",
         )
-        # mutation 已 set，第二次应 reject
-        result = handler._tool_replace_report_text(
+        second = handler._tool_replace_report_text(
             self.project_id, old="渠道质量", new="其他",
         )
+        third = handler._tool_replace_report_text(
+            self.project_id, old="其他", new="最终",
+        )
+        result = handler._tool_replace_report_text(
+            self.project_id, old="最终", new="超限",
+        )
+        self.assertEqual(first.get("status"), "success", msg=first)
+        self.assertEqual(second.get("status"), "success", msg=second)
+        self.assertEqual(third.get("status"), "success", msg=third)
         self.assertEqual(result.get("status"), "error")
-        self.assertIn("本轮已经修改过", result.get("message", ""))
+        self.assertIn("达到上限", result.get("message", ""))
         self.assertIn("当前", result.get("message", ""))
         self.assertIn("report_progress", result)
         self.assertGreater(result["report_progress"]["current_count"], 0)
@@ -10079,15 +10925,23 @@ class RewriteReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         handler._build_turn_context(self.project_id, "整篇重写")
         self._trigger_read_file(handler)
         # 第一次成功
-        handler._tool_rewrite_report_draft(
+        first = handler._tool_rewrite_report_draft(
             self.project_id, content="# 新报告\n## 第一章\n新内容1\n",
         )
-        # mutation 已 set，第二次应 reject
-        result = handler._tool_rewrite_report_draft(
+        second = handler._tool_rewrite_report_draft(
             self.project_id, content="# 再新报告\n## 第一章\n新内容2\n",
         )
+        third = handler._tool_rewrite_report_draft(
+            self.project_id, content="# 第三版报告\n## 第一章\n新内容3\n",
+        )
+        result = handler._tool_rewrite_report_draft(
+            self.project_id, content="# 第四版报告\n## 第一章\n新内容4\n",
+        )
+        self.assertEqual(first.get("status"), "success", msg=first)
+        self.assertEqual(second.get("status"), "success", msg=second)
+        self.assertEqual(third.get("status"), "success", msg=third)
         self.assertEqual(result.get("status"), "error")
-        self.assertIn("本轮已经修改过", result.get("message", ""))
+        self.assertIn("达到上限", result.get("message", ""))
         self.assertIn("当前", result.get("message", ""))
         self.assertIn("report_progress", result)
         self.assertGreater(result["report_progress"]["current_count"], 0)
@@ -10226,15 +11080,23 @@ class AppendReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         self._setup_outline_confirmed_s4(handler)
         handler._build_turn_context(self.project_id, "开始写报告")
         # 第一次成功（首次，无需 read）
-        handler._tool_append_report_draft(
+        first = handler._tool_append_report_draft(
             self.project_id, content=self._VALID_APPEND_CONTENT,
         )
-        # mutation 已 set，第二次应 reject
+        second = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
+        third = handler._tool_append_report_draft(
+            self.project_id, content=self._VALID_APPEND_CONTENT,
+        )
         result = handler._tool_append_report_draft(
             self.project_id, content=self._VALID_APPEND_CONTENT,
         )
+        self.assertEqual(first.get("status"), "success", msg=first)
+        self.assertEqual(second.get("status"), "success", msg=second)
+        self.assertEqual(third.get("status"), "success", msg=third)
         self.assertEqual(result.get("status"), "error")
-        self.assertIn("本轮已经修改过", result.get("message", ""))
+        self.assertIn("达到上限", result.get("message", ""))
         self.assertIn("当前", result.get("message", ""))
         self.assertIn("report_progress", result)
         self.assertGreater(result["report_progress"]["current_count"], 0)
@@ -10304,6 +11166,289 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in AppendReportDraftToolTests.__dict__
     ):
         setattr(AppendReportDraftToolTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class AppendReportDraftMutationsListTests(_WriteToolTestMixin, ChatRuntimeTests):
+    """Task 16: append_report_draft records canonical_draft_mutations entries."""
+
+    _VALID_APPEND_CONTENT = "## 第一章 引言\n\n" + ("正文内容" * 60)
+
+    def _prepare_s4_turn(self, handler, user_message: str):
+        self._setup_outline_confirmed_s4(handler)
+        return handler._build_turn_context(self.project_id, user_message)
+
+    def test_first_draft_appends_first_draft_action(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_s4_turn(handler, "开始写报告")
+
+        result = handler._tool_append_report_draft(
+            self.project_id,
+            content=self._VALID_APPEND_CONTENT,
+        )
+
+        self.assertEqual(result.get("status"), "success", msg=result)
+        mutations = turn_context["canonical_draft_mutations"]
+        self.assertEqual(len(mutations), 1)
+        mutation = mutations[0]
+        self.assertEqual(mutation["tool"], "append_report_draft")
+        self.assertEqual(mutation["canonical_action"], "first_draft")
+        self.assertEqual(mutation["old_len"], 0)
+        self.assertEqual(mutation["new_len"], len(self._VALID_APPEND_CONTENT))
+        self.assertIn("mtime_after", mutation)
+        self.assertIn("ts", mutation)
+
+    def test_subsequent_append_uses_append_action(self):
+        handler = self._make_handler_with_project()
+        old_draft = "# 报告\n## 第一章\n已有内容\n"
+        self._put_draft(old_draft)
+        turn_context = self._prepare_s4_turn(handler, "续写下一章")
+        self._trigger_read_file(handler)
+
+        result = handler._tool_append_report_draft(
+            self.project_id,
+            content=self._VALID_APPEND_CONTENT,
+        )
+
+        self.assertEqual(result.get("status"), "success", msg=result)
+        mutations = turn_context["canonical_draft_mutations"]
+        self.assertEqual(len(mutations), 1)
+        mutation = mutations[0]
+        self.assertEqual(mutation["tool"], "append_report_draft")
+        self.assertEqual(mutation["canonical_action"], "append")
+        self.assertEqual(mutation["old_len"], len(old_draft))
+        self.assertEqual(mutation["new_len"], len(self._VALID_APPEND_CONTENT))
+        self.assertIn("mtime_after", mutation)
+        self.assertIn("ts", mutation)
+
+    def test_post_hoc_modify_intent_blocks_append(self):
+        handler = self._make_handler_with_project()
+        old_draft = "# 报告\n## 第一章 引言\n引言段\n"
+        self._put_draft(old_draft)
+        turn_context = self._prepare_s4_turn(handler, "把引言段改成新引言")
+        self._trigger_read_file(handler)
+
+        result = handler._tool_append_report_draft(
+            self.project_id,
+            content=self._VALID_APPEND_CONTENT,
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("改已有内容", result.get("message", ""))
+        self.assertIn("edit_file", result.get("message", ""))
+        self.assertEqual(
+            (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8"),
+            old_draft,
+        )
+        self.assertEqual(turn_context["canonical_draft_mutations"], [])
+
+    def test_post_hoc_generative_intent_passes_append(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_s4_turn(handler, "续写下一章")
+
+        result = handler._tool_append_report_draft(
+            self.project_id,
+            content=self._VALID_APPEND_CONTENT,
+        )
+
+        self.assertEqual(result.get("status"), "success", msg=result)
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
+
+    def test_append_updates_legacy_append_mutation_entry_in_place(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_s4_turn(handler, "开始写报告")
+        original_execute_plan_write = handler._execute_plan_write
+        legacy_entry = {
+            "tool": "append_report_draft",
+            "canonical_action": "legacy",
+            "old_len": -1,
+            "legacy_marker": True,
+        }
+
+        def _execute_plan_write_with_legacy_entry(*args, **kwargs):
+            result = original_execute_plan_write(*args, **kwargs)
+            if result.get("status") == "success":
+                turn_context.setdefault("canonical_draft_mutations", []).append(legacy_entry)
+            return result
+
+        handler._execute_plan_write = _execute_plan_write_with_legacy_entry
+
+        result = handler._tool_append_report_draft(
+            self.project_id,
+            content=self._VALID_APPEND_CONTENT,
+        )
+
+        self.assertEqual(result.get("status"), "success", msg=result)
+        mutations = turn_context["canonical_draft_mutations"]
+        self.assertEqual(len(mutations), 1)
+        self.assertIs(mutations[0], legacy_entry)
+        mutation = mutations[0]
+        self.assertEqual(mutation["tool"], "append_report_draft")
+        self.assertEqual(mutation["canonical_action"], "first_draft")
+        self.assertEqual(mutation["old_len"], 0)
+        self.assertEqual(mutation["new_len"], len(self._VALID_APPEND_CONTENT))
+        self.assertIsNotNone(mutation.get("mtime_after"))
+        self.assertIn("ts", mutation)
+        self.assertTrue(mutation["legacy_marker"])
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in AppendReportDraftMutationsListTests.__dict__
+    ):
+        setattr(AppendReportDraftMutationsListTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class CanonicalMutationBridgeTests(_WriteToolTestMixin, ChatRuntimeTests):
+    """Task 16b: legacy canonical mutation recorder also feeds the new list."""
+
+    _VALID_APPEND_CONTENT = "## 第一章 引言\n\n" + ("正文内容" * 60)
+    _REQUIRED_ENTRY_FIELDS = {
+        "tool",
+        "canonical_action",
+        "target_label",
+        "old_len",
+        "new_len",
+        "mtime_after",
+        "ts",
+    }
+
+    def _make_handler_with_turn_context(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        return handler, handler._turn_context
+
+    def _record_mutation(
+        self,
+        handler,
+        *,
+        source_tool_name="replace_report_text",
+        progress_snapshot=None,
+    ):
+        handler._record_successful_canonical_draft_mutation(
+            source_tool_name=source_tool_name,
+            normalized_path=handler.skill_engine.REPORT_DRAFT_PATH,
+            progress_snapshot=progress_snapshot,
+        )
+
+    def test_record_writes_both_old_dict_and_new_list(self):
+        handler, turn_context = self._make_handler_with_turn_context()
+        progress_snapshot = {"current_count": 123}
+
+        self._record_mutation(
+            handler,
+            source_tool_name="replace_report_text",
+            progress_snapshot=progress_snapshot,
+        )
+
+        old_mutation = turn_context["canonical_draft_mutation"]
+        self.assertEqual(old_mutation["tool"], "replace_report_text")
+        self.assertEqual(old_mutation["path"], handler.skill_engine.REPORT_DRAFT_PATH)
+        self.assertEqual(old_mutation["progress_snapshot"], progress_snapshot)
+        mutations = turn_context["canonical_draft_mutations"]
+        self.assertEqual(len(mutations), 1)
+        self.assertEqual(mutations[0]["tool"], "replace_report_text")
+        self.assertEqual(mutations[0]["path"], handler.skill_engine.REPORT_DRAFT_PATH)
+        self.assertEqual(mutations[0]["progress_snapshot"], progress_snapshot)
+
+    def test_record_three_times_yields_list_len_3(self):
+        handler, turn_context = self._make_handler_with_turn_context()
+
+        for tool_name in (
+            "rewrite_report_section",
+            "replace_report_text",
+            "rewrite_report_draft",
+        ):
+            self._record_mutation(handler, source_tool_name=tool_name)
+
+        mutations = turn_context["canonical_draft_mutations"]
+        self.assertEqual(
+            [mutation["tool"] for mutation in mutations],
+            [
+                "rewrite_report_section",
+                "replace_report_text",
+                "rewrite_report_draft",
+            ],
+        )
+        self.assertEqual(turn_context["canonical_draft_mutation"]["tool"], "rewrite_report_draft")
+
+    def test_new_list_entry_includes_required_fields(self):
+        handler, turn_context = self._make_handler_with_turn_context()
+        handler._turn_context["_last_successful_semantic_edit_event"] = {
+            "source_tool_name": "replace_report_text",
+            "path": handler.skill_engine.REPORT_DRAFT_PATH,
+            "tool": "edit_file",
+            "arguments": {
+                "file_path": handler.skill_engine.REPORT_DRAFT_PATH,
+                "old_string": "old text",
+                "new_string": "new text",
+            },
+        }
+
+        self._record_mutation(handler, source_tool_name="replace_report_text")
+
+        mutation = turn_context["canonical_draft_mutations"][0]
+        self.assertTrue(self._REQUIRED_ENTRY_FIELDS.issubset(mutation.keys()))
+        self.assertEqual(mutation["canonical_action"], "text_replace")
+        self.assertEqual(mutation["target_label"], "old text")
+        self.assertEqual(mutation["old_len"], len("old text"))
+        self.assertEqual(mutation["new_len"], len("new text"))
+
+    def test_record_with_project_id_includes_current_draft_mtime(self):
+        handler = self._make_handler_with_project()
+        turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context = turn_context
+        self._put_draft("# 报告\n## 第一章\n旧内容\n")
+
+        handler._record_successful_canonical_draft_mutation(
+            project_id=self.project_id,
+            source_tool_name="replace_report_text",
+            normalized_path=handler.skill_engine.REPORT_DRAFT_PATH,
+        )
+
+        mutation = turn_context["canonical_draft_mutations"][0]
+        self.assertIsInstance(mutation["mtime_after"], float)
+
+    def test_append_report_draft_still_records_single_complete_entry(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        turn_context = handler._build_turn_context(self.project_id, "开始写报告")
+
+        result = handler._tool_append_report_draft(
+            self.project_id,
+            content=self._VALID_APPEND_CONTENT,
+        )
+
+        self.assertEqual(result.get("status"), "success", msg=result)
+        mutations = turn_context["canonical_draft_mutations"]
+        self.assertEqual(len(mutations), 1)
+        mutation = mutations[0]
+        self.assertTrue(self._REQUIRED_ENTRY_FIELDS.issubset(mutation.keys()))
+        self.assertEqual(mutation["tool"], "append_report_draft")
+        self.assertEqual(mutation["canonical_action"], "first_draft")
+        self.assertEqual(mutation["target_label"], "first chapter")
+        self.assertEqual(mutation["old_len"], 0)
+        self.assertEqual(mutation["new_len"], len(self._VALID_APPEND_CONTENT))
+        self.assertIsNotNone(mutation["mtime_after"])
+        self.assertIsNotNone(mutation["ts"])
+        self.assertEqual(
+            turn_context["canonical_draft_mutation"]["tool"],
+            "append_report_draft",
+        )
+        self.assertEqual(
+            turn_context["canonical_draft_mutation"]["canonical_action"],
+            "first_draft",
+        )
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in CanonicalMutationBridgeTests.__dict__
+    ):
+        setattr(CanonicalMutationBridgeTests, _inherited_test_name, None)
 del _inherited_test_name
 
 
@@ -10522,10 +11667,1127 @@ class WriteObligationRetryTests(ChatRuntimeTests):
         self.assertFalse(retry_fired)
 
 
+class ClaimOnlyRetryWithCanonicalObligationTests(ChatRuntimeTests):
+    def _make_legacy_obligation(self, family="rewrite_section"):
+        return {"tool_family": family, "detected": "重写"}
+
+    def _make_handler_with_empty_turn(self):
+        handler = self._make_handler_with_project()
+        handler._build_turn_context(self.project_id, "看下背景资料")
+        handler._turn_context["canonical_draft_write_obligation"] = None
+        handler._turn_context["canonical_draft_mutation"] = None
+        handler._turn_context["canonical_draft_mutations"] = []
+        return handler
+
+    def test_generative_obligation_claim_without_mutation_injects_retry(self):
+        handler = self._make_handler_with_empty_turn()
+        handler._turn_context["canonical_obligation"] = {
+            "intent": "generative",
+            "expected_action": "append",
+        }
+        current_turn_messages = []
+
+        retry_fired = handler._maybe_inject_obligation_retry(
+            "正文已同步更新到 content/report_draft_v1.md。",
+            current_turn_messages,
+        )
+
+        self.assertTrue(retry_fired)
+        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
+        self.assertEqual(current_turn_messages[-1]["role"], "user")
+        self.assertIn("append_report_draft", current_turn_messages[-1]["content"])
+
+    def test_modify_obligation_claim_without_mutation_injects_retry(self):
+        handler = self._make_handler_with_empty_turn()
+        handler._turn_context["canonical_obligation"] = {
+            "intent": "modify",
+            "expected_action": "any_canonical_write",
+        }
+        current_turn_messages = []
+
+        retry_fired = handler._maybe_inject_obligation_retry(
+            "我已经把正文修改完毕。",
+            current_turn_messages,
+        )
+
+        self.assertTrue(retry_fired)
+        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
+        self.assertEqual(current_turn_messages[-1]["role"], "user")
+        self.assertIn("edit_file", current_turn_messages[-1]["content"])
+
+    def test_generative_obligation_with_mutation_does_not_fall_through_to_legacy(self):
+        handler = self._make_handler_with_empty_turn()
+        handler._turn_context["canonical_obligation"] = {
+            "intent": "generative",
+            "expected_action": "append",
+        }
+        handler._turn_context["canonical_draft_write_obligation"] = (
+            self._make_legacy_obligation("begin")
+        )
+        handler._turn_context["canonical_draft_mutation"] = None
+        handler._turn_context["canonical_draft_mutations"] = [
+            {"tool": "append_report_draft"}
+        ]
+        current_turn_messages = []
+
+        retry_fired = handler._maybe_inject_obligation_retry(
+            "正文已同步更新到 content/report_draft_v1.md。",
+            current_turn_messages,
+        )
+
+        self.assertFalse(retry_fired)
+        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
+        self.assertEqual(current_turn_messages, [])
+
+    def test_no_obligation_returns_false(self):
+        handler = self._make_handler_with_empty_turn()
+        handler._turn_context["canonical_obligation"] = {
+            "intent": None,
+            "expected_action": None,
+        }
+        current_turn_messages = []
+
+        retry_fired = handler._maybe_inject_obligation_retry(
+            "正文已同步更新到 content/report_draft_v1.md。",
+            current_turn_messages,
+        )
+
+        self.assertFalse(retry_fired)
+        self.assertEqual(current_turn_messages, [])
+
+    def test_legacy_obligation_without_new_intent_still_retries(self):
+        handler = self._make_handler_with_empty_turn()
+        handler._turn_context["canonical_obligation"] = {
+            "intent": None,
+            "expected_action": None,
+        }
+        handler._turn_context["canonical_draft_write_obligation"] = (
+            self._make_legacy_obligation()
+        )
+        current_turn_messages = []
+
+        retry_fired = handler._maybe_inject_obligation_retry(
+            "我已经把第二章重写完毕，请查看正文。",
+            current_turn_messages,
+        )
+
+        self.assertTrue(retry_fired)
+        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
+        self.assertEqual(current_turn_messages[-1]["role"], "user")
+        self.assertIn("rewrite_report_section", current_turn_messages[-1]["content"])
+
+    def test_retry_fired_flag_prevents_double_injection(self):
+        handler = self._make_handler_with_empty_turn()
+        handler._turn_context["canonical_obligation"] = {
+            "intent": "generative",
+            "expected_action": "append",
+        }
+        handler._turn_context["obligation_retry_fired"] = True
+        current_turn_messages = []
+
+        retry_fired = handler._maybe_inject_obligation_retry(
+            "正文已同步更新到 content/report_draft_v1.md。",
+            current_turn_messages,
+        )
+
+        self.assertFalse(retry_fired)
+        self.assertEqual(current_turn_messages, [])
+
+    def test_missing_new_obligation_field_still_uses_legacy_branch(self):
+        handler = self._make_handler_with_empty_turn()
+        handler._turn_context.pop("canonical_obligation", None)
+        handler._turn_context["canonical_draft_write_obligation"] = (
+            self._make_legacy_obligation()
+        )
+        current_turn_messages = []
+
+        retry_fired = handler._maybe_inject_obligation_retry(
+            "我已经把第二章重写完毕，请查看正文。",
+            current_turn_messages,
+        )
+
+        self.assertTrue(retry_fired)
+        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
+        self.assertEqual(current_turn_messages[-1]["role"], "user")
+
+    def test_new_mutation_list_blocks_legacy_retry_without_new_intent(self):
+        handler = self._make_handler_with_empty_turn()
+        handler._turn_context["canonical_obligation"] = {
+            "intent": None,
+            "expected_action": None,
+        }
+        handler._turn_context["canonical_draft_write_obligation"] = (
+            self._make_legacy_obligation()
+        )
+        handler._turn_context["canonical_draft_mutation"] = None
+        handler._turn_context["canonical_draft_mutations"] = [
+            {"tool": "edit_file"}
+        ]
+        current_turn_messages = []
+
+        retry_fired = handler._maybe_inject_obligation_retry(
+            "我已经把第二章重写完毕，请查看正文。",
+            current_turn_messages,
+        )
+
+        self.assertFalse(retry_fired)
+        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
+        self.assertEqual(current_turn_messages, [])
+
+    def test_new_obligation_without_claim_returns_false(self):
+        handler = self._make_handler_with_empty_turn()
+        handler._turn_context["canonical_obligation"] = {
+            "intent": "generative",
+            "expected_action": "append",
+        }
+        current_turn_messages = []
+
+        retry_fired = handler._maybe_inject_obligation_retry(
+            "我准备开始起草正文。",
+            current_turn_messages,
+        )
+
+        self.assertFalse(retry_fired)
+        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
+        self.assertEqual(current_turn_messages, [])
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name
+        not in ClaimOnlyRetryWithCanonicalObligationTests.__dict__
+    ):
+        setattr(ClaimOnlyRetryWithCanonicalObligationTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class CanonicalObligationChatLoopRetryTests(ChatRuntimeTests):
+    """Task 21: chat loops must enter retry for new canonical_obligation only."""
+
+    USER_MESSAGE = "帮我写一段正文"
+    CLAIM_TEXT = "正文已经写完并同步到 content/report_draft_v1.md。"
+
+    def _assistant_response(self, content: str):
+        return SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=content,
+                        tool_calls=[],
+                    )
+                )
+            ],
+        )
+
+    def _assert_retry_request_contains_synthetic_correction(self, mock_openai):
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
+        second_messages = (
+            mock_openai.return_value.chat.completions.create
+            .call_args_list[1]
+            .kwargs["messages"]
+        )
+        self.assertTrue(
+            any(
+                message.get("role") == "assistant"
+                and message.get("content") == self.CLAIM_TEXT
+                for message in second_messages
+            ),
+            msg=second_messages,
+        )
+        corrective_message = next(
+            (
+                message
+                for message in second_messages
+                if message.get("role") == "user"
+                and "不要只在文字中声明已完成" in str(message.get("content") or "")
+            ),
+            None,
+        )
+        self.assertIsNotNone(corrective_message, msg=second_messages)
+        self.assertIn("append_report_draft", corrective_message["content"])
+        self.assertFalse(
+            any(message.get("role") == "tool" for message in second_messages),
+            msg=second_messages,
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_non_stream_retries_when_generative_canonical_obligation_claims_done_without_legacy_obligation(
+        self,
+        mock_openai,
+    ):
+        self.assertIsNone(detect_canonical_draft_write_obligation(self.USER_MESSAGE))
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._assistant_response(self.CLAIM_TEXT),
+            self._assistant_response("我会实际调用写正文工具。"),
+        ]
+        handler = self._make_handler_with_project()
+
+        result = handler.chat(self.project_id, self.USER_MESSAGE, max_iterations=2)
+
+        self.assertIn("我会实际调用写正文工具", result["content"])
+        self._assert_retry_request_contains_synthetic_correction(mock_openai)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_stream_retries_when_generative_canonical_obligation_claims_done_without_legacy_obligation(
+        self,
+        mock_openai,
+    ):
+        self.assertIsNone(detect_canonical_draft_write_obligation(self.USER_MESSAGE))
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            iter([self._make_chunk(content=self.CLAIM_TEXT)]),
+            iter([self._make_chunk(content="我会实际调用写正文工具。")]),
+        ]
+        handler = self._make_handler_with_project()
+
+        events = list(handler.chat_stream(self.project_id, self.USER_MESSAGE, max_iterations=2))
+
+        self.assertTrue(
+            any(
+                event.get("type") == "content"
+                and "我会实际调用写正文工具" in event.get("data", "")
+                for event in events
+            ),
+            msg=events,
+        )
+        self._assert_retry_request_contains_synthetic_correction(mock_openai)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name
+        not in CanonicalObligationChatLoopRetryTests.__dict__
+    ):
+        setattr(CanonicalObligationChatLoopRetryTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
         _inherited_test_name.startswith("test_")
         and _inherited_test_name not in WriteObligationRetryTests.__dict__
     ):
         setattr(WriteObligationRetryTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class _EditFileDispatcherTestMixin(_WriteToolTestMixin):
+    CANONICAL = "content/report_draft_v1.md"
+    DRAFT = (
+        "# 报告标题\n"
+        "## 第一章 引言\n"
+        "引言段\n"
+        "## 第二章 战略\n"
+        "战略段\n"
+    )
+
+    def _call_edit_file(self, handler, file_path, old_string, new_string):
+        return handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "edit_file",
+                json.dumps(
+                    {
+                        "file_path": file_path,
+                        "old_string": old_string,
+                        "new_string": new_string,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+    def _draft_text(self):
+        return (self.project_dir / self.CANONICAL).read_text(encoding="utf-8")
+
+    def _put_project_file(self, file_path, content):
+        target = self.project_dir / file_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def _setup_stage_s4_without_outline_confirmation(self, handler):
+        original_infer = handler.skill_engine._infer_stage_state
+
+        def _mock_infer_s4(project_path):
+            result = dict(original_infer(project_path))
+            result["stage_code"] = "S4"
+            return result
+
+        handler.skill_engine._infer_stage_state = _mock_infer_s4
+
+    def _prepare_canonical_edit(
+        self,
+        handler,
+        *,
+        draft=None,
+        user_message="把引言段改成新引言",
+        read=True,
+        stage_s4=True,
+        outline_confirmed=True,
+    ):
+        if stage_s4:
+            if outline_confirmed:
+                self._setup_outline_confirmed_s4(handler)
+            else:
+                self._setup_stage_s4_without_outline_confirmation(handler)
+        self._put_draft(self.DRAFT if draft is None else draft)
+        turn_context = handler._build_turn_context(self.project_id, user_message)
+        if read:
+            self._trigger_read_file(handler)
+        return turn_context
+
+    def _prepare_generic_edit(self, handler, *, file_path="some/other.md", content="alpha old beta\n"):
+        self._put_project_file(file_path, content)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["generic_non_plan_write_allowed"] = True
+        handler._turn_context.setdefault("canonical_draft_mutations", [])
+        handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({"file_path": file_path}, ensure_ascii=False),
+            ),
+        )
+        return handler._turn_context
+
+
+class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntimeTests):
+    """Task 14: canonical draft path dispatches edit_file by path and anchor."""
+
+    def test_section_rewrite_via_h2_anchor(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_canonical_edit(
+            handler,
+            user_message="把第二章重写一下",
+        )
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            "## 第二章 战略",
+            "## 第二章 战略\n新战略段\n",
+        )
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(result.get("canonical_action"), "section_rewrite")
+        self.assertEqual(
+            self._draft_text(),
+            "# 报告标题\n## 第一章 引言\n引言段\n## 第二章 战略\n新战略段\n",
+        )
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
+
+    def test_section_rewrite_requires_new_h2_heading(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(
+            handler,
+            user_message="把第二章重写一下",
+        )
+        original = self._draft_text()
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            "## 第二章 战略",
+            "新战略段\n",
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("## ", result.get("message", ""))
+        self.assertEqual(self._draft_text(), original)
+
+    def test_section_rewrite_rejects_multiple_h2_headings(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(
+            handler,
+            user_message="把第二章重写一下",
+        )
+        original = self._draft_text()
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            "## 第二章 战略",
+            "## 第二章 战略\n新战略段\n## 第三章 多余\n多余段\n",
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("一个", result.get("message", ""))
+        self.assertEqual(self._draft_text(), original)
+
+    def test_section_rewrite_rejects_oversized_content(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(
+            handler,
+            user_message="把第二章重写一下",
+        )
+        original = self._draft_text()
+        oversized_section = "## 第二章 战略\n" + ("超长内容" * 800) + "\n"
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            "## 第二章 战略",
+            oversized_section,
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("超过预期范围", result.get("message", ""))
+        self.assertEqual(self._draft_text(), original)
+
+    def test_full_rewrite_requires_user_keyword(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="把报告标题改一下")
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            "# 报告标题",
+            "# 新报告\n## 第一章\n新内容\n",
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("整篇重写需要明确", result.get("message", ""))
+
+    def test_full_rewrite_with_keyword_passes(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_canonical_edit(
+            handler,
+            user_message="整篇重写这份报告",
+        )
+        new_draft = "# 新报告\n## 第一章\n新内容\n## 第二章\n更多内容\n"
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            "# 报告标题",
+            new_draft,
+        )
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(result.get("canonical_action"), "full_rewrite")
+        self.assertEqual(self._draft_text(), new_draft)
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
+
+    def test_full_draft_old_string_without_keyword_is_not_text_replace(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="把报告标题改一下")
+        original = self._draft_text()
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            original,
+            "# 只剩标题\n",
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("整篇重写需要明确", result.get("message", ""))
+        self.assertEqual(self._draft_text(), original)
+
+    def test_full_rewrite_requires_report_shape(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="整篇重写这份报告")
+        original = self._draft_text()
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            original,
+            "# 只剩标题\n",
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("章节标题", result.get("message", ""))
+        self.assertEqual(self._draft_text(), original)
+
+    def test_text_replace_unique_match(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_canonical_edit(handler, user_message="把引言段改成新引言")
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(result.get("canonical_action"), "text_replace")
+        self.assertIn("新引言", self._draft_text())
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
+
+    def test_text_replace_non_unique_rejected(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(
+            handler,
+            draft="# 报告标题\n## 第一章\n重复\n## 第二章\n重复\n",
+            user_message="把重复改成单次",
+        )
+
+        result = self._call_edit_file(handler, self.CANONICAL, "重复", "单次")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("唯一", result.get("message", ""))
+
+    def test_section_delete(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_canonical_edit(handler, user_message="删掉第二章")
+
+        result = self._call_edit_file(handler, self.CANONICAL, "## 第二章 战略", "")
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(result.get("canonical_action"), "section_delete")
+        self.assertNotIn("## 第二章 战略", self._draft_text())
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
+
+    def test_text_delete(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_canonical_edit(handler, user_message="删掉引言段")
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "")
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(result.get("canonical_action"), "text_delete")
+        self.assertNotIn("引言段", self._draft_text())
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
+
+    def test_section_delete_satisfies_required_write_when_draft_shrinks(self):
+        handler = self._make_handler_with_project()
+        draft = (
+            "# 报告标题\n"
+            "## 第一章 保留\n"
+            + ("保留内容" * 30)
+            + "\n## 第二章 删除\n"
+            + ("删除内容" * 12)
+            + "\n"
+        )
+        self._prepare_canonical_edit(handler, draft=draft, user_message="删掉第二章")
+        snapshots = {
+            self.CANONICAL: handler._snapshot_project_file(self.project_id, self.CANONICAL)
+        }
+
+        result = self._call_edit_file(handler, self.CANONICAL, "## 第二章 删除", "")
+        satisfied, missing = handler._required_writes_satisfied(self.project_id, snapshots)
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(result.get("canonical_action"), "section_delete")
+        self.assertTrue(satisfied)
+        self.assertEqual(missing, [])
+
+    def test_text_delete_satisfies_required_write_when_draft_shrinks(self):
+        handler = self._make_handler_with_project()
+        draft = (
+            "# 报告标题\n"
+            "## 第一章 保留\n"
+            + ("保留内容" * 30)
+            + "\n需要删除的一句话\n"
+            "## 第二章 保留\n"
+            + ("继续保留" * 12)
+            + "\n"
+        )
+        self._prepare_canonical_edit(handler, draft=draft, user_message="删掉这句话")
+        snapshots = {
+            self.CANONICAL: handler._snapshot_project_file(self.project_id, self.CANONICAL)
+        }
+
+        result = self._call_edit_file(handler, self.CANONICAL, "需要删除的一句话\n", "")
+        satisfied, missing = handler._required_writes_satisfied(self.project_id, snapshots)
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(result.get("canonical_action"), "text_delete")
+        self.assertTrue(satisfied)
+        self.assertEqual(missing, [])
+
+    def test_empty_old_string_rejected_with_append_hint(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="续写下一章")
+
+        result = self._call_edit_file(handler, self.CANONICAL, "", "新增内容")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("append_report_draft", result.get("message", ""))
+
+    def test_anchor_label_not_in_draft_rejected(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="把第十章重写一下")
+
+        result = self._call_edit_file(handler, self.CANONICAL, "## 第十章 不存在", "## 第十章 不存在\n新内容\n")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("锚点章节未在 draft 中唯一匹配", result.get("message", ""))
+
+    def test_single_line_h1_goes_text_replace_not_full_rewrite(self):
+        handler = self._make_handler_with_project()
+        draft = "# 另一个标题\n## 第一章\n这里引用 # 报告标题 作为旧名\n"
+        self._prepare_canonical_edit(
+            handler,
+            draft=draft,
+            user_message="把旧名改一下",
+        )
+
+        result = self._call_edit_file(handler, self.CANONICAL, "# 报告标题", "# 新报告标题")
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(result.get("canonical_action"), "text_replace")
+        self.assertIn("# 另一个标题", self._draft_text())
+        self.assertIn("# 新报告标题", self._draft_text())
+
+    def test_h1_anchor_with_newline_goes_text_replace_not_full_rewrite(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="把标题改一下")
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            "# 报告标题\n",
+            "# 新报告标题\n",
+        )
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(result.get("canonical_action"), "text_replace")
+        self.assertTrue(self._draft_text().startswith("# 新报告标题\n"))
+
+    def test_begin_obligation_blocks_canonical_edit(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="开始写报告")
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("append_report_draft", result.get("message", ""))
+        self.assertIn("引言段", self._draft_text())
+
+    def test_rewrite_section_obligation_rejects_text_replace_action(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="把第二章重写一下")
+        original = self._draft_text()
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("rewrite_report_section", result.get("message", ""))
+        self.assertIn("## 章节锚点", result.get("message", ""))
+        self.assertEqual(self._draft_text(), original)
+
+    def test_replace_text_obligation_rejects_section_rewrite_action(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="把引言段改成新引言")
+        original = self._draft_text()
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            "## 第二章 战略",
+            "## 第二章 战略\n新战略段\n",
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("replace_report_text", result.get("message", ""))
+        self.assertIn("唯一文字片段", result.get("message", ""))
+        self.assertEqual(self._draft_text(), original)
+
+    def test_successful_canonical_edit_persists_workspace_memory(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="把引言段改成新引言")
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+        state = handler._load_conversation_state(self.project_id)
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertTrue(
+            any(
+                event.get("tool_name") == "edit_file"
+                and event.get("source_key") == f"file:{self.CANONICAL}"
+                and event.get("persisted_via") == "write_file"
+                for event in state.get("events", [])
+            )
+        )
+        memory_entry = next(
+            entry
+            for entry in state.get("memory_entries", [])
+            if entry.get("source_key") == f"file:{self.CANONICAL}"
+        )
+        self.assertIn("新引言", memory_entry.get("content", ""))
+        self.assertNotIn("引言段", memory_entry.get("content", ""))
+
+    def test_non_canonical_path_uses_generic_edit(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_generic_edit(
+            handler,
+            file_path="some/other.md",
+            content="alpha old beta\n",
+        )
+
+        result = self._call_edit_file(handler, "some/other.md", "old", "new")
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(
+            (self.project_dir / "some/other.md").read_text(encoding="utf-8"),
+            "alpha new beta\n",
+        )
+        self.assertEqual(turn_context.get("canonical_draft_mutations"), [])
+
+    def test_post_hoc_generative_intent_blocks_edit(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="续写下一章")
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("新增内容", result.get("message", ""))
+        self.assertIn("append_report_draft", result.get("message", ""))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in EditFileCanonicalDispatcherTests.__dict__
+    ):
+        setattr(EditFileCanonicalDispatcherTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class EditFileCanonicalInvariantRejectTests(_EditFileDispatcherTestMixin, ChatRuntimeTests):
+    """Task 14: canonical edit_file dispatcher applies shared write invariants."""
+
+    def test_stage_lt_s4_rejected(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(
+            handler,
+            user_message="把引言段改成新引言",
+            stage_s4=False,
+        )
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertTrue("S4" in result.get("message", "") or "阶段" in result.get("message", ""))
+
+    def test_outline_not_confirmed_rejected(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(
+            handler,
+            user_message="把引言段改成新引言",
+            outline_confirmed=False,
+        )
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("大纲", result.get("message", ""))
+
+    def test_mixed_intent_rejected(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler, user_message="把引言段改成新引言并导出")
+
+        with mock.patch.object(
+            handler,
+            "_secondary_action_families_in_message",
+            return_value=["export", "quality_check"],
+        ):
+            result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("多个动作", result.get("message", ""))
+
+    def test_mutation_limit_full_rejected(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_canonical_edit(handler, user_message="把引言段改成新引言")
+        turn_context["canonical_draft_mutations"] = [
+            {"canonical_action": "text_replace", "target_label": "m0", "old_len": 1, "new_len": 1},
+            {"canonical_action": "text_replace", "target_label": "m1", "old_len": 1, "new_len": 1},
+            {"canonical_action": "text_replace", "target_label": "m2", "old_len": 1, "new_len": 1},
+        ]
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("上限", result.get("message", ""))
+
+    def test_no_read_before_write_rejected(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(
+            handler,
+            user_message="把引言段改成新引言",
+            read=False,
+        )
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertTrue("read_file" in result.get("message", "") or "读取" in result.get("message", ""))
+
+    def test_within_turn_self_refresh_skips_read_check(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_canonical_edit(handler, user_message="把引言段改成新引言")
+
+        first = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+        self.assertEqual(first.get("status"), "success")
+        turn_context["read_file_snapshots"].clear()
+
+        second = self._call_edit_file(handler, self.CANONICAL, "新引言", "最终引言")
+
+        self.assertEqual(second.get("status"), "success")
+        self.assertEqual(second.get("canonical_action"), "text_replace")
+        self.assertIn("最终引言", self._draft_text())
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 2)
+
+    def test_fetch_url_pending_rejected(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_canonical_edit(handler, user_message="把引言段改成新引言")
+        turn_context["web_search_performed"] = True
+        turn_context["fetch_url_performed"] = False
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("fetch_url", result.get("message", ""))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in EditFileCanonicalInvariantRejectTests.__dict__
+    ):
+        setattr(EditFileCanonicalInvariantRejectTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class EditFileGenericRegressionTests(_EditFileDispatcherTestMixin, ChatRuntimeTests):
+    """Task 14: non-canonical edit_file keeps generic behavior."""
+
+    def test_edit_other_md_uses_generic_no_invariants_run(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_generic_edit(
+            handler,
+            file_path="other/notes.md",
+            content="alpha old beta\n",
+        )
+        turn_context["canonical_draft_mutations"] = [
+            {"canonical_action": "x"},
+            {"canonical_action": "y"},
+            {"canonical_action": "z"},
+        ]
+
+        result = self._call_edit_file(handler, "other/notes.md", "old", "new")
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(
+            (self.project_dir / "other/notes.md").read_text(encoding="utf-8"),
+            "alpha new beta\n",
+        )
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 3)
+
+    def test_edit_other_md_with_unique_match_succeeds(self):
+        handler = self._make_handler_with_project()
+        self._prepare_generic_edit(
+            handler,
+            file_path="other/notes.md",
+            content="alpha old beta\n",
+        )
+
+        result = self._call_edit_file(handler, "other/notes.md", "old", "new")
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertIn(
+            "alpha new beta",
+            (self.project_dir / "other/notes.md").read_text(encoding="utf-8"),
+        )
+
+    def test_edit_other_md_non_unique_old_string_rejected_by_generic(self):
+        handler = self._make_handler_with_project()
+        self._prepare_generic_edit(
+            handler,
+            file_path="other/notes.md",
+            content="old alpha old beta\n",
+        )
+
+        result = self._call_edit_file(handler, "other/notes.md", "old", "new")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("不唯一", result.get("message", ""))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in EditFileGenericRegressionTests.__dict__
+    ):
+        setattr(EditFileGenericRegressionTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class _WriteFileDispatcherTestMixin(_WriteToolTestMixin):
+    CANONICAL = "content/report_draft_v1.md"
+    DRAFT = (
+        "# 报告标题\n"
+        "## 第一章 引言\n"
+        "引言段\n"
+    )
+
+    def _prepare_write_turn(self, handler):
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        handler._turn_context["generic_non_plan_write_allowed"] = True
+        handler._turn_context.setdefault("canonical_draft_mutations", [])
+        return handler._turn_context
+
+    def _call_write_file(self, handler, file_path, content):
+        return handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": file_path,
+                        "content": content,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+    def _canonical_text(self):
+        return (self.project_dir / self.CANONICAL).read_text(encoding="utf-8")
+
+
+class WriteFileCanonicalDispatcherTests(_WriteFileDispatcherTestMixin, ChatRuntimeTests):
+    """Task 15: canonical write_file is rejected before generic writes."""
+
+    def test_existing_canonical_write_file_rejected_before_generic_write(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_write_turn(handler)
+        self._put_draft(self.DRAFT)
+
+        with mock.patch.object(
+            handler,
+            "_execute_plan_write",
+            wraps=handler._execute_plan_write,
+        ) as generic_write:
+            result = self._call_write_file(
+                handler,
+                self.CANONICAL,
+                "# 新报告\n## 第一章\n新内容\n",
+            )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("append_report_draft", result.get("message", ""))
+        self.assertIn("edit_file", result.get("message", ""))
+        generic_write.assert_not_called()
+        self.assertEqual(self._canonical_text(), self.DRAFT)
+        self.assertEqual(turn_context.get("canonical_draft_mutations"), [])
+
+    def test_missing_canonical_write_file_rejected_and_not_created(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_write_turn(handler)
+        draft_path = self.project_dir / self.CANONICAL
+        self.assertFalse(draft_path.exists())
+
+        with mock.patch.object(
+            handler,
+            "_execute_plan_write",
+            wraps=handler._execute_plan_write,
+        ) as generic_write:
+            result = self._call_write_file(
+                handler,
+                self.CANONICAL,
+                "# 新报告\n## 第一章\n新内容\n",
+            )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("append_report_draft", result.get("message", ""))
+        self.assertIn("edit_file", result.get("message", ""))
+        generic_write.assert_not_called()
+        self.assertFalse(draft_path.exists())
+        self.assertEqual(turn_context.get("canonical_draft_mutations"), [])
+
+    def test_canonical_path_variants_rejected(self):
+        for file_path in ("content\\report_draft_v1.md", "./content/report_draft_v1.md"):
+            with self.subTest(file_path=file_path):
+                handler = self._make_handler_with_project()
+                turn_context = self._prepare_write_turn(handler)
+                self._put_draft(self.DRAFT)
+
+                result = self._call_write_file(
+                    handler,
+                    file_path,
+                    "# 新报告\n## 第一章\n新内容\n",
+                )
+
+                self.assertEqual(result.get("status"), "error")
+                self.assertIn("append_report_draft", result.get("message", ""))
+                self.assertIn("edit_file", result.get("message", ""))
+                self.assertEqual(self._canonical_text(), self.DRAFT)
+                self.assertEqual(turn_context.get("canonical_draft_mutations"), [])
+
+    def test_non_canonical_path_uses_generic_write(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_write_turn(handler)
+
+        with mock.patch.object(
+            handler,
+            "_execute_plan_write",
+            wraps=handler._execute_plan_write,
+        ) as generic_write:
+            result = self._call_write_file(
+                handler,
+                "other/file.md",
+                "generic content\n",
+            )
+
+        self.assertEqual(result.get("status"), "success")
+        generic_write.assert_called_once()
+        self.assertEqual(
+            (self.project_dir / "other/file.md").read_text(encoding="utf-8"),
+            "generic content\n",
+        )
+        self.assertEqual(turn_context.get("canonical_draft_mutations"), [])
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in WriteFileCanonicalDispatcherTests.__dict__
+    ):
+        setattr(WriteFileCanonicalDispatcherTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class WriteFileGenericRegressionTests(_WriteFileDispatcherTestMixin, ChatRuntimeTests):
+    """Task 15: non-canonical write_file keeps generic behavior."""
+
+    def test_write_other_file_succeeds_and_persists_content(self):
+        handler = self._make_handler_with_project()
+        self._prepare_write_turn(handler)
+
+        result = self._call_write_file(
+            handler,
+            "other/file.md",
+            "hello generic write\n",
+        )
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(
+            (self.project_dir / "other/file.md").read_text(encoding="utf-8"),
+            "hello generic write\n",
+        )
+
+    def test_write_non_canonical_does_not_record_canonical_mutation(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_write_turn(handler)
+
+        result = self._call_write_file(
+            handler,
+            "other/file.md",
+            "plain content\n",
+        )
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(turn_context.get("canonical_draft_mutations"), [])
+        self.assertIsNone(turn_context.get("canonical_draft_mutation"))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in WriteFileGenericRegressionTests.__dict__
+    ):
+        setattr(WriteFileGenericRegressionTests, _inherited_test_name, None)
 del _inherited_test_name
