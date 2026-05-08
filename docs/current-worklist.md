@@ -1,20 +1,14 @@
 # Current Worklist
 
-最后更新：2026-05-08（DeepSeek Migration：Commit 0 foundation 已 ship，spec + plan 经 codex 多轮 review 全部 APPROVED，等 codex 实施 Commit 1-3）
+最后更新：2026-05-09（DeepSeek Migration：Commit 1-3 已完成，cutover report 已提交；待 2026-05-09 手工验收 packaged UI/chat E2E）
 
 ## 当前未解决 / 待验证
 
-1. **DeepSeek Migration — Commit 1-3 实施待启动**
-- 状态：`plan APPROVED，等 codex 实施`
-- Spec：[docs/superpowers/specs/2026-05-08-deepseek-migration-toolset-redesign-design.md](superpowers/specs/2026-05-08-deepseek-migration-toolset-redesign-design.md)（3 轮 codex review APPROVED）
-- Plan：[docs/superpowers/plans/2026-05-08-deepseek-migration-toolset-redesign.md](superpowers/plans/2026-05-08-deepseek-migration-toolset-redesign.md)（4 轮 codex review APPROVED，commit `d7afadb`）
-- Commit 0（已 ship 2026-05-07/08，commits `06779b1` / `0b8b968` / `8b3ad16`）：服务器 managed proxy 模型切换 + `heal_stale_managed_model` + `tier_1m_eff_256k` + frontend connectionMode fallback
-- Commit 1 起待实施：
-  - **Commit 1**（Task 1-22，~22 task）：加新 dispatcher + S0 first-turn gate + `<think>` 折叠 + mutation_limit list + canonical_obligation；新旧路径并存
-  - **Commit 2**（Task 23-27）：删 3 个旧专用工具的 schema 注册 + dispatch 路由 + SKILL.md §S4 引用
-  - **Commit 3**（Task 28-39）：删旧 callable + guard 控制层（~700 行净删）+ grep 残留扫描 + cutover report
-- 实施约束：每个 task explicit "Run" 命令限制测试范围（不让 agent 默认全套 pytest）；每个 commit 末尾嵌入 codex review loop，APPROVED 后才进入下一 commit
-- 派活方式：按 CLAUDE.md 子代理派活规则，用 `codex exec --effort xhigh` 接 plan + 设 cron 监控
+1. **DeepSeek Migration — 2026-05-09 手工验收（packaged UI/chat E2E）**
+- 状态：`待手工验收`
+- 范围：使用 `dist\咨询报告助手\` 打包态跑完整 UI/chat 主链路，重点确认 packaged UI、聊天流式、工具调用、S0→S4 写正文路径在真实窗口内可用
+- 背景：Commit 1-3 + cutover report 已完成；自动验证和 legacy grep gates 已通过，但 Task 38 明确 full packaged UI/chat manual E2E 未独立证明
+- 验收参考：[docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md](superpowers/cutover_report_2026-05-08_deepseek-migration.md)
 
 2. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现，已推后）
 - 状态：`已推后到 UI 重构一并处理`（spec §2.2 Out of Scope）
@@ -25,11 +19,41 @@
 - 触发条件：UI 重构立项时一起做（设计稿在 `docs/design_UI.pdf`）
 
 3. **UI 重构**（推后）
-- 状态：`待 DeepSeek Migration 实施完成后立项`
+- 状态：`待 2026-05-09 packaged UI/chat 手工验收通过后立项`
 - 设计稿：`docs/design_UI.pdf`（用户用 Claude design 做的 3 套初步设计稿）
 - 触发条件：DeepSeek Migration Commit 1-3 实施完成 + 跑通流程后再立项
 
+4. **stage-advance-gates Bug G/H 低优先级待复核**
+- 状态：`低优先级待复核`
+- Bug G：回退 checkpoint 后 `content/*.md` 仍存在，状态可能不自洽；复核时决定级联清理还是 UI 标红提示。
+- Bug H：S1 回退后 UI「下一步建议」显示"暂无"，`next_stage_hint` S1 分支缺；复核时补齐提示或确认新版流程已绕开。
+
+5. **新建项目表单与废 UI 整理**（待 UI 重构时并入/评估）
+- 状态：`待 UI 重构时评估`
+- 目标：清理"填了像没填"的字段、重复输入项和旧流程遗留 UI，包括截止日期控件、材料/备注语义重叠、项目类型/主题/目标读者/篇幅字段利用率。
+- 关联：Task 7 的 `length_fallback` chip 目前只是非交互提示；如做项目表单 edit 模式，可顺便让 chip 点击打开编辑面板。
+
+6. **`draw.io skill` 评估**
+- 状态：`待评估`
+- 目标：判断它对咨询报告场景是否真有价值，还是只会增加复杂度。
+
+7. **前端生产包优化**
+- 状态：`待优化`
+- 现状：`vite build` 已通过，但主 JS chunk 仍接近 `1 MB`。
+- 目标：在不引入复杂度失控的前提下做基本拆包，降低首屏和构建产物压力。
+
+8. **技术债清理**
+- 状态：`待清理`
+- 当前明确项：`pydantic` deprecation warning、打包依赖排除空间。
+
 ## 最近已解决
+
+0d. **DeepSeek Migration Commit 1-3 + cutover report 完成（2026-05-09）**
+- 状态：`已完成；待 packaged UI/chat 手工验收`
+- Commit chain：`69730c7 Add migration toolset foundation` → `118f383 Cut traffic from legacy report draft tools` → `9a59955 Delete legacy report draft control layer`
+- Cutover report：[docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md](superpowers/cutover_report_2026-05-08_deepseek-migration.md)（commit `a5f1cd1 docs(deepseek-migration): add cutover report`）
+- 验证：backend fast `834 passed, 1 skipped, 3 deselected, 13 warnings, 22 subtests passed`；backend including slow `837 passed, 1 skipped, 13 warnings, 22 subtests passed`；frontend node tests `183 passed`；Windows build `build.bat` 成功并重建 `dist\咨询报告助手\`；legacy grep gates 7 类 clean
+- 注意：Task 38 明确 full packaged UI/chat manual E2E 仍需在 2026-05-09 手工验收
 
 0c. **DeepSeek Migration Commit 0 + spec + plan 全 APPROVED（2026-05-07~08）**
 - 状态：`Commit 0 已 ship 3 commits + spec 3 轮 codex review APPROVED + plan 4 轮 codex review APPROVED`
@@ -42,7 +66,7 @@
   - `8b3ad16` catch the last two gemini-3-flash refs in README + proxy contract
 - 默认模型名同步覆盖了原 worklist item #3"默认渠道文案与默认模型决策"，整体合入 DeepSeek Migration
 - 2026-05-08 E2E 实测：DeepSeek V4 Pro 9 次工具调用 schema 100% 正确，模型行为本身没问题；6 个产品/工程问题（`<think>` 标签泄露 / S0 门槛被动 / per-turn search 配额过严 / packaged stderr 吞没 / version_info 空 / 老用户 config heal）作为本轮 plan 的 in-scope items 一次性处理
-- 下一步：codex 接 plan 实施 Commit 1（详见上方 Item 1）
+- 后续实施已完成，见 0d 与 cutover report；当前仅剩 packaged UI/chat 手工验收（见上方 Item 1）
 
 0b. **S4 mutation-limit 二次写入真实字数提示（2026-05-07）**
 - 状态：`已修复并打包验证`
@@ -110,8 +134,8 @@
   - 聊天气泡 + 文件预览原生框选复制可用
 - 二轮新暴露问题见 1b（已修）
 
-1a. **[BUG 串] stage-advance-gates 实机链条性失效 — A/B/C/D/F 已修，G/H 待跟进**
-- 状态：`A/B/C/D/F 已修，G/H 待跟进`（2026-04-21 3 路并行 codex + general-purpose 派活，全部合 main；C 后续被 S0 interview 实施覆盖，详见 1d）
+1a. **[BUG 串] stage-advance-gates 实机链条性失效 — A/B/C/D/F 已修，G/H 移入当前待办**
+- 状态：`A/B/C/D/F 已修；G/H 已移入上方当前待办 Item 4`（2026-04-21 3 路并行 codex + general-purpose 派活，全部合 main；C 后续被 S0 interview 实施覆盖，详见 1d）
 - 关联 plan：`docs/superpowers/plans/2026-04-21-smoke-test-bugfix.md`
 - 测试基线：403 passed / 1 skipped（基线 397 → 403，加 6 条新测试）
 
@@ -127,9 +151,9 @@
 
 **Bug F ✅** — `backend/chat.py:_expected_plan_writes_for_message` 白名单从硬编码 5 条路径改成正则匹配 `report_draft_v\d+\.md` 和 `(content|output)/*.md`，`_is_expected_report_write_path` 方法抽出可复用。+28 行测试。commit `1e180cc fix(chat): detect versioned report draft claims`。
 
-**Bug G ⏸** — 未修。回退 checkpoint 后 `content/*.md` 仍存在，状态不自洽。需要级联清理 or UI 标红提示，暂挂。
+**Bug G ↗** — 回退 checkpoint 后 `content/*.md` 仍存在，状态不自洽；已移入当前待办 Item 4。
 
-**Bug H ⏸** — 未修。S1 回退后 UI「下一步建议」显示"暂无"，`next_stage_hint` S1 分支缺。暂挂。
+**Bug H ↗** — S1 回退后 UI「下一步建议」显示"暂无"，`next_stage_hint` S1 分支缺；已移入当前待办 Item 4。
 
 ~~**Bug I**~~ — 已排除，黄色警告是当轮新触发。
 
@@ -158,10 +182,11 @@
 - 原现象：用户回"确认"（响应模型"请回复'确认大纲'或'按此大纲执行'"），`stage_checkpoints.json` 未写入 `outline_confirmed_at`
 - 修法：选了决策点 (b) 中期重构。新增 `StageAckParser`（commits `088d648 Add StageAckParser parse_raw with unknown-key events` + `c0e30b3 Add tag position judgment` + `41d21ef Add StageAckParser.strip` + `9a81d69 Wire StageAckParser finalize into both chat paths with tag priority` 等），LLM 在 assistant 尾部输出 `<stage-ack>KEY</stage-ack>`，后端校验前置文件后 set checkpoint 并剥掉标签。`_WEAK_ADVANCE_BY_STAGE` 弱关键词表整张删除（commit `916f135 Remove weak advance keyword table; add s0 strong keywords`）。五个 checkpoint 通吃。详见 1d。
 
-1c. **[新发现] 模型行为硬伤 — 主体修复已合 main，待现场复测**
-- 状态：`核心兜底全部落地，reality_test 已暴露 max_iterations 撞顶并修复，待重打包后再测`
+1c. **[归档] Gemini-era 模型行为硬伤 — 主体修复已合 main，复测路径已被 DeepSeek Migration 取代**
+- 状态：`核心兜底全部落地；Gemini reality_test 复测路径已停止推进`
 - 测试项目：`D:\MyProject\CodeProject\consulting-report-agent\reality_test\.consulting-report\`（替代旧的 `D:\CodexProject\test\`）
 - 模型约束：`gemini-3-flash`（免费批量渠道限制，无法更换）
+- 归档说明：不再按 Gemini reality_test 复测路径推进；当前验收以 DeepSeek packaged UI/chat E2E 为准。
 
 **2026-04-24 已落地（α/β/γ/δ 全套）**：
 - `content/report_draft_v1.md` 成为正文草稿唯一规范路径；首次成稿/续写走 `append_report_draft`，修改已有正文走 `read_file + edit_file`，禁止用 `write_file` 直接覆盖正文草稿（**δ + 问题 3 修法**）
@@ -176,7 +201,7 @@
 - 系统化调查：单轮内做了 6 次成功 tool 调用 + 1 次失败 write（fetch_url 前置门禁挡的），assistant 输出**零** SELF_CORRECTION_LOOP_MARKERS 命中——撞顶不是病理性循环，是真实工作密度
 - 根因：当前架构（先读后写 + fetch_url 前置 + Gemini 3 Flash 串行 tool call）下，单轮"完成 S0 收尾 + 补全 plan + 抓 1-2 条引用"实际需要 11-13 轮，10 不够
 - 修复：`max_iterations` 默认值 10 → 20（commit `ec976b8 fix(chat): raise stream max_iterations from 10 to 20`），`_chat_stream_unlocked` + `chat_stream` 两处。非流式 `chat()` 仍 5（仅测试用）。test_chat_runtime 342 passed / 1 skipped 零回归
-- 重打包已完成（2026-05-04，dist 104 MB / exe 14 MB），待用 reality_test 跑同样会话验证
+- 当时重打包已完成（2026-05-04，dist 104 MB / exe 14 MB）；后续不再以 Gemini reality_test 作为当前验收路径。
 
 1d. **[已完成] S0 interview + stage-ack 19 个 task 全套实施**
 - 状态：`全部合 main`（2026-04-21 spec/plan APPROVED → 2026-04-21~04-22 19 个 task 实施 → 全部进入 main）
@@ -189,37 +214,12 @@
 - 测试基线：spec 5 轮 / plan 3 轮 codex review；实施期 19 个 task 各 commit 跑 review
 - 结论：1a Bug C ✅ / 1b Bug 1 ✅ / 1b Bug 3 ✅ 全部由本块覆盖，无需独立追踪
 
-2. 新建项目表单与废 UI 整理
-- 状态：`待开始`
-- 目标：把"填了像没填"的字段、重复输入项和旧流程遗留 UI 一次性清干净。
-- 当前方向：
-  - 删除真正无效或重复的字段
-  - 把"截止日期"改成日期选择器
-  - 重新审视"已有材料或备注"和"初始材料"的语义重叠
-  - 提高项目类型、主题、目标读者、篇幅等字段在初始化和首轮交互中的利用率
-- 关联：Task 7 的 `length_fallback` chip 目前只是非交互提示，因为 `ProjectCreateModal` 没有 edit 模式；如果本项做了"新建项目表单改造 + 加 edit 模式"，可以顺便让 chip 点击打开编辑面板。
-
-4. `draw.io skill` 评估
-- 状态：`待开始`
-- 目标：判断它对咨询报告场景是否真有价值，还是只会增加复杂度。
-
-5. 前端生产包优化
-- 状态：`待开始`
-- 现状：`vite build` 已通过，但主 JS chunk 仍接近 `1 MB`。
-- 目标：在不引入复杂度失控的前提下做基本拆包，降低首屏和构建产物压力。
-
-6. 技术债清理
-- 状态：`待开始`
-- 当前明确项：
-  - `pydantic` deprecation warning 仍存在
-  - 需要再看是否有可以从打包里继续排除的非必需依赖
-
 8. ~~聊天与文件预览复制体验~~ — ✅ 已修，commit `341de44`。根因：PyWebView 的 WebView2 在 Win 下对非输入元素默认禁选；通过 `.selectable-content` 工具类（`-webkit-user-select: text` + `*` 子选择器）在 ChatPanel 气泡 + FilePreviewPanel 预览区放开。右上角复制按钮保留。已进"最近已解决"。
 
 ## 历史已解决
 
 0. ⭐ **context-signal-and-intent-tag Phase 2a 实施完成（2026-05-05，13 commits 已合 main）**
-- 状态：`Phase 2a 13/13 task done + 5 fix（reviewer catch 真问题）；待 fix4 修 section/replace fallback 后进 Phase 3`
+- 状态：`Phase 2a 13/13 task done + 5 fix（reviewer catch 真问题）；后续 fix4 / cutover / 删除旧链路已被 Tools redesign 覆盖`
 - 关联文档：
   - spec [2026-05-04-context-signal-and-intent-tag-design.md](superpowers/specs/2026-05-04-context-signal-and-intent-tag-design.md)（5 轮 APPROVED）
   - plan [2026-05-04-context-signal-and-intent-tag.md](superpowers/plans/2026-05-04-context-signal-and-intent-tag.md)（6 轮 APPROVED）
@@ -231,16 +231,16 @@
 - 测试基线：GateCanonicalDraftToolCallTests 17/17 + 70 wider sanity 0 failed
 - 关键 commits：`8940d70` parser → `234c0fb` tail-guard → `dda3aef` preflight → `1a15b12+6e956fb` validate → `dc2a321+d603042` gate → `cf445e2+ab91fda` compare event → `5a6a5b8` script → `f6ed0e9` SKILL → `a89b081` fix2 → `6112a75` fix3
 - Cutover smoke 实测：begin/continue Bug A 修复（fallback work），section/replace 暴露架构缺口（见 0a）
-- **下一步**：（1）fix4 修 section/replace keyword fallback → （2）重测 cutover → （3）Phase 3 (Task 24-27) 切主 + 删旧
+- **归档说明**：fix4、cutover 重测、旧链路删除均已在 2026-05-06 Tools redesign 中完成或取代；本块不再发起后续任务。
 
 1. ⭐ **context-signal-and-intent-tag Phase 1 实施完成（2026-05-04，16 commits 在 `claude/happy-jackson-938bd1`）**
-- 状态：`Phase 1 13/13 task done，待 reality_test 实测 + Phase 2/3`
+- 状态：`Phase 1 13/13 task done；后续验证和 Phase 2/3 路线已被 Tools redesign / DeepSeek Migration 覆盖`
 - 关联文档：
   - spec `docs/superpowers/specs/2026-05-04-context-signal-and-intent-tag-design.md`（5 轮 review APPROVED）
   - plan `docs/superpowers/plans/2026-05-04-context-signal-and-intent-tag.md`（6 轮 review APPROVED）
   - handoff `docs/superpowers/handoffs/2026-05-04-phase1-impl-handoff.md`（cold-start 下个 session 用）
 - 5 reality_test bug 状态：
-  - **Bug A**（门禁误判）⏸ 留 Phase 2，由 `<draft-action>` tag 替代 `_classify_canonical_draft_turn` 关键词遍历
+  - **Bug A**（门禁误判）↗ 后由 Phase 2 `<draft-action>` tag 路线处理，最终被 Tools redesign 取代
   - **Bug B**（黄框污染）✅ A1 修：`SystemNotice.surface_to_user` 必填 + `_emit_system_notice_once` 双 dedupe + 服务端过滤
   - **Bug C**（阈值黑盒）✅ A2 修：`_render_progress_markdown` 渲染 `**质量进度**: 5/7 条 有效来源` + tool_result 追加 `quality_hint`
   - **Bug D**（兜底黑洞）✅ A3 修：`_finalize_empty_assistant_turn` helper（永不持久化空 assistant）+ `_coalesce_consecutive_user_messages` + 三层 sanitize（provider build / GET /conversation / 前端）
@@ -252,7 +252,7 @@
   - 全程 codex exec gpt-5.4 xhigh + PowerShell tool inline env 注入 + 20 min 静默 cron
   - Task 13 编排器整合是最贵的——3 commit（实施 + return value fix1 + 14 旧测试断言修 fix2）
   - chat_runtime suite 11k 行是 pytest 全套主时间瓶颈，reviewer prompt 必须 narrow scope
-- **下一步**：（1）reality_test 实测（启动 dist exe，验 4 个修好的 bug 不复现）→（2）Phase 2 Task 15-22（B1 draft-action tag 灰度并行）→（3）Task 23 cutover **必须用户审 5-session compare report** →（4）Phase 3 Task 24-27 删旧 + 重打包 + 同步文档
+- **归档说明**：reality_test、Phase 2/3、cutover compare、重打包与文档同步路线已被后续 Tools redesign / DeepSeek Migration 完成或取代；本块只保留历史背景。
 
 1. ⭐ **400 死循环根因清理 + edit_file 工具 + debug dump 转正（2026-04-22）**
 - 状态：`已完成`（claude 侧自改自测，未派 codex；测试 509 passed / 1 skipped / 0 failed）
@@ -266,14 +266,14 @@
 - 配置：`managed_search_pool.json` `per_turn_searches: 2 → 4`（仍受 `project_minute_limit: 10` / `global_minute_limit: 20` 保护）
 - debug dump 转正：`_debug_dump_request` 方法从临时调试代码改成持久辅助工具。路径从 `D:/consulting-debug/` 挪到 `~/.consulting-report/debug/`（跨平台 + 和其他用户数据同目录），每次请求写 `payload-latest.json`（覆盖），失败时另存 `error-{UTC}-{label}.json`（保留）。`label` ∈ `{stream, stream-iter, nostream}`，`note` 字段带 `iteration=N`
 - 关键证据：`~/.consulting-report/debug/error-20260422T132039Z-stream.json`（最初定位到 `write_filewrite_file` 畸形 payload）、`error-20260422T135150Z-stream.json`（Fix A 早期实现引入的"连续两条 user"回归证据）
-- 后续未解决的模型行为问题转交 codex，见"当前未解决"第 1c 条
+- 后续模型行为问题曾转入 Gemini-era 修复链路；该路径现已归档，当前验收以 DeepSeek packaged UI/chat E2E 为准。
 
 1. ⭐ **stage-advance-gates smoke-test bugfix（Bug A/B/D/F + 前端复制）**
 - 状态：`已完成`（2026-04-21 3 路并行派活，全部合 main）
 - 5 个 commit：`cb15e4c` / `7e262cf` / `1e180cc`（task-4 Bug A/B/F）+ `4a6a7da` / `88f10d7` / `7a50bb3`（task-5 Bug D）+ `341de44`（frontend-copy 复制体验）
 - 测试：后端 403 passed（397→403，+6 新测试）；前端 139 passed；`npm run build` 零错
-- 详情见"当前未解决/待验证"第 1a 条（保留在那里以便追 C/G/H 跟进）
-- 下一步：**重打包 `dist\咨询报告助手\` → 用户二轮 smoke test**
+- 详情见最近已解决 1a；G/H 已移入当前待办 Item 4。
+- 归档说明：二轮 smoke 与重打包后续已完成；新暴露问题已归入 1b / 1d / 当前 Item 4，不再从本历史块发起 smoke。
 
 1. ⭐ **阶段推进门禁重构（stage-advance-gates，Task 1-8 全闭环）**
 - 状态：`已完成`（2026-04-21 分支 `feat/stage-advance-gates` 合 main）
