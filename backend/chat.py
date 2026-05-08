@@ -2397,8 +2397,11 @@ class ChatHandler:
             return None
         return (
             "正文草稿不要直接用空 old_string 的 `edit_file` 修改。"
-            "请根据用户意图改用 `rewrite_report_section` / `replace_report_text` / "
-            "`rewrite_report_draft`；这些工具会处理读取校验和落盘范围。"
+            "新增或续写正文请调用 `append_report_draft`；"
+            "修改已有正文请先调用 `read_file` 核对原文，再调用 "
+            "`edit_file(file_path, old_string, new_string)`，"
+            "`old_string` 要取自草稿中唯一且足够具体的原文锚点。"
+            "不要对 `content/report_draft_v1.md` 使用 `write_file`。"
         )
 
     def _required_replacement_write_satisfied(
@@ -2588,6 +2591,33 @@ class ChatHandler:
 
     def _build_missing_write_feedback(self, missing_files: list[str]) -> str:
         joined = "、".join(f"`{path}`" for path in missing_files)
+        includes_report_draft = any(
+            self._is_canonical_report_draft_path(path)
+            for path in missing_files
+        )
+        if includes_report_draft:
+            other_files = [
+                path for path in missing_files
+                if not self._is_canonical_report_draft_path(path)
+            ]
+            other_guidance = (
+                "其他计划文件请用真实文件工具完成落盘："
+                "新建或整体重写用 `write_file`，局部追加或替换用 `edit_file`。"
+                if other_files
+                else ""
+            )
+            return (
+                f"你刚刚声称已更新或已经给出了需要入档的内容，但本轮并未成功调用真实文件工具写入 {joined}。"
+                "不要口头汇报，也不要继续推进下一阶段。"
+                "报告正文草稿新增或续写用 `append_report_draft`；"
+                "修改已有正文请先调用 `read_file` 核对原文，再调用 "
+                "`edit_file(file_path, old_string, new_string)`，"
+                "`old_string` 要取自草稿中唯一且足够具体的原文锚点。"
+                "不要对 `content/report_draft_v1.md` 使用 `write_file`。"
+                f"{other_guidance}"
+                "不要把 `edit_file(...)` 或 `write_file(...)` 写在聊天正文里，那不是工具调用。"
+                "落盘成功后，再用一句话说明实际已写入哪些文件。"
+            )
         return (
             f"你刚刚声称已更新或已经给出了需要入档的内容，但本轮并未成功调用真实文件工具写入 {joined}。"
             "不要口头汇报，也不要继续推进下一阶段。"
@@ -2602,10 +2632,11 @@ class ChatHandler:
             f"用户本轮要求更新报告正文，因此必须真实更新 {joined}。"
             "刚才未检测到该文件按用户意图完成更新。"
             "请按用户意图调用真实写正文工具："
-            "续写或新增章节用 `append_report_draft`；"
-            "章节改写用 `rewrite_report_section`；"
-            "文字替换用 `replace_report_text`；"
-            "整篇重写用 `rewrite_report_draft`。"
+            "新增或续写正文用 `append_report_draft`；"
+            "修改已有正文请先调用 `read_file` 核对原文，再调用 "
+            "`edit_file(file_path, old_string, new_string)`，"
+            "`old_string` 要取自草稿中唯一且足够具体的原文锚点。"
+            "不要对 `content/report_draft_v1.md` 使用 `write_file`。"
             "不要只口头说明已完成，也不要把工具调用写在聊天正文里。"
         )
     def _build_required_write_failure_message(self, missing_paths: list[str]) -> str:
@@ -2613,8 +2644,10 @@ class ChatHandler:
         return (
             f"这轮没有检测到报告草稿 {joined} 被实际更新。"
             "请重新发送更新报告正文的请求；我会要求模型按意图调用 "
-            "append_report_draft / rewrite_report_section / replace_report_text / "
-            "rewrite_report_draft 完成真实落盘。"
+            "`append_report_draft` 完成新增/续写，或先 `read_file` 再调用 "
+            "`edit_file(file_path, old_string, new_string)` 修改已有正文；"
+            "`old_string` 需要锚定草稿中唯一且足够具体的原文。"
+            "不会对 `content/report_draft_v1.md` 使用 `write_file`。"
         )
     def _build_self_correction_loop_feedback(self) -> str:
         return (
@@ -3786,82 +3819,6 @@ class ChatHandler:
             {
                 "type": "function",
                 "function": {
-                    "name": "rewrite_report_section",
-                    "description": (
-                        "重写正文草稿（content/report_draft_v1.md）中已存在的某一章/节。"
-                        "目标章节由系统从用户消息中自动定位（要求消息中含'第N章/节/部分'前缀，"
-                        "且草稿中存在唯一对应 heading）。仅在 S4 阶段、草稿存在、目标可唯一定位时可用。"
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": (
-                                    "目标章节的新版完整内容，从 `## 章节标题` 行开始，"
-                                    "到下一个同级 `##` 之前为止。不能包含其他 `##` 级别的标题。"
-                                ),
-                            },
-                        },
-                        "required": ["content"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "replace_report_text",
-                    "description": (
-                        "把正文草稿（content/report_draft_v1.md）中的某段文字替换为新文字。"
-                        "要求 `old` 在草稿中**唯一**出现（恰好 1 次）。仅在 S4 阶段、草稿存在时可用。"
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "old": {
-                                "type": "string",
-                                "description": (
-                                    "要替换的原文片段。必须在草稿中唯一出现，"
-                                    "长度建议 5-200 字以确保唯一性。"
-                                ),
-                            },
-                            "new": {
-                                "type": "string",
-                                "description": "替换后的新文字。可以为空（删除场景）。",
-                            },
-                        },
-                        "required": ["old", "new"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "rewrite_report_draft",
-                    "description": (
-                        "重写整份正文草稿（content/report_draft_v1.md）。仅在用户明确要求"
-                        "'整篇重写' / '推倒重来' / '全文重写' 时使用；个别章节调整请用 "
-                        "`rewrite_report_section`，文字替换用 `replace_report_text`。"
-                        "仅在 S4 阶段、草稿存在时可用。"
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": (
-                                    "完整新草稿内容，从 `# 报告标题` 开始。"
-                                    "必须含至少一个 `## ` 级别章节标题。"
-                                ),
-                            },
-                        },
-                        "required": ["content"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
                     "name": "read_file",
                     "description": "读取项目文件",
                     "parameters": {
@@ -4157,9 +4114,10 @@ class ChatHandler:
             return {
                 "status": "error",
                 "message": (
-                    "本轮用户意图是重写/删除章节，请调用 rewrite_report_section，"
-                    "或在 edit_file 中使用 ## 章节锚点完成 section_rewrite/section_delete；"
-                    "不要用唯一文字片段做局部替换。"
+                    "本轮用户意图是重写/删除章节，请先调用 `read_file` 核对目标章节，"
+                    "再调用 `edit_file(file_path, old_string, new_string)`；"
+                    "`old_string` 应锚定完整目标章节或其 `##` 章节块，"
+                    "不要只替换零散文字片段。"
                 ),
             }
         if tool_family == "replace_text" and canonical_action not in {
@@ -4169,8 +4127,9 @@ class ChatHandler:
             return {
                 "status": "error",
                 "message": (
-                    "本轮用户意图是替换/删除具体文字，请调用 replace_report_text，"
-                    "或在 edit_file 中使用唯一文字片段完成 text_replace/text_delete；"
+                    "本轮用户意图是替换/删除具体文字，请先调用 `read_file` 核对原文，"
+                    "再调用 `edit_file(file_path, old_string, new_string)`；"
+                    "`old_string` 要取自草稿中唯一出现的原文片段。"
                     "章节重写请让用户明确提出重写章节。"
                 ),
             }
@@ -4423,18 +4382,6 @@ class ChatHandler:
                     self._turn_context["fetch_url_performed"] = True
                     self._persist_successful_tool_result(project_id, func_name, args, result)
                 return result
-            if func_name == "rewrite_report_section":
-                return self._tool_rewrite_report_section(
-                    project_id, content=args.get("content", ""),
-                )
-            if func_name == "replace_report_text":
-                return self._tool_replace_report_text(
-                    project_id, old=args.get("old", ""), new=args.get("new", ""),
-                )
-            if func_name == "rewrite_report_draft":
-                return self._tool_rewrite_report_draft(
-                    project_id, content=args.get("content", ""),
-                )
             return {"status": "error", "message": f"未知工具: {func_name}"}
         except json.JSONDecodeError as e:
             logging.error(f"工具参数解析失败: {func_name}, 错误: {str(e)}")
@@ -5142,9 +5089,11 @@ class ChatHandler:
         return (
             "本轮要求更新报告正文，但当前提交的最终内容比现有草稿更短，"
             "可能覆盖并丢失已有正文。"
-            "续写或新增章节请用 `append_report_draft`；"
-            "若本轮要改写已有内容，请使用 rewrite_report_section / "
-            "replace_report_text / rewrite_report_draft。"
+            "新增或续写正文请用 `append_report_draft`；"
+            "若本轮要修改已有正文，请先调用 `read_file` 核对原文，再调用 "
+            "`edit_file(file_path, old_string, new_string)`，"
+            "`old_string` 要锚定草稿中唯一且足够具体的原文。"
+            "不要对 `content/report_draft_v1.md` 使用 `write_file`。"
         )
     def _validate_analysis_notes_refs_for_write(
         self,
@@ -6213,8 +6162,12 @@ class ChatHandler:
         corrective = (
             "你在回复中声称已修改正文（"
             f"obligation={obligation['tool_family']}），但本轮没有成功调用任何写正文工具"
-            "（append_report_draft / rewrite_report_section / replace_report_text / "
-            "rewrite_report_draft）。请实际调用对应工具完成写入，不要只在文字中声明已完成。"
+            "。新增或续写正文请调用 `append_report_draft`；"
+            "修改已有正文请先调用 `read_file`，再调用 "
+            "`edit_file(file_path, old_string, new_string)`，"
+            "`old_string` 要取自草稿中唯一且足够具体的原文锚点。"
+            "不要对 `content/report_draft_v1.md` 使用 `write_file`；"
+            "不要只在文字中声明已完成。"
         )
         self._inject_synthetic_user_correction(corrective, current_turn_messages)
         self._turn_context["obligation_retry_fired"] = True
@@ -6238,13 +6191,21 @@ class ChatHandler:
 
         obligation = self._turn_context.get("canonical_draft_write_obligation") or {}
         tool_family = obligation.get("tool_family") or "unknown"
+        if tool_family in {"begin", "continue"}:
+            required_guidance = "新增或续写正文请调用 `append_report_draft` 完成正文落盘。"
+        else:
+            required_guidance = (
+                "修改已有正文请先调用 `read_file` 核对原文，再调用 "
+                "`edit_file(file_path, old_string, new_string)`，"
+                "`old_string` 要取自草稿中唯一且足够具体的原文锚点。"
+                "不要对 `content/report_draft_v1.md` 使用 `write_file`。"
+            )
         return {
             "status": "error",
             "message": (
                 "本轮用户意图已经识别为正文写入任务"
                 f"（{tool_family}），请不要调用 `{func_name}`。"
-                "如需查看现有内容，可以先调用 `read_file`；随后必须调用 "
-                f"`{expected_tool}` 完成正文落盘。"
+                f"{required_guidance}"
             ),
         }
 

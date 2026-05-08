@@ -113,26 +113,23 @@ description: Use when writing consulting reports, strategy analysis, market rese
 ### S4 报告撰写
 - 形成有效草稿
 - 报告正文草稿只写入 `content/report_draft_v1.md`
-- 正文首次成稿或续写，用 `append_report_draft(content)`；正文已有文字要改，先 `read_file`，再按意图使用 `rewrite_report_section` / `replace_report_text` / `rewrite_report_draft`
-- 不要对 `content/report_draft_v1.md` 使用 `edit_file` 或 `write_file`
+- 正文首次成稿或续写，用 `append_report_draft(content)`；正文已有文字要改，先 `read_file`，再按意图使用 `edit_file(file_path, old_string, new_string)`
+- 不要对 `content/report_draft_v1.md` 使用 `write_file`
 - 持续同步摘要、图表、章节结构
 
 **推进到 S5：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
 
-### S4 正文写作工具
+### S4 写正文工具
 
-| 用户意图 | 调用工具 | 关键参数 |
-|---|---|---|
-| 起草初稿 / 续写正文 / 写下一段或下一章 | `append_report_draft` | `content`：要追加的内容 |
-| 重写已有的某一章/节（用户说"重写第N章/节"） | `rewrite_report_section` | `content`：以 `## 章节标题` 开始的新章节完整内容（不含其他 `##` heading） |
-| 替换正文中的具体文字（用户说"把 X 改成 Y"） | `replace_report_text` | `old`：原文片段（必须在草稿中唯一）；`new`：替换后内容（可空） |
-| 整篇重写正文（用户说"整篇重写"/"推倒重来"/"全文重写"） | `rewrite_report_draft` | `content`：以 `# 报告标题` 开始的完整新草稿 |
+| 工具 | 用途 |
+|---|---|
+| `append_report_draft(content)` | 起草 / 续写 / 写下一章 |
+| `edit_file(file_path, old_string, new_string)` | 章节重写（`old_string` 用 `## 锚点`）/ 文字替换（`old_string` 在 draft 中唯一）/ 整篇重写（`old_string` 等于 draft 第一行 h1 + 用户明确要求"整篇/推倒/全文重写"）|
 
-**关键**：
-- 这四个工具内部已经做了阶段、大纲、草稿存在性、章节定位、读后再改、内容大小限制等校验。如果不满足前提，工具会直接返回 error 引导你下一步动作。
-- **不要**对 `content/report_draft_v1.md` 使用通用 `edit_file` 或 `write_file`——会被拒绝。
-- **不要**复述 1500 字章节原文当 old_string——专用工具不要你传 old_string，系统自己定位。
-- 一轮只能改一处：先确定用户最关心的那一处修改完，再问用户下一步。如果用户在一句话里同时要"改章节 + 导出"，请先完成章节修改，再让用户确认下一步。
+约束：
+- 不要对 `content/report_draft_v1.md` 用 `write_file`——首次起草请用 `append_report_draft`
+- 一轮内 ≤ 3 次 canonical write
+- 章节重写时 `old_string` 仅取首行 h2 标题做匹配；后端用 draft 中实际 snapshot 替换
 
 ### S5 质量审查
 - 完成 `review-checklist.md`
@@ -156,8 +153,8 @@ description: Use when writing consulting reports, strategy analysis, market rese
 
 - 已有文件要改，先 `read_file`，再用 `write_file` / `edit_file`
 - 正文首次成稿或续写 -> `append_report_draft(content)`
-- 正文已有文字修改 -> `read_file` + `rewrite_report_section` / `replace_report_text` / `rewrite_report_draft`
-- 不要对 `content/report_draft_v1.md` 使用 `edit_file` 或 `write_file`
+- 正文已有文字修改 -> `read_file` + `edit_file(file_path, old_string, new_string)`
+- 不要对 `content/report_draft_v1.md` 使用 `write_file`
 - 同一条消息如果还带 `导出` / `质量检查` / `看看文件` / `看看现在多少字`，本轮只完成正文写入并给下一步提示，下一轮再单独处理
 - `write_file(file_path, content)`：**整文件覆盖**写入，适合新建文件或明确的整份重写
 - `edit_file(file_path, old_string, new_string)`：**精确字符串替换**，`old_string` 必须在文件里唯一存在；如果报 `old_string 不唯一` 或 `未找到`，先 `read_file` 核对原文
@@ -165,7 +162,7 @@ description: Use when writing consulting reports, strategy analysis, market rese
 
 ## 工具错误处理
 
-当你调用 `append_report_draft` / `rewrite_report_section` / `replace_report_text` / `rewrite_report_draft` / `write_file` / `edit_file` / `web_search` / `fetch_url` 拿到 `status: error` 时：
+当你调用 `append_report_draft` / `write_file` / `edit_file` / `web_search` / `fetch_url` 拿到 `status: error` 时：
 
 1. 必须在本轮的可见回复里告诉用户：
    - 哪个工具调用失败了（写哪个文件 / 搜什么 / 抓哪个 URL）
