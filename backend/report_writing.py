@@ -6,68 +6,7 @@ Pure functions only. No ChatHandler dependency. Tests in tests/test_report_writi
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
-
-
-# ---- Section target resolve (迁移自 fix4 fix2 的 _preflight_resolve_section_target) ----
-
-_SECTION_PREFIX_RE = re.compile(
-    r"第([一二三四五六七八九十百千万0-9]+)(?:章(?!节)|节(?!章)|部分)"
-)
-
-
-def resolve_section_target(
-    user_message: str,
-    draft_text: str,
-    extract_markdown_heading_nodes,
-) -> Optional[Dict[str, str]]:
-    """user_message 中抽章节数字前缀，prefix-match draft heading.
-
-    返回 {label, snapshot} 当且仅当 user_message 含 '第N章/节/部分' 这类前缀且
-    draft heading 中**所有 prefix 都恰好唯一定位到同一个 heading**；否则返回 None。
-    任意 prefix 0/多 candidate → fail-fast None（per fix4-fix2 Bug 7）。
-
-    `extract_markdown_heading_nodes` 注入：避免 backend.chat 循环依赖；callers 传入
-    `ChatHandler._extract_markdown_heading_nodes`。
-    """
-    if not user_message or not draft_text:
-        return None
-    matches = list(_SECTION_PREFIX_RE.finditer(user_message))
-    if not matches:
-        return None
-    heading_nodes = extract_markdown_heading_nodes(draft_text)
-    if not heading_nodes:
-        return None
-
-    resolved = []
-    for prefix_match in matches:
-        prefix = prefix_match.group(0)
-        candidates = [
-            node for node in heading_nodes
-            if isinstance(node, dict)
-            and isinstance(node.get("label"), str)
-            and str(node.get("label")).startswith(prefix)
-        ]
-        if len(candidates) != 1:
-            return None  # fail-fast on any non-unique prefix
-        resolved.append(candidates[0])
-
-    unique_keys = set()
-    for n in resolved:
-        s = n.get("start", -1)
-        e = n.get("end", -1)
-        if not isinstance(s, (int, float)) or not isinstance(e, (int, float)):
-            return None  # malformed heading node — fail-closed
-        unique_keys.add((int(s), int(e)))
-    if len(unique_keys) != 1:
-        return None  # multi-prefix resolving to different headings → ambiguous
-
-    node = resolved[0]
-    label = str(node.get("label") or "")
-    snapshot = str(node.get("section_snapshot") or "")
-    if not label or not snapshot:
-        return None
-    return {"label": label, "snapshot": snapshot}
+from typing import Dict, Optional
 
 
 def resolve_section_anchor(anchor: str, draft: str) -> Optional[str]:
@@ -285,15 +224,33 @@ def check_no_fetch_url_pending(
 _GENERATIVE_PATTERNS = [
     re.compile(r"起草"),
     re.compile(r"续写"),
+    re.compile(r"开始写.{0,8}(?:报告|正文)"),
+    re.compile(r"开始起草"),
     re.compile(r"写下一[章节段]"),
     re.compile(r"继续写"),
     re.compile(r"帮我写(?!得)"),
     re.compile(r"写完(第|下一)"),
 ]
 
+_SECTION_MENTION_PATTERN = r"第[一二三四五六七八九十百千万0-9]+(?:章|节|部分)"
+
+_FULL_REWRITE_PATTERNS = [
+    re.compile(r"(?:全文|整篇|全部).{0,12}(?:重写|改写)"),
+    re.compile(r"(?:重写|改写).{0,12}(?:全文|整篇|全部|这份报告|报告正文|正文)"),
+    re.compile(r"推倒(?:重来|重写)"),
+]
+
 _MODIFY_PATTERNS = [
     re.compile(r"把.+改(成|为)"),
-    re.compile(r"重写第.+[章节]"),
+    re.compile(
+        rf"(?:{_SECTION_MENTION_PATTERN}.{{0,40}}(?:重写|改写|重做)|"
+        rf"(?:重写|改写|重做).{{0,20}}{_SECTION_MENTION_PATTERN})"
+    ),
+    *_FULL_REWRITE_PATTERNS,
+    re.compile(
+        rf"{_SECTION_MENTION_PATTERN}.{{0,40}}"
+        r"(?:改强|补强|加强|改好|改弱)"
+    ),
     re.compile(r"替换"),
     re.compile(r"修改"),
     re.compile(r"删[掉除]"),
@@ -310,10 +267,11 @@ _MODIFY_PATTERNS = [
 
 _DRAFT_ACTION_PATTERN = (
     r"(?:继续写|写下一[章节段]|写完(?:第|下一)?[章节段]?|帮我写(?!得)|"
-    r"起草|续写|修改|调整|润色|优化|替换|重写|删[掉除]?|改)"
+    r"起草|续写|修改|调整|润色|优化|替换|推倒重来|推倒重写|重写|改写|"
+    r"重做|改强|补强|加强|删[掉除]?|改)"
 )
 
-_NEGATION_CORE_PATTERN = r"(?:不用|不要|不必|不需要|无需|别)"
+_NEGATION_CORE_PATTERN = r"(?:不用|不要|不必|不需要|无需|别|不是|不想|并非)"
 _NEGATION_PREFIX_PATTERN = rf"(?:先{_NEGATION_CORE_PATTERN}|先不|不再|{_NEGATION_CORE_PATTERN})"
 _NEGATION_SUFFIX_PATTERN = rf"(?:就)?{_NEGATION_PREFIX_PATTERN}"
 _SAME_CLAUSE_TEXT = r"[^，,。！？!?；;\n]{0,8}"
@@ -346,6 +304,15 @@ _NEGATED_ACTION_PATTERNS = [
 ]
 
 
+def _remove_negated_action_clauses(user_message: str) -> tuple[str, bool]:
+    negated_remaining = user_message
+    negated_found = False
+    for p in _NEGATED_ACTION_PATTERNS:
+        negated_remaining, count = p.subn("", negated_remaining)
+        negated_found = negated_found or count > 0
+    return negated_remaining, negated_found
+
+
 def detect_user_message_intent(user_message: str) -> str:
     """Lightweight keyword-based intent classifier for canonical draft writes.
 
@@ -359,11 +326,7 @@ def detect_user_message_intent(user_message: str) -> str:
     if not user_message:
         return "ambiguous"
 
-    negated_remaining = user_message
-    negated_found = False
-    for p in _NEGATED_ACTION_PATTERNS:
-        negated_remaining, count = p.subn("", negated_remaining)
-        negated_found = negated_found or count > 0
+    negated_remaining, negated_found = _remove_negated_action_clauses(user_message)
     if negated_found:
         for p in _GENERATIVE_PATTERNS:
             if p.search(negated_remaining):
@@ -382,50 +345,11 @@ def detect_user_message_intent(user_message: str) -> str:
     return "ambiguous"
 
 
-# ---- Write obligation detection (spec §3.5) ----
-
-# 复用现有 chat.py 的 keyword 列表作为粗粒度 yes/no 信号
-# (per spec r2 reviewer §C12: 不迁移 stage gate / scope / target / priority logic)
-
-_OBLIGATION_REPLACE_RE = re.compile(
-    r"把(?:(?:报告|正文)(?:里的|中的|里|中)?)?"
-    r"[^，,、。！？!?；;：:\n]{1,80}?"
-    r"\s*[，,、：:]?\s*"
-    r"(?:改成|改为|替换成|换成)"
-)
-
-_OBLIGATION_SECTION_CHANGE_RE = re.compile(
-    r"第[一二三四五六七八九十百千万0-9]+(?:章|节|部分)"
-    r".{0,80}?"
-    r"(?:改强|改弱|改好|改一下|调整|优化|润色|补强|加强)"
-)
-
-
-def detect_canonical_draft_write_obligation(user_message: str) -> Optional[Dict[str, Any]]:
-    """粗粒度判定 user 消息是否触发"本轮要写正文"信号。返回 None=无信号；
-    返回 dict={'tool_family': str, 'detected': str} 表示有 obligation。
-
-    `tool_family` 仅供事件记录用，不驱动 gate / scope enforcement.
-    """
-    text = (user_message or "").strip()
-    if not text:
-        return None
-
-    # phrase hits 顺序：begin → continue → rewrite_draft → section → replace
-    for kw in ("开始写报告", "开始写正文", "开始起草", "起草报告", "写第一版"):
-        if kw in text:
-            return {"tool_family": "begin", "detected": kw}
-    for kw in ("继续写", "继续写报告", "继续写正文", "接着写", "写下一章", "写下一段"):
-        if kw in text:
-            return {"tool_family": "continue", "detected": kw}
-    for kw in ("整篇重写", "全文重写", "推倒重写", "推倒重来", "全部改写"):
-        if kw in text:
-            return {"tool_family": "rewrite_draft", "detected": kw}
-    for kw in ("重写", "改写", "重做"):
-        if kw in text:
-            return {"tool_family": "rewrite_section", "detected": kw}
-    if _OBLIGATION_SECTION_CHANGE_RE.search(text):
-        return {"tool_family": "rewrite_section", "detected": "section_change_pattern"}
-    if _OBLIGATION_REPLACE_RE.search(text):
-        return {"tool_family": "replace_text", "detected": "replace_pattern"}
-    return None
+def user_message_requests_full_rewrite(user_message: str) -> bool:
+    """Return whether the user explicitly requested a full draft rewrite."""
+    if not user_message:
+        return False
+    remaining, _ = _remove_negated_action_clauses(user_message)
+    if not any(p.search(remaining) for p in _FULL_REWRITE_PATTERNS):
+        return False
+    return detect_user_message_intent(user_message) == "modify"

@@ -17,7 +17,6 @@ from backend.config import (
     ManagedSearchRoutingConfig,
     Settings,
 )
-from backend.report_writing import detect_canonical_draft_write_obligation
 from backend.skill import SkillEngine
 
 
@@ -3812,11 +3811,6 @@ class ChatRuntimeTests(unittest.TestCase):
         handler = self._make_handler_with_project()
         draft_path = self._write_partial_report_draft("既有正文" * 120)
         self._start_report_writing_turn(handler, "继续写正文")
-        snapshots = handler._build_required_write_snapshots(
-            self.project_id,
-            "继续写正文",
-        )
-        handler._turn_context["required_write_snapshots"] = snapshots
         self._read_file_for_turn(handler, "content/report_draft_v1.md")
 
         first = handler._execute_tool(
@@ -3992,23 +3986,6 @@ class ChatRuntimeTests(unittest.TestCase):
             ),
             {"file:plan/notes.md"},
         )
-
-    def _required_write_paths_for_stage(
-        self,
-        handler: ChatHandler,
-        stage_code: str,
-        user_message: str,
-        *,
-        can_write_non_plan: bool = True,
-    ) -> set[str]:
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=can_write_non_plan)
-        with mock.patch.object(
-            handler.skill_engine,
-            "_infer_stage_state",
-            return_value={"stage_code": stage_code},
-        ):
-            return set(handler._build_required_write_snapshots(self.project_id, user_message))
-
 
     def _start_report_writing_turn(
         self,
@@ -4367,27 +4344,22 @@ class ChatRuntimeTests(unittest.TestCase):
                 self.project_id,
                 "请全文重写这份报告正文",
             )
-            snapshots = handler._build_required_write_snapshots(
-                self.project_id,
-                "请全文重写这份报告正文",
-            )
-        handler._turn_context["required_write_snapshots"] = snapshots
 
         feedback = handler._build_required_write_feedback(["content/report_draft_v1.md"])
         failure = handler._build_required_write_failure_message(["content/report_draft_v1.md"])
-        prewrite_error = handler._validate_required_report_draft_prewrite(
+        write_file_rejection = handler._dispatch_write_file(
             self.project_id,
             "content/report_draft_v1.md",
             "# 新草稿\n\n更短版本",
-            source_tool_name="write_file",
             source_tool_args={"file_path": "content/report_draft_v1.md", "content": "# 新草稿\n\n更短版本"},
         )
 
-        self.assertIsInstance(prewrite_error, str)
+        self.assertEqual(write_file_rejection.get("status"), "error")
+        write_file_rejection_message = write_file_rejection.get("message", "")
         messages = {
             "feedback": feedback,
             "failure": failure,
-            "prewrite_error": prewrite_error,
+            "write_file_rejection": write_file_rejection_message,
         }
         bad_write_file_recommendations = [
             "新建或整体重写用 `write_file`",
@@ -5406,6 +5378,35 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("stage_checkpoints.json", result["message"])
         self.assertNotIn("outline_confirmed_at", checkpoints)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_stage_checkpoints_gate_preempts_existing_file_read_before_write(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        checkpoint_path = self.project_dir / "stage_checkpoints.json"
+        checkpoint_path.write_text('{"__migrated_at": "2026-05-09T00:00:00"}', encoding="utf-8")
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "stage_checkpoints.json",
+                        "content": '{"outline_confirmed_at": "2026-04-17T12:00:00"}',
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        notices = handler._turn_context.get("pending_system_notices") or []
+        self.assertEqual(result["status"], "error")
+        self.assertIn("stage_checkpoints.json 是用户确认真值源", result["message"])
+        self.assertNotIn("read_file", result["message"])
+        self.assertEqual(notices[-1]["category"], "checkpoint_forge_blocked")
+        self.assertTrue(notices[-1]["surface_to_user"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_rejects_checkpoints_path_via_relative_and_case_variants(self, mock_openai):
@@ -9577,11 +9578,6 @@ class NewTurnContextFieldsTests(ChatRuntimeTests):
         ctx = handler._new_turn_context(can_write_non_plan=True)
         self.assertEqual(ctx.get("user_message_text"), "")
 
-    def test_new_turn_context_has_obligation_default_none(self):
-        handler = self._make_handler_with_project()
-        ctx = handler._new_turn_context(can_write_non_plan=True)
-        self.assertIsNone(ctx.get("canonical_draft_write_obligation"))
-
     def test_new_turn_context_has_read_file_snapshots_empty_dict(self):
         handler = self._make_handler_with_project()
         ctx = handler._new_turn_context(can_write_non_plan=True)
@@ -10156,30 +10152,6 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
-class CanonicalDraftWriteObligationTurnContextTests(ChatRuntimeTests):
-    def test_obligation_set_for_section_keyword(self):
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "把第二章重写一下")
-        ob = handler._turn_context.get("canonical_draft_write_obligation")
-        self.assertIsNotNone(ob)
-        self.assertEqual(ob["tool_family"], "rewrite_section")
-
-    def test_obligation_none_for_unrelated(self):
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "你好，能介绍一下项目吗？")
-        ob = handler._turn_context.get("canonical_draft_write_obligation")
-        self.assertIsNone(ob)
-
-
-for _inherited_test_name in dir(ChatRuntimeTests):
-    if (
-        _inherited_test_name.startswith("test_")
-        and _inherited_test_name not in CanonicalDraftWriteObligationTurnContextTests.__dict__
-    ):
-        setattr(CanonicalDraftWriteObligationTurnContextTests, _inherited_test_name, None)
-del _inherited_test_name
-
-
 class CanonicalObligationFieldTests(ChatRuntimeTests):
     def test_new_turn_context_defaults_canonical_obligation_empty(self):
         handler = self._make_handler_with_project()
@@ -10208,6 +10180,46 @@ class CanonicalObligationFieldTests(ChatRuntimeTests):
             {"intent": "modify", "expected_action": "any_canonical_write"},
         )
 
+    def test_section_rewrite_phrase_sets_modify_obligation_and_required_draft_snapshot(self):
+        handler = self._make_handler_with_project()
+        user_message = "请把第二章重写一下"
+        ctx = handler._build_turn_context(self.project_id, user_message)
+
+        self.assertEqual(
+            ctx.get("canonical_obligation"),
+            {"intent": "modify", "expected_action": "any_canonical_write"},
+        )
+        self.assertEqual(
+            handler._required_write_paths_for_turn(self.project_id, user_message),
+            {handler.skill_engine.REPORT_DRAFT_PATH},
+        )
+        snapshots = handler._build_obligation_write_snapshots(self.project_id, user_message)
+        self.assertEqual(set(snapshots), {handler.skill_engine.REPORT_DRAFT_PATH})
+        self.assertEqual(
+            snapshots[handler.skill_engine.REPORT_DRAFT_PATH].get("path"),
+            handler.skill_engine.REPORT_DRAFT_PATH,
+        )
+
+    def test_full_rewrite_phrase_sets_modify_obligation_and_required_draft_snapshot(self):
+        handler = self._make_handler_with_project()
+        user_message = "全文重写这份报告正文"
+        ctx = handler._build_turn_context(self.project_id, user_message)
+
+        self.assertEqual(
+            ctx.get("canonical_obligation"),
+            {"intent": "modify", "expected_action": "any_canonical_write"},
+        )
+        self.assertEqual(
+            handler._required_write_paths_for_turn(self.project_id, user_message),
+            {handler.skill_engine.REPORT_DRAFT_PATH},
+        )
+        snapshots = handler._build_obligation_write_snapshots(self.project_id, user_message)
+        self.assertEqual(set(snapshots), {handler.skill_engine.REPORT_DRAFT_PATH})
+        self.assertEqual(
+            snapshots[handler.skill_engine.REPORT_DRAFT_PATH].get("path"),
+            handler.skill_engine.REPORT_DRAFT_PATH,
+        )
+
     def test_ambiguous_message_sets_empty_canonical_obligation(self):
         handler = self._make_handler_with_project()
         ctx = handler._build_turn_context(self.project_id, "看下背景资料")
@@ -10216,18 +10228,6 @@ class CanonicalObligationFieldTests(ChatRuntimeTests):
             ctx.get("canonical_obligation"),
             {"intent": None, "expected_action": None},
         )
-
-    def test_legacy_obligation_still_populated_with_new_field(self):
-        handler = self._make_handler_with_project()
-        ctx = handler._build_turn_context(self.project_id, "把第二章重写一下")
-
-        self.assertIsNotNone(ctx.get("canonical_draft_write_obligation"))
-        self.assertIn("canonical_obligation", ctx)
-        self.assertEqual(
-            set(ctx["canonical_obligation"].keys()),
-            {"intent", "expected_action"},
-        )
-
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
@@ -10297,9 +10297,6 @@ class ToolSchemaRegistrationTests(ChatRuntimeTests):
         names = {t["function"]["name"] for t in tools if "function" in t}
         self.assertIn("append_report_draft", names)
         self.assertIn("edit_file", names)
-        self.assertNotIn("rewrite_report_section", names)
-        self.assertNotIn("replace_report_text", names)
-        self.assertNotIn("rewrite_report_draft", names)
 
     def test_append_report_draft_schema_only_content_param(self):
         handler = self._make_handler_with_project()
@@ -10390,45 +10387,6 @@ del _inherited_test_name
 
 
 class ObligationToolFamilyGuardTests(_WriteToolTestMixin, ChatRuntimeTests):
-    def test_begin_obligation_blocks_web_search_before_draft_append(self):
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "开始写报告吧")
-
-        with mock.patch.object(handler, "_web_search") as search:
-            result = handler._execute_tool(
-                self.project_id,
-                self._make_tool_call(
-                    "web_search",
-                    json.dumps({"query": "猪猪侠 超人强"}, ensure_ascii=False),
-                ),
-            )
-
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("append_report_draft", result.get("message", ""))
-        search.assert_not_called()
-        self.assertFalse(handler._turn_context.get("web_search_performed"))
-
-    def test_begin_obligation_blocks_wrong_semantic_draft_tool(self):
-        handler = self._make_handler_with_project()
-        self._setup_outline_confirmed_s4(handler)
-        self._put_draft("# 报告\n## 第一章\n旧内容\n")
-        handler._build_turn_context(self.project_id, "开始写报告吧")
-        self._trigger_read_file(handler)
-
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_tool_call(
-                "rewrite_report_section",
-                json.dumps({"content": "## 第一章\n新内容\n"}, ensure_ascii=False),
-            ),
-        )
-
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("append_report_draft", result.get("message", ""))
-        actual = (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8")
-        self.assertIn("旧内容", actual)
-        self.assertNotIn("新内容", actual)
-
     def test_begin_obligation_still_allows_read_file(self):
         handler = self._make_handler_with_project()
         self._put_draft("# 报告\n## 第一章\n旧内容\n")
@@ -10639,11 +10597,11 @@ class AppendReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         # 首次起草应该成功，不报 read_file 错误
         self.assertEqual(result.get("status"), "success")
 
-    def test_cross_turn_mutation_default_none(self):
-        """_new_turn_context 中 canonical_draft_mutation 默认为 None."""
+    def test_cross_turn_mutations_default_empty_list(self):
+        """_new_turn_context starts with an empty mutation list."""
         handler = self._make_handler_with_project()
         fresh_ctx = handler._new_turn_context(can_write_non_plan=True)
-        self.assertIsNone(fresh_ctx.get("canonical_draft_mutation"))
+        self.assertEqual(fresh_ctx.get("canonical_draft_mutations"), [])
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):
@@ -10740,43 +10698,6 @@ class AppendReportDraftMutationsListTests(_WriteToolTestMixin, ChatRuntimeTests)
         self.assertEqual(result.get("status"), "success", msg=result)
         self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
 
-    def test_append_updates_legacy_append_mutation_entry_in_place(self):
-        handler = self._make_handler_with_project()
-        turn_context = self._prepare_s4_turn(handler, "开始写报告")
-        original_execute_plan_write = handler._execute_plan_write
-        legacy_entry = {
-            "tool": "append_report_draft",
-            "canonical_action": "legacy",
-            "old_len": -1,
-            "legacy_marker": True,
-        }
-
-        def _execute_plan_write_with_legacy_entry(*args, **kwargs):
-            result = original_execute_plan_write(*args, **kwargs)
-            if result.get("status") == "success":
-                turn_context.setdefault("canonical_draft_mutations", []).append(legacy_entry)
-            return result
-
-        handler._execute_plan_write = _execute_plan_write_with_legacy_entry
-
-        result = handler._tool_append_report_draft(
-            self.project_id,
-            content=self._VALID_APPEND_CONTENT,
-        )
-
-        self.assertEqual(result.get("status"), "success", msg=result)
-        mutations = turn_context["canonical_draft_mutations"]
-        self.assertEqual(len(mutations), 1)
-        self.assertIs(mutations[0], legacy_entry)
-        mutation = mutations[0]
-        self.assertEqual(mutation["tool"], "append_report_draft")
-        self.assertEqual(mutation["canonical_action"], "first_draft")
-        self.assertEqual(mutation["old_len"], 0)
-        self.assertEqual(mutation["new_len"], len(self._VALID_APPEND_CONTENT))
-        self.assertIsNotNone(mutation.get("mtime_after"))
-        self.assertIn("ts", mutation)
-        self.assertTrue(mutation["legacy_marker"])
-
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
@@ -10788,7 +10709,7 @@ del _inherited_test_name
 
 
 class CanonicalMutationBridgeTests(_WriteToolTestMixin, ChatRuntimeTests):
-    """Task 16b: legacy canonical mutation recorder also feeds the new list."""
+    """Canonical draft writes use the mutations list as the only turn state."""
 
     _VALID_APPEND_CONTENT = "## 第一章 引言\n\n" + ("正文内容" * 60)
     _REQUIRED_ENTRY_FIELDS = {
@@ -10806,94 +10727,80 @@ class CanonicalMutationBridgeTests(_WriteToolTestMixin, ChatRuntimeTests):
         handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
         return handler, handler._turn_context
 
-    def _record_mutation(
-        self,
-        handler,
-        *,
-        source_tool_name="replace_report_text",
-        progress_snapshot=None,
-    ):
-        handler._record_successful_canonical_draft_mutation(
-            source_tool_name=source_tool_name,
-            normalized_path=handler.skill_engine.REPORT_DRAFT_PATH,
-            progress_snapshot=progress_snapshot,
+    def _prepare_edit_turn(self, handler):
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft(
+            "# 报告\n"
+            "## 第一章 引言\n"
+            "alpha beta gamma\n"
+        )
+        turn_context = handler._build_turn_context(self.project_id, "把 alpha 改成 delta")
+        self._trigger_read_file(handler)
+        return turn_context
+
+    def _edit_draft(self, handler, old_string, new_string):
+        return handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "edit_file",
+                json.dumps(
+                    {
+                        "file_path": handler.skill_engine.REPORT_DRAFT_PATH,
+                        "old_string": old_string,
+                        "new_string": new_string,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
         )
 
-    def test_record_writes_both_old_dict_and_new_list(self):
-        handler, turn_context = self._make_handler_with_turn_context()
-        progress_snapshot = {"current_count": 123}
+    def test_edit_file_records_new_list_only(self):
+        handler, _ = self._make_handler_with_turn_context()
+        turn_context = self._prepare_edit_turn(handler)
 
-        self._record_mutation(
-            handler,
-            source_tool_name="replace_report_text",
-            progress_snapshot=progress_snapshot,
-        )
+        result = self._edit_draft(handler, "alpha", "delta")
 
-        old_mutation = turn_context["canonical_draft_mutation"]
-        self.assertEqual(old_mutation["tool"], "replace_report_text")
-        self.assertEqual(old_mutation["path"], handler.skill_engine.REPORT_DRAFT_PATH)
-        self.assertEqual(old_mutation["progress_snapshot"], progress_snapshot)
+        self.assertEqual(result.get("status"), "success", msg=result)
         mutations = turn_context["canonical_draft_mutations"]
         self.assertEqual(len(mutations), 1)
-        self.assertEqual(mutations[0]["tool"], "replace_report_text")
+        self.assertEqual(mutations[0]["tool"], "edit_file")
         self.assertEqual(mutations[0]["path"], handler.skill_engine.REPORT_DRAFT_PATH)
-        self.assertEqual(mutations[0]["progress_snapshot"], progress_snapshot)
 
-    def test_record_three_times_yields_list_len_3(self):
-        handler, turn_context = self._make_handler_with_turn_context()
+    def test_three_successful_edits_yield_list_len_3(self):
+        handler, _ = self._make_handler_with_turn_context()
+        turn_context = self._prepare_edit_turn(handler)
 
-        for tool_name in (
-            "rewrite_report_section",
-            "replace_report_text",
-            "rewrite_report_draft",
-        ):
-            self._record_mutation(handler, source_tool_name=tool_name)
+        first = self._edit_draft(handler, "alpha", "delta")
+        second = self._edit_draft(handler, "beta", "epsilon")
+        third = self._edit_draft(handler, "gamma", "zeta")
 
+        self.assertEqual(first.get("status"), "success", msg=first)
+        self.assertEqual(second.get("status"), "success", msg=second)
+        self.assertEqual(third.get("status"), "success", msg=third)
         mutations = turn_context["canonical_draft_mutations"]
-        self.assertEqual(
-            [mutation["tool"] for mutation in mutations],
-            [
-                "rewrite_report_section",
-                "replace_report_text",
-                "rewrite_report_draft",
-            ],
-        )
-        self.assertEqual(turn_context["canonical_draft_mutation"]["tool"], "rewrite_report_draft")
+        self.assertEqual([mutation["tool"] for mutation in mutations], ["edit_file"] * 3)
 
     def test_new_list_entry_includes_required_fields(self):
-        handler, turn_context = self._make_handler_with_turn_context()
-        handler._turn_context["_last_successful_semantic_edit_event"] = {
-            "source_tool_name": "replace_report_text",
-            "path": handler.skill_engine.REPORT_DRAFT_PATH,
-            "tool": "edit_file",
-            "arguments": {
-                "file_path": handler.skill_engine.REPORT_DRAFT_PATH,
-                "old_string": "old text",
-                "new_string": "new text",
-            },
-        }
+        handler, _ = self._make_handler_with_turn_context()
+        turn_context = self._prepare_edit_turn(handler)
 
-        self._record_mutation(handler, source_tool_name="replace_report_text")
+        result = self._edit_draft(handler, "alpha", "delta")
 
+        self.assertEqual(result.get("status"), "success", msg=result)
         mutation = turn_context["canonical_draft_mutations"][0]
         self.assertTrue(self._REQUIRED_ENTRY_FIELDS.issubset(mutation.keys()))
         self.assertEqual(mutation["canonical_action"], "text_replace")
-        self.assertEqual(mutation["target_label"], "old text")
-        self.assertEqual(mutation["old_len"], len("old text"))
-        self.assertEqual(mutation["new_len"], len("new text"))
+        self.assertEqual(mutation["target_label"], "alpha")
+        self.assertEqual(mutation["old_len"], len("alpha"))
+        self.assertEqual(mutation["new_len"], len("delta"))
 
-    def test_record_with_project_id_includes_current_draft_mtime(self):
-        handler = self._make_handler_with_project()
-        turn_context = handler._new_turn_context(can_write_non_plan=True)
-        handler._turn_context = turn_context
-        self._put_draft("# 报告\n## 第一章\n旧内容\n")
+    def test_edit_file_entry_includes_current_draft_mtime(self):
+        handler, _ = self._make_handler_with_turn_context()
+        turn_context = self._prepare_edit_turn(handler)
 
-        handler._record_successful_canonical_draft_mutation(
-            project_id=self.project_id,
-            source_tool_name="replace_report_text",
-            normalized_path=handler.skill_engine.REPORT_DRAFT_PATH,
-        )
+        result = self._edit_draft(handler, "alpha", "delta")
 
+        self.assertEqual(result.get("status"), "success", msg=result)
         mutation = turn_context["canonical_draft_mutations"][0]
         self.assertIsInstance(mutation["mtime_after"], float)
 
@@ -10919,14 +10826,6 @@ class CanonicalMutationBridgeTests(_WriteToolTestMixin, ChatRuntimeTests):
         self.assertEqual(mutation["new_len"], len(self._VALID_APPEND_CONTENT))
         self.assertIsNotNone(mutation["mtime_after"])
         self.assertIsNotNone(mutation["ts"])
-        self.assertEqual(
-            turn_context["canonical_draft_mutation"]["tool"],
-            "append_report_draft",
-        )
-        self.assertEqual(
-            turn_context["canonical_draft_mutation"]["canonical_action"],
-            "first_draft",
-        )
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):
@@ -10951,8 +10850,10 @@ class AppendReportDraftFollowupStateTests(_WriteToolTestMixin, ChatRuntimeTests)
             content="## 第一章 引言\n\n" + ("正文内容" * 60),
         )
 
-        mutation = handler._turn_context.get("canonical_draft_mutation")
+        mutations = handler._turn_context.get("canonical_draft_mutations")
         self.assertEqual(result.get("status"), "success", msg=result)
+        self.assertIsInstance(mutations, list)
+        mutation = mutations[-1]
         self.assertIsInstance(mutation, dict)
         self.assertEqual(mutation["tool"], "append_report_draft")
         self.assertEqual(mutation["path"], "content/report_draft_v1.md")
@@ -11006,75 +10907,10 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
-class WriteObligationRetryTests(ChatRuntimeTests):
-    """Spec §3.5 §7.6 retry 入口在 chat loop 层，不在 _finalize_assistant_turn."""
-
-    def _make_obligation(self, family="rewrite_section"):
-        return {"tool_family": family, "detected": "重写"}
-
-    def test_obligation_present_no_mutation_text_claims_triggers_retry(self):
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "把第二章重写一下")
-        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
-        # 模拟 model 输出 claim text 但 0 tool_call
-        assistant_text = "我已经把第二章重写完毕，请查看正文。"
-        current_turn_messages = []
-        retry_fired = handler._maybe_inject_obligation_retry(
-            assistant_text,
-            current_turn_messages,
-        )
-        self.assertTrue(retry_fired)
-        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
-        self.assertEqual(current_turn_messages[-1]["role"], "user")
-
-    def test_obligation_retry_returns_false_when_no_message_sink(self):
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "把第二章重写一下")
-        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
-        assistant_text = "我已经把第二章重写完毕，请查看正文。"
-
-        retry_fired = handler._maybe_inject_obligation_retry(assistant_text, None)
-
-        self.assertFalse(retry_fired)
-        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
-
-    def test_obligation_present_no_claim_no_retry(self):
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "把第二章重写一下")
-        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
-        # 没有完成声明，仅意图陈述
-        assistant_text = "我会重写第二章，让我先 read_file 看看现有内容。"
-        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
-        self.assertFalse(retry_fired)
-        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
-
-    def test_obligation_present_with_mutation_no_retry(self):
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "把第二章重写一下")
-        handler._turn_context["canonical_draft_write_obligation"] = self._make_obligation()
-        handler._turn_context["canonical_draft_mutation"] = {"tool": "rewrite_report_section"}
-        assistant_text = "我已经把第二章重写完毕。"
-        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
-        self.assertFalse(retry_fired)
-
-    def test_obligation_none_no_retry(self):
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "你好")
-        handler._turn_context["canonical_draft_write_obligation"] = None
-        assistant_text = "你好，需要什么帮助？"
-        retry_fired = handler._maybe_inject_obligation_retry(assistant_text)
-        self.assertFalse(retry_fired)
-
-
 class ClaimOnlyRetryWithCanonicalObligationTests(ChatRuntimeTests):
-    def _make_legacy_obligation(self, family="rewrite_section"):
-        return {"tool_family": family, "detected": "重写"}
-
     def _make_handler_with_empty_turn(self):
         handler = self._make_handler_with_project()
         handler._build_turn_context(self.project_id, "看下背景资料")
-        handler._turn_context["canonical_draft_write_obligation"] = None
-        handler._turn_context["canonical_draft_mutation"] = None
         handler._turn_context["canonical_draft_mutations"] = []
         return handler
 
@@ -11114,16 +10950,12 @@ class ClaimOnlyRetryWithCanonicalObligationTests(ChatRuntimeTests):
         self.assertEqual(current_turn_messages[-1]["role"], "user")
         self.assertIn("edit_file", current_turn_messages[-1]["content"])
 
-    def test_generative_obligation_with_mutation_does_not_fall_through_to_legacy(self):
+    def test_generative_obligation_with_mutation_does_not_retry(self):
         handler = self._make_handler_with_empty_turn()
         handler._turn_context["canonical_obligation"] = {
             "intent": "generative",
             "expected_action": "append",
         }
-        handler._turn_context["canonical_draft_write_obligation"] = (
-            self._make_legacy_obligation("begin")
-        )
-        handler._turn_context["canonical_draft_mutation"] = None
         handler._turn_context["canonical_draft_mutations"] = [
             {"tool": "append_report_draft"}
         ]
@@ -11154,27 +10986,6 @@ class ClaimOnlyRetryWithCanonicalObligationTests(ChatRuntimeTests):
         self.assertFalse(retry_fired)
         self.assertEqual(current_turn_messages, [])
 
-    def test_legacy_obligation_without_new_intent_still_retries(self):
-        handler = self._make_handler_with_empty_turn()
-        handler._turn_context["canonical_obligation"] = {
-            "intent": None,
-            "expected_action": None,
-        }
-        handler._turn_context["canonical_draft_write_obligation"] = (
-            self._make_legacy_obligation()
-        )
-        current_turn_messages = []
-
-        retry_fired = handler._maybe_inject_obligation_retry(
-            "我已经把第二章重写完毕，请查看正文。",
-            current_turn_messages,
-        )
-
-        self.assertTrue(retry_fired)
-        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
-        self.assertEqual(current_turn_messages[-1]["role"], "user")
-        self.assertIn("edit_file", current_turn_messages[-1]["content"])
-
     def test_retry_fired_flag_prevents_double_injection(self):
         handler = self._make_handler_with_empty_turn()
         handler._turn_context["canonical_obligation"] = {
@@ -11190,47 +11001,6 @@ class ClaimOnlyRetryWithCanonicalObligationTests(ChatRuntimeTests):
         )
 
         self.assertFalse(retry_fired)
-        self.assertEqual(current_turn_messages, [])
-
-    def test_missing_new_obligation_field_still_uses_legacy_branch(self):
-        handler = self._make_handler_with_empty_turn()
-        handler._turn_context.pop("canonical_obligation", None)
-        handler._turn_context["canonical_draft_write_obligation"] = (
-            self._make_legacy_obligation()
-        )
-        current_turn_messages = []
-
-        retry_fired = handler._maybe_inject_obligation_retry(
-            "我已经把第二章重写完毕，请查看正文。",
-            current_turn_messages,
-        )
-
-        self.assertTrue(retry_fired)
-        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
-        self.assertEqual(current_turn_messages[-1]["role"], "user")
-
-    def test_new_mutation_list_blocks_legacy_retry_without_new_intent(self):
-        handler = self._make_handler_with_empty_turn()
-        handler._turn_context["canonical_obligation"] = {
-            "intent": None,
-            "expected_action": None,
-        }
-        handler._turn_context["canonical_draft_write_obligation"] = (
-            self._make_legacy_obligation()
-        )
-        handler._turn_context["canonical_draft_mutation"] = None
-        handler._turn_context["canonical_draft_mutations"] = [
-            {"tool": "edit_file"}
-        ]
-        current_turn_messages = []
-
-        retry_fired = handler._maybe_inject_obligation_retry(
-            "我已经把第二章重写完毕，请查看正文。",
-            current_turn_messages,
-        )
-
-        self.assertFalse(retry_fired)
-        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
         self.assertEqual(current_turn_messages, [])
 
     def test_new_obligation_without_claim_returns_false(self):
@@ -11261,27 +11031,30 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
-class CanonicalObligationChatLoopRetryTests(ChatRuntimeTests):
+class CanonicalObligationChatLoopRetryTests(_WriteToolTestMixin, ChatRuntimeTests):
     """Task 21: chat loops must enter retry for new canonical_obligation only."""
 
     USER_MESSAGE = "帮我写一段正文"
     CLAIM_TEXT = "正文已经写完并同步到 content/report_draft_v1.md。"
 
-    def _assistant_response(self, content: str):
+    def _assistant_response(self, content: str, tool_calls=None):
         return SimpleNamespace(
             usage=None,
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(
                         content=content,
-                        tool_calls=[],
+                        tool_calls=tool_calls or [],
                     )
                 )
             ],
         )
 
-    def _assert_retry_request_contains_synthetic_correction(self, mock_openai):
-        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
+    def _assert_retry_request_contains_required_write_feedback(self, mock_openai):
+        self.assertGreaterEqual(
+            mock_openai.return_value.chat.completions.create.call_count,
+            2,
+        )
         second_messages = (
             mock_openai.return_value.chat.completions.create
             .call_args_list[1]
@@ -11300,7 +11073,7 @@ class CanonicalObligationChatLoopRetryTests(ChatRuntimeTests):
                 message
                 for message in second_messages
                 if message.get("role") == "user"
-                and "不要只在文字中声明已完成" in str(message.get("content") or "")
+                and "必须真实更新" in str(message.get("content") or "")
             ),
             None,
         )
@@ -11312,45 +11085,65 @@ class CanonicalObligationChatLoopRetryTests(ChatRuntimeTests):
         )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_non_stream_retries_when_generative_canonical_obligation_claims_done_without_legacy_obligation(
+    def test_non_stream_retries_when_generative_canonical_obligation_claims_done_with_new_intent_signal(
         self,
         mock_openai,
     ):
-        self.assertIsNone(detect_canonical_draft_write_obligation(self.USER_MESSAGE))
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        append_content = "## 第一章 引言\n\n" + ("正文内容" * 60)
+        append_call = self._make_tool_call(
+            "append_report_draft",
+            json.dumps({"content": append_content}, ensure_ascii=False),
+        )
+        append_call.id = "call-append"
         mock_openai.return_value.chat.completions.create.side_effect = [
             self._assistant_response(self.CLAIM_TEXT),
-            self._assistant_response("我会实际调用写正文工具。"),
+            self._assistant_response("", tool_calls=[append_call]),
+            self._assistant_response("正文草稿已实际写入。"),
         ]
-        handler = self._make_handler_with_project()
 
-        result = handler.chat(self.project_id, self.USER_MESSAGE, max_iterations=2)
+        result = handler.chat(self.project_id, self.USER_MESSAGE, max_iterations=4)
 
-        self.assertIn("我会实际调用写正文工具", result["content"])
-        self._assert_retry_request_contains_synthetic_correction(mock_openai)
+        self.assertIn("正文草稿已实际写入", result["content"])
+        self._assert_retry_request_contains_required_write_feedback(mock_openai)
 
     @mock.patch("backend.chat.OpenAI")
-    def test_stream_retries_when_generative_canonical_obligation_claims_done_without_legacy_obligation(
+    def test_stream_retries_when_generative_canonical_obligation_claims_done_with_new_intent_signal(
         self,
         mock_openai,
     ):
-        self.assertIsNone(detect_canonical_draft_write_obligation(self.USER_MESSAGE))
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        append_content = "## 第一章 引言\n\n" + ("正文内容" * 60)
         mock_openai.return_value.chat.completions.create.side_effect = [
             iter([self._make_chunk(content=self.CLAIM_TEXT)]),
-            iter([self._make_chunk(content="我会实际调用写正文工具。")]),
+            iter([
+                self._make_chunk(
+                    tool_calls=[
+                        self._make_stream_tool_call_chunk(
+                            0,
+                            id="call-append",
+                            name="append_report_draft",
+                            arguments=json.dumps({"content": append_content}, ensure_ascii=False),
+                        )
+                    ]
+                )
+            ]),
+            iter([self._make_chunk(content="正文草稿已实际写入。")]),
         ]
-        handler = self._make_handler_with_project()
 
-        events = list(handler.chat_stream(self.project_id, self.USER_MESSAGE, max_iterations=2))
+        events = list(handler.chat_stream(self.project_id, self.USER_MESSAGE, max_iterations=4))
 
         self.assertTrue(
             any(
                 event.get("type") == "content"
-                and "我会实际调用写正文工具" in event.get("data", "")
+                and "正文草稿已实际写入" in event.get("data", "")
                 for event in events
             ),
             msg=events,
         )
-        self._assert_retry_request_contains_synthetic_correction(mock_openai)
+        self._assert_retry_request_contains_required_write_feedback(mock_openai)
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):
@@ -11360,15 +11153,6 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         not in CanonicalObligationChatLoopRetryTests.__dict__
     ):
         setattr(CanonicalObligationChatLoopRetryTests, _inherited_test_name, None)
-del _inherited_test_name
-
-
-for _inherited_test_name in dir(ChatRuntimeTests):
-    if (
-        _inherited_test_name.startswith("test_")
-        and _inherited_test_name not in WriteObligationRetryTests.__dict__
-    ):
-        setattr(WriteObligationRetryTests, _inherited_test_name, None)
 del _inherited_test_name
 
 
@@ -11550,6 +11334,25 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
         self.assertEqual(result.get("status"), "error")
         self.assertIn("整篇重写需要明确", result.get("message", ""))
 
+    def test_full_rewrite_rejects_negated_user_keyword(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(
+            handler,
+            user_message="不是全文重写，只把标题改一下",
+        )
+        draft_before = self._draft_text()
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            draft_before,
+            "# 新报告\n## 第一章\n新内容\n",
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("整篇重写需要明确", result.get("message", ""))
+        self.assertEqual(self._draft_text(), draft_before)
+
     def test_full_rewrite_with_keyword_passes(self):
         handler = self._make_handler_with_project()
         turn_context = self._prepare_canonical_edit(
@@ -11562,6 +11365,26 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
             handler,
             self.CANONICAL,
             "# 报告标题",
+            new_draft,
+        )
+
+        self.assertEqual(result.get("status"), "success")
+        self.assertEqual(result.get("canonical_action"), "full_rewrite")
+        self.assertEqual(self._draft_text(), new_draft)
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
+
+    def test_full_rewrite_with_all_rewrite_keyword_passes(self):
+        handler = self._make_handler_with_project()
+        turn_context = self._prepare_canonical_edit(
+            handler,
+            user_message="全部改写",
+        )
+        new_draft = "# 新报告\n## 第一章\n新内容\n"
+
+        result = self._call_edit_file(
+            handler,
+            self.CANONICAL,
+            self._draft_text(),
             new_draft,
         )
 
@@ -11753,35 +11576,6 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
         self.assertEqual(result.get("status"), "error")
         self.assertIn("append_report_draft", result.get("message", ""))
         self.assertIn("引言段", self._draft_text())
-
-    def test_rewrite_section_obligation_rejects_text_replace_action(self):
-        handler = self._make_handler_with_project()
-        self._prepare_canonical_edit(handler, user_message="把第二章重写一下")
-        original = self._draft_text()
-
-        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
-
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("edit_file", result.get("message", ""))
-        self.assertIn("目标章节", result.get("message", ""))
-        self.assertEqual(self._draft_text(), original)
-
-    def test_replace_text_obligation_rejects_section_rewrite_action(self):
-        handler = self._make_handler_with_project()
-        self._prepare_canonical_edit(handler, user_message="把引言段改成新引言")
-        original = self._draft_text()
-
-        result = self._call_edit_file(
-            handler,
-            self.CANONICAL,
-            "## 第二章 战略",
-            "## 第二章 战略\n新战略段\n",
-        )
-
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("edit_file", result.get("message", ""))
-        self.assertIn("唯一出现", result.get("message", ""))
-        self.assertEqual(self._draft_text(), original)
 
     def test_successful_canonical_edit_persists_workspace_memory(self):
         handler = self._make_handler_with_project()
@@ -12180,7 +11974,6 @@ class WriteFileGenericRegressionTests(_WriteFileDispatcherTestMixin, ChatRuntime
 
         self.assertEqual(result.get("status"), "success")
         self.assertEqual(turn_context.get("canonical_draft_mutations"), [])
-        self.assertIsNone(turn_context.get("canonical_draft_mutation"))
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):

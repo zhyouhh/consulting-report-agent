@@ -105,9 +105,6 @@ class SkillMdS0InterviewLockTests(unittest.TestCase):
         self.assertIn("append_report_draft", self.skill_md)
         self.assertIn("edit_file", self.skill_md)
         self.assertIn("read_file", self.skill_md)
-        self.assertNotIn("rewrite_report_section", self.skill_md)
-        self.assertNotIn("replace_report_text", self.skill_md)
-        self.assertNotIn("rewrite_report_draft", self.skill_md)
         self.assertNotIn("draft-action 标签规范", self.skill_md)
 
 

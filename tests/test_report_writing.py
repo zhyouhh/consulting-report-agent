@@ -11,77 +11,8 @@ from backend.report_writing import (
     check_outline_confirmed,
     check_read_before_write_canonical_draft,
     check_report_writing_stage,
-    detect_canonical_draft_write_obligation,
     resolve_section_anchor,
-    resolve_section_target,
 )
-
-
-def _fake_heading_nodes(items):
-    """items: list[(label, snapshot, start, end)]"""
-    return [
-        {"label": label, "snapshot": snap, "start": s, "end": e, "section_snapshot": snap}
-        for label, snap, s, e in items
-    ]
-
-
-class ResolveSectionTargetTests(unittest.TestCase):
-    def setUp(self):
-        self.draft = "# 报告\n## 第一章 引言\n内容0\n## 第二章 战力分析\n内容B\n## 第三章 总结\n内容C\n"
-        self.nodes = _fake_heading_nodes([
-            ("第一章 引言", "## 第一章 引言\n内容0", 5, 25),
-            ("第二章 战力分析", "## 第二章 战力分析\n内容B", 25, 50),
-            ("第三章 总结", "## 第三章 总结\n内容C", 50, 75),
-        ])
-
-    def test_unique_prefix_returns_target(self):
-        result = resolve_section_target(
-            "重写第二章", self.draft,
-            extract_markdown_heading_nodes=lambda _: self.nodes,
-        )
-        self.assertIsNotNone(result)
-        self.assertEqual(result["label"], "第二章 战力分析")
-
-    def test_zero_candidates_returns_none(self):
-        result = resolve_section_target(
-            "重写第四章", self.draft,
-            extract_markdown_heading_nodes=lambda _: self.nodes,
-        )
-        self.assertIsNone(result)
-
-    def test_partial_multi_prefix_fail_fast(self):
-        # 第二章 unique，第四章 not in draft → fail-fast
-        result = resolve_section_target(
-            "把第二章和第四章重写", self.draft,
-            extract_markdown_heading_nodes=lambda _: self.nodes,
-        )
-        self.assertIsNone(result)
-
-    def test_multi_prefix_distinct_targets_returns_none(self):
-        # 两个 prefix 都 unique 但指向不同 heading
-        result = resolve_section_target(
-            "把第二章和第三章重写", self.draft,
-            extract_markdown_heading_nodes=lambda _: self.nodes,
-        )
-        self.assertIsNone(result)
-
-    def test_multi_prefix_same_target_returns_target(self):
-        # 重复 prefix 都指向同一个 heading
-        result = resolve_section_target(
-            "第二章再说第二章", self.draft,
-            extract_markdown_heading_nodes=lambda _: self.nodes,
-        )
-        self.assertIsNotNone(result)
-
-    def test_section_node_compound_excluded(self):
-        # 第二章节 不应匹配 第二章
-        result = resolve_section_target(
-            "改第二章节", "# 报告\n## 第二章 X\n内容\n",
-            extract_markdown_heading_nodes=lambda _: _fake_heading_nodes(
-                [("第二章 X", "## 第二章 X\n内容", 5, 30)],
-            ),
-        )
-        self.assertIsNone(result)
 
 
 class ResolveSectionAnchorTests(unittest.TestCase):
@@ -234,11 +165,6 @@ class CheckHelpersTests(unittest.TestCase):
         self.assertIsNone(check_no_prior_canonical_mutation_in_turn({}))
         self.assertIsNone(check_no_prior_canonical_mutation_in_turn(
             {"canonical_draft_mutations": []},
-        ))
-
-    def test_check_no_prior_canonical_mutation_in_turn_ignores_legacy_field(self):
-        self.assertIsNone(check_no_prior_canonical_mutation_in_turn(
-            {"canonical_draft_mutation": {"tool": "rewrite_report_section"}},
         ))
 
     def test_check_no_fetch_url_pending_no_search_pass(self):
@@ -498,49 +424,6 @@ class ReadBeforeWriteSelfRefreshTests(unittest.TestCase):
         self.assertIn("read_file", result)
 
 
-class DetectWriteObligationTests(unittest.TestCase):
-    def test_begin(self):
-        d = detect_canonical_draft_write_obligation("开始写报告正文")
-        self.assertEqual(d["tool_family"], "begin")
-
-    def test_continue(self):
-        d = detect_canonical_draft_write_obligation("继续写下一章")
-        self.assertEqual(d["tool_family"], "continue")
-
-    def test_section_rewrite_explicit(self):
-        d = detect_canonical_draft_write_obligation("请把第二章重写一下")
-        self.assertEqual(d["tool_family"], "rewrite_section")
-
-    def test_section_rewrite_multi(self):
-        d = detect_canonical_draft_write_obligation("重写第二章和第三章")
-        self.assertEqual(d["tool_family"], "rewrite_section")
-
-    def test_replace_text_quoted(self):
-        d = detect_canonical_draft_write_obligation("把正文里的'渠道效率'改成'渠道质量'")
-        self.assertEqual(d["tool_family"], "replace_text")
-
-    def test_replace_text_unquoted(self):
-        d = detect_canonical_draft_write_obligation("把报告里的增长改成高质量增长")
-        self.assertEqual(d["tool_family"], "replace_text")
-
-    def test_whole_rewrite_explicit(self):
-        d = detect_canonical_draft_write_obligation("整篇重写，推倒重来")
-        self.assertEqual(d["tool_family"], "rewrite_draft")
-
-    def test_whole_rewrite_with_constraint(self):
-        d = detect_canonical_draft_write_obligation("全文重写，但保留原来的章节结构")
-        self.assertEqual(d["tool_family"], "rewrite_draft")
-
-    def test_section_strong_change(self):
-        d = detect_canonical_draft_write_obligation("第二章太弱了，改强一点")
-        self.assertEqual(d["tool_family"], "rewrite_section")
-
-    def test_continue_with_export(self):
-        # mixed intent — detector 只输出 first match (continue)
-        d = detect_canonical_draft_write_obligation("继续写到5000字，然后导出")
-        self.assertEqual(d["tool_family"], "continue")
-
-
 class DetectUserMessageIntentTests(unittest.TestCase):
     def test_generative_keywords_match(self):
         from backend.report_writing import detect_user_message_intent
@@ -563,6 +446,12 @@ class DetectUserMessageIntentTests(unittest.TestCase):
             "把第二章里的渠道效率替换为渠道质量",
             "把正文中的2025年预测改为2026年预测",
             "重写第二章",
+            "请把第二章重写一下",
+            "全文重写这份报告正文",
+            "整篇重写",
+            "推倒重来",
+            "全部改写",
+            "第二章太弱了，改强一点",
             "替换第一段",
             "修改结论部分",
             "删掉最后一节",
@@ -663,6 +552,25 @@ class DetectUserMessageIntentTests(unittest.TestCase):
             self.assertEqual(detect_user_message_intent(msg), "ambiguous",
                              f"expected ambiguous for: {msg}")
 
+    def test_negated_rewrite_requests_are_ambiguous(self):
+        from backend.report_writing import detect_user_message_intent
+        for msg in [
+            "不是全文重写",
+            "不想全文重写",
+            "并非全文重写",
+            "不是整篇重写",
+            "不想整篇重写",
+            "并非整篇重写",
+            "不是全部改写",
+            "不想全部改写",
+            "并非全部改写",
+            "不是重写第二章",
+            "不想重写第二章",
+            "并非重写第二章",
+        ]:
+            self.assertEqual(detect_user_message_intent(msg), "ambiguous",
+                             f"expected ambiguous for: {msg}")
+
     def test_ambiguous_returns_ambiguous(self):
         from backend.report_writing import detect_user_message_intent
         for msg in [
@@ -685,6 +593,40 @@ class DetectUserMessageIntentTests(unittest.TestCase):
             detect_user_message_intent("把第二章里的'30%'改成'三成'，谢谢。"),
             "modify",
         )
+
+
+class UserMessageRequestsFullRewriteTests(unittest.TestCase):
+    def test_positive_full_rewrite_requests_match(self):
+        from backend.report_writing import user_message_requests_full_rewrite
+
+        for msg in [
+            "整篇重写这份报告",
+            "全文重写这份报告正文",
+            "推倒重来",
+            "全部改写",
+        ]:
+            self.assertTrue(
+                user_message_requests_full_rewrite(msg),
+                f"expected full rewrite request for: {msg}",
+            )
+
+    def test_negated_full_rewrite_requests_do_not_match(self):
+        from backend.report_writing import user_message_requests_full_rewrite
+
+        for msg in [
+            "不是全文重写，只把标题改一下",
+            "不想全文重写",
+            "并非整篇重写",
+        ]:
+            self.assertFalse(
+                user_message_requests_full_rewrite(msg),
+                f"expected no full rewrite request for: {msg}",
+            )
+
+    def test_generic_modify_request_does_not_match(self):
+        from backend.report_writing import user_message_requests_full_rewrite
+
+        self.assertFalse(user_message_requests_full_rewrite("把标题改一下"))
 
 
 class MutationLimit3Tests(unittest.TestCase):
@@ -720,10 +662,6 @@ class MutationLimit3Tests(unittest.TestCase):
         self.assertIn("text_replace", msg)
         self.assertIn("m0", msg)
         self.assertIn("m2", msg)
-
-    def test_legacy_field_name_returns_none(self):
-        ctx = {"canonical_draft_mutation": {"tool": "rewrite_report_section"}}
-        self.assertIsNone(check_no_prior_canonical_mutation_in_turn(ctx))
 
     def test_non_list_mutations_field_passes(self):
         ctx = {"canonical_draft_mutations": {"tool": "edit_file"}}

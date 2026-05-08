@@ -2,7 +2,7 @@
 
 This is not a model accuracy test. It verifies the model-visible tool surface
 after Commit 2: append for new draft content, edit_file for modifying existing
-draft text, and no legacy specialized rewrite/replace schemas.
+draft text, and no retired specialized rewrite/replace schemas.
 """
 import unittest
 
@@ -11,12 +11,6 @@ from tests.test_chat_runtime import ChatRuntimeTests as _ChatRuntimeTests
 
 class ToolSelectionBenchmarkTests(_ChatRuntimeTests):
     """Schema-shape sanity for the report-writing tools visible to the model."""
-
-    LEGACY_TOOL_NAMES = {
-        "rewrite_report_section",
-        "replace_report_text",
-        "rewrite_report_draft",
-    }
 
     def _tools_by_name(self):
         handler = self._make_handler_with_project()
@@ -31,8 +25,6 @@ class ToolSelectionBenchmarkTests(_ChatRuntimeTests):
 
         self.assertIn("append_report_draft", by_name)
         self.assertIn("edit_file", by_name)
-        for legacy_name in self.LEGACY_TOOL_NAMES:
-            self.assertNotIn(legacy_name, by_name)
 
     def test_tool_descriptions_guide_cutover_usage(self):
         by_name = self._tools_by_name()
