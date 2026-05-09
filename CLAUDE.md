@@ -39,31 +39,34 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 - `plan/stage-gates.md`、`plan/progress.md`、`plan/tasks.md` **由后端自动回写**，模型不能手写，测试/代码里也别假设它们是手工维护
 - `plan/project-info.md` 已退役，不要新建、读取或引用
 - 禁止创建 `gate-control.md`
-- 写 `outline.md` / `research-plan.md` 前必须先 `web_search → fetch_url → 写入 notes.md/references.md`，门禁在 `backend/chat.py`（`NON_PLAN_WRITE_ALLOW_KEYWORDS`、`FILE_UPDATE_VERBS`、证据计数逻辑）
+- 写 `outline.md` / `research-plan.md` 前必须先 `web_search → fetch_url → 写入 notes.md/references.md`，门禁在 `backend/chat.py`（`_should_require_fetch_url_before_write`、证据计数与质量门禁逻辑）
 
-## S4 写正文工具（2026-05-06 redesign）
+## S4 写正文工具（2026-05-09 DeepSeek migration）
 
-S4 阶段（大纲已确认）model 通过以下 4 个**专用工具**修改 `content/report_draft_v1.md`，统一在 `backend/chat.py:_execute_tool` 派发：
+S4 阶段（大纲已确认）报告正文唯一规范路径是 `content/report_draft_v1.md`。DeepSeek migration 后正文工具集从 4 个专用工具收敛为 **1 个生成工具 + 通用 edit dispatcher**：
 
 | 工具 | 用途 | 关键约束 |
 |---|---|---|
 | `append_report_draft(content)` | 起草 / 续写 / 写下一章 | 首次起草 draft 不存在时跳过 read-before-write check |
-| `rewrite_report_section(content)` | 重写章节（user 说"重写第N章"） | `content` 必须 `## ` 开头 + 仅 1 个 h2 + 长度 ≤ `max(3000, 3*snapshot.length)`；后端用 `resolve_section_target` 自己定位章节 snapshot |
-| `replace_report_text(old, new)` | 文字替换（"把 X 改成 Y"） | `old` 必须在 draft 中**唯一**出现 |
-| `rewrite_report_draft(content)` | 整篇重写（"整篇重写"/"推倒重来"） | `content` 必须 `# ` 开头 + ≥ 1 个 `## ` + 长度 ≤ `max(8000, 2*current.length)` |
+| `edit_file(file_path, old_string, new_string)` | 修改已有正文 | `file_path` 为 `content/report_draft_v1.md` 时走 canonical draft dispatcher；先 `read_file`，`old_string` 必须是章节锚点 / H1 整篇锚点 / 唯一文本 |
 
-每个工具入口 inline 调 6 个 invariant check helpers（stage / outline / mixed-intent / mutation-limit / read-before-write+mtime / fetch_url-pending），全部定义在 `backend/report_writing.py`（pure functions，无 `chat.py` 反向 import）。后端用 preflight 已 resolve 的 snapshot 自己控制 `old_string`——model 完全不复述大段文本，结构性绕开 gemini-3-flash 等小模型的复述能力约束。
+`edit_file` 对 canonical draft 的分派规则：
+
+- `old_string` 以 `## ` 开头：`resolve_section_anchor()` 只用首行 h2 label 定位整章 snapshot，可用于章节重写 / 删除。
+- `old_string` 等于 draft 第一行 H1 且用户明确说"整篇/全文/推倒重来"：整篇重写。
+- 其他情况：`old_string` 必须在 draft 中唯一出现，用于文字替换 / 删除。
+- `write_file` **不接受** `content/report_draft_v1.md`；首次起草或续写必须用 `append_report_draft`。
+
+正文写入入口 inline 调 6 个 invariant check helpers（stage / outline / mixed-intent / mutation-limit / read-before-write+mtime / fetch_url-pending），全部定义在 `backend/report_writing.py`（pure functions，无 `chat.py` 反向 import）。
 
 **关键约束**：
-- 不要对 `content/report_draft_v1.md` 用通用 `edit_file` / `write_file`，legacy gate 已只接受这 4 个语义工具（chat.py:5620 + 6081 satisfaction check 白名单）
-- 一旦 `detect_canonical_draft_write_obligation` 识别出本轮正文写入意图，`_guard_canonical_draft_obligation_tool` 会把工具家族锁到对应语义工具：`begin/continue → append_report_draft`、`rewrite_section → rewrite_report_section`、`replace_text → replace_report_text`、`rewrite_draft → rewrite_report_draft`。除 `read_file` / `read_material_file` 外，其他工具会被直接拒绝，防止小模型跑去搜索、写 plan 或调错正文工具
-- 一轮一改：`turn_context["canonical_draft_mutation"]` 限制每轮 ≤ 1 次 canonical write
-- 第二次同轮 canonical write 被 mutation-limit 拦截时，工具错误必须回传 `report_progress` 和“当前真实字数”，让模型按真实字数提示下一轮继续，不能自行估算或声称已达标
+- 旧专用工具 `rewrite_report_section` / `replace_report_text` / `rewrite_report_draft` 已删除；不要新建、注册或引用。
+- `canonical_draft_mutations` 是 list；每轮最多 3 次 canonical draft mutation，超限错误必须带 mutations 摘要和真实进度。
 - read-before-write：先 `read_file` 才能改（首次起草除外）；mtime 变了要重读
 
-**Turn-end 对账**：`_chat_*_unlocked` no-tool-call 分支检测 `canonical_draft_write_obligation` set + 0 mutation + assistant 文本声称已写 → 注入 corrective user message + retry。
+**Turn-end 对账**：`_chat_*_unlocked` no-tool-call 分支检测 `canonical_obligation` set + `canonical_draft_mutations` 为空 + assistant 文本声称已写 → 注入 corrective user message + retry。只兜底"完全没写却声称写了"，不解决 partial obligation retry。
 
-**历史背景**：原 `<draft-action>` tag system + classifier + gate + scope enforcement 整套（含 fix4 v5 amendment）已于 2026-05-06 整体删除（净减 6300+ 行）。详见 `docs/superpowers/specs/2026-05-05-report-tools-redesign-design.md` + `docs/superpowers/cutover_report_2026-05-06_tools-redesign.md`。
+**历史背景**：原 `<draft-action>` tag system + classifier + gate + scope enforcement 整套（含 fix4 v5 amendment）已于 2026-05-06 删除；4 专用工具中的 3 个旧工具与 gemini 时代 obligation / family-lock 控制层已于 2026-05-09 DeepSeek migration 删除。详见 `docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md`。
 
 ## 管理型搜索池
 
