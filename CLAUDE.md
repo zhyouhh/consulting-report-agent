@@ -31,6 +31,24 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 
 `backend/config.py:get_base_path()` 在 PyInstaller 打包态下返回 `sys._MEIPASS`，在开发态下返回仓库根，所有相对路径寻址都必须经过它。
 
+## DeepSeek 官渠兼容
+
+默认 managed 模型是 `deepseek-v4-pro`。这条官渠和 OpenAI 兼容层有几条硬约束，改 `backend/chat.py` 的 provider message / tool-call 逻辑时必须保留：
+
+- 带 `tools` 的 DeepSeek 请求不要显式发送 `tool_choice="auto"`，让 provider 走默认工具选择；官渠 reasoner route 会拒绝这个字段
+- assistant tool-call follow-up 要回传非空 `reasoning_content`，否则 thinking/tool-call 链路可能被上游拒绝
+- 不要把 SDK `model_dump()` 里的 null 字段原样塞回历史消息；`reasoning_content: null`、`audio: null` 这类字段会触发官渠 400
+- 回归测试集中在 `tests/test_chat_runtime.py` 的 DeepSeek/tool-call follow-up 用例
+
+## 打包态 QA 接续（2026-05-13）
+
+正式待办仍以 `docs/current-worklist.md` 为唯一真值源；最近一次打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-13-packaged-s0-s7-qa.md`。当前接续优先级：
+
+1. 先修打包态 GUI 启动崩溃：`settings.mode` null 导致首页 error boundary，用户无法进入产品
+2. 再修 `_internal\skill\scripts\quality_check.ps1` 在 Windows PowerShell 下的编码解析失败，并补打包态脚本 smoke
+3. 决策 `export_draft.ps1` 依赖系统 Pandoc 的交付形态：随包带 Pandoc，或改 Python 原生 `.docx` 导出
+4. 最后补 checkpoint endpoint 的越级推进校验，避免 API/自动化制造不一致阶段状态
+
 ## Skill 工作流（S0-S7）
 
 `skill/SKILL.md` 定义的阶段状态机由 `backend/skill.py:SkillEngine` 执行。**几个硬约束**，改动任何阶段/plan 文件逻辑前必须理解：

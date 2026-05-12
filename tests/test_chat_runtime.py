@@ -90,8 +90,12 @@ class ChatRuntimeTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def _make_chunk(self, *, content=None, tool_calls=None):
-        delta = SimpleNamespace(content=content, tool_calls=tool_calls)
+    def _make_chunk(self, *, content=None, tool_calls=None, reasoning_content=None):
+        delta = SimpleNamespace(
+            content=content,
+            tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
+        )
         return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
 
     def _make_usage_chunk(self, **usage_fields):
@@ -605,6 +609,204 @@ class ChatRuntimeTests(unittest.TestCase):
             execute_tool.call_args.args[1].function.arguments,
             '{"query":"ultraman flight"}',
         )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_tool_followup_preserves_reasoning_content(self, mock_openai):
+        def tool_stream():
+            yield self._make_chunk(reasoning_content="隐藏推理片段")
+            yield self._make_chunk(
+                content="\n\n",
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-1",
+                        name="read_file",
+                        arguments='{"file_path":"plan/outline.md"}',
+                    )
+                ],
+            )
+
+        def final_stream():
+            yield self._make_chunk(content="最终答复")
+
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            tool_stream(),
+            final_stream(),
+        ]
+        handler = self._make_handler_with_project()
+
+        with mock.patch.object(
+            handler,
+            "_execute_tool",
+            return_value={"status": "success", "content": "# 大纲"},
+        ):
+            events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
+
+        second_request_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        assistant_tool_message = next(
+            message
+            for message in second_request_messages
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        )
+
+        self.assertEqual(assistant_tool_message["content"], "\n\n")
+        self.assertEqual(assistant_tool_message["reasoning_content"], "隐藏推理片段")
+        self.assertTrue(any(event == {"type": "content", "data": "\n\n"} for event in events))
+        self.assertFalse(any(event.get("data") == "隐藏推理片段" for event in events))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_tool_followup_omits_empty_reasoning_content(self, mock_openai):
+        def tool_stream():
+            yield self._make_chunk(
+                content="\n\n",
+                reasoning_content="",
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-1",
+                        name="read_file",
+                        arguments='{"file_path":"plan/outline.md"}',
+                    )
+                ],
+            )
+
+        def final_stream():
+            yield self._make_chunk(content="最终答复")
+
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            tool_stream(),
+            final_stream(),
+        ]
+        handler = self._make_handler_with_project()
+
+        with mock.patch.object(
+            handler,
+            "_execute_tool",
+            return_value={"status": "success", "content": "# 大纲"},
+        ):
+            list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
+
+        second_request_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        assistant_tool_message = next(
+            message
+            for message in second_request_messages
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        )
+
+        self.assertEqual(assistant_tool_message["content"], "\n\n")
+        self.assertNotIn("reasoning_content", assistant_tool_message)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_tool_followup_omits_null_sdk_dump_fields(self, mock_openai):
+        tool_call = SimpleNamespace(
+            id="call-1",
+            function=SimpleNamespace(
+                name="read_file",
+                arguments='{"file_path":"plan/outline.md"}',
+            ),
+        )
+        first_message = SimpleNamespace(
+            content="\n\n",
+            tool_calls=[tool_call],
+        )
+        first_message.model_dump = mock.Mock(
+            return_value={
+                "role": "assistant",
+                "content": "\n\n",
+                "audio": None,
+                "function_call": None,
+                "refusal": None,
+                "reasoning_content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"file_path":"plan/outline.md"}',
+                        },
+                    }
+                ],
+            }
+        )
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(message=first_message)],
+            ),
+            SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="最终答复",
+                            tool_calls=[],
+                        )
+                    )
+                ],
+            ),
+        ]
+        handler = self._make_handler_with_project()
+
+        with mock.patch.object(
+            handler,
+            "_execute_tool",
+            return_value={"status": "success", "content": "# 大纲"},
+        ):
+            result = handler.chat(self.project_id, "继续", max_iterations=2)
+
+        second_request_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        assistant_tool_message = next(
+            message
+            for message in second_request_messages
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        )
+
+        self.assertIn("最终答复", result["content"])
+        self.assertEqual(assistant_tool_message["content"], "\n\n")
+        self.assertNotIn("reasoning_content", assistant_tool_message)
+        self.assertNotIn("audio", assistant_tool_message)
+        self.assertNotIn("function_call", assistant_tool_message)
+        self.assertNotIn("refusal", assistant_tool_message)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_omits_explicit_tool_choice_for_deepseek_models(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="完成"),
+        ])
+        handler = self._make_handler_with_project()
+        handler.settings.managed_model = "deepseek-v4-pro"
+        handler.settings.model = "deepseek-v4-pro"
+
+        list(handler.chat_stream(self.project_id, "继续"))
+
+        request_kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
+        self.assertIn("tools", request_kwargs)
+        self.assertNotIn("tool_choice", request_kwargs)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_omits_explicit_tool_choice_for_deepseek_models(self, mock_openai):
+        mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="完成",
+                        tool_calls=[],
+                    )
+                )
+            ],
+        )
+        handler = self._make_handler_with_project()
+        handler.settings.managed_model = "deepseek-v4-pro"
+        handler.settings.model = "deepseek-v4-pro"
+
+        result = handler.chat(self.project_id, "继续")
+
+        request_kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
+        self.assertEqual(result["content"], "完成")
+        self.assertIn("tools", request_kwargs)
+        self.assertNotIn("tool_choice", request_kwargs)
 
     @mock.patch("backend.chat.OpenAI")
     def test_normalize_usage_prefers_prompt_tokens_for_context_used(self, mock_openai):

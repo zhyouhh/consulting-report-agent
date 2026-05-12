@@ -1,16 +1,40 @@
 # Current Worklist
 
-最后更新：2026-05-09（DeepSeek Migration：Commit 1-3 已完成，cutover report 已提交；待 2026-05-09 手工验收 packaged UI/chat E2E）
+最后更新：2026-05-13（DeepSeek 官渠 tool-call 400 已修复并重打包；packaged S0-S7 QA 跑到 `done`，但暴露 GUI 启动崩溃、质量检查脚本编码和导出依赖问题）
 
 ## 当前未解决 / 待验证
 
-1. **DeepSeek Migration — 2026-05-09 手工验收（packaged UI/chat E2E）**
-- 状态：`待手工验收`
-- 范围：使用 `dist\咨询报告助手\` 打包态跑完整 UI/chat 主链路，重点确认 packaged UI、聊天流式、工具调用、S0→S4 写正文路径在真实窗口内可用
-- 背景：Commit 1-3 + cutover report 已完成；自动验证和 legacy grep gates 已通过，但 Task 38 明确 full packaged UI/chat manual E2E 未独立证明
-- 验收参考：[docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md](superpowers/cutover_report_2026-05-08_deepseek-migration.md)
+1. **P0/P1：打包态 GUI 启动崩溃**
+- 状态：`阻断交付`
+- 现象：启动 `dist\咨询报告助手\咨询报告助手.exe` 后打开 `http://127.0.0.1:8080`，页面显示「应用出错，请刷新页面」
+- 控制台：`TypeError: Cannot read properties of null (reading 'mode')`
+- 已知边界：`/api/settings`、`/api/projects` 返回 200，后端可运行；问题更像前端初始 settings/null state 处理
+- 证据：本地 QA 输出 `.gstack/qa-reports/screenshots/s0-s7-initial.png`；可提交摘要见 [2026-05-13 packaged S0-S7 QA handoff](superpowers/handoffs/2026-05-13-packaged-s0-s7-qa.md)
+- 下一步：从 `frontend/src` 中读取 settings 的路径查起，补 null/加载态回归测试，再重打包验证
 
-2. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现，已推后）
+2. **P1：打包态 `quality_check.ps1` 编码失败**
+- 状态：`阻断质量检查功能`
+- 现象：`POST /api/projects/{id}/quality-check` 返回 `{"status":"error","output":null}`；直接跑 `_internal\skill\scripts\quality_check.ps1` 会出现中文乱码和 PowerShell parser errors
+- 初步根因：UTF-8 `.ps1` 在 Windows PowerShell 中按 legacy code page 解析
+- 下一步：统一 `.ps1` 打包编码（优先 UTF-8 with BOM）或改成编码安全的 Python 执行路径；新增打包态脚本 smoke
+- 关联文件：`skill/scripts/quality_check.ps1`、`backend/report_tools.py`、`tests/smoke_packaged_app.py`
+
+3. **P2/P3：`export-draft` 依赖外部 Pandoc，包内未自带**
+- 状态：`待产品决策`
+- 现状：`skill/scripts/export_draft.ps1` 通过 `Get-Command pandoc` 找系统安装；`dist\咨询报告助手\` 内没有 `pandoc.exe`，`consulting_report.spec` 也未收集 Pandoc
+- 用户影响：目标用户是不懂技术的同事，要求他们自行安装 Pandoc 不符合产品定位
+- 选择：
+  - A. 随 Windows 包带 Pandoc：转换稳定、包更大
+  - B. 用 Python 原生 `.docx` 生成基础可审稿：包更轻、Markdown 格式还原需要取舍
+- 下一步：先定方案，再补导出 smoke 和文档说明
+
+4. **P2：checkpoint API 可越级推进**
+- 状态：`待修复`
+- 现象：QA 中 workspace 仍在 S2 时，`review-started` checkpoint 被接受；原因是 endpoint 只校验目标 checkpoint 的直接前置文件，不校验前序阶段已完成
+- 用户影响：UI 正常路径可能不易触发，但 API 调用或后续自动化可制造不一致状态
+- 下一步：`SkillEngine.record_stage_checkpoint()` 增加 predecessor-stage validation；补拒绝越级的单测
+
+5. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现，已推后）
 - 状态：`已推后到 UI 重构一并处理`（spec §2.2 Out of Scope）
 - 现状：`frontend/src/utils/modelCapabilities.js` 的 `supportsImageAttachments` 对 `mode==="managed"` 一律 return true（gemini-3-flash 时代多模态行为）
 - 问题：DeepSeek V4 Pro 是 text-only reasoning 模型，前端不拦图片附件 → 用户传图后请求会被上游 400 拒（postMessage、上传按钮、拖拽都不会有 UX 提示）
@@ -18,42 +42,61 @@
 - 关联文件：`frontend/src/utils/modelCapabilities.js`、`frontend/tests/modelCapabilities.test.mjs`、各上传/粘贴入口组件
 - 触发条件：UI 重构立项时一起做（设计稿在 `docs/design_UI.pdf`）
 
-3. **UI 重构**（推后）
-- 状态：`待 2026-05-09 packaged UI/chat 手工验收通过后立项`
+6. **UI 重构**
+- 状态：`待 packaged GUI 启动崩溃修复后立项`
 - 设计稿：`docs/design_UI.pdf`（用户用 Claude design 做的 3 套初步设计稿）
-- 触发条件：DeepSeek Migration Commit 1-3 实施完成 + 跑通流程后再立项
+- 触发条件：先恢复当前打包 GUI 可打开，再决定是否进入设计重构；不要把 P0 启动崩溃埋进大重构里
 
-4. **stage-advance-gates Bug G/H 低优先级待复核**
+7. **stage-advance-gates Bug G/H 低优先级待复核**
 - 状态：`低优先级待复核`
 - Bug G：回退 checkpoint 后 `content/*.md` 仍存在，状态可能不自洽；复核时决定级联清理还是 UI 标红提示。
 - Bug H：S1 回退后 UI「下一步建议」显示"暂无"，`next_stage_hint` S1 分支缺；复核时补齐提示或确认新版流程已绕开。
 
-5. **新建项目表单与废 UI 整理**（待 UI 重构时并入/评估）
+8. **新建项目表单与废 UI 整理**（待 UI 重构时并入/评估）
 - 状态：`待 UI 重构时评估`
 - 目标：清理"填了像没填"的字段、重复输入项和旧流程遗留 UI，包括截止日期控件、材料/备注语义重叠、项目类型/主题/目标读者/篇幅字段利用率。
 - 关联：Task 7 的 `length_fallback` chip 目前只是非交互提示；如做项目表单 edit 模式，可顺便让 chip 点击打开编辑面板。
 
-6. **`draw.io skill` 评估**
+9. **`draw.io skill` 评估**
 - 状态：`待评估`
 - 目标：判断它对咨询报告场景是否真有价值，还是只会增加复杂度。
 
-7. **前端生产包优化**
+10. **前端生产包优化**
 - 状态：`待优化`
 - 现状：`vite build` 已通过，但主 JS chunk 仍接近 `1 MB`。
 - 目标：在不引入复杂度失控的前提下做基本拆包，降低首屏和构建产物压力。
 
-8. **技术债清理**
+11. **技术债清理**
 - 状态：`待清理`
 - 当前明确项：`pydantic` deprecation warning、打包依赖排除空间。
 
 ## 最近已解决
 
+0e. **DeepSeek 官渠 tool-call 400 根治 + 打包态后端 S0-S7 QA（2026-05-13）**
+- 状态：`代码已修复；打包态后端生命周期已跑到 done；GUI 仍有 P0 启动崩溃，见当前 Item 1`
+- 根因：
+  - DeepSeek 官渠 reasoner route 会拒绝显式 `tool_choice="auto"`
+  - thinking/tool-call follow-up 需要把非空 `reasoning_content` 随 assistant tool-call message 回传
+  - OpenAI SDK `model_dump()` 可能携带 `reasoning_content: null` / `audio: null` 等字段，官渠会拒
+- 修复：
+  - DeepSeek 模型请求保留 `tools`，但不显式传 `tool_choice`
+  - stream / non-stream tool-call follow-up 保留非空 `reasoning_content`
+  - assistant tool-call message 改为只序列化 provider 需要的字段，丢掉 null SDK dump 字段
+- 验证：
+  - targeted regressions 通过
+  - `tests/test_chat_runtime.py -q -n 8`: 430 passed / 1 skipped / 20 warnings / 17 subtests passed
+  - `tests -q -n 8 --ignore=tests/test_chat_runtime.py`: 409 passed / 8 warnings / 5 subtests passed
+  - source canary：真实 `deepseek-v4-pro` 完成 `read_file → tool result → final reply`，0 error
+  - packaged canary：`dist\咨询报告助手\` 完成同一 tool-call round trip，0 error
+  - packaged S0-S7 API lifecycle：最终 `done / 已归档`
+- Handoff：[2026-05-13 packaged S0-S7 QA handoff](superpowers/handoffs/2026-05-13-packaged-s0-s7-qa.md)
+
 0d. **DeepSeek Migration Commit 1-3 + cutover report 完成（2026-05-09）**
-- 状态：`已完成；待 packaged UI/chat 手工验收`
+- 状态：`已完成；packaged QA 后续已转入 0e 和当前 Item 1`
 - Commit chain：`69730c7 Add migration toolset foundation` → `118f383 Cut traffic from legacy report draft tools` → `9a59955 Delete legacy report draft control layer`
 - Cutover report：[docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md](superpowers/cutover_report_2026-05-08_deepseek-migration.md)（commit `a5f1cd1 docs(deepseek-migration): add cutover report`）
 - 验证：backend fast `834 passed, 1 skipped, 3 deselected, 13 warnings, 22 subtests passed`；backend including slow `837 passed, 1 skipped, 13 warnings, 22 subtests passed`；frontend node tests `183 passed`；Windows build `build.bat` 成功并重建 `dist\咨询报告助手\`；legacy grep gates 7 类 clean
-- 注意：Task 38 明确 full packaged UI/chat manual E2E 仍需在 2026-05-09 手工验收
+- 注意：原 Task 38 packaged UI/chat manual E2E 已在 2026-05-13 复测；GUI 阻断转入当前 Item 1
 
 0c. **DeepSeek Migration Commit 0 + spec + plan 全 APPROVED（2026-05-07~08）**
 - 状态：`Commit 0 已 ship 3 commits + spec 3 轮 codex review APPROVED + plan 4 轮 codex review APPROVED`

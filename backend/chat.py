@@ -410,6 +410,11 @@ class ChatHandler:
             return (self.settings.custom_model or self.settings.model or "").strip()
         return (self.settings.model or self.settings.managed_model or self.settings.custom_model or "").strip()
 
+    def _should_send_explicit_tool_choice(self, active_model: str) -> bool:
+        # DeepSeek's official thinking-mode examples rely on the default auto behavior.
+        # Sending tool_choice="auto" can be rejected by official reasoner routes.
+        return "deepseek" not in (active_model or "").lower()
+
     def _resolve_context_policy(self) -> ResolvedContextPolicy:
         custom_effective_limit = None
         if self.settings.mode == "custom":
@@ -2515,10 +2520,11 @@ class ChatHandler:
                     "temperature": 0.7,
                     "max_tokens": self._get_request_max_tokens(policy),
                     "tools": self._get_tools(),
-                    "tool_choice": "auto",
                     "timeout": self._build_stream_timeout(active_model),
                     "stream": True,
                 }
+                if self._should_send_explicit_tool_choice(active_model):
+                    request_kwargs["tool_choice"] = "auto"
                 if include_usage_requested:
                     request_kwargs["stream_options"] = {"include_usage": True}
                 self._debug_dump_request(request_kwargs, label="stream", note=f"iteration={iterations}")
@@ -2582,6 +2588,11 @@ class ChatHandler:
                         continue
 
                     delta = chunk.choices[0].delta
+                    reasoning_delta = self._extract_reasoning_content_from_message(delta)
+                    if isinstance(reasoning_delta, str) and reasoning_delta:
+                        collected_message["reasoning_content"] = (
+                            collected_message.get("reasoning_content", "") + reasoning_delta
+                        )
                     if delta.content:
                         yield from emit_parsed_stream_events(parser.feed(delta.content))
                         if self._looks_like_self_correction_loop(accumulated):
@@ -2672,8 +2683,9 @@ class ChatHandler:
                     iterations += 1
                     continue
 
-                current_turn_messages.append(collected_message)
-                for index, tool_call in enumerate(collected_message["tool_calls"]):
+                assistant_tool_message = self._normalize_collected_assistant_tool_call_message(collected_message)
+                current_turn_messages.append(assistant_tool_message)
+                for index, tool_call in enumerate(assistant_tool_message["tool_calls"]):
                     func_name = tool_call["function"]["name"]
                     func_args = tool_call["function"]["arguments"]
                     tool_preview = f"🔧 调用工具: {func_name}"
@@ -2907,10 +2919,11 @@ class ChatHandler:
                     "temperature": 0.7,
                     "max_tokens": self._get_request_max_tokens(policy),
                     "tools": self._get_tools(),
-                    "tool_choice": "auto",
                     "timeout": timeout,
                     "stream": False,
                 }
+                if self._should_send_explicit_tool_choice(active_model):
+                    request_kwargs["tool_choice"] = "auto"
                 self._debug_dump_request(request_kwargs, label="nostream", note=f"iteration={iterations}")
                 try:
                     response = self.client.chat.completions.create(**request_kwargs)
@@ -2936,22 +2949,7 @@ class ChatHandler:
 
             message = response.choices[0].message
             if message.tool_calls:
-                try:
-                    msg_dict = message.model_dump()
-                except Exception:
-                    msg_dict = {
-                        "role": "assistant",
-                        "content": message.content or "",
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                            }
-                            for tc in message.tool_calls
-                        ],
-                    }
-                current_turn_messages.append(msg_dict)
+                current_turn_messages.append(self._assistant_tool_call_message_from_response(message))
                 for tool_call in message.tool_calls:
                     result = self._execute_tool(project_id, tool_call)
                     write_event = self._extract_successful_write_event(
@@ -3160,6 +3158,81 @@ class ChatHandler:
             else:
                 coalesced.append(dict(msg))
         return coalesced
+
+    def _serialize_tool_call_for_provider(self, tool_call) -> Dict:
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function") or {}
+            return {
+                "id": tool_call.get("id") or "",
+                "type": tool_call.get("type") or "function",
+                "function": {
+                    "name": function.get("name") or "",
+                    "arguments": function.get("arguments") or "",
+                },
+            }
+
+        function = getattr(tool_call, "function", None)
+        return {
+            "id": getattr(tool_call, "id", "") or "",
+            "type": getattr(tool_call, "type", "function") or "function",
+            "function": {
+                "name": getattr(function, "name", "") or "",
+                "arguments": getattr(function, "arguments", "") or "",
+            },
+        }
+
+    def _extract_reasoning_content_from_message(self, message) -> str:
+        reasoning_content = getattr(message, "reasoning_content", None)
+        if isinstance(reasoning_content, str) and reasoning_content:
+            return reasoning_content
+
+        model_dump = getattr(message, "model_dump", None)
+        if not callable(model_dump):
+            return ""
+
+        try:
+            dumped = model_dump()
+        except Exception:
+            return ""
+
+        if isinstance(dumped, dict):
+            reasoning_content = dumped.get("reasoning_content")
+            if isinstance(reasoning_content, str) and reasoning_content:
+                return reasoning_content
+        return ""
+
+    def _build_assistant_tool_call_message(
+        self,
+        *,
+        content,
+        tool_calls,
+        reasoning_content: str | None = None,
+    ) -> Dict:
+        message = {
+            "role": "assistant",
+            "content": content if isinstance(content, str) else ("" if content is None else str(content)),
+            "tool_calls": [
+                self._serialize_tool_call_for_provider(tool_call)
+                for tool_call in (tool_calls or [])
+            ],
+        }
+        if isinstance(reasoning_content, str) and reasoning_content:
+            message["reasoning_content"] = reasoning_content
+        return message
+
+    def _assistant_tool_call_message_from_response(self, message) -> Dict:
+        return self._build_assistant_tool_call_message(
+            content=getattr(message, "content", ""),
+            tool_calls=getattr(message, "tool_calls", []),
+            reasoning_content=self._extract_reasoning_content_from_message(message),
+        )
+
+    def _normalize_collected_assistant_tool_call_message(self, message: Dict) -> Dict:
+        return self._build_assistant_tool_call_message(
+            content=message.get("content", ""),
+            tool_calls=message.get("tool_calls") or [],
+            reasoning_content=message.get("reasoning_content"),
+        )
 
     def _build_provider_turn_conversation(
         self,
