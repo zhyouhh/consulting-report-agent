@@ -349,6 +349,24 @@ class SkillEngine:
         validator = getattr(self, validator_name)
         if not validator(project_path):
             raise ValueError(f"{reason} 缺少前置文件: {path}")
+        self._validate_stage_checkpoint_predecessors(project_path, key)
+
+    def _required_stage_checkpoint_predecessors(self, project_path: Path, key: str) -> tuple[str, ...]:
+        if key not in self._CASCADE_ORDER:
+            return ()
+        required = list(self._CASCADE_ORDER[:self._CASCADE_ORDER.index(key)])
+        if key == "delivery_archived_at" and not self._delivery_mode_requires_presentation(project_path):
+            required = [item for item in required if item != "presentation_ready_at"]
+        return tuple(required)
+
+    def _validate_stage_checkpoint_predecessors(self, project_path: Path, key: str) -> None:
+        required = self._required_stage_checkpoint_predecessors(project_path, key)
+        if not required:
+            return
+        checkpoints = self._load_stage_checkpoints(project_path)
+        missing = [item for item in required if item not in checkpoints]
+        if missing:
+            raise ValueError(f"缺少前序阶段 checkpoint: {', '.join(missing)}")
 
     def _resolve_length_targets(self, project_path):
         overview_path = project_path / "plan" / "project-overview.md"

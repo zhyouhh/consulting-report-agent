@@ -98,6 +98,13 @@ def http_post_json(path: str, port: int, payload: dict, timeout: float = 10.0) -
         return json.loads(resp.read().decode("utf-8"))
 
 
+def http_post(path: str, port: int, timeout: float = 10.0) -> dict:
+    url = f"http://127.0.0.1:{port}{path}"
+    req = urllib.request.Request(url, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def http_delete(path: str, port: int, timeout: float = 5.0) -> dict:
     url = f"http://127.0.0.1:{port}{path}"
     req = urllib.request.Request(url, method="DELETE")
@@ -143,7 +150,10 @@ def check_private_files(bundle_internal: Path) -> None:
         raise SmokeFailure("skill/SKILL.md 未打入 _internal/skill/")
     if not (bundle_internal / "frontend" / "dist").exists():
         raise SmokeFailure("frontend/dist 未打入 _internal/frontend/dist/")
-    log_step("skill/ 与 frontend/dist/ 注入", True)
+    pandoc_path = bundle_internal / "pandoc.exe"
+    if not pandoc_path.exists() or not pandoc_path.stat().st_size:
+        raise SmokeFailure(f"pandoc.exe 缺失或为空: {pandoc_path}")
+    log_step("skill/、frontend/dist/ 与 pandoc.exe 注入", True)
 
 
 def wait_for_server(port: int, timeout: int) -> None:
@@ -181,7 +191,7 @@ def check_settings(port: int) -> None:
     )
 
 
-def check_project_scaffolding(port: int, temp_workspace: Path) -> str:
+def check_project_scaffolding(port: int, temp_workspace: Path) -> tuple[str, Path]:
     payload = {
         "name": "smoke-test-project",
         "workspace_dir": str(temp_workspace),
@@ -237,7 +247,37 @@ def check_project_scaffolding(port: int, temp_workspace: Path) -> str:
         f"{len(files)} files",
     )
 
-    return project_id
+    return project_id, project_dir
+
+
+def check_review_tools(port: int, project_id: str, project_dir: Path) -> None:
+    report_path = project_dir / "content" / "report_draft_v1.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        "# 测试报告\n\n"
+        "## 一、关键发现\n\n"
+        "数据显示，当前流程已经完成基础验证。数据来源：自动化打包 smoke。\n\n"
+        "## 二、行动建议\n\n"
+        "建议继续补齐真实业务材料，并在交付前完成人工复核。\n",
+        encoding="utf-8",
+    )
+
+    quality = http_post(f"/api/projects/{project_id}/quality-check", port)
+    if quality.get("status") != "ok":
+        raise SmokeFailure(f"quality-check 失败: {quality}")
+    if "检查摘要" not in (quality.get("output") or ""):
+        raise SmokeFailure(f"quality-check 输出缺检查摘要: {quality}")
+    log_step("打包态 quality-check 脚本", True)
+
+    exported = http_post(f"/api/projects/{project_id}/export-draft", port, timeout=20.0)
+    if exported.get("status") != "ok":
+        raise SmokeFailure(f"export-draft 失败: {exported}")
+    output_path = Path(exported.get("output_path") or "")
+    if output_path.suffix.lower() != ".docx" or not output_path.exists():
+        raise SmokeFailure(f"export-draft 未生成 docx: {exported}")
+    if "已生成可审草稿" not in (exported.get("output") or ""):
+        raise SmokeFailure(f"export-draft 输出缺生成提示: {exported}")
+    log_step("打包态 export-draft + bundled Pandoc", True, str(output_path))
 
 
 def delete_test_project(port: int, project_id: str) -> None:
@@ -303,7 +343,8 @@ def run_smoke(bundle_dir: Path, port: int) -> bool:
 
         print(f"[3/4] 调用 HTTP API 验证业务流（不打 /api/chat）...")
         check_settings(port)
-        created_project_id = check_project_scaffolding(port, temp_workspace)
+        created_project_id, project_dir = check_project_scaffolding(port, temp_workspace)
+        check_review_tools(port, created_project_id, project_dir)
         delete_test_project(port, created_project_id)
         created_project_id = None
         return True

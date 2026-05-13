@@ -13,6 +13,10 @@ test("supportsImageAttachments always allows managed mode", () => {
   );
 });
 
+test("supportsImageAttachments falls back safely while settings are loading", () => {
+  assert.equal(supportsImageAttachments(null), true);
+});
+
 test("supportsImageAttachments recognizes common multimodal custom models", () => {
   assert.equal(
     supportsImageAttachments({

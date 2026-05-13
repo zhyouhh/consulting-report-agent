@@ -8,6 +8,7 @@
 - 只要默认托管代理已经部署完成，同事拿到包后可以直接开箱即用。
 - 仍然保留 `自定义 API` 入口，给有条件的高级用户自行配置。
 - 当前导出能力是 `可审草稿`，不是最终排版完成的 Word/PDF 成品。
+- Windows 发布包随带 `_internal/pandoc.exe`，同事不需要单独安装 Pandoc。
 
 ## Windows 打包步骤
 
@@ -40,7 +41,13 @@ cd ..
 - 在项目根目录放一个不入库的 `managed_search_pool.json`
 - 或在运行 `build.bat` 前设置环境变量 `CONSULTING_REPORT_MANAGED_SEARCH_POOL_FILE`
 
-`build.bat` 会在缺少这两者时直接失败，避免打出一个表面成功、实际不能开箱即用的包。
+再准备可随包分发的 Pandoc，三选一：
+
+- 在项目根目录放一个 `pandoc.exe`
+- 或设置环境变量 `CONSULTING_REPORT_PANDOC_EXE` 指向 `pandoc.exe`
+- 或在构建机安装 Pandoc，并确保 `pandoc` 在 `PATH` 中
+
+`build.bat` 会在缺少这些打包依赖时直接失败，避免打出一个表面成功、实际不能开箱即用的包。
 它还会在打包前请求 `https://newapi.z0y0h.work/client/v1/models` 做预检。
 `managed_client_token.txt` 必须放的是 `/client` 使用的 client token，不是上游 API key。
 `managed_search_pool.json` 必须包含完整的内置搜索池 schema，至少包括：
@@ -67,8 +74,8 @@ cd ..
 
 如果你跳过 `build.bat` 直接运行 `pyinstaller consulting_report.spec`，
 那就必须先把私有搜索池文件放到仓库根目录，并命名为 `managed_search_pool.json`，
-同时也建议使用项目自己的 `.venv`，不要直接用全局 Python 环境。加 `--noconfirm`
-可以覆盖已有的 `dist\咨询报告助手\`，便于重复打包。
+同时确保 `consulting_report.spec` 能解析到 `pandoc.exe`。也建议使用项目自己的 `.venv`，
+不要直接用全局 Python 环境。加 `--noconfirm` 可以覆盖已有的 `dist\咨询报告助手\`，便于重复打包。
 
 生成目录：
 
@@ -80,6 +87,7 @@ dist/咨询报告助手/
     frontend/dist/
     managed_client_token.txt
     managed_search_pool.json
+    pandoc.exe
     ...
 ```
 
@@ -99,7 +107,7 @@ PyInstaller 把所有 `datas` 收到 `_internal/` 下面，`sys._MEIPASS` 在运
 ### 默认通道
 
 - 面向普通同事，开箱即用。
-- 默认模型：`gemini-3-flash`
+- 默认模型：`deepseek-v4-pro`
 - 默认地址：`https://newapi.z0y0h.work/client/v1`
 - 客户端不保存真实上游 key，真实凭证只存在服务端薄中转。
 - 发布包需要注入单独的客户端令牌文件 `managed_client_token.txt`。
@@ -115,6 +123,12 @@ PyInstaller 把所有 `datas` 收到 `_internal/` 下面，`sys._MEIPASS` 在运
 - 运行时动态状态不写回包内，而是写到：
   - `C:\Users\<用户名>\.consulting-report\search_runtime_state.json`
   - `C:\Users\<用户名>\.consulting-report\search_cache.json`
+
+### 可审草稿导出
+
+- `export_draft.ps1` 优先使用发布包内的 `_internal\pandoc.exe`。
+- 构建时必须能解析到可分发的 Pandoc；打包后同事机器不再依赖系统 Pandoc。
+- Pandoc 会明显增加包体积，当前完整 `dist\咨询报告助手\` 约 307 MB。
 
 ### 自定义 API
 
@@ -141,3 +155,6 @@ A: 构建机源文件放在项目根目录的 `managed_search_pool.json`；打�
 
 **Q: 现在导出是不是最终 Word/PDF？**  
 A: 不是。当前是 `可审草稿` 导出，用于内部审阅和继续修改。
+
+**Q: 同事机器需要安装 Pandoc 吗？**
+A: 不需要。Windows 发布包已经随带 `_internal\pandoc.exe`；只有构建机需要在打包时提供 Pandoc。

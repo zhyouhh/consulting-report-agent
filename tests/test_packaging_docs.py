@@ -18,6 +18,8 @@ class PackagingDocsTests(unittest.TestCase):
         self.assertIn('"venv"', script.lower())
         self.assertIn("managed_client_token.txt", script)
         self.assertIn("managed_search_pool.json", script)
+        self.assertIn("resolve_bundle_pandoc", script)
+        self.assertIn("Validate bundled Pandoc", script)
 
     def test_build_docs_describe_managed_default_and_windows_first_release(self):
         for doc_name in ["BUILD.md", "WINDOWS_BUILD.md"]:
@@ -30,6 +32,9 @@ class PackagingDocsTests(unittest.TestCase):
             self.assertIn("client token", content)
             self.assertIn(".venv", content)
             self.assertIn("PyInstaller", content)
+            self.assertIn("deepseek-v4-pro", content)
+            self.assertIn("Pandoc", content)
+            self.assertIn("pandoc.exe", content)
 
     def test_build_docs_describe_search_pool_and_runtime_storage(self):
         for doc_name in ["BUILD.md", "WINDOWS_BUILD.md"]:
@@ -51,6 +56,8 @@ class PackagingDocsTests(unittest.TestCase):
         self.assertIn("自定义 API", content)
         self.assertIn("Windows", content)
         self.assertIn("可审草稿", content)
+        self.assertIn("deepseek-v4-pro", content)
+        self.assertIn("Pandoc", content)
         self.assertNotIn("Word/PDF", content)
 
 

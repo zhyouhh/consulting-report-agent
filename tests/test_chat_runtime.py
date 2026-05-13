@@ -68,6 +68,15 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
     def _write_stage_one_prerequisites(self, project_dir: Path):
+        checkpoints_path = project_dir / "stage_checkpoints.json"
+        checkpoints = {}
+        if checkpoints_path.exists():
+            checkpoints = json.loads(checkpoints_path.read_text(encoding="utf-8"))
+        checkpoints.setdefault("s0_interview_done_at", "2026-04-21T10:00:00")
+        checkpoints_path.write_text(
+            json.dumps(checkpoints, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         self._write_evidence_gate_prerequisites(project_dir)
         (project_dir / "plan" / "outline.md").write_text(
             "# Report outline\n\n"
@@ -8781,15 +8790,18 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         self.assertFalse(any("outline" in n.get("reason", "") for n in notices))
 
     def test_executable_tag_wins_over_pending_keyword(self):
-        """User said '确认大纲' (keyword → stored as pending_stage_keyword in
+        """A pending checkpoint keyword is discarded when the assistant emits
         _build_turn_context, NOT executed yet). Assistant then emits an
         executable tag pointing at a DIFFERENT checkpoint. The tag must win;
-        pending keyword is discarded without setting outline_confirmed_at."""
+        pending keyword is discarded without clearing outline_confirmed_at."""
         handler = self._make_handler_with_project()
         self._set_checkpoints({
             "s0_interview_done_at": "2026-04-21T10:00:00",
             "outline_confirmed_at": "2026-04-21T11:00:00",
         })
+        original_outline_checkpoint = handler.skill_engine._load_stage_checkpoints(
+            self.project_dir
+        )["outline_confirmed_at"]
         # Build effective report draft so review_started_at prereq passes
         (self.project_dir / "content").mkdir(exist_ok=True)
         (self.project_dir / "content" / "report_draft_v1.md").write_text(
@@ -8798,12 +8810,7 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         )
         # Simulate keyword pending (what _build_turn_context would store)
         handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-        handler._turn_context["pending_stage_keyword"] = ("set", "outline_confirmed_at")
-        # Clear outline_confirmed_at first so we can see whether pending keyword
-        # would have set it (it shouldn't - tag wins)
-        handler.skill_engine._clear_stage_checkpoint(
-            self.project_dir, "outline_confirmed_at"
-        )
+        handler._turn_context["pending_stage_keyword"] = ("clear", "outline_confirmed_at")
         # Assistant tag points at review_started_at
         self._finalize_assistant_for_test(
             handler,
@@ -8812,8 +8819,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
         # Tag's target set
         self.assertIn("review_started_at", checkpoints)
-        # Pending keyword target NOT set (tag won; keyword discarded)
-        self.assertNotIn("outline_confirmed_at", checkpoints)
+        # Pending keyword target NOT cleared (tag won; keyword discarded)
+        self.assertEqual(checkpoints["outline_confirmed_at"], original_outline_checkpoint)
         # pending_stage_keyword cleared
         self.assertIsNone(handler._turn_context.get("pending_stage_keyword"))
 
@@ -9709,6 +9716,9 @@ class StageAckRegressionTests(ChatRuntimeTests):
 
     def test_stage_ack_review_started_at_advances_s4_to_s5(self):
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(
+            self.project_dir, "s0_interview_done_at",
+        )
         handler.skill_engine._save_stage_checkpoint(
             self.project_dir, "outline_confirmed_at",
         )

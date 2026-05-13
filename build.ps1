@@ -69,7 +69,7 @@ try {
     Write-Host "Consulting Report Agent - Windows Build"
     Write-Host "========================================"
 
-    Invoke-Step "[1/10] Check Python..." {
+    Invoke-Step "[1/11] Check Python..." {
         $pythonCmd = Get-Command python -ErrorAction Stop
         & $pythonCmd.Source --version
         if ($LASTEXITCODE -ne 0) {
@@ -77,18 +77,18 @@ try {
         }
     }
 
-    Invoke-Step "[2/10] Prepare project venv..." {
+    Invoke-Step "[2/11] Prepare project venv..." {
         if (-not (Test-Path -LiteralPath $venvPython)) {
             Invoke-CommandChecked -FilePath "python" -Arguments @("-m", "venv", ".venv")
         }
     }
 
-    Invoke-Step "[3/10] Install backend dependencies..." {
+    Invoke-Step "[3/11] Install backend dependencies..." {
         Invoke-CommandChecked -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
         Invoke-CommandChecked -FilePath $venvPython -Arguments @("-m", "pip", "install", "-r", "requirements.txt")
     }
 
-    Invoke-Step "[4/10] Prepare managed client token..." {
+    Invoke-Step "[4/11] Prepare managed client token..." {
         if (Test-Path -LiteralPath $tokenFile) {
             return
         }
@@ -99,7 +99,7 @@ try {
         $generatedManagedTokenFile = $true
     }
 
-    Invoke-Step "[5/10] Prepare managed search pool..." {
+    Invoke-Step "[5/11] Prepare managed search pool..." {
         if (Test-Path -LiteralPath $searchPoolFile) {
             return
         }
@@ -113,7 +113,7 @@ try {
         $stagedSearchPoolFile = $true
     }
 
-    Invoke-Step "[6/10] Validate managed client token..." {
+    Invoke-Step "[6/11] Validate managed client token..." {
         $tokenValidationCode = @(
             "from pathlib import Path"
             "from build_support import validate_bundle_managed_client_token"
@@ -123,7 +123,7 @@ try {
         Invoke-PythonFromStdin $tokenValidationCode
     }
 
-    Invoke-Step "[7/10] Validate managed search pool..." {
+    Invoke-Step "[7/11] Validate managed search pool..." {
         $searchPoolValidationCode = @(
             "from pathlib import Path"
             "from build_support import validate_bundle_managed_search_pool"
@@ -133,7 +133,17 @@ try {
         Invoke-PythonFromStdin $searchPoolValidationCode
     }
 
-    Invoke-Step "[8/10] Build frontend..." {
+    Invoke-Step "[8/11] Validate bundled Pandoc..." {
+        $pandocValidationCode = @(
+            "from pathlib import Path"
+            "from build_support import resolve_bundle_pandoc"
+            ""
+            "print(resolve_bundle_pandoc(Path('.')))"
+        ) -join "`n"
+        Invoke-PythonFromStdin $pandocValidationCode
+    }
+
+    Invoke-Step "[9/11] Build frontend..." {
         Push-Location (Join-Path $root "frontend")
         try {
             Invoke-CommandChecked -FilePath "npm" -Arguments @("install")
@@ -143,11 +153,11 @@ try {
         }
     }
 
-    Invoke-Step "[9/10] Install PyInstaller..." {
+    Invoke-Step "[10/11] Install PyInstaller..." {
         Invoke-CommandChecked -FilePath $venvPython -Arguments @("-m", "pip", "install", "pyinstaller")
     }
 
-    Invoke-Step "[10/10] Package application..." {
+    Invoke-Step "[11/11] Package application..." {
         Invoke-CommandChecked -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", "consulting_report.spec")
     }
 

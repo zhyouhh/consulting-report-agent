@@ -42,12 +42,10 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 
 ## 打包态 QA 接续（2026-05-13）
 
-正式待办仍以 `docs/current-worklist.md` 为唯一真值源；最近一次打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-13-packaged-s0-s7-qa.md`。当前接续优先级：
+正式待办仍以 `docs/current-worklist.md` 为唯一真值源；2026-05-13 打包态 S0-S7 QA 记录在 `docs/superpowers/handoffs/2026-05-13-packaged-s0-s7-qa.md`。
+2026-05-13 打包态前四个问题已收口：GUI 首屏 `settings === null` 崩溃、`quality_check.ps1` Windows PowerShell 编码、`export_draft.ps1` 包内 Pandoc、checkpoint API 越级推进。
 
-1. 先修打包态 GUI 启动崩溃：`settings.mode` null 导致首页 error boundary，用户无法进入产品
-2. 再修 `_internal\skill\scripts\quality_check.ps1` 在 Windows PowerShell 下的编码解析失败，并补打包态脚本 smoke
-3. 决策 `export_draft.ps1` 依赖系统 Pandoc 的交付形态：随包带 Pandoc，或改 Python 原生 `.docx` 导出
-4. 最后补 checkpoint endpoint 的越级推进校验，避免 API/自动化制造不一致阶段状态
+当前接续：图片附件按 `managed_model` 分流已推后到 UI 重构；UI 重构可单独立项；stage-advance-gates Bug G/H 低优先级复核。
 
 ## Skill 工作流（S0-S7）
 
@@ -129,7 +127,7 @@ build.bat                    # 等价于 powershell -File build.ps1
 
 - `docs/current-worklist.md` — 当前待解决/待验证事项的唯一真值源
 - `docs/debug-backlog.md` — 已归档的调试历史，**不再维护**当前待办
-- `docs/superpowers/plans/` 与 `docs/superpowers/specs/` — 正式变更的设计和落地计划，新功能改动前先去这里看最近的 spec
+- `docs/superpowers/plans/` 与 `docs/superpowers/specs/` — 正式变更的设计和落地计划，新功能改动前先去这里看相关 spec
 
 发现正式待办别在 `debug-backlog.md` 里加新条目，直接加到 `current-worklist.md`。
 

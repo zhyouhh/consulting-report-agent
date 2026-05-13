@@ -7,6 +7,7 @@ sys.path.insert(0, str(root))
 
 from build_support import (
     require_non_empty_bundle_text_file,
+    resolve_bundle_pandoc,
     validate_bundle_managed_search_pool,
 )
 
@@ -15,6 +16,7 @@ datas = [
     ('skill', 'skill'),
     ('frontend/dist', 'frontend/dist'),
 ]
+binaries = []
 managed_client_token_file = require_non_empty_bundle_text_file(
     root,
     'managed_client_token.txt',
@@ -25,11 +27,13 @@ managed_search_pool_file = validate_bundle_managed_search_pool(
     'managed_search_pool.json',
 )
 datas.append((str(managed_search_pool_file), '.'))
+pandoc_binary_file = resolve_bundle_pandoc(root)
+binaries.append((str(pandoc_binary_file), '.'))
 
 a = Analysis(
     ['app.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=[
         'uvicorn.logging',
