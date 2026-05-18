@@ -734,6 +734,16 @@ For non-streaming, include it in `ChatResponse.system_notices`. The false
 assistant text may still be persisted, but it must no longer be silent to the
 user; a future phase can replace the text with an automatic retry if needed.
 
+Add one route-level assertion in addition to the helper-level tests:
+
+```python
+def test_claim_mismatch_notice_reaches_chat_response_or_stream(self):
+    # Mock a one-turn assistant response that says "已进入资料采集阶段。"
+    # without any successful advance_stage tool call.
+    # Assert non-stream ChatResponse.system_notices or streaming type=="system_notice"
+    # contains category "stage_claim_without_checkpoint".
+```
+
 - [ ] **Step 5: Run GREEN tests**
 
 Run:
@@ -769,6 +779,8 @@ Expected:
 
 - `backend/` has no stage-ack execution path.
 - `skill/SKILL.md` has no stage-ack instruction.
+- Current user-visible docs and prompts do not tell the model to use
+  `StageAckParser`, `<stage-ack>`, or strong keyword checkpoint fallback.
 - Historical docs may mention stage-ack, but current worklist/AGENTS should describe advance_stage.
 
 - [ ] **Step 2: Update current docs**
