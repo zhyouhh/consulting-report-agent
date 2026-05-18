@@ -1567,6 +1567,16 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertNotIn("review_started_at", self.engine._read_raw_stage_checkpoints(project_dir))
 
+    def test_record_stage_checkpoint_rejects_review_start_when_s1_file_was_broken(self):
+        project_dir = self._make_project_past_s3()
+        self._write_report(project_dir, word_count=4300)
+        (project_dir / "plan" / "notes.md").write_text("# Notes\n\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "S1|notes.md"):
+            self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
+
+        self.assertNotIn("review_started_at", self.engine._read_raw_stage_checkpoints(project_dir))
+
     def test_record_delivery_archived_report_only_requires_review_passed(self):
         project_dir = self._make_project_past_s4()
         self._write_delivery_log(project_dir)

@@ -350,22 +350,63 @@ class SkillEngine:
         if not validator(project_path):
             raise ValueError(f"{reason} 缺少前置文件: {path}")
 
-    def _validate_stage_checkpoint_transition(self, project_path: Path, key: str) -> None:
-        if key not in self.STAGE_CHECKPOINT_KEYS:
-            raise ValueError(f"Unsupported stage checkpoint key: {key}")
-
-        checkpoints = self._load_stage_checkpoints(project_path)
-        targets = self._resolve_length_targets(project_path)
-
-        def require(condition: bool, message: str) -> None:
-            if not condition:
-                raise ValueError(message)
+    def _stage_one_completion_state(self, project_path: Path, checkpoints: dict[str, str] | None = None) -> dict:
+        checkpoints = checkpoints if checkpoints is not None else self._load_stage_checkpoints(project_path)
 
         project_overview_ready = self._is_effective_plan_file(project_path, "project-overview.md")
         notes_ready = self._has_effective_notes(project_path)
         references_ready = self._has_effective_references(project_path)
         outline_ready = self._has_effective_outline(project_path)
         research_plan_ready = self._has_effective_research_plan(project_path)
+        interview_done = "s0_interview_done_at" in checkpoints
+        outline_confirmed = "outline_confirmed_at" in checkpoints
+
+        missing_prerequisites = []
+        if not project_overview_ready:
+            missing_prerequisites.append("project-overview.md")
+        if not interview_done:
+            missing_prerequisites.append("S0 需求访谈")
+        if not notes_ready:
+            missing_prerequisites.append("notes.md")
+        if not references_ready:
+            missing_prerequisites.append("references.md")
+        if not outline_ready:
+            missing_prerequisites.append("outline.md")
+        if not research_plan_ready:
+            missing_prerequisites.append("research-plan.md")
+
+        missing_for_completion = list(missing_prerequisites)
+        if not outline_confirmed:
+            missing_for_completion.append("outline_confirmed_at")
+
+        return {
+            "project_overview_ready": project_overview_ready,
+            "notes_ready": notes_ready,
+            "references_ready": references_ready,
+            "outline_ready": outline_ready,
+            "research_plan_ready": research_plan_ready,
+            "interview_done": interview_done,
+            "outline_confirmed": outline_confirmed,
+            "stage_zero_complete": project_overview_ready and interview_done,
+            "stage_one_prerequisites_complete": not missing_prerequisites,
+            "stage_one_complete": not missing_for_completion,
+            "missing_prerequisites": missing_prerequisites,
+            "missing_for_completion": missing_for_completion,
+        }
+
+    def _validate_stage_checkpoint_transition(self, project_path: Path, key: str) -> None:
+        if key not in self.STAGE_CHECKPOINT_KEYS:
+            raise ValueError(f"Unsupported stage checkpoint key: {key}")
+
+        checkpoints = self._load_stage_checkpoints(project_path)
+        targets = self._resolve_length_targets(project_path)
+        stage_one_state = self._stage_one_completion_state(project_path, checkpoints)
+
+        def require(condition: bool, message: str) -> None:
+            if not condition:
+                raise ValueError(message)
+
+        project_overview_ready = stage_one_state["project_overview_ready"]
         data_ready = self._has_enough_data_log_sources(project_path, targets["data_log_min"])
         analysis_ready = self._has_enough_analysis_refs(project_path, targets["analysis_refs_min"])
         report_ready = self._has_effective_report_draft(project_path, min_words=targets["report_word_floor"])
@@ -375,21 +416,18 @@ class SkillEngine:
             return
 
         if key == "outline_confirmed_at":
-            require("s0_interview_done_at" in checkpoints, "需要先完成 S0 需求访谈，才能确认大纲。")
-            missing = []
-            if not notes_ready:
-                missing.append("notes.md")
-            if not references_ready:
-                missing.append("references.md")
-            if not outline_ready:
-                missing.append("outline.md")
-            if not research_plan_ready:
-                missing.append("research-plan.md")
+            missing = stage_one_state["missing_prerequisites"]
             require(not missing, f"需要先补齐 {', '.join(missing)}，才能确认大纲。")
             return
 
         if key == "review_started_at":
-            require("outline_confirmed_at" in checkpoints, "需要先确认大纲，才能开始审查。")
+            require(
+                stage_one_state["stage_one_complete"],
+                (
+                    "需要先保持 S1 研究设计完成状态"
+                    f"（缺少或失效: {', '.join(stage_one_state['missing_for_completion'])}），才能开始审查。"
+                ),
+            )
             require(data_ready, "需要先补齐 data-log.md 的有效来源条目，才能开始审查。")
             require(analysis_ready, "需要先补齐 analysis-notes.md 的 DL 引用，才能开始审查。")
             require(report_ready, "需要先形成达到字数门槛的有效正文，才能开始审查。")
@@ -1373,12 +1411,13 @@ class SkillEngine:
     def _infer_stage_state(self, project_path: Path) -> dict:
         targets = self._resolve_length_targets(project_path)
         checkpoints = self._load_stage_checkpoints(project_path)
+        stage_one_state = self._stage_one_completion_state(project_path, checkpoints)
 
-        project_overview_ready = self._is_effective_plan_file(project_path, "project-overview.md")
-        notes_ready = self._has_effective_notes(project_path)
-        references_ready = self._has_effective_references(project_path)
-        outline_ready = self._has_effective_outline(project_path)
-        research_plan_ready = self._has_effective_research_plan(project_path)
+        project_overview_ready = stage_one_state["project_overview_ready"]
+        notes_ready = stage_one_state["notes_ready"]
+        references_ready = stage_one_state["references_ready"]
+        outline_ready = stage_one_state["outline_ready"]
+        research_plan_ready = stage_one_state["research_plan_ready"]
 
         data_log_quality_ok = self._has_enough_data_log_sources(project_path, targets["data_log_min"])
         analysis_quality_ok = self._has_enough_analysis_refs(project_path, targets["analysis_refs_min"])
@@ -1389,22 +1428,15 @@ class SkillEngine:
         delivery_ready = self._has_effective_delivery_log(project_path)
         presentation_required = self._delivery_mode_requires_presentation(project_path)
 
-        interview_done = "s0_interview_done_at" in checkpoints
-        outline_confirmed = "outline_confirmed_at" in checkpoints
+        interview_done = stage_one_state["interview_done"]
+        outline_confirmed = stage_one_state["outline_confirmed"]
         review_started = "review_started_at" in checkpoints
         review_passed = "review_passed_at" in checkpoints
         presentation_done = "presentation_ready_at" in checkpoints
         delivery_archived = "delivery_archived_at" in checkpoints
 
-        stage_zero_complete = project_overview_ready and interview_done
-        stage_one_complete = (
-            stage_zero_complete
-            and notes_ready
-            and references_ready
-            and outline_ready
-            and research_plan_ready
-            and outline_confirmed
-        )
+        stage_zero_complete = stage_one_state["stage_zero_complete"]
+        stage_one_complete = stage_one_state["stage_one_complete"]
         stage_two_complete = stage_one_complete and data_log_quality_ok
         stage_three_complete = stage_two_complete and analysis_quality_ok
         stage_four_complete = stage_three_complete and report_ready and review_started

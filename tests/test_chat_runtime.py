@@ -9709,13 +9709,39 @@ class StageAckRegressionTests(ChatRuntimeTests):
 
     def test_stage_ack_review_started_at_advances_s4_to_s5(self):
         handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine._save_stage_checkpoint(
+            self.project_dir, "s0_interview_done_at",
+        )
         handler.skill_engine._save_stage_checkpoint(
             self.project_dir, "outline_confirmed_at",
+        )
+        data_lines = ["# Data log", ""]
+        for idx in range(1, 5):
+            data_lines.extend(
+                [
+                    f"### [DL-2026-{idx:02d}] Source {idx}",
+                    f"- URL: https://example.com/source-{idx}",
+                    f"- 摘要: 第 {idx} 条来源记录包含实质证据。",
+                    "",
+                ]
+            )
+        (self.project_dir / "plan" / "data-log.md").write_text(
+            "\n".join(data_lines).strip() + "\n",
+            encoding="utf-8",
+        )
+        (self.project_dir / "plan" / "analysis-notes.md").write_text(
+            "# Analysis notes\n\n"
+            "## Core insights\n\n"
+            "Conclusion: 当前方案已具备进入审查的主要判断。\n"
+            "Evidence: 依据 [DL-2026-01]、[DL-2026-02]、[DL-2026-03]。\n"
+            "Impact: 可以开始检查正文质量与证据一致性。\n",
+            encoding="utf-8",
         )
         draft_path = self.project_dir / "content" / "report_draft_v1.md"
         draft_path.parent.mkdir(parents=True, exist_ok=True)
         draft_path.write_text(
-            "# 报告草稿\n\n## 第一章\n\n" + ("有效正文" * 40) + "\n",
+            "# 报告草稿\n\n## 第一章\n\n" + ("有效正文" * 800) + "\n",
             encoding="utf-8",
         )
 
