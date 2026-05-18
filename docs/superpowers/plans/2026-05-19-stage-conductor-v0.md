@@ -359,6 +359,7 @@ git commit -m "feat(stage): add advance_stage tool"
 - Delete: `backend/stage_ack.py`
 - Modify/Delete: `tests/test_stage_ack.py`
 - Modify: `tests/test_chat_runtime.py`
+- Modify: `tests/test_tool_log.py`
 
 - [ ] **Step 1: Write replacement failing tests**
 
@@ -436,6 +437,23 @@ Delete `backend/stage_ack.py` and `tests/test_stage_ack.py`, or leave no runtime
 
 Delete or rewrite `StageAckFinalizePipelineTests`, `StageAckRegressionTests`, and stream tail stage-ack tests in `tests/test_chat_runtime.py`. Replacement tests should assert no side effect.
 
+Also update `tests/test_tool_log.py`: remove `InsertBeforeTailTagsTests` expectations
+that tool-log injection preserves or orders around `<stage-ack>` tail tags. If
+`ChatHandler._insert_before_tail_tags()` becomes unused after removing stage-ack
+tail handling, delete the helper and the class. If the helper is still used for
+tool-log placement, rewrite stage-ack cases as sanitizer assertions against the
+real helper:
+
+```python
+def test_insert_helper_does_not_preserve_legacy_stage_ack_tail(self):
+    content = "body\n\n<stage-ack>outline_confirmed_at</stage-ack>"
+    stripped = _strip_legacy_stage_ack(content)
+    result = self.handler._insert_before_tail_tags(stripped, "INJ")
+    self.assertNotIn("<stage-ack", result)
+```
+
+Do not introduce test-only production APIs for this assertion.
+
 Search:
 
 ```powershell
@@ -449,7 +467,7 @@ Expected after task: no runtime stage-ack execution references; only sanitizer t
 Run:
 
 ```powershell
-.venv\Scripts\python -m pytest tests/test_chat_runtime.py tests/test_stage_checkpoints.py -q
+.venv\Scripts\python -m pytest tests/test_chat_runtime.py tests/test_tool_log.py tests/test_stage_checkpoints.py -q
 ```
 
 Expected: pass.
@@ -457,7 +475,7 @@ Expected: pass.
 - [ ] **Step 7: Commit**
 
 ```powershell
-git add backend/chat.py tests/test_chat_runtime.py tests/test_stage_ack.py backend/stage_ack.py
+git add backend/chat.py tests/test_chat_runtime.py tests/test_tool_log.py tests/test_stage_ack.py backend/stage_ack.py
 git commit -m "fix(stage): retire stage-ack execution"
 ```
 
@@ -756,7 +774,7 @@ Update:
 Run:
 
 ```powershell
-.venv\Scripts\python -m pytest tests/test_skill_engine.py tests/test_chat_runtime.py tests/test_main_api.py tests/test_packaging_docs.py -q
+.venv\Scripts\python -m pytest tests/test_skill_engine.py tests/test_chat_runtime.py tests/test_tool_log.py tests/test_main_api.py tests/test_packaging_docs.py -q
 ```
 
 - [ ] **Step 4: Run frontend tests**
@@ -799,7 +817,7 @@ If no files changed, skip commit.
 Run:
 
 ```powershell
-.venv\Scripts\python -m pytest tests/test_skill_engine.py tests/test_chat_runtime.py tests/test_main_api.py tests/test_packaging_docs.py tests/test_packaging_spec.py tests/test_build_support.py -q
+.venv\Scripts\python -m pytest tests/test_skill_engine.py tests/test_chat_runtime.py tests/test_tool_log.py tests/test_main_api.py tests/test_packaging_docs.py tests/test_packaging_spec.py tests/test_build_support.py -q
 cd frontend
 node --test tests/
 npm run build
