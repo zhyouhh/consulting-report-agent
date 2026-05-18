@@ -314,35 +314,8 @@ class ChatHandler:
         "plan/data-log.md",
         "plan/analysis-notes.md",
     })
-    _STRONG_ADVANCE_KEYWORDS = {
-        "s0_interview_done_at": ["跳过访谈", "不用问了", "先写大纲吧", "够了开始吧", "直接开始"],
-        "outline_confirmed_at": ["确认大纲", "大纲没问题", "按这个大纲写", "就这个大纲", "就按这个版本"],
-        "review_started_at": ["开始审查", "进入审查", "可以审查了", "开始 review"],
-        "review_passed_at": ["审查通过", "审查没问题", "报告可以交付"],
-        "presentation_ready_at": ["演示准备好了", "演示准备完成", "PPT 完成", "讲稿完成"],
-        "delivery_archived_at": ["归档结束项目", "项目交付完成", "交付归档"],
-    }
-    _ROLLBACK_KEYWORDS = {
-        "outline_confirmed_at": ["大纲再改下", "大纲还要调整", "回去改大纲", "先别写了，大纲有问题"],
-        "review_started_at": ["还要改报告", "再改改报告", "回到写作阶段", "暂停审查"],
-        "review_passed_at": ["重新审查", "再看看", "审查没过"],
-        "presentation_ready_at": ["演示再改", "讲稿还要调整"],
-        "delivery_archived_at": ["还没归档", "撤回归档"],
-    }
-    _QUESTION_PATTERNS = [
-        re.compile(r"(吗|么)[?？]?$"),
-        re.compile(r"[?？]$"),
-    ]
     _NEGATION_RE = re.compile(r"(不要|别|没|不是|不想|不|并非|非要|非得)[^。！？!?\n]{0,9}$")
     _NEGATION_WINDOW_CHARS = 10
-    _STAGE_RANK = {
-        "s0_interview_done_at": 0,
-        "outline_confirmed_at": 1,
-        "review_started_at": 2,
-        "review_passed_at": 3,
-        "presentation_ready_at": 4,
-        "delivery_archived_at": 5,
-    }
 
     def __init__(self, settings: Settings, skill_engine: SkillEngine):
         self.settings = settings
@@ -3614,6 +3587,9 @@ class ChatHandler:
         return f"data:{mime_type};base64,{encoded}"
 
     def _get_tools(self):
+        return self._build_tools()
+
+    def _build_tools(self):
         """定义可用工具"""
         return [
             {
@@ -3671,6 +3647,37 @@ class ChatHandler:
                             },
                         },
                         "required": ["content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "advance_stage",
+                    "description": (
+                        "在用户明确确认阶段推进或回退时，记录/撤销阶段 checkpoint。"
+                        "不要仅凭用户普通关键词自动推进；必须给出本次动作的用户确认理由。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "checkpoint_key": {
+                                "type": "string",
+                                "enum": sorted(self.skill_engine.STAGE_CHECKPOINT_KEYS),
+                                "description": "要设置或清除的阶段 checkpoint key",
+                            },
+                            "action": {
+                                "type": "string",
+                                "enum": ["set", "clear"],
+                                "default": "set",
+                                "description": "set 表示推进/确认，clear 表示回退/撤销",
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "用户明确确认本次阶段变更的理由，不能为空",
+                            },
+                        },
+                        "required": ["checkpoint_key", "reason"],
                     },
                 },
             },
@@ -4080,6 +4087,17 @@ class ChatHandler:
                 else dict(raw_arguments or {})
             )
             if (
+                func_name == "advance_stage"
+                and args.get("checkpoint_key") == "s0_interview_done_at"
+                and args.get("action", "set") in (None, "set")
+            ):
+                return self._tool_advance_stage(
+                    project_id,
+                    checkpoint_key=args.get("checkpoint_key"),
+                    action=args.get("action", "set"),
+                    reason=args.get("reason"),
+                )
+            if (
                 self._turn_context.get("s0_confirmation_completed", True) is False
                 and func_name not in S0_FIRST_TURN_ALLOWED_TOOLS
             ):
@@ -4092,6 +4110,13 @@ class ChatHandler:
                         "等用户回答或明确跳过后，再使用其他工具。"
                     ),
                 }
+            if func_name == "advance_stage":
+                return self._tool_advance_stage(
+                    project_id,
+                    checkpoint_key=args.get("checkpoint_key"),
+                    action=args.get("action", "set"),
+                    reason=args.get("reason"),
+                )
             if func_name == "write_file":
                 return self._dispatch_write_file(
                     project_id,
@@ -4194,6 +4219,82 @@ class ChatHandler:
                     surface_to_user=False,
                 )
             return {"status": "error", "message": f"工具执行失败: {str(e)}"}
+
+    def _tool_advance_stage(
+        self,
+        project_id: str,
+        *,
+        checkpoint_key: object,
+        action: object = "set",
+        reason: object = None,
+    ) -> Dict:
+        if (
+            not isinstance(checkpoint_key, str)
+            or checkpoint_key not in self.skill_engine.STAGE_CHECKPOINT_KEYS
+        ):
+            return {
+                "status": "error",
+                "checkpoint_key": checkpoint_key,
+                "message": f"不支持的 checkpoint_key: {checkpoint_key}",
+            }
+
+        action_value = action if action is not None else "set"
+        if not isinstance(action_value, str) or action_value not in {"set", "clear"}:
+            return {
+                "status": "error",
+                "action": action_value,
+                "checkpoint_key": checkpoint_key,
+                "message": "advance_stage 的 action 只能是 set 或 clear。",
+            }
+
+        if not isinstance(reason, str) or not reason.strip():
+            return {
+                "status": "error",
+                "action": action_value,
+                "checkpoint_key": checkpoint_key,
+                "message": "advance_stage 的 reason 不能为空。",
+            }
+
+        if (
+            checkpoint_key == "s0_interview_done_at"
+            and action_value == "set"
+            and not self._has_prior_s0_assistant_turn(project_id)
+        ):
+            return {
+                "status": "error",
+                "action": action_value,
+                "checkpoint_key": checkpoint_key,
+                "message": "需要先完成一轮 S0 澄清提问，才能完成需求访谈。",
+            }
+
+        try:
+            engine_result = self.skill_engine.record_stage_checkpoint(
+                project_id,
+                checkpoint_key,
+                action_value,
+            )
+        except ValueError as exc:
+            return {
+                "status": "error",
+                "action": action_value,
+                "checkpoint_key": checkpoint_key,
+                "message": str(exc),
+            }
+
+        self._turn_context["checkpoint_event"] = {
+            "action": action_value,
+            "key": checkpoint_key,
+        }
+        stage_code = self.skill_engine.get_workspace_summary(project_id).get("stage_code")
+        action_label = "设置" if action_value == "set" else "清除"
+        return {
+            "status": "success",
+            "action": action_value,
+            "checkpoint_key": checkpoint_key,
+            "stage_code": stage_code,
+            "message": f"已{action_label}阶段 checkpoint: {checkpoint_key}",
+            "engine_result": engine_result,
+        }
 
     def _execute_append_report_draft(self, project_id: str, content: object) -> Dict:
         if not isinstance(content, str):
@@ -5651,16 +5752,12 @@ class ChatHandler:
             "read_file_paths": set(),
             "canonical_draft_mutations": [],
             "checkpoint_event": None,
-            "pending_stage_keyword": None,
             "s0_confirmation_completed": True,
             "s0_non_whitelist_tool_attempted": False,
             "user_message_text": "",                  # spec §3.3 NEW
             "canonical_obligation": {"intent": None, "expected_action": None},
             "read_file_snapshots": {},                # spec §3.7 NEW
         }
-
-    def _is_question(self, text: str) -> bool:
-        return any(pattern.search(text) for pattern in self._QUESTION_PATTERNS)
 
     def _phrase_hits(self, text: str, phrases: list[str]) -> bool:
         """Substring match with negation suppression. If any occurrence of the phrase
@@ -5679,9 +5776,9 @@ class ChatHandler:
         """Return True if the project's conversation history contains at
         least one role=='assistant' message.
 
-        Per spec §3 S0 soft gate: s0_interview_done_at strong keyword /
-        stage-ack tag only fires after the assistant has already delivered
-        at least one turn (typically the mandatory S0 clarification block).
+        Per spec §3 S0 soft gate: s0_interview_done_at through advance_stage /
+        stage-ack only fires after the assistant has already delivered at least
+        one turn (typically the mandatory S0 clarification block).
         Frontend-assembled welcome messages are role=user and don't count.
         Tool role also doesn't count.
         """
@@ -5692,43 +5789,6 @@ class ChatHandler:
         except Exception:
             return False
         return any(m.get("role") == "assistant" for m in conv)
-
-    def _detect_stage_keyword(
-        self,
-        user_message: str,
-        current_stage: str,
-        project_id: str | None = None,  # For Task I S0 soft gate
-    ) -> tuple[str, str] | None:
-        if not user_message:
-            return None
-        trimmed = user_message.strip()
-        if self._is_question(trimmed):
-            return None
-
-        rollback_hits = [
-            key for key, phrases in self._ROLLBACK_KEYWORDS.items()
-            if self._phrase_hits(trimmed, phrases)
-        ]
-        if rollback_hits:
-            key = max(rollback_hits, key=lambda k: self._STAGE_RANK.get(k, 0))
-            return ("clear", key)
-
-        advance_hits: list[str] = []
-        for key, phrases in self._STRONG_ADVANCE_KEYWORDS.items():
-            if self._phrase_hits(trimmed, phrases):
-                advance_hits.append(key)
-
-        if advance_hits:
-            key = max(advance_hits, key=lambda k: self._STAGE_RANK.get(k, 0))
-            # S0 soft gate: reject s0 set unless at least one assistant turn exists
-            if (
-                key == "s0_interview_done_at"
-                and not self._has_prior_s0_assistant_turn(project_id)
-            ):
-                return None
-            return ("set", key)
-
-        return None
 
     def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, object]:
         self._turn_context = self._new_turn_context(can_write_non_plan=False)
@@ -5750,33 +5810,6 @@ class ChatHandler:
             "intent": None if intent == "ambiguous" else intent,
             "expected_action": expected_action,
         }
-        project_path = self.skill_engine.get_project_path(project_id)
-        if project_path:
-            summary = self.skill_engine.get_workspace_summary(project_id)
-            current_stage = summary.get("stage_code", "S0")
-            detected = self._detect_stage_keyword(user_message, current_stage, project_id)
-            if detected:
-                action, key = detected
-                if action == "clear":
-                    try:
-                        self.skill_engine.record_stage_checkpoint(project_id, key, action)
-                    except ValueError as exc:
-                        notice = self.skill_engine.get_stage_checkpoint_prereq_notice(key)
-                        if notice:
-                            reason = str(exc) or notice["reason"]
-                            self._emit_system_notice_once(
-                                category="checkpoint_prereq_missing",
-                                path=None,
-                                reason=reason,
-                                user_action="请根据上方原因调整阶段或补齐前置条件后再推进。",
-                                surface_to_user=True,
-                            )
-                        else:
-                            raise exc
-                    else:
-                        self._turn_context["checkpoint_event"] = {"action": action, "key": key}
-                else:
-                    self._turn_context["pending_stage_keyword"] = (action, key)
         generic_non_plan_write_allowed = self._should_allow_generic_non_plan_write(project_id, user_message)
         self._turn_context["generic_non_plan_write_allowed"] = generic_non_plan_write_allowed
         self._turn_context["can_write_non_plan"] = (
@@ -6003,10 +6036,8 @@ class ChatHandler:
         # Step 1: parse
         stage_events = stage_parser.parse(assistant_message)
         executable_stage_events = [event for event in stage_events if event.executable]
-        pending = self._turn_context.get("pending_stage_keyword")
 
-        # Step 2: stage-ack side effects. Keep the project RLock and pending
-        # keyword fallback semantics from the pre-orchestrator finalizer.
+        # Step 2: stage-ack side effects.
         lock = _get_project_request_lock(project_id)
         with lock:
             for event in stage_events:
@@ -6018,29 +6049,8 @@ class ChatHandler:
                         event.ignored_reason,
                     )
 
-            if executable_stage_events:
-                self._turn_context["pending_stage_keyword"] = None
-                for event in stage_events:
-                    if event.executable:
-                        self._apply_stage_ack_event(project_id, event)
-            elif pending:
-                action, key = pending
-                self._turn_context["pending_stage_keyword"] = None
-                try:
-                    self.skill_engine.record_stage_checkpoint(project_id, key, action)
-                except ValueError as exc:
-                    notice = self.skill_engine.get_stage_checkpoint_prereq_notice(key)
-                    if notice:
-                        reason = str(exc) or notice["reason"]
-                        self._emit_system_notice_once(
-                            category="stage_keyword_prereq_missing",
-                            path=None,
-                            reason=reason,
-                            user_action="请根据上方原因调整阶段或补齐前置条件后再推进。",
-                            surface_to_user=True,
-                        )
-                else:
-                    self._turn_context["checkpoint_event"] = {"action": action, "key": key}
+            for event in executable_stage_events:
+                self._apply_stage_ack_event(project_id, event)
 
         # Step 3: strip control tags.
         visible_content = stage_parser.strip(assistant_message)
