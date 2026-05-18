@@ -366,7 +366,7 @@ async def set_checkpoint(project_id: str, name: str, action: str = "set"):
             detail=(
                 "s0_interview_done_at 不能通过 endpoint 直接 set："
                 "endpoint 层无对话上下文，无法执行 S0 对话级软门槛。"
-                "set 只能走 StageAckParser / strong 关键词软门槛 / schema migration。"
+                "set 只能走 advance_stage / schema migration。"
             ),
         )
     try:

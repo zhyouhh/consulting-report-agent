@@ -77,15 +77,13 @@ S0_FIRST_TURN_ALLOWED_TOOLS = frozenset({
     "web_search",
     "fetch_url",
 })
-_STAGE_ACK_MARKER = "<stage-ack"
-_TAIL_GUARD_MARKERS = (_STAGE_ACK_MARKER,)
 _CONVERSATION_STATE_LOCKS: dict[str, threading.RLock] = {}
 _CONVERSATION_STATE_LOCKS_GUARD = threading.Lock()
 _PROJECT_REQUEST_LOCKS: dict[str, threading.RLock] = {}
 _PROJECT_REQUEST_LOCKS_GUARD = threading.Lock()
 _SEARCH_ROUTER_SINGLETON: SearchRouter | None = None
 _SEARCH_ROUTER_GUARD = threading.Lock()
-TAIL_TAG_SCAN_RE = re.compile(
+_STAGE_ACK_STRIP_RE = re.compile(
     r'<stage-ack(?:\s+action="(?:set|clear)")?>[a-z_0-9]+</stage-ack>',
     re.IGNORECASE,
 )
@@ -96,6 +94,12 @@ TOOL_LOG_COMMENT_RE = re.compile(
 )
 
 
+def _strip_legacy_stage_ack(content: str) -> str:
+    if not content or "<stage-ack" not in content.lower():
+        return content
+    return re.sub(r"\n{3,}", "\n\n", _STAGE_ACK_STRIP_RE.sub("", content)).strip()
+
+
 def strip_tool_log_comments(content: str) -> str:
     return TOOL_LOG_COMMENT_RE.sub("", content).rstrip()
 
@@ -103,29 +107,23 @@ def strip_tool_log_comments(content: str) -> str:
 def stream_split_safe_tail(buffer: str) -> tuple[str, str]:
     """Split buffer into (safe_to_emit_now, held_until_stream_close).
 
-    Holds stage-ack control tags until the full assistant message can be parsed.
+    Holds legacy stage-ack residue until finalize can strip it from visible text.
     """
     if not buffer:
         return "", ""
 
-    # Rule 1: 找最早的 marker 出现位置
-    earliest_idx = -1
-    for marker in _TAIL_GUARD_MARKERS:
-        idx = buffer.lower().find(marker)
-        if idx != -1 and (earliest_idx == -1 or idx < earliest_idx):
-            earliest_idx = idx
-    if earliest_idx != -1:
-        return buffer[:earliest_idx], buffer[earliest_idx:]
+    marker = "<stage-ack"
+    marker_idx = buffer.lower().find(marker)
+    if marker_idx != -1:
+        return buffer[:marker_idx], buffer[marker_idx:]
 
-    # Rule 2: 末尾是 stage-ack marker 的前缀
-    for marker in _TAIL_GUARD_MARKERS:
-        marker_len = len(marker)
-        max_overlap = min(marker_len - 1, len(buffer))
-        for k in range(max_overlap, 0, -1):
-            if marker.startswith(buffer[-k:].lower()):
-                return buffer[:-k], buffer[-k:]
+    # 末尾可能正切在 marker 中间，先短暂 hold，避免半个 legacy tag 泄到前端。
+    marker_len = len(marker)
+    max_overlap = min(marker_len - 1, len(buffer))
+    for k in range(max_overlap, 0, -1):
+        if marker.startswith(buffer[-k:].lower()):
+            return buffer[:-k], buffer[-k:]
 
-    # Rule 3: 全部安全
     return buffer, ""
 
 
@@ -1312,37 +1310,8 @@ class ChatHandler:
             return content
         lines = [self._format_tool_pair_line(p) for p in pairs]
         block = "<!-- tool-log\n" + "\n".join(lines) + "\n-->"
-        return self._insert_before_tail_tags(content, block)
-
-    def _insert_before_tail_tags(self, content: str, block: str) -> str:
-        """Insert before tail tag block (stage-ack).
-        Uses TAIL_TAG_SCAN_RE module-level regex.
-        """
-        spans = [(m.start(), m.end()) for m in TAIL_TAG_SCAN_RE.finditer(content)]
-        if not spans:
-            sep = "\n\n" if content and not content.endswith("\n") else ""
-            return content + sep + block
-
-        last_pos = -1
-        i = 0
-        while i < len(content):
-            in_tag = False
-            for s, e in spans:
-                if s <= i < e:
-                    i = e
-                    in_tag = True
-                    break
-            if in_tag:
-                continue
-            if not content[i].isspace():
-                last_pos = i
-            i += 1
-        tail_anchor = last_pos + 1
-
-        before = content[:tail_anchor].rstrip()
-        after = content[tail_anchor:]
-        sep = "\n\n" if before else ""
-        return before + sep + block + "\n" + after.lstrip("\n")
+        sep = "\n\n" if content and not content.endswith("\n") else ""
+        return content + sep + block
 
     def _persist_successful_tool_result(
         self,
@@ -3181,9 +3150,10 @@ class ChatHandler:
         tool_calls,
         reasoning_content: str | None = None,
     ) -> Dict:
+        assistant_content = content if isinstance(content, str) else ("" if content is None else str(content))
         message = {
             "role": "assistant",
-            "content": content if isinstance(content, str) else ("" if content is None else str(content)),
+            "content": _strip_legacy_stage_ack(assistant_content),
             "tool_calls": [
                 self._serialize_tool_call_for_provider(tool_call)
                 for tool_call in (tool_calls or [])
@@ -3230,7 +3200,7 @@ class ChatHandler:
         conversation.append(self._to_provider_message(project_id, current_user_message, include_images=True))
         current_turn_start_index = len(conversation) - 1
         if current_turn_messages:
-            conversation.extend(current_turn_messages)
+            conversation.extend(self._strip_legacy_stage_ack_from_provider_messages(current_turn_messages))
         # v5: 合并相邻 user role（必须在 budget fit 之前）
         coalesced = self._coalesce_consecutive_user_messages(conversation)
 
@@ -3241,6 +3211,21 @@ class ChatHandler:
             len(coalesced),
         )
         return coalesced, new_current_turn_start_index
+
+    def _strip_legacy_stage_ack_from_provider_messages(self, messages: List[Dict]) -> List[Dict]:
+        sanitized = []
+        for message in messages:
+            if message.get("role") != "assistant":
+                sanitized.append(message)
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or "<stage-ack" not in content.lower():
+                sanitized.append(message)
+                continue
+            new_message = dict(message)
+            new_message["content"] = _strip_legacy_stage_ack(content)
+            sanitized.append(new_message)
+        return sanitized
 
     def _memory_items_from_state(
         self,
@@ -3517,6 +3502,7 @@ class ChatHandler:
             return None
         if role == "assistant":
             content = message.get("content", "") or ""
+            content = _strip_legacy_stage_ack(content)
             # v5: sanitize 历史 fallback 污染——这种 assistant 不喂回模型。
             if content.strip() in LEGACY_EMPTY_ASSISTANT_FALLBACKS:
                 return None
@@ -5336,8 +5322,6 @@ class ChatHandler:
 
     def _load_conversation(self, project_id: str) -> List[Dict]:
         """加载对话历史。仅持久化 user/assistant 显示消息。"""
-        from backend.stage_ack import StageAckParser
-
         project_path = self.skill_engine.get_project_path(project_id)
         if not project_path:
             return []
@@ -5357,14 +5341,13 @@ class ChatHandler:
                 "content": self._extract_message_text(message.get("content", "")),
                 "attached_material_ids": message.get("attached_material_ids", []),
             })
-        parser = StageAckParser()
         sanitized = []
         for message in normalized:
             role = message.get("role")
             content = message.get("content", "") or ""
             if role == "assistant" and "<stage-ack" in content.lower():
                 new_message = dict(message)
-                new_message["content"] = parser.strip(content)
+                new_message["content"] = _strip_legacy_stage_ack(content)
                 sanitized.append(new_message)
             else:
                 sanitized.append(message)
@@ -5778,8 +5761,8 @@ class ChatHandler:
         """Return True if the project's conversation history contains at
         least one role=='assistant' message.
 
-        Per spec §3 S0 soft gate: s0_interview_done_at through advance_stage /
-        stage-ack only fires after the assistant has already delivered at least
+        Per spec §3 S0 soft gate: s0_interview_done_at through advance_stage
+        only fires after the assistant has already delivered at least
         one turn (typically the mandatory S0 clarification block).
         Frontend-assembled welcome messages are role=user and don't count.
         Tool role also doesn't count.
@@ -6021,47 +6004,18 @@ class ChatHandler:
         *,
         user_message: str = "",
     ) -> str:
-        """统一编排器（spec §5.6 7 步顺序）：
-        1. parse stage-ack 控制 tag
-        2. 执行 stage-ack 副作用
-        3. strip 控制 tag → visible_content
-        4. 判空 → A3 (_finalize_empty_assistant_turn)
-        5. append tool-log
-        6. 持久化 history + save_conversation
+        """统一编排器：
+        1. strip legacy stage-ack residue → visible_content
+        2. 判空 → A3 (_finalize_empty_assistant_turn)
+        3. append tool-log
+        4. 持久化 history + save_conversation
         """
-        from backend.stage_ack import StageAckParser
-
         del user_message
 
-        stage_parser = StageAckParser()
+        had_legacy_stage_ack = "<stage-ack" in (assistant_message or "").lower()
+        visible_content = _strip_legacy_stage_ack(assistant_message)
 
-        # Step 1: parse
-        stage_events = stage_parser.parse(assistant_message)
-        executable_stage_events = [event for event in stage_events if event.executable]
-
-        # Step 2: stage-ack side effects. During the advance_stage migration,
-        # an explicit tool checkpoint event wins over legacy stage-ack tags in
-        # the same assistant turn; tags are still stripped below.
-        if not self._turn_context.get("checkpoint_event"):
-            lock = _get_project_request_lock(project_id)
-            with lock:
-                for event in stage_events:
-                    if not event.executable:
-                        logging.getLogger("backend.chat").warning(
-                            "stage-ack tag ignored: key=%s action=%s reason=%s",
-                            event.key,
-                            event.action,
-                            event.ignored_reason,
-                        )
-
-                for event in executable_stage_events:
-                    self._apply_stage_ack_event(project_id, event)
-
-        # Step 3: strip control tags.
-        visible_content = stage_parser.strip(assistant_message)
-        visible_content = visible_content.strip()
-
-        # Step 4: empty visible reply goes through A3 before any tool-log append.
+        # Empty visible reply goes through A3 before any tool-log append.
         if not visible_content:
             return self._finalize_empty_assistant_turn(
                 project_id,
@@ -6069,7 +6023,7 @@ class ChatHandler:
                 current_user_message,
                 diagnostic=(
                     "tag_strip_emptied"
-                    if stage_events
+                    if had_legacy_stage_ack
                     else "stream_truncated"
                 ),
             )
@@ -6098,48 +6052,6 @@ class ChatHandler:
         ])
         self._save_conversation(project_id, history)
         return persisted_content
-
-    def _apply_stage_ack_event(self, project_id: str, event) -> None:
-        if (
-            event.key == "s0_interview_done_at"
-            and event.action == "set"
-            and not self._has_prior_s0_assistant_turn(project_id)
-        ):
-            self._emit_system_notice_once(
-                category="s0_tag_soft_gate",
-                path=None,
-                reason=(
-                    "S0 阶段第一轮必须先对 seed 做一轮打包追问，"
-                    "再推进；本轮 tag 不执行。"
-                ),
-                user_action=(
-                    "请模型按 SKILL.md §S0 先发 3-5 个澄清问题，"
-                    "下一轮再发 tag。"
-                ),
-                surface_to_user=True,
-            )
-            return
-
-        try:
-            self.skill_engine.record_stage_checkpoint(
-                project_id, event.key, event.action
-            )
-        except ValueError as exc:
-            notice = self.skill_engine.get_stage_checkpoint_prereq_notice(event.key)
-            if notice:
-                reason = str(exc) or notice["reason"]
-                self._emit_system_notice_once(
-                    category="stage_ack_prereq_missing",
-                    path=None,
-                    reason=reason,
-                    user_action="请根据上方原因调整阶段或补齐前置条件后再推进。",
-                    surface_to_user=True,
-                )
-        else:
-            self._turn_context["checkpoint_event"] = {
-                "action": event.action,
-                "key": event.key,
-            }
 
     def _emit_system_notice_once(
         self,

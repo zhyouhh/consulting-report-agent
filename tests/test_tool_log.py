@@ -163,48 +163,6 @@ class AppendToolLogTests(unittest.TestCase):
             self.assertLessEqual(len(line), 120)
 
 
-class InsertBeforeTailTagsTests(unittest.TestCase):
-    def setUp(self):
-        self.handler = ChatHandler.__new__(ChatHandler)
-
-    def test_no_tail_tags_appends_at_end(self):
-        result = self.handler._insert_before_tail_tags("body text", "BLOCK")
-        self.assertTrue(result.endswith("BLOCK"))
-
-    def test_inserts_before_stage_ack_tail(self):
-        content = "body\n\n<stage-ack>outline_confirmed_at</stage-ack>"
-        result = self.handler._insert_before_tail_tags(content, "INJ")
-        inj_pos = result.find("INJ")
-        ack_pos = result.find("<stage-ack")
-        self.assertLess(inj_pos, ack_pos)
-
-    def test_draft_action_tail_is_plain_text_after_delete(self):
-        content = "body\n\n<draft-action>begin</draft-action>"
-        result = self.handler._insert_before_tail_tags(content, "INJ")
-        inj_pos = result.find("INJ")
-        tag_pos = result.find("<draft-action")
-        self.assertGreater(inj_pos, tag_pos)
-
-    def test_draft_action_replace_block_is_plain_text_after_delete(self):
-        content = "body\n\n<draft-action-replace>\n  <old>x</old>\n  <new>y</new>\n</draft-action-replace>"
-        result = self.handler._insert_before_tail_tags(content, "INJ")
-        inj_pos = result.find("INJ")
-        tag_pos = result.find("<draft-action-replace")
-        self.assertGreater(inj_pos, tag_pos)
-
-    def test_mixed_stage_ack_and_draft_action_only_holds_stage_ack(self):
-        content = "body\n\n<draft-action>begin</draft-action>\n<stage-ack>outline_confirmed_at</stage-ack>"
-        result = self.handler._insert_before_tail_tags(content, "INJ")
-        inj_pos = result.find("INJ")
-        self.assertGreater(inj_pos, result.find("<draft-action"))
-        self.assertLess(inj_pos, result.find("<stage-ack"))
-
-    def test_trailing_whitespace_preserved(self):
-        content = "body\n\n<stage-ack>outline_confirmed_at</stage-ack>\n\n"
-        result = self.handler._insert_before_tail_tags(content, "INJ")
-        self.assertIn("INJ", result)
-
-
 class StripToolLogCommentsTests(unittest.TestCase):
     def test_strips_well_formed_single_line(self):
         from backend.chat import strip_tool_log_comments
