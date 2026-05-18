@@ -4285,6 +4285,8 @@ class ChatHandler:
             "action": action_value,
             "key": checkpoint_key,
         }
+        if checkpoint_key == "s0_interview_done_at" and action_value == "set":
+            self._unlock_s0_confirmation_first_turn(project_id)
         stage_code = self.skill_engine.get_workspace_summary(project_id).get("stage_code")
         action_label = "设置" if action_value == "set" else "清除"
         return {

@@ -10206,6 +10206,53 @@ class S0FirstTurnUnlockTests(ChatRuntimeTests):
             False,
         )
 
+    def test_advance_stage_s0_set_unlocks_pending_conversation_state_after_finalize(self):
+        handler = self._make_handler_with_project()
+        self._set_s0_confirmation_pending(handler)
+        (self.project_dir / "conversation.json").write_text(
+            json.dumps(
+                [
+                    {"role": "user", "content": "我要做一个报告"},
+                    {"role": "assistant", "content": "请先补充目标读者和范围。"},
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "advance_stage",
+                json.dumps(
+                    {
+                        "checkpoint_key": "s0_interview_done_at",
+                        "action": "set",
+                        "reason": "用户已确认跳过继续访谈",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        self.assertEqual(result["status"], "success")
+
+        self._finalize_assistant_for_test(
+            handler,
+            "已完成需求访谈，进入下一步。",
+            current_turn_messages=[
+                self._assistant_tool_call_message("advance_stage", "call-advance"),
+                self._tool_result_message("call-advance", status="success"),
+            ],
+        )
+
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertIn("s0_interview_done_at", checkpoints)
+        self.assertIs(
+            handler._load_conversation_state(self.project_id)["s0_confirmation_completed"],
+            True,
+        )
+        next_turn_context = handler._build_turn_context(self.project_id, "继续")
+        self.assertIs(next_turn_context["s0_confirmation_completed"], True)
+
     def test_no_unlock_persists_false_for_writer_tool_without_existing_state(self):
         handler = self._make_handler_with_project()
         self._set_s0_confirmation_pending_without_sidecar(handler)
