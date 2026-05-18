@@ -17,7 +17,12 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from .chat import ChatHandler, LEGACY_EMPTY_ASSISTANT_FALLBACKS, strip_tool_log_comments
+from .chat import (
+    ChatHandler,
+    LEGACY_EMPTY_ASSISTANT_FALLBACKS,
+    _strip_legacy_stage_ack,
+    strip_tool_log_comments,
+)
 from .config import Settings, get_base_path, heal_stale_managed_model, load_settings, save_settings
 from .context_policy import clamp_custom_context_limit_override
 from .models import ChatRequest, ChatResponse, ProjectInfo
@@ -395,7 +400,8 @@ async def get_conversation(project_id: str):
             raw = m.get("content") or ""
             if raw.strip() in LEGACY_EMPTY_ASSISTANT_FALLBACKS:
                 continue
-            sanitized.append({**m, "content": strip_tool_log_comments(raw)})
+            cleaned = strip_tool_log_comments(_strip_legacy_stage_ack(raw))
+            sanitized.append({**m, "content": cleaned})
         else:
             sanitized.append(m)
     return {"messages": sanitized}

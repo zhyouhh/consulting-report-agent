@@ -653,6 +653,35 @@ class GetConversationSanitizeTests(unittest.TestCase):
         self.assertNotIn("<!-- tool-log", assistant_msg["content"])
         self.assertIn("Real reply", assistant_msg["content"])
 
+    def test_get_conversation_strips_legacy_stage_ack_from_assistants(self):
+        self._write_conversation([
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "Real reply.\n<stage-ack>outline_confirmed_at</stage-ack>\n",
+            },
+        ])
+
+        resp = self.client.get("/api/projects/demo/conversation")
+        data = resp.json()
+
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        self.assertNotIn("<stage-ack", assistant_msg["content"])
+        self.assertEqual(assistant_msg["content"], "Real reply.")
+
+    def test_get_conversation_user_role_preserves_legacy_stage_ack_text(self):
+        self._write_conversation([
+            {
+                "role": "user",
+                "content": "请解释 <stage-ack>outline_confirmed_at</stage-ack>",
+            },
+        ])
+
+        resp = self.client.get("/api/projects/demo/conversation")
+        data = resp.json()
+
+        self.assertIn("<stage-ack>", data["messages"][0]["content"])
+
     def test_get_conversation_user_role_unchanged_even_with_tool_log_text(self):
         self._write_conversation([
             {"role": "user", "content": "see <!-- tool-log\n--> in my message"},
