@@ -8828,6 +8828,40 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
             {"action": "set", "key": "review_started_at"},
         )
 
+    def test_stage_ack_side_effect_skipped_when_advance_stage_already_recorded_event(self):
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        self._write_effective_outline()
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "advance_stage",
+                json.dumps(
+                    {
+                        "checkpoint_key": "outline_confirmed_at",
+                        "action": "set",
+                        "reason": "用户明确确认大纲",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        self.assertEqual(result["status"], "success")
+
+        final = self._finalize_assistant_for_test(
+            handler,
+            "已确认。\n<stage-ack action=\"clear\">outline_confirmed_at</stage-ack>\n",
+        )
+
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertNotIn("<stage-ack", final)
+        self.assertIn("outline_confirmed_at", checkpoints)
+        self.assertEqual(
+            handler._turn_context["checkpoint_event"],
+            {"action": "set", "key": "outline_confirmed_at"},
+        )
+
     def test_stage_ack_failure_notice_uses_transition_error_reason(self):
         handler = self._make_handler_with_project()
         self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})

@@ -6037,20 +6037,23 @@ class ChatHandler:
         stage_events = stage_parser.parse(assistant_message)
         executable_stage_events = [event for event in stage_events if event.executable]
 
-        # Step 2: stage-ack side effects.
-        lock = _get_project_request_lock(project_id)
-        with lock:
-            for event in stage_events:
-                if not event.executable:
-                    logging.getLogger("backend.chat").warning(
-                        "stage-ack tag ignored: key=%s action=%s reason=%s",
-                        event.key,
-                        event.action,
-                        event.ignored_reason,
-                    )
+        # Step 2: stage-ack side effects. During the advance_stage migration,
+        # an explicit tool checkpoint event wins over legacy stage-ack tags in
+        # the same assistant turn; tags are still stripped below.
+        if not self._turn_context.get("checkpoint_event"):
+            lock = _get_project_request_lock(project_id)
+            with lock:
+                for event in stage_events:
+                    if not event.executable:
+                        logging.getLogger("backend.chat").warning(
+                            "stage-ack tag ignored: key=%s action=%s reason=%s",
+                            event.key,
+                            event.action,
+                            event.ignored_reason,
+                        )
 
-            for event in executable_stage_events:
-                self._apply_stage_ack_event(project_id, event)
+                for event in executable_stage_events:
+                    self._apply_stage_ack_event(project_id, event)
 
         # Step 3: strip control tags.
         visible_content = stage_parser.strip(assistant_message)
