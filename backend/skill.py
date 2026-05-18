@@ -394,6 +394,129 @@ class SkillEngine:
             "missing_for_completion": missing_for_completion,
         }
 
+    def _stage_four_completion_state(
+        self,
+        project_path: Path,
+        checkpoints: dict[str, str] | None = None,
+        targets: dict | None = None,
+        stage_one_state: dict | None = None,
+    ) -> dict:
+        checkpoints = checkpoints if checkpoints is not None else self._load_stage_checkpoints(project_path)
+        targets = targets if targets is not None else self._resolve_length_targets(project_path)
+        stage_one_state = stage_one_state or self._stage_one_completion_state(project_path, checkpoints)
+
+        data_ready = self._has_enough_data_log_sources(project_path, targets["data_log_min"])
+        analysis_ready = self._has_enough_analysis_refs(project_path, targets["analysis_refs_min"])
+        report_ready = self._has_effective_report_draft(project_path, min_words=targets["report_word_floor"])
+        review_started = "review_started_at" in checkpoints
+
+        missing_for_review_start = list(stage_one_state["missing_for_completion"])
+        if not data_ready:
+            missing_for_review_start.append("data-log.md")
+        if not analysis_ready:
+            missing_for_review_start.append("analysis-notes.md")
+        if not report_ready:
+            missing_for_review_start.append(self.REPORT_DRAFT_PATH)
+
+        missing_for_stage_four = list(missing_for_review_start)
+        if not review_started:
+            missing_for_stage_four.append("review_started_at")
+
+        stage_two_complete = stage_one_state["stage_one_complete"] and data_ready
+        stage_three_complete = stage_two_complete and analysis_ready
+
+        return {
+            "data_log_quality_ok": data_ready,
+            "analysis_quality_ok": analysis_ready,
+            "report_ready": report_ready,
+            "review_started": review_started,
+            "stage_two_complete": stage_two_complete,
+            "stage_three_complete": stage_three_complete,
+            "review_start_prerequisites_complete": not missing_for_review_start,
+            "stage_four_complete": not missing_for_stage_four,
+            "missing_for_review_start": missing_for_review_start,
+            "missing_for_stage_four": missing_for_stage_four,
+        }
+
+    def _stage_five_completion_state(
+        self,
+        project_path: Path,
+        checkpoints: dict[str, str] | None = None,
+        targets: dict | None = None,
+        stage_one_state: dict | None = None,
+        stage_four_state: dict | None = None,
+    ) -> dict:
+        checkpoints = checkpoints if checkpoints is not None else self._load_stage_checkpoints(project_path)
+        targets = targets if targets is not None else self._resolve_length_targets(project_path)
+        stage_one_state = stage_one_state or self._stage_one_completion_state(project_path, checkpoints)
+        stage_four_state = stage_four_state or self._stage_four_completion_state(
+            project_path, checkpoints, targets, stage_one_state
+        )
+
+        review_checklist_ready = self._has_effective_review_checklist(project_path)
+        review_passed = "review_passed_at" in checkpoints
+
+        missing_for_review_pass = list(stage_four_state["missing_for_stage_four"])
+        if not review_checklist_ready:
+            missing_for_review_pass.append("review-checklist.md")
+
+        missing_for_stage_five = list(missing_for_review_pass)
+        if not review_passed:
+            missing_for_stage_five.append("review_passed_at")
+
+        return {
+            "review_checklist_ready": review_checklist_ready,
+            "review_passed": review_passed,
+            "review_pass_prerequisites_complete": not missing_for_review_pass,
+            "stage_five_complete": not missing_for_stage_five,
+            "missing_for_review_pass": missing_for_review_pass,
+            "missing_for_stage_five": missing_for_stage_five,
+        }
+
+    def _stage_six_completion_state(
+        self,
+        project_path: Path,
+        checkpoints: dict[str, str] | None = None,
+        targets: dict | None = None,
+        stage_one_state: dict | None = None,
+        stage_four_state: dict | None = None,
+        stage_five_state: dict | None = None,
+    ) -> dict:
+        checkpoints = checkpoints if checkpoints is not None else self._load_stage_checkpoints(project_path)
+        targets = targets if targets is not None else self._resolve_length_targets(project_path)
+        stage_one_state = stage_one_state or self._stage_one_completion_state(project_path, checkpoints)
+        stage_four_state = stage_four_state or self._stage_four_completion_state(
+            project_path, checkpoints, targets, stage_one_state
+        )
+        stage_five_state = stage_five_state or self._stage_five_completion_state(
+            project_path, checkpoints, targets, stage_one_state, stage_four_state
+        )
+
+        presentation_required = self._delivery_mode_requires_presentation(project_path)
+        presentation_ready = self._has_effective_presentation_plan(project_path)
+        presentation_done = "presentation_ready_at" in checkpoints
+
+        missing_for_presentation_ready = list(stage_five_state["missing_for_stage_five"])
+        if not presentation_ready:
+            missing_for_presentation_ready.append("presentation-plan.md")
+
+        missing_for_stage_six = list(missing_for_presentation_ready)
+        if presentation_required and not presentation_done:
+            missing_for_stage_six.append("presentation_ready_at")
+
+        return {
+            "presentation_required": presentation_required,
+            "presentation_ready": presentation_ready,
+            "presentation_done": presentation_done,
+            "presentation_ready_prerequisites_complete": presentation_required and not missing_for_presentation_ready,
+            "stage_six_complete": (
+                stage_five_state["stage_five_complete"]
+                and ((presentation_ready and presentation_done) if presentation_required else True)
+            ),
+            "missing_for_presentation_ready": missing_for_presentation_ready,
+            "missing_for_stage_six": missing_for_stage_six,
+        }
+
     def _validate_stage_checkpoint_transition(self, project_path: Path, key: str) -> None:
         if key not in self.STAGE_CHECKPOINT_KEYS:
             raise ValueError(f"Unsupported stage checkpoint key: {key}")
@@ -401,15 +524,19 @@ class SkillEngine:
         checkpoints = self._load_stage_checkpoints(project_path)
         targets = self._resolve_length_targets(project_path)
         stage_one_state = self._stage_one_completion_state(project_path, checkpoints)
+        stage_four_state = self._stage_four_completion_state(project_path, checkpoints, targets, stage_one_state)
+        stage_five_state = self._stage_five_completion_state(
+            project_path, checkpoints, targets, stage_one_state, stage_four_state
+        )
+        stage_six_state = self._stage_six_completion_state(
+            project_path, checkpoints, targets, stage_one_state, stage_four_state, stage_five_state
+        )
 
         def require(condition: bool, message: str) -> None:
             if not condition:
                 raise ValueError(message)
 
         project_overview_ready = stage_one_state["project_overview_ready"]
-        data_ready = self._has_enough_data_log_sources(project_path, targets["data_log_min"])
-        analysis_ready = self._has_enough_analysis_refs(project_path, targets["analysis_refs_min"])
-        report_ready = self._has_effective_report_draft(project_path, min_words=targets["report_word_floor"])
 
         if key == "s0_interview_done_at":
             require(project_overview_ready, "需要先创建有效 project-overview.md，才能完成需求访谈。")
@@ -421,40 +548,27 @@ class SkillEngine:
             return
 
         if key == "review_started_at":
-            require(
-                stage_one_state["stage_one_complete"],
-                (
-                    "需要先保持 S1 研究设计完成状态"
-                    f"（缺少或失效: {', '.join(stage_one_state['missing_for_completion'])}），才能开始审查。"
-                ),
-            )
-            require(data_ready, "需要先补齐 data-log.md 的有效来源条目，才能开始审查。")
-            require(analysis_ready, "需要先补齐 analysis-notes.md 的 DL 引用，才能开始审查。")
-            require(report_ready, "需要先形成达到字数门槛的有效正文，才能开始审查。")
+            missing = stage_four_state["missing_for_review_start"]
+            require(not missing, f"需要先补齐 {', '.join(missing)}，才能开始审查。")
             return
 
         if key == "review_passed_at":
-            require("review_started_at" in checkpoints, "需要先进入质量审查，才能标记审查通过。")
-            require(
-                self._has_effective_review_checklist(project_path),
-                "需要先完成有效 review-checklist.md，才能标记审查通过。",
-            )
+            missing = stage_five_state["missing_for_review_pass"]
+            require(not missing, f"需要先补齐 {', '.join(missing)}，才能标记审查通过。")
             return
 
         if key == "presentation_ready_at":
-            require("review_passed_at" in checkpoints, "需要先审查通过，才能标记演示准备完成。")
-            require(self._delivery_mode_requires_presentation(project_path), "仅报告项目不需要演示准备阶段。")
-            require(
-                self._has_effective_presentation_plan(project_path),
-                "需要先完成 presentation-plan.md，才能标记演示准备完成。",
-            )
+            require(stage_six_state["presentation_required"], "仅报告项目不需要演示准备阶段。")
+            missing = stage_six_state["missing_for_presentation_ready"]
+            require(not missing, f"需要先补齐 {', '.join(missing)}，才能标记演示准备完成。")
             return
 
         if key == "delivery_archived_at":
-            if self._delivery_mode_requires_presentation(project_path):
-                require("presentation_ready_at" in checkpoints, "需要先完成演示准备，才能归档。")
+            if stage_six_state["presentation_required"]:
+                missing = stage_six_state["missing_for_stage_six"]
             else:
-                require("review_passed_at" in checkpoints, "需要先审查通过，才能归档。")
+                missing = stage_five_state["missing_for_stage_five"]
+            require(not missing, f"需要先补齐 {', '.join(missing)}，才能归档。")
             require(self._has_effective_delivery_log(project_path), "需要先完成 delivery-log.md，才能归档。")
 
     def _resolve_length_targets(self, project_path):
@@ -1412,6 +1526,13 @@ class SkillEngine:
         targets = self._resolve_length_targets(project_path)
         checkpoints = self._load_stage_checkpoints(project_path)
         stage_one_state = self._stage_one_completion_state(project_path, checkpoints)
+        stage_four_state = self._stage_four_completion_state(project_path, checkpoints, targets, stage_one_state)
+        stage_five_state = self._stage_five_completion_state(
+            project_path, checkpoints, targets, stage_one_state, stage_four_state
+        )
+        stage_six_state = self._stage_six_completion_state(
+            project_path, checkpoints, targets, stage_one_state, stage_four_state, stage_five_state
+        )
 
         project_overview_ready = stage_one_state["project_overview_ready"]
         notes_ready = stage_one_state["notes_ready"]
@@ -1419,31 +1540,28 @@ class SkillEngine:
         outline_ready = stage_one_state["outline_ready"]
         research_plan_ready = stage_one_state["research_plan_ready"]
 
-        data_log_quality_ok = self._has_enough_data_log_sources(project_path, targets["data_log_min"])
-        analysis_quality_ok = self._has_enough_analysis_refs(project_path, targets["analysis_refs_min"])
-
-        report_ready = self._has_effective_report_draft(project_path, min_words=targets["report_word_floor"])
-        review_checklist_ready = self._has_effective_review_checklist(project_path)
-        presentation_ready = self._has_effective_presentation_plan(project_path)
+        data_log_quality_ok = stage_four_state["data_log_quality_ok"]
+        analysis_quality_ok = stage_four_state["analysis_quality_ok"]
+        report_ready = stage_four_state["report_ready"]
+        review_checklist_ready = stage_five_state["review_checklist_ready"]
+        presentation_ready = stage_six_state["presentation_ready"]
         delivery_ready = self._has_effective_delivery_log(project_path)
-        presentation_required = self._delivery_mode_requires_presentation(project_path)
+        presentation_required = stage_six_state["presentation_required"]
 
         interview_done = stage_one_state["interview_done"]
         outline_confirmed = stage_one_state["outline_confirmed"]
-        review_started = "review_started_at" in checkpoints
-        review_passed = "review_passed_at" in checkpoints
-        presentation_done = "presentation_ready_at" in checkpoints
+        review_started = stage_four_state["review_started"]
+        review_passed = stage_five_state["review_passed"]
+        presentation_done = stage_six_state["presentation_done"]
         delivery_archived = "delivery_archived_at" in checkpoints
 
         stage_zero_complete = stage_one_state["stage_zero_complete"]
         stage_one_complete = stage_one_state["stage_one_complete"]
-        stage_two_complete = stage_one_complete and data_log_quality_ok
-        stage_three_complete = stage_two_complete and analysis_quality_ok
-        stage_four_complete = stage_three_complete and report_ready and review_started
-        stage_five_complete = stage_four_complete and review_checklist_ready and review_passed
-        stage_six_complete = stage_five_complete and (
-            (presentation_ready and presentation_done) if presentation_required else True
-        )
+        stage_two_complete = stage_four_state["stage_two_complete"]
+        stage_three_complete = stage_four_state["stage_three_complete"]
+        stage_four_complete = stage_four_state["stage_four_complete"]
+        stage_five_complete = stage_five_state["stage_five_complete"]
+        stage_six_complete = stage_six_state["stage_six_complete"]
         stage_seven_complete = stage_six_complete and delivery_ready and delivery_archived
 
         if not stage_zero_complete:

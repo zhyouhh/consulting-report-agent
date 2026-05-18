@@ -5768,7 +5768,7 @@ class ChatHandler:
                                 category="checkpoint_prereq_missing",
                                 path=None,
                                 reason=reason,
-                                user_action="请先补齐阶段前置文件后再推进阶段。",
+                                user_action="请根据上方原因调整阶段或补齐前置条件后再推进。",
                                 surface_to_user=True,
                             )
                         else:
@@ -6036,7 +6036,7 @@ class ChatHandler:
                             category="stage_keyword_prereq_missing",
                             path=None,
                             reason=reason,
-                            user_action="请先补齐阶段前置文件后再推进阶段。",
+                            user_action="请根据上方原因调整阶段或补齐前置条件后再推进。",
                             surface_to_user=True,
                         )
                 else:
@@ -6117,7 +6117,7 @@ class ChatHandler:
                     category="stage_ack_prereq_missing",
                     path=None,
                     reason=reason,
-                    user_action="请先补齐阶段前置文件后再推进阶段。",
+                    user_action="请根据上方原因调整阶段或补齐前置条件后再推进。",
                     surface_to_user=True,
                 )
         else:

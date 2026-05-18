@@ -8004,7 +8004,7 @@ class ChatRuntimeTests(unittest.TestCase):
                     "category": "stage_keyword_prereq_missing",
                     "path": None,
                     "reason": "需要先补齐 notes.md, references.md, outline.md, research-plan.md，才能确认大纲。",
-                    "user_action": "请先补齐阶段前置文件后再推进阶段。",
+                    "user_action": "请根据上方原因调整阶段或补齐前置条件后再推进。",
                     "surface_to_user": True,
                 }
             ],
@@ -8897,7 +8897,7 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         self.assertIn("research-plan.md", notices[0]["reason"])
         self.assertNotIn("需要先生成有效报告大纲", notices[0]["reason"])
         self.assertIsNone(notices[0]["path"])
-        self.assertEqual(notices[0]["user_action"], "请先补齐阶段前置文件后再推进阶段。")
+        self.assertEqual(notices[0]["user_action"], "请根据上方原因调整阶段或补齐前置条件后再推进。")
 
     def test_user_message_tag_not_parsed_by_finalize(self):
         # Finalize operates on assistant content only; user tag is never

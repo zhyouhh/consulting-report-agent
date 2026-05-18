@@ -168,7 +168,7 @@ class SkillEngineTests(unittest.TestCase):
 
     def _make_project_past_outline_confirm(self) -> Path:
         project_dir = self._make_project_with_all_s1_files()
-        self.engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
         return project_dir
 
     def _make_project_past_s3(self) -> Path:
@@ -184,15 +184,9 @@ class SkillEngineTests(unittest.TestCase):
 
     def _make_project_past_s5(self) -> Path:
         project_dir = self._make_project_past_s4()
-        (project_dir / "plan" / "review-checklist.md").write_text(
-            "# 审查清单\n\n"
-            "- [x] 事实与数据来源已核对\n"
-            "- [x] 关键结论与证据一致\n"
-            "- [x] 结构逻辑完整\n",
-            encoding="utf-8",
-        )
-        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
-        self.engine._save_stage_checkpoint(project_dir, "review_passed_at")
+        self._write_review_checklist(project_dir)
+        self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
+        self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
         return project_dir
 
     def _write_data_log_with_n_sources(self, project_dir: Path, n: int):
@@ -249,6 +243,16 @@ class SkillEngineTests(unittest.TestCase):
             "- [x] Facts and sources checked\n"
             "- [x] Conclusions align with evidence\n"
             "- [x] Structure and logic reviewed\n",
+            encoding="utf-8",
+        )
+
+    def _write_presentation_plan(self, project_dir: Path):
+        (project_dir / "plan" / "presentation-plan.md").write_text(
+            "# Presentation plan\n\n"
+            "## 演示结构\n"
+            "- 将报告结论转化为董事会演示 narrative。\n"
+            "## 讲稿安排\n"
+            "- 准备 Q&A 与关键页讲稿。\n",
             encoding="utf-8",
         )
 
@@ -1579,17 +1583,34 @@ class SkillEngineTests(unittest.TestCase):
 
     def test_record_delivery_archived_report_only_requires_review_passed(self):
         project_dir = self._make_project_past_s4()
+        self._write_review_checklist(project_dir)
+        self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
         self._write_delivery_log(project_dir)
 
         with self.assertRaisesRegex(ValueError, "审查通过|review_passed"):
             self.engine.record_stage_checkpoint("demo", "delivery_archived_at", "set")
 
-        self.engine._save_stage_checkpoint(project_dir, "review_passed_at")
+        self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
 
         result = self.engine.record_stage_checkpoint("demo", "delivery_archived_at", "set")
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("delivery_archived_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_record_delivery_archived_rejects_when_review_predecessor_chain_breaks(self):
+        project_dir = self._make_project_past_s5()
+        self._write_delivery_log(project_dir)
+        self._write_report(project_dir, word_count=10)
+
+        state = self.engine._infer_stage_state(project_dir)
+        self.assertEqual(state["stage_code"], "S4")
+
+        with self.assertRaisesRegex(ValueError, "正文|report_draft_v1.md"):
+            self.engine.record_stage_checkpoint("demo", "delivery_archived_at", "set")
+
+        checkpoints = self.engine._load_stage_checkpoints(project_dir)
+        self.assertNotIn("delivery_archived_at", checkpoints)
+        self.assertEqual(self.engine._infer_stage_state(project_dir)["stage_code"], "S4")
 
     def test_record_delivery_archived_presentation_mode_requires_presentation_ready(self):
         project_dir = self._make_project_past_s5()
@@ -1604,7 +1625,8 @@ class SkillEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "演示准备|presentation_ready"):
             self.engine.record_stage_checkpoint("demo", "delivery_archived_at", "set")
 
-        self.engine._save_stage_checkpoint(project_dir, "presentation_ready_at")
+        self._write_presentation_plan(project_dir)
+        self.engine.record_stage_checkpoint("demo", "presentation_ready_at", "set")
 
         result = self.engine.record_stage_checkpoint("demo", "delivery_archived_at", "set")
 
