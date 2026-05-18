@@ -634,7 +634,10 @@ def test_claim_stage_advance_without_advance_stage_gets_corrective_notice(self):
     handler._turn_context["stage_code_before_turn"] = "S1"
     result = self._finalize_assistant_for_test(handler, "已进入资料采集阶段。")
     notices = handler._turn_context.get("pending_system_notices", [])
-    self.assertTrue(any("advance_stage" in n["reason"] or "advance_stage" in n["user_action"] for n in notices))
+    matching = [n for n in notices if n["category"] == "stage_claim_without_checkpoint"]
+    self.assertEqual(len(matching), 1)
+    self.assertTrue(matching[0]["surface_to_user"])
+    self.assertIn("advance_stage", matching[0]["user_action"])
 
 def test_claim_guard_does_not_fire_when_stage_auto_advances(self):
     handler = self._make_handler_with_project()
@@ -717,13 +720,19 @@ def _maybe_emit_stage_claim_mismatch_notice(self, project_id: str, visible_conte
         path=None,
         reason="助手声称推进阶段，但本轮没有成功调用 advance_stage。",
         user_action="请先调用 advance_stage；如果阶段未推进，请明确说明当前仍停留在原阶段。",
-        surface_to_user=False,
+        surface_to_user=True,
     )
 ```
 
 Call after visible content is stripped and before persistence. The guard must
 not fire when S2/S3 legitimately auto-advance because file quality thresholds
 changed during the turn.
+
+For streaming, make sure this user-visible `system_notice` is emitted through
+the existing notice drain before the final assistant turn is considered done.
+For non-streaming, include it in `ChatResponse.system_notices`. The false
+assistant text may still be persisted, but it must no longer be silent to the
+user; a future phase can replace the text with an automatic retry if needed.
 
 - [ ] **Step 5: Run GREEN tests**
 
