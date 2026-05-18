@@ -7863,6 +7863,7 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine.record_stage_checkpoint(self.project_id, "s0_interview_done_at", "set")
 
         turn_context = handler._build_turn_context(self.project_id, "确认大纲，开始写")
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
@@ -7881,6 +7882,7 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine.record_stage_checkpoint(self.project_id, "s0_interview_done_at", "set")
 
         handler._turn_context = handler._build_turn_context(self.project_id, "确认大纲")
 
@@ -8000,9 +8002,9 @@ class ChatRuntimeTests(unittest.TestCase):
                 {
                     "type": "system_notice",
                     "category": "stage_keyword_prereq_missing",
-                    "path": "plan/outline.md",
+                    "path": None,
                     "reason": "需要先补齐 notes.md, references.md, outline.md, research-plan.md，才能确认大纲。",
-                    "user_action": "请先让助手补齐 `plan/outline.md`，再确认大纲。",
+                    "user_action": "请先补齐阶段前置文件后再推进阶段。",
                     "surface_to_user": True,
                 }
             ],
@@ -8013,6 +8015,7 @@ class ChatRuntimeTests(unittest.TestCase):
         del mock_openai
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine.record_stage_checkpoint(self.project_id, "s0_interview_done_at", "set")
 
         turn_context = handler._build_turn_context(self.project_id, "确认大纲")
 
@@ -8145,6 +8148,7 @@ class AssistantTurnOrchestratorTests(ChatRuntimeTests):
         checkpoint 落戳 + 走 A3 不持久化空文本"""
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine.record_stage_checkpoint(self.project_id, "s0_interview_done_at", "set")
         history = []
         current_user = {"role": "user", "content": "确认大纲", "attached_material_ids": []}
         assistant_msg = "<stage-ack>outline_confirmed_at</stage-ack>"
@@ -8892,6 +8896,8 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         self.assertIn("notes.md", notices[0]["reason"])
         self.assertIn("research-plan.md", notices[0]["reason"])
         self.assertNotIn("需要先生成有效报告大纲", notices[0]["reason"])
+        self.assertIsNone(notices[0]["path"])
+        self.assertEqual(notices[0]["user_action"], "请先补齐阶段前置文件后再推进阶段。")
 
     def test_user_message_tag_not_parsed_by_finalize(self):
         # Finalize operates on assistant content only; user tag is never
@@ -8945,10 +8951,7 @@ class ChatPathIntegrationTests(ChatRuntimeTests):
         )
 
     def _write_effective_outline(self):
-        (self.project_dir / "plan" / "outline.md").write_text(
-            "# 大纲\n## 章节 1\n- 要点 A\n## 章节 2\n- 要点 B\n",
-            encoding="utf-8",
-        )
+        self._write_stage_one_prerequisites(self.project_dir)
 
     def _mock_non_stream_completion(self, full_text):
         from types import SimpleNamespace

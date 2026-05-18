@@ -5763,11 +5763,12 @@ class ChatHandler:
                     except ValueError as exc:
                         notice = self.skill_engine.get_stage_checkpoint_prereq_notice(key)
                         if notice:
+                            reason = str(exc) or notice["reason"]
                             self._emit_system_notice_once(
                                 category="checkpoint_prereq_missing",
-                                path=notice["path"],
-                                reason=str(exc) or notice["reason"],
-                                user_action=notice["user_action"],
+                                path=None,
+                                reason=reason,
+                                user_action="请先补齐阶段前置文件后再推进阶段。",
                                 surface_to_user=True,
                             )
                         else:
@@ -6030,11 +6031,12 @@ class ChatHandler:
                 except ValueError as exc:
                     notice = self.skill_engine.get_stage_checkpoint_prereq_notice(key)
                     if notice:
+                        reason = str(exc) or notice["reason"]
                         self._emit_system_notice_once(
                             category="stage_keyword_prereq_missing",
-                            path=notice["path"],
-                            reason=str(exc) or notice["reason"],
-                            user_action=notice["user_action"],
+                            path=None,
+                            reason=reason,
+                            user_action="请先补齐阶段前置文件后再推进阶段。",
                             surface_to_user=True,
                         )
                 else:
@@ -6110,11 +6112,12 @@ class ChatHandler:
         except ValueError as exc:
             notice = self.skill_engine.get_stage_checkpoint_prereq_notice(event.key)
             if notice:
+                reason = str(exc) or notice["reason"]
                 self._emit_system_notice_once(
                     category="stage_ack_prereq_missing",
-                    path=notice["path"],
-                    reason=str(exc) or notice["reason"],
-                    user_action=notice["user_action"],
+                    path=None,
+                    reason=reason,
+                    user_action="请先补齐阶段前置文件后再推进阶段。",
                     surface_to_user=True,
                 )
         else:
