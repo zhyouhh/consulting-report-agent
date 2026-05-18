@@ -16,6 +16,13 @@ description: Use when writing consulting reports, strategy analysis, market rese
 - `plan/project-info.md` 已退役，不再作为默认入口、主上下文或正式计划文件
 - 禁止创建 `gate-control.md`
 
+## 阶段推进与回退
+
+- 模型侧阶段变更只能通过 `advance_stage(checkpoint_key="...", action="set|clear", reason="...")`。
+- 用户明确确认推进或回退阶段时，先调用 `advance_stage`；工具返回 `status: success` 后，才能声称阶段已推进或已回退。
+- 如果 `advance_stage` 返回 error，必须说明阶段尚未变更，并按工具返回原因提示用户补齐前置条件或重新确认。
+- 不要用可见文字、隐藏标记或手写 `stage-gates.md` / `progress.md` / `tasks.md` 代替 `advance_stage`。
+
 ## 启动门禁
 
 在开始任何实质性写作前，按下面顺序执行：
@@ -34,13 +41,10 @@ description: Use when writing consulting reports, strategy analysis, market rese
 1. 你的第一轮回复只能做一件事：基于 `plan/project-overview.md` 提出 3-5 个打包的澄清问题（一条消息内全发完）。
 2. 第一轮**禁止**：
    - 调用 `write_file` 写入 `plan/outline.md`、`plan/research-plan.md`、`plan/data-log.md`、`plan/analysis-notes.md`
-   - 输出 `<stage-ack>s0_interview_done_at</stage-ack>`
-3. 用户回答问题后，或用户明确说"跳过访谈 / 不用问了 / 直接开始"后，才可以更新 `plan/project-overview.md`；用户跳过就沿用 seed 不改。
-4. 完成上述处理后，在回复**最后单独一行**输出：
-
-`<stage-ack>s0_interview_done_at</stage-ack>`
-
-不要解释这个 tag。不要把 tag 放进代码块、列表、引用、正文中间。
+   - 调用 `advance_stage(checkpoint_key="s0_interview_done_at", action="set", reason="...")`
+3. 用户回答问题后，或用户明确说"跳过访谈 / 不用问了 / 直接开始"后，先必要时更新 `plan/project-overview.md`；用户跳过就沿用 seed 不改。
+4. 完成上述处理后，调用 `advance_stage(checkpoint_key="s0_interview_done_at", action="set", reason="用户已回答或明确跳过 S0 预访谈")`。
+5. 只有工具返回 `status: success` 后，才能说明 S0 已完成并进入 S1；否则说明当前仍停留在 S0。
 
 #### 首轮硬约束
 
@@ -74,7 +78,7 @@ description: Use when writing consulting reports, strategy analysis, market rese
 - 形成 `outline.md`
 - 形成 `research-plan.md`
 
-**推进到 S2：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
+**推进到 S2：** 用户明确确认大纲或要求进入下一阶段时，调用 `advance_stage(checkpoint_key="outline_confirmed_at", action="set", reason="用户确认研究设计和大纲")`。用户明确回退时，调用同一 checkpoint 且 `action="clear"`。工具 success 后才能说已进入 S2 或已回退。
 
 ### S2 资料采集
 - 把事实材料持续写入 `data-log.md`
@@ -117,7 +121,7 @@ description: Use when writing consulting reports, strategy analysis, market rese
 - 不要对 `content/report_draft_v1.md` 使用 `write_file`
 - 持续同步摘要、图表、章节结构
 
-**推进到 S5：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
+**推进到 S5：** 用户明确要求开始质量审查时，调用 `advance_stage(checkpoint_key="review_started_at", action="set", reason="用户确认开始质量审查")`。用户明确回退时，调用同一 checkpoint 且 `action="clear"`。工具 success 后才能说已进入 S5 或已回退。
 
 ### S4 写正文工具
 
@@ -135,19 +139,19 @@ description: Use when writing consulting reports, strategy analysis, market rese
 - 完成 `review-checklist.md`
 - `review.md` 可选，用于记录修订意见
 
-**推进到 S6 / S7：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。后续走 S6 还是 S7 取决于交付形式：报告+演示 → S6；仅报告 → 直接 S7。
+**推进到 S6 / S7：** 用户明确确认审查通过时，调用 `advance_stage(checkpoint_key="review_passed_at", action="set", reason="用户确认报告审查通过")`。用户明确回退时，调用同一 checkpoint 且 `action="clear"`。工具 success 后才能说已进入下一阶段。后续走 S6 还是 S7 取决于交付形式：报告+演示 → S6；仅报告 → 直接 S7。
 
 ### S6 演示准备
 - 仅当交付形式 = `报告+演示` 时启用
 - 完成 `presentation-plan.md`
 
-**推进到 S7：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
+**推进到 S7：** 用户明确确认演示准备完成时，调用 `advance_stage(checkpoint_key="presentation_ready_at", action="set", reason="用户确认演示准备完成")`。用户明确回退时，调用同一 checkpoint 且 `action="clear"`。工具 success 后才能说已进入 S7 或已回退。
 
 ### S7 交付归档
 - 更新 `delivery-log.md`
 - 记录交付版本、反馈和后续动作
 
-**推进到 done：** 必须等用户在工作区点击对应按钮，或用户明确表达推进意图时，你在回复**最后单独一行**输出 `<stage-ack>KEY</stage-ack>`（KEY 见附录）。用户明确回退意图时输出 `<stage-ack action="clear">KEY</stage-ack>`。
+**推进到 done：** 用户明确确认交付归档完成时，调用 `advance_stage(checkpoint_key="delivery_archived_at", action="set", reason="用户确认项目已交付归档")`。用户明确回退时，调用同一 checkpoint 且 `action="clear"`。工具 success 后才能说项目已归档完成。
 
 ## 文件工具选择
 
@@ -195,30 +199,22 @@ description: Use when writing consulting reports, strategy analysis, market rese
 4. 本 Skill 的正式文件约束
 5. 当前系统提示中已注入的生命周期与质量约束
 
-## 附录：stage-ack 标签规范
+## 附录：advance_stage 阶段工具速查
 
-阶段推进 / 回退的控制信号。只在用户明确表达推进或回退意图时使用。
+阶段推进 / 回退只能通过 `advance_stage`。常用 checkpoint：
 
-**合法 KEY（6 个）**：
-- `s0_interview_done_at`
-- `outline_confirmed_at`
-- `review_started_at`
-- `review_passed_at`
-- `presentation_ready_at`
-- `delivery_archived_at`
+| checkpoint_key | 何时 set |
+|---|---|
+| `s0_interview_done_at` | 用户回答 S0 澄清问题，或明确跳过预访谈 |
+| `outline_confirmed_at` | 用户确认大纲和研究设计 |
+| `review_started_at` | 用户确认开始质量审查 |
+| `review_passed_at` | 用户确认审查通过 |
+| `presentation_ready_at` | 用户确认演示准备完成 |
+| `delivery_archived_at` | 用户确认项目交付归档 |
 
-**语法**：
-- Set：`<stage-ack>KEY</stage-ack>`
-- Clear：`<stage-ack action="clear">KEY</stage-ack>`
+回退阶段时使用对应 checkpoint，并把 `action` 设为 `"clear"`。
 
-**用法规则**：
-- 只在用户明确表达推进 / 回退意图时发
-- 不要每条消息都发
-- 不要发未列出的 KEY
-- tag **必须放在回复最后、单独一行、代码块外**
-- **正文中需要展示 XML 示例时必须使用转义文本**（如 `\<stage-ack\>...\</stage-ack\>`）；**即使在 code fence 内也不要输出真实 `<stage-ack>` 标签**——真实 tag 不管放哪里都会被 parser 识别并剥离
-
-**强关键词短语表**（用户习惯说法，供你理解意图；非要求模型输出）：
+用户常见表达（供理解意图，不代表自动推进）：
 - s0_interview_done_at：跳过访谈 / 不用问了 / 先写大纲吧 / 够了开始吧 / 直接开始
 - outline_confirmed_at：确认大纲 / 大纲没问题 / 按这个大纲写 / 就这个大纲 / 就按这个版本
 - review_started_at：开始审查 / 进入审查 / 可以审查了 / 开始 review

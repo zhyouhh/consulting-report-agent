@@ -72,10 +72,9 @@ class SkillMdS0InterviewLockTests(unittest.TestCase):
         self.assertIn("plan/research-plan.md", self.skill_md)
         self.assertIn("plan/data-log.md", self.skill_md)
         self.assertIn("plan/analysis-notes.md", self.skill_md)
-        # Rule 4: tag emission on last line
-        self.assertIn(
-            "<stage-ack>s0_interview_done_at</stage-ack>", self.skill_md
-        )
+        # Rule 4: stage advancement must use the explicit tool
+        self.assertIn("advance_stage", self.skill_md)
+        self.assertIn('checkpoint_key="s0_interview_done_at"', self.skill_md)
 
     def test_all_six_keys_in_appendix(self):
         for key in [
@@ -88,12 +87,13 @@ class SkillMdS0InterviewLockTests(unittest.TestCase):
         ]:
             self.assertIn(key, self.skill_md, f"Missing key {key} in SKILL.md")
 
-    def test_escape_rule_for_examples(self):
-        # Per spec: examples in body text MUST use escaped form, even in code fences
-        self.assertIn("即使在 code fence", self.skill_md)
+    def test_legacy_stage_ack_instructions_removed(self):
+        self.assertIn("advance_stage", self.skill_md)
+        self.assertNotIn("<stage-ack", self.skill_md)
+        self.assertNotIn("stage-ack 标签规范", self.skill_md)
 
-    def test_strong_keyword_examples_table(self):
-        # Checks a sample phrase from each of the six key's strong-keyword set
+    def test_common_stage_phrase_examples_table(self):
+        # Checks a sample phrase from each checkpoint's user-intent examples
         self.assertIn("跳过访谈", self.skill_md)  # s0
         self.assertIn("确认大纲", self.skill_md)
         self.assertIn("开始审查", self.skill_md)
