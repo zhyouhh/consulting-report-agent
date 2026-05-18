@@ -350,6 +350,75 @@ class SkillEngine:
         if not validator(project_path):
             raise ValueError(f"{reason} 缺少前置文件: {path}")
 
+    def _validate_stage_checkpoint_transition(self, project_path: Path, key: str) -> None:
+        if key not in self.STAGE_CHECKPOINT_KEYS:
+            raise ValueError(f"Unsupported stage checkpoint key: {key}")
+
+        checkpoints = self._load_stage_checkpoints(project_path)
+        targets = self._resolve_length_targets(project_path)
+
+        def require(condition: bool, message: str) -> None:
+            if not condition:
+                raise ValueError(message)
+
+        project_overview_ready = self._is_effective_plan_file(project_path, "project-overview.md")
+        notes_ready = self._has_effective_notes(project_path)
+        references_ready = self._has_effective_references(project_path)
+        outline_ready = self._has_effective_outline(project_path)
+        research_plan_ready = self._has_effective_research_plan(project_path)
+        data_ready = self._has_enough_data_log_sources(project_path, targets["data_log_min"])
+        analysis_ready = self._has_enough_analysis_refs(project_path, targets["analysis_refs_min"])
+        report_ready = self._has_effective_report_draft(project_path, min_words=targets["report_word_floor"])
+
+        if key == "s0_interview_done_at":
+            require(project_overview_ready, "需要先创建有效 project-overview.md，才能完成需求访谈。")
+            return
+
+        if key == "outline_confirmed_at":
+            require("s0_interview_done_at" in checkpoints, "需要先完成 S0 需求访谈，才能确认大纲。")
+            missing = []
+            if not notes_ready:
+                missing.append("notes.md")
+            if not references_ready:
+                missing.append("references.md")
+            if not outline_ready:
+                missing.append("outline.md")
+            if not research_plan_ready:
+                missing.append("research-plan.md")
+            require(not missing, f"需要先补齐 {', '.join(missing)}，才能确认大纲。")
+            return
+
+        if key == "review_started_at":
+            require("outline_confirmed_at" in checkpoints, "需要先确认大纲，才能开始审查。")
+            require(data_ready, "需要先补齐 data-log.md 的有效来源条目，才能开始审查。")
+            require(analysis_ready, "需要先补齐 analysis-notes.md 的 DL 引用，才能开始审查。")
+            require(report_ready, "需要先形成达到字数门槛的有效正文，才能开始审查。")
+            return
+
+        if key == "review_passed_at":
+            require("review_started_at" in checkpoints, "需要先进入质量审查，才能标记审查通过。")
+            require(
+                self._has_effective_review_checklist(project_path),
+                "需要先完成有效 review-checklist.md，才能标记审查通过。",
+            )
+            return
+
+        if key == "presentation_ready_at":
+            require("review_passed_at" in checkpoints, "需要先审查通过，才能标记演示准备完成。")
+            require(self._delivery_mode_requires_presentation(project_path), "仅报告项目不需要演示准备阶段。")
+            require(
+                self._has_effective_presentation_plan(project_path),
+                "需要先完成 presentation-plan.md，才能标记演示准备完成。",
+            )
+            return
+
+        if key == "delivery_archived_at":
+            if self._delivery_mode_requires_presentation(project_path):
+                require("presentation_ready_at" in checkpoints, "需要先完成演示准备，才能归档。")
+            else:
+                require("review_passed_at" in checkpoints, "需要先审查通过，才能归档。")
+            require(self._has_effective_delivery_log(project_path), "需要先完成 delivery-log.md，才能归档。")
+
     def _resolve_length_targets(self, project_path):
         overview_path = project_path / "plan" / "project-overview.md"
         expected = 3000
@@ -1179,7 +1248,7 @@ class SkillEngine:
         lock = _get_project_request_lock(project_id)
         with lock:
             if action == "set":
-                self._validate_stage_checkpoint_prereq(project_path, key)
+                self._validate_stage_checkpoint_transition(project_path, key)
                 timestamp = self._save_stage_checkpoint(project_path, key)
                 self._sync_stage_tracking_files(project_path)
                 return {"status": "ok", "key": key, "timestamp": timestamp}

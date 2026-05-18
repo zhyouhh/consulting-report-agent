@@ -37,6 +37,41 @@ class CheckpointEndpointTests(unittest.TestCase):
     def tearDown(self):
         main_module.register_desktop_bridge(None)
 
+    def _write_stage_one_prerequisites(self, project_dir: Path) -> None:
+        (project_dir / "plan" / "notes.md").write_text(
+            "# Notes\n\n"
+            "## Boundaries\n"
+            "- Focus on enterprise AI adoption decisions.\n"
+            "## Assumptions\n"
+            "- Budget remains flat through FY26.\n",
+            encoding="utf-8",
+        )
+        (project_dir / "plan" / "references.md").write_text(
+            "# References\n\n"
+            "## Sources\n"
+            "- Internal interview transcript: operations lead workshop\n"
+            "- External benchmark: https://example.com/ai-benchmark\n",
+            encoding="utf-8",
+        )
+        (project_dir / "plan" / "outline.md").write_text(
+            "# Report outline\n\n"
+            "## Executive summary\n"
+            "- Key finding\n"
+            "## Market context\n"
+            "- Market signal\n"
+            "## Recommendations\n"
+            "- Next step\n",
+            encoding="utf-8",
+        )
+        (project_dir / "plan" / "research-plan.md").write_text(
+            "# Research plan\n\n"
+            "## Research methods\n"
+            "- Expert interviews\n"
+            "## Data sources\n"
+            "- CRM export\n",
+            encoding="utf-8",
+        )
+
     @mock.patch("backend.main.skill_engine.record_stage_checkpoint")
     def test_checkpoint_set_delegates_to_public_service(self, mock_record):
         mock_record.return_value = {"status": "ok", "key": "outline_confirmed_at", "timestamp": "2026-04-17T12:00:00"}
@@ -65,6 +100,36 @@ class CheckpointEndpointTests(unittest.TestCase):
     def test_unknown_action_returns_400(self):
         r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed?action=weird")
         self.assertEqual(r.status_code, 400)
+
+    def test_checkpoint_endpoint_rejects_review_started_when_predecessors_missing(self):
+        from backend.skill import SkillEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(__file__).resolve().parents[1] / "skill"
+            engine = SkillEngine(Path(tmpdir) / "projects", skill_dir)
+            engine.create_project(
+                name="demo",
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+                workspace_dir=str(Path(tmpdir) / "ws"),
+            )
+            project_dir = engine.get_project_path("demo")
+            self.assertIsNotNone(project_dir)
+            self._write_stage_one_prerequisites(project_dir)
+            engine._save_stage_checkpoint(project_dir, "s0_interview_done_at")
+            engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+            (project_dir / "content" / "report_draft_v1.md").write_text(
+                "# Draft\n\n" + ("有效正文。" * 1200),
+                encoding="utf-8",
+            )
+            with mock.patch.object(main_module, "skill_engine", engine):
+                response = self.client.post("/api/projects/demo/checkpoints/review-started")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("data-log", response.json()["detail"])
 
 
 class S0CheckpointEndpointTests(unittest.TestCase):

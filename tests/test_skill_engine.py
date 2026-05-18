@@ -1546,6 +1546,61 @@ class SkillEngineTests(unittest.TestCase):
         self.assertNotIn("outline_confirmed_at", self.engine._read_raw_stage_checkpoints(project_dir))
         self.assertEqual(self.engine._load_stage_checkpoints(project_dir), {})
 
+    def test_record_stage_checkpoint_rejects_outline_confirmation_without_s0(self):
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        self.engine._clear_stage_checkpoint(project_dir, "s0_interview_done_at")
+
+        with self.assertRaisesRegex(ValueError, "需求访谈|S0|s0"):
+            self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+
+        self.assertNotIn("outline_confirmed_at", self.engine._read_raw_stage_checkpoints(project_dir))
+
+    def test_record_stage_checkpoint_rejects_review_start_without_data_and_analysis_quality(self):
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        self.engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+        self._write_report(project_dir, word_count=3000)
+
+        with self.assertRaisesRegex(ValueError, "data-log|analysis"):
+            self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
+
+        self.assertNotIn("review_started_at", self.engine._read_raw_stage_checkpoints(project_dir))
+
+    def test_record_delivery_archived_report_only_requires_review_passed(self):
+        project_dir = self._make_project_past_s4()
+        self._write_delivery_log(project_dir)
+
+        with self.assertRaisesRegex(ValueError, "审查通过|review_passed"):
+            self.engine.record_stage_checkpoint("demo", "delivery_archived_at", "set")
+
+        self.engine._save_stage_checkpoint(project_dir, "review_passed_at")
+
+        result = self.engine.record_stage_checkpoint("demo", "delivery_archived_at", "set")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("delivery_archived_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_record_delivery_archived_presentation_mode_requires_presentation_ready(self):
+        project_dir = self._make_project_past_s5()
+        overview_path = project_dir / "plan" / "project-overview.md"
+        overview_text = overview_path.read_text(encoding="utf-8").replace(
+            "**交付形式**: 仅报告",
+            "**交付形式**: 报告+演示",
+        )
+        overview_path.write_text(overview_text, encoding="utf-8")
+        self._write_delivery_log(project_dir)
+
+        with self.assertRaisesRegex(ValueError, "演示准备|presentation_ready"):
+            self.engine.record_stage_checkpoint("demo", "delivery_archived_at", "set")
+
+        self.engine._save_stage_checkpoint(project_dir, "presentation_ready_at")
+
+        result = self.engine.record_stage_checkpoint("demo", "delivery_archived_at", "set")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("delivery_archived_at", self.engine._load_stage_checkpoints(project_dir))
+
 
 class S0CheckpointInfrastructureTests(unittest.TestCase):
     def test_s0_in_stage_checkpoint_keys(self):
