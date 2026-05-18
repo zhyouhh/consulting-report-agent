@@ -45,7 +45,7 @@ assistant 结尾才尝试推进 checkpoint
 
 ## Design Summary
 
-新的阶段路径是：
+新的 checkpoint 变更路径是：
 
 ```text
 用户自然语言确认
@@ -69,6 +69,10 @@ assistant 文本尾部 <stage-ack>...
 ```
 
 不再具备阶段副作用。
+
+这里的“阶段副作用”特指 checkpoint mutation。S2 → S3、S3 → S4 仍由
+`_infer_stage_state()` 基于 `data-log.md` / `analysis-notes.md` 的质量阈值自动投影，不需要
+`advance_stage`。
 
 ## Stage Checkpoint Contract
 
@@ -131,6 +135,8 @@ delivery_archived_at
 1. 新项目首轮 assistant 必须先问 3-5 个澄清问题。
 2. 如果 `conversation.json` 中没有任何 prior assistant message，`advance_stage(s0_interview_done_at)` 返回 error，不落 checkpoint。
 3. 用户回答或明确跳过后，下一轮模型才可以调用 `advance_stage(s0_interview_done_at)`。
+4. 推荐顺序是：必要时先更新 `plan/project-overview.md` 的澄清内容；再调用
+   `advance_stage(s0_interview_done_at)`；工具成功后才写 S1 文件。
 
 这个软门槛只适用于 `advance_stage` 工具 set S0；schema migration 不受影响。
 
