@@ -3155,6 +3155,11 @@ class ChatRuntimeTests(unittest.TestCase):
 
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine.record_stage_checkpoint(
+            self.project_id,
+            "s0_interview_done_at",
+            "set",
+        )
 
         module_obj = module_lock(self.project_id)
         instance_obj = handler._get_project_request_lock(self.project_id)
