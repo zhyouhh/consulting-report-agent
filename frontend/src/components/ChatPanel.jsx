@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { showError, showInfo, showSuccess } from '../utils/toast'
 import { buildChatRequest, toggleMaterialSelection } from '../utils/chatMaterials'
 import {
@@ -32,6 +33,26 @@ import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { stripToolLogComments } from '../utils/toolLogStrip.mjs'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 import ThinkingBlock from './ThinkingBlock'
+
+const assistantMarkdownComponents = {
+  table: ({ children }) => (
+    <div className="my-2 overflow-x-auto">
+      <table className="min-w-full border-collapse text-xs">
+        {children}
+      </table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th className="border border-[#3a3a5a] bg-[#1a1a2e] px-2 py-1 text-left font-semibold text-[#e2e2f0]">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td className="border border-[#3a3a5a] px-2 py-1 align-top text-[#e2e2f0]">
+      {children}
+    </td>
+  ),
+}
 
 export default function ChatPanel({
   projectId,
@@ -742,7 +763,12 @@ export default function ChatPanel({
                     ) : block.type === 'thinking' ? (
                       <ThinkingBlock key={index} text={block.content} />
                     ) : (
-                      <ReactMarkdown key={index} className="prose prose-invert prose-sm max-w-none">
+                      <ReactMarkdown
+                        key={index}
+                        className="prose prose-invert prose-sm max-w-none"
+                        remarkPlugins={[remarkGfm]}
+                        components={assistantMarkdownComponents}
+                      >
                         {block.content}
                       </ReactMarkdown>
                     ))}
