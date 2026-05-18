@@ -42,6 +42,7 @@ Do not implement on `main`. Do not push unless the user explicitly asks.
 **Files:**
 - Modify: `backend/skill.py`
 - Test: `tests/test_skill_engine.py`
+- Test: `tests/test_main_api.py`
 
 - [ ] **Step 1: Write failing tests for full predecessor validation**
 
@@ -80,12 +81,54 @@ def test_record_delivery_archived_presentation_mode_requires_presentation_ready(
     ...
 ```
 
+Update API/table tests in `tests/test_main_api.py`:
+
+```python
+def _write_stage_one_prerequisites(project_dir: Path) -> None:
+    # Copy the compact helper from ChatRuntimeTests or keep it local in this
+    # test module. It should write effective notes.md, references.md,
+    # outline.md, and research-plan.md.
+
+def test_checkpoint_tables_key_sets_are_aligned(self):
+    from backend.main import _CHECKPOINT_ROUTES
+    from backend.skill import SkillEngine
+
+    route_keys = set(_CHECKPOINT_ROUTES.values())
+    self.assertEqual(route_keys, SkillEngine.STAGE_CHECKPOINT_KEYS)
+
+def test_checkpoint_endpoint_rejects_review_started_when_predecessors_missing(self):
+    # Use a real temporary SkillEngine project, not a mock, so the endpoint
+    # exercises record_stage_checkpoint() predecessor validation.
+    from backend.skill import SkillEngine
+    with tempfile.TemporaryDirectory() as tmpdir:
+        skill_dir = Path(__file__).resolve().parents[1] / "skill"
+        engine = SkillEngine(Path(tmpdir) / "projects", skill_dir)
+        engine.create_project(name="demo", workspace_dir=str(Path(tmpdir) / "ws"))
+        project_dir = engine.get_project_path("demo")
+        self._write_stage_one_prerequisites(project_dir)
+        engine._save_stage_checkpoint(project_dir, "s0_interview_done_at")
+        engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+        (project_dir / "content").mkdir(exist_ok=True)
+        (project_dir / "content" / "report_draft_v1.md").write_text(
+            "# Draft\n\n" + ("有效正文。" * 1200),
+            encoding="utf-8",
+        )
+        with mock.patch.object(main_module, "skill_engine", engine):
+            response = self.client.post("/api/projects/demo/checkpoints/review-started")
+    self.assertEqual(response.status_code, 400)
+    self.assertIn("data-log", response.json()["detail"])
+```
+
+For the second test, create a project with an effective draft but missing
+data-log/analysis prerequisites, then call
+`/api/projects/{id}/checkpoints/review-started`. Expected: `400`.
+
 - [ ] **Step 2: Run RED tests**
 
 Run:
 
 ```powershell
-.venv\Scripts\python -m pytest tests/test_skill_engine.py -q
+.venv\Scripts\python -m pytest tests/test_skill_engine.py tests/test_main_api.py -q
 ```
 
 Expected: new tests fail because `record_stage_checkpoint()` only checks direct prereq.
@@ -151,14 +194,14 @@ def _validate_stage_checkpoint_transition(self, project_path: Path, key: str) ->
         require(self._has_effective_delivery_log(project_path), "需要先完成 delivery-log.md，才能归档。")
 ```
 
-In `record_stage_checkpoint()`, replace `_validate_stage_checkpoint_prereq(project_path, key)` with the new helper. Keep `_validate_stage_checkpoint_prereq()` for user-facing notice fallback until chat code is updated.
+In `record_stage_checkpoint()`, replace `_validate_stage_checkpoint_prereq(project_path, key)` with the new helper only for `action == "set"`. `action == "clear"` must keep the existing idempotent cascading behavior and must not run predecessor validation. Keep `_validate_stage_checkpoint_prereq()` for user-facing notice fallback until chat code is updated.
 
 - [ ] **Step 4: Run GREEN tests**
 
 Run:
 
 ```powershell
-.venv\Scripts\python -m pytest tests/test_skill_engine.py -q
+.venv\Scripts\python -m pytest tests/test_skill_engine.py tests/test_main_api.py -q
 ```
 
 Expected: all pass.
@@ -166,7 +209,7 @@ Expected: all pass.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add backend/skill.py tests/test_skill_engine.py
+git add backend/skill.py tests/test_skill_engine.py tests/test_main_api.py
 git commit -m "fix(stage): validate checkpoint predecessors"
 ```
 
@@ -284,6 +327,11 @@ In `backend/chat.py`:
 4. Remove fallback execution of `pending_stage_keyword` in `_finalize_assistant_turn()`.
 
 Keep `_is_non_plan_write_blocking_message()` and non-plan write intent logic.
+
+Update tests that asserted checkpoint table parity with `_STAGE_RANK`. If
+`tests/test_main_api.py::CheckpointTableInvariantTests` or similar tests import
+`ChatHandler._STAGE_RANK`, rewrite them to compare `_CHECKPOINT_ROUTES` against
+`SkillEngine.STAGE_CHECKPOINT_KEYS`, excluding the S0 set endpoint special case.
 
 - [ ] **Step 6: Run GREEN tests**
 
@@ -565,9 +613,28 @@ Add claim mismatch test:
 def test_claim_stage_advance_without_advance_stage_gets_corrective_notice(self):
     handler = self._make_handler_with_project()
     handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+    handler._turn_context["stage_code_before_turn"] = "S1"
     result = self._finalize_assistant_for_test(handler, "已进入资料采集阶段。")
     notices = handler._turn_context.get("pending_system_notices", [])
     self.assertTrue(any("advance_stage" in n["reason"] or "advance_stage" in n["user_action"] for n in notices))
+
+def test_claim_guard_does_not_fire_when_stage_auto_advances(self):
+    handler = self._make_handler_with_project()
+    handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+    handler._turn_context["stage_code_before_turn"] = "S2"
+    self._write_stage_one_prerequisites(self.project_dir)
+    handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
+    handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+    (self.project_dir / "plan" / "data-log.md").write_text(
+        "\n\n".join(
+            f"### [DL-2026-{index:02d}] 事实 {index}\n- **URL**：https://example.com/{index}"
+            for index in range(1, 9)
+        ),
+        encoding="utf-8",
+    )
+    self._finalize_assistant_for_test(handler, "已进入分析阶段。")
+    notices = handler._turn_context.get("pending_system_notices", [])
+    self.assertFalse(any(n["category"] == "stage_claim_without_checkpoint" for n in notices))
 ```
 
 - [ ] **Step 2: Run RED tests**
@@ -575,7 +642,7 @@ def test_claim_stage_advance_without_advance_stage_gets_corrective_notice(self):
 Run:
 
 ```powershell
-.venv\Scripts\python -m pytest tests/test_packaging_docs.py tests/test_chat_runtime.py -q -k "advance_stage or stage_ack or corrective"
+.venv\Scripts\python -m pytest tests/test_packaging_docs.py tests/test_chat_runtime.py tests/test_main_api.py -q -k "advance_stage or stage_ack or corrective or checkpoint"
 ```
 
 Expected: fails because SKILL still mentions stage-ack and guard missing.
@@ -601,17 +668,31 @@ S0 section:
 
 - [ ] **Step 4: Add claim mismatch guard**
 
-Implement a small helper in `backend/chat.py`:
+Store the initial stage in `_build_turn_context()`:
+
+```python
+summary = self.skill_engine.get_workspace_summary(project_id)
+self._turn_context["stage_code_before_turn"] = summary.get("stage_code")
+```
+
+Then implement a small helper in `backend/chat.py`:
 
 ```python
 _STAGE_ADVANCE_CLAIM_RE = re.compile(
     r"(进入资料采集|进入分析|进入报告撰写|进入质量审查|已推进到)",
 )
 
-def _maybe_emit_stage_claim_mismatch_notice(self, visible_content: str) -> None:
+def _maybe_emit_stage_claim_mismatch_notice(self, project_id: str, visible_content: str) -> None:
     if self._turn_context.get("checkpoint_event"):
         return
     if not _STAGE_ADVANCE_CLAIM_RE.search(visible_content or ""):
+        return
+    before = self._turn_context.get("stage_code_before_turn")
+    try:
+        current = self.skill_engine.get_workspace_summary(project_id).get("stage_code")
+    except ValueError:
+        current = before
+    if current != before:
         return
     self._emit_system_notice_once(
         category="stage_claim_without_checkpoint",
@@ -622,14 +703,16 @@ def _maybe_emit_stage_claim_mismatch_notice(self, visible_content: str) -> None:
     )
 ```
 
-Call after visible content is stripped and before persistence.
+Call after visible content is stripped and before persistence. The guard must
+not fire when S2/S3 legitimately auto-advance because file quality thresholds
+changed during the turn.
 
 - [ ] **Step 5: Run GREEN tests**
 
 Run:
 
 ```powershell
-.venv\Scripts\python -m pytest tests/test_packaging_docs.py tests/test_chat_runtime.py -q -k "advance_stage or stage_ack or corrective"
+.venv\Scripts\python -m pytest tests/test_packaging_docs.py tests/test_chat_runtime.py tests/test_main_api.py -q -k "advance_stage or stage_ack or corrective or checkpoint"
 ```
 
 - [ ] **Step 6: Commit**
@@ -673,7 +756,7 @@ Update:
 Run:
 
 ```powershell
-.venv\Scripts\python -m pytest tests/test_skill_engine.py tests/test_chat_runtime.py tests/test_packaging_docs.py -q
+.venv\Scripts\python -m pytest tests/test_skill_engine.py tests/test_chat_runtime.py tests/test_main_api.py tests/test_packaging_docs.py -q
 ```
 
 - [ ] **Step 4: Run frontend tests**
@@ -716,7 +799,7 @@ If no files changed, skip commit.
 Run:
 
 ```powershell
-.venv\Scripts\python -m pytest tests/test_skill_engine.py tests/test_chat_runtime.py tests/test_packaging_docs.py tests/test_packaging_spec.py tests/test_build_support.py -q
+.venv\Scripts\python -m pytest tests/test_skill_engine.py tests/test_chat_runtime.py tests/test_main_api.py tests/test_packaging_docs.py tests/test_packaging_spec.py tests/test_build_support.py -q
 cd frontend
 node --test tests/
 npm run build
