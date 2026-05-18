@@ -5766,7 +5766,7 @@ class ChatHandler:
                             self._emit_system_notice_once(
                                 category="checkpoint_prereq_missing",
                                 path=notice["path"],
-                                reason=notice["reason"],
+                                reason=str(exc) or notice["reason"],
                                 user_action=notice["user_action"],
                                 surface_to_user=True,
                             )
@@ -6027,13 +6027,13 @@ class ChatHandler:
                 self._turn_context["pending_stage_keyword"] = None
                 try:
                     self.skill_engine.record_stage_checkpoint(project_id, key, action)
-                except ValueError:
+                except ValueError as exc:
                     notice = self.skill_engine.get_stage_checkpoint_prereq_notice(key)
                     if notice:
                         self._emit_system_notice_once(
                             category="stage_keyword_prereq_missing",
                             path=notice["path"],
-                            reason=notice["reason"],
+                            reason=str(exc) or notice["reason"],
                             user_action=notice["user_action"],
                             surface_to_user=True,
                         )
@@ -6107,13 +6107,13 @@ class ChatHandler:
             self.skill_engine.record_stage_checkpoint(
                 project_id, event.key, event.action
             )
-        except ValueError:
+        except ValueError as exc:
             notice = self.skill_engine.get_stage_checkpoint_prereq_notice(event.key)
             if notice:
                 self._emit_system_notice_once(
                     category="stage_ack_prereq_missing",
                     path=notice["path"],
-                    reason=notice["reason"],
+                    reason=str(exc) or notice["reason"],
                     user_action=notice["user_action"],
                     surface_to_user=True,
                 )

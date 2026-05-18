@@ -8001,7 +8001,7 @@ class ChatRuntimeTests(unittest.TestCase):
                     "type": "system_notice",
                     "category": "stage_keyword_prereq_missing",
                     "path": "plan/outline.md",
-                    "reason": "需要先生成有效报告大纲，才能确认大纲并进入资料采集。",
+                    "reason": "需要先补齐 notes.md, references.md, outline.md, research-plan.md，才能确认大纲。",
                     "user_action": "请先让助手补齐 `plan/outline.md`，再确认大纲。",
                     "surface_to_user": True,
                 }
@@ -8629,8 +8629,41 @@ class ThinkingStreamParserTests(unittest.TestCase):
 
 class StageAckFinalizePipelineTests(ChatRuntimeTests):
     def _write_effective_outline(self):
+        self._write_stage_one_prerequisites(self.project_dir)
+
+    def _write_outline_only(self):
         (self.project_dir / "plan" / "outline.md").write_text(
             "# 大纲\n## 章节 1\n- 要点 A\n## 章节 2\n- 要点 B\n",
+            encoding="utf-8",
+        )
+
+    def _write_review_started_prerequisites(self):
+        self._write_effective_outline()
+        data_lines = ["# Data log", ""]
+        for idx in range(1, 5):
+            data_lines.extend(
+                [
+                    f"### [DL-2026-{idx:02d}] Source {idx}",
+                    f"- URL: https://example.com/source-{idx}",
+                    f"- 摘要: 第 {idx} 条来源记录包含实质证据。",
+                    "",
+                ]
+            )
+        (self.project_dir / "plan" / "data-log.md").write_text(
+            "\n".join(data_lines).strip() + "\n",
+            encoding="utf-8",
+        )
+        (self.project_dir / "plan" / "analysis-notes.md").write_text(
+            "# Analysis notes\n\n"
+            "## Core insights\n\n"
+            "Conclusion: 当前方案已具备进入审查的主要判断。\n"
+            "Evidence: 依据 [DL-2026-01]、[DL-2026-02]、[DL-2026-03]。\n"
+            "Impact: 可以开始检查正文质量与证据一致性。\n",
+            encoding="utf-8",
+        )
+        (self.project_dir / "content").mkdir(exist_ok=True)
+        (self.project_dir / "content" / "report_draft_v1.md").write_text(
+            "# Report\n\n" + ("数据资产核算。" * 800),
             encoding="utf-8",
         )
 
@@ -8784,26 +8817,16 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         """User said '确认大纲' (keyword → stored as pending_stage_keyword in
         _build_turn_context, NOT executed yet). Assistant then emits an
         executable tag pointing at a DIFFERENT checkpoint. The tag must win;
-        pending keyword is discarded without setting outline_confirmed_at."""
+        pending keyword is discarded without overwriting checkpoint_event."""
         handler = self._make_handler_with_project()
         self._set_checkpoints({
             "s0_interview_done_at": "2026-04-21T10:00:00",
             "outline_confirmed_at": "2026-04-21T11:00:00",
         })
-        # Build effective report draft so review_started_at prereq passes
-        (self.project_dir / "content").mkdir(exist_ok=True)
-        (self.project_dir / "content" / "report_draft_v1.md").write_text(
-            "# Report\n\n" + ("数据资产核算。" * 400),
-            encoding="utf-8",
-        )
+        self._write_review_started_prerequisites()
         # Simulate keyword pending (what _build_turn_context would store)
         handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
         handler._turn_context["pending_stage_keyword"] = ("set", "outline_confirmed_at")
-        # Clear outline_confirmed_at first so we can see whether pending keyword
-        # would have set it (it shouldn't - tag wins)
-        handler.skill_engine._clear_stage_checkpoint(
-            self.project_dir, "outline_confirmed_at"
-        )
         # Assistant tag points at review_started_at
         self._finalize_assistant_for_test(
             handler,
@@ -8812,8 +8835,10 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
         # Tag's target set
         self.assertIn("review_started_at", checkpoints)
-        # Pending keyword target NOT set (tag won; keyword discarded)
-        self.assertNotIn("outline_confirmed_at", checkpoints)
+        self.assertEqual(
+            handler._turn_context["checkpoint_event"],
+            {"action": "set", "key": "review_started_at"},
+        )
         # pending_stage_keyword cleared
         self.assertIsNone(handler._turn_context.get("pending_stage_keyword"))
 
@@ -8851,6 +8876,22 @@ class StageAckFinalizePipelineTests(ChatRuntimeTests):
         self.assertNotIn("outline_confirmed_at", checkpoints)
         notices = handler._turn_context.get("pending_system_notices", [])
         self.assertTrue(any("outline.md" in str(n) for n in notices))
+
+    def test_stage_ack_failure_notice_uses_transition_error_reason(self):
+        handler = self._make_handler_with_project()
+        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
+        self._write_outline_only()
+
+        self._finalize_assistant_for_test(
+            handler,
+            "大纲不完整但强推。\n<stage-ack>outline_confirmed_at</stage-ack>\n",
+        )
+
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertEqual(len(notices), 1)
+        self.assertIn("notes.md", notices[0]["reason"])
+        self.assertIn("research-plan.md", notices[0]["reason"])
+        self.assertNotIn("需要先生成有效报告大纲", notices[0]["reason"])
 
     def test_user_message_tag_not_parsed_by_finalize(self):
         # Finalize operates on assistant content only; user tag is never
