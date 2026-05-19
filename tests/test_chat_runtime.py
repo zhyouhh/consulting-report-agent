@@ -9516,6 +9516,42 @@ class StageClaimMismatchNoticeTests(ChatRuntimeTests):
                 self.assertEqual(len(notices), 1)
                 self.assertEqual(notices[0]["category"], "stage_claim_without_checkpoint")
 
+    def test_stage_claim_detector_ignores_section_transition_prose(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._build_turn_context(self.project_id, "继续")
+
+        self._finalize_assistant_for_test(handler, "下面进入分析：先看行业结构。")
+
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertEqual(notices, [])
+
+    def test_stage_claim_detector_allows_negation_in_previous_clause(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._build_turn_context(self.project_id, "继续")
+
+        self._finalize_assistant_for_test(handler, "用户未反对，已进入 S2。")
+
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["category"], "stage_claim_without_checkpoint")
+
+    def test_stage_claim_detector_covers_s0_to_s1_phrases(self):
+        claims = [
+            "S0 已完成并进入 S1。",
+            "已进入研究设计阶段。",
+            "需求访谈已完成。",
+        ]
+        for claim in claims:
+            with self.subTest(claim=claim):
+                handler = self._make_handler_with_project()
+                handler._turn_context = handler._build_turn_context(self.project_id, "继续")
+
+                self._finalize_assistant_for_test(handler, claim)
+
+                notices = handler._turn_context.get("pending_system_notices", [])
+                self.assertEqual(len(notices), 1)
+                self.assertEqual(notices[0]["category"], "stage_claim_without_checkpoint")
+
     def test_stage_claim_detector_suppresses_negated_phrases(self):
         negated_claims = [
             "当前还不能进入资料采集阶段。",

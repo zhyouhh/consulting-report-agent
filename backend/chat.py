@@ -89,15 +89,18 @@ _STAGE_ACK_STRIP_RE = re.compile(
 )
 _STAGE_ADVANCE_CLAIM_RE = re.compile(
     r"("
-    r"已?进入\s*S[2-7]"
-    r"|已推进[到至]\s*(?:S[2-7]|资料采集|分析|报告撰写|质量审查|演示准备|交付归档)(?:阶段)?"
-    r"|已?进入(?:资料采集|分析|报告撰写|质量审查|演示准备|交付归档)(?:阶段)?"
+    r"S0\s*已完成并进入\s*S1"
+    r"|已?进入\s*S[1-7]"
+    r"|已推进[到至]\s*(?:S[1-7]|(?:研究设计|资料采集|分析|报告撰写|质量审查|演示准备|交付归档)(?:阶段|状态|环节))"
+    r"|已?进入(?:研究设计|资料采集|分析|报告撰写|质量审查|演示准备|交付归档)(?:阶段|状态|环节)"
+    r"|需求访谈已完成"
     r"|项目已归档完成"
     r")",
 )
 _STAGE_ADVANCE_CLAIM_NEGATION_RE = re.compile(
-    r"(?:不能|不要|不代表|不是|并非|尚未|还未|还没|未|没有|别|无需)[^。！？!?\n]{0,12}$"
+    r"(?:不能|不要|不代表|不是|并非|尚未|还未|还没|未|没有|别|无需)[^，,；;。！？!?\n：:]{0,12}$"
 )
+_STAGE_ADVANCE_CLAIM_CLAUSE_BOUNDARY_RE = re.compile(r"[，,；;。！？!?\n：:]")
 TOOL_LOG_COMMENT_RE = re.compile(
     r'<!--\s*tool-log'
     r'(?:[\s\S]*?-->|[\s\S]*$)',
@@ -115,7 +118,8 @@ def _has_stage_advance_claim(content: str) -> bool:
     text = content or ""
     for match in _STAGE_ADVANCE_CLAIM_RE.finditer(text):
         prefix = text[max(0, match.start() - 18):match.start()]
-        if _STAGE_ADVANCE_CLAIM_NEGATION_RE.search(prefix):
+        clause_prefix = _STAGE_ADVANCE_CLAIM_CLAUSE_BOUNDARY_RE.split(prefix)[-1]
+        if _STAGE_ADVANCE_CLAIM_NEGATION_RE.search(clause_prefix):
             continue
         return True
     return False
