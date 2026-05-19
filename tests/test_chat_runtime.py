@@ -6245,7 +6245,7 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_expected_plan_writes_include_stage_gates_and_tasks_when_assistant_claims_updates(self, mock_openai):
+    def test_expected_plan_writes_ignore_backend_generated_stage_files_when_assistant_claims_updates(self, mock_openai):
         del mock_openai
         handler = ChatHandler(
             self._make_settings(),
@@ -6253,11 +6253,10 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         expected = handler._expected_plan_writes_for_message(
-            "我已更新 `plan/stage-gates.md`、`plan/tasks.md`，并同步了当前阶段与任务清单。"
+            "我已更新 `plan/stage-gates.md`、`plan/progress.md`、`plan/tasks.md`，并同步了当前阶段与任务清单。"
         )
 
-        self.assertIn("plan/stage-gates.md", expected)
-        self.assertIn("plan/tasks.md", expected)
+        self.assertEqual(expected, set())
 
     @mock.patch("backend.chat.OpenAI")
     def test_expected_plan_writes_include_only_canonical_report_draft_when_assistant_claims_report_saved(self, mock_openai):

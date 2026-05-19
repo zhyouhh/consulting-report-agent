@@ -320,6 +320,13 @@ class ChatHandler:
     NON_PLAN_WRITE_ALLOWED_STAGE_CODES = {"S4", "S5", "S6", "S7", "done"}
     QUALITY_HINT_TARGET_FILES = frozenset({"plan/data-log.md", "plan/analysis-notes.md"})
     QUALITY_HINT_STAGES = frozenset({"S2", "S3"})
+    BACKEND_GENERATED_PLAN_PATHS = frozenset(
+        {
+            "plan/stage-gates.md",
+            "plan/progress.md",
+            "plan/tasks.md",
+        }
+    )
     LEGACY_REPORT_DRAFT_PATHS = frozenset({
         "report_draft_v1.md",
         "content/report.md",
@@ -1850,7 +1857,11 @@ class ChatHandler:
         if self._message_mentions_file_update(normalized_text, ("plan/tasks.md", "tasks.md", "任务清单", "阶段任务")):
             expected.add("plan/tasks.md")
 
-        return expected
+        return {
+            path
+            for path in expected
+            if path not in self.BACKEND_GENERATED_PLAN_PATHS
+        }
 
     def _pseudo_file_tool_paths_for_message(self, assistant_message: str) -> set[str]:
         expected: set[str] = set()
