@@ -5304,6 +5304,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 skill_dir=self.repo_skill_dir,
             )
             handler = ChatHandler(settings, engine)
+            engine._save_stage_checkpoint(Path(project["project_dir"]), "s0_interview_done_at")
             handler._turn_context = {"can_write_non_plan": False, "web_search_disabled": False}
             self._read_file_for_turn(handler, "./plan/OUTLINE.MD", project["id"])
 
@@ -5326,6 +5327,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_write_file_rejects_self_signed_review_checklist(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
         self._read_file_for_turn(handler, "plan/review-checklist.md")
 
@@ -5350,6 +5352,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_write_file_rejects_self_signed_review_checklist_with_fullwidth_space(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
         self._read_file_for_turn(handler, "plan/review-checklist.md")
 
@@ -5392,7 +5395,7 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("建议通过", result["message"])
+        self.assertIn("开始审查", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_accepts_review_verdict_after_review_started(self, mock_openai):
@@ -5422,6 +5425,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_write_file_auto_disables_review_interception_when_review_passed(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_passed_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
         self._read_file_for_turn(handler, "plan/review-checklist.md")
@@ -5446,6 +5450,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_write_file_rejects_inline_placeholder_feedback(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_passed_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
         self._read_file_for_turn(handler, "plan/delivery-log.md")
 
@@ -5470,6 +5475,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_write_file_rejects_multiline_placeholder_feedback(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_passed_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
         self._read_file_for_turn(handler, "plan/delivery-log.md")
 
@@ -5494,6 +5500,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_write_file_accepts_multiline_real_feedback(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_passed_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
         self._read_file_for_turn(handler, "plan/delivery-log.md")
 
@@ -5517,6 +5524,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_write_file_rejects_archived_status_claim_without_checkpoint(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_passed_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
         self._read_file_for_turn(handler, "plan/delivery-log.md")
 
@@ -5541,6 +5549,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_write_file_auto_disables_delivery_interception_when_archived(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_passed_at")
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "delivery_archived_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
         self._read_file_for_turn(handler, "plan/delivery-log.md")
@@ -5705,12 +5714,12 @@ class ChatRuntimeTests(unittest.TestCase):
         notices = handler._turn_context.get("pending_system_notices", [])
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("S0 阶段", result["message"])
+        self.assertIn("确认大纲", result["message"])
         self.assertEqual(len(notices), 1)
-        self.assertEqual(notices[0]["category"], "s0_write_blocked")
+        self.assertEqual(notices[0]["category"], "stage_write_blocked")
         self.assertEqual(notices[0]["path"], "plan/data-log.md")
-        self.assertIn("资料清单", notices[0]["reason"])
-        self.assertIn("SKILL.md §S0", notices[0]["user_action"])
+        self.assertIn("确认大纲", notices[0]["reason"])
+        self.assertIn("advance_stage", notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_rejects_analysis_notes_without_dl_refs_after_data_log_ready(self, mock_openai):
@@ -5761,6 +5770,209 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("analysis-notes.md", result["message"])
         self.assertIn("[DL-2026-01]", result["message"])
         self.assertEqual(notices[0]["category"], "analysis_refs_missing")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_write_file_data_log_before_outline_confirmed_requires_confirm_outline(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/data-log.md")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/data-log.md",
+                        "content": (
+                            "# Data log\n\n"
+                            "### [DL-2026-01] 示例事实\n"
+                            "- **URL**：https://example.com/source\n"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("确认大纲", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_write_file_data_log_same_turn_allowed_after_advance_stage(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine.record_stage_checkpoint(
+            self.project_id,
+            "s0_interview_done_at",
+            "set",
+        )
+        handler._turn_context = handler._build_turn_context(self.project_id, "确认大纲")
+
+        advance_result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "advance_stage",
+                json.dumps(
+                    {
+                        "checkpoint_key": "outline_confirmed_at",
+                        "action": "set",
+                        "reason": "用户明确确认大纲",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        self.assertEqual(advance_result["status"], "success")
+        checkpoints = handler.skill_engine._load_stage_checkpoints(self.project_dir)
+        self.assertIn("outline_confirmed_at", checkpoints)
+        self._read_file_for_turn(handler, "plan/data-log.md")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/data-log.md",
+                        "content": (
+                            "# Data log\n\n"
+                            "### [DL-2026-01] 示例事实\n"
+                            "- **URL**：https://example.com/source\n"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "success")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_write_file_analysis_notes_before_data_log_threshold_rejected(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        (self.project_dir / "plan" / "data-log.md").write_text(
+            (
+                "# Data log\n\n"
+                "### [DL-2026-01] 示例事实\n"
+                "- **URL**：https://example.com/source\n"
+            ),
+            encoding="utf-8",
+        )
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/analysis-notes.md")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/analysis-notes.md",
+                        "content": "# 分析笔记\n\n- 初步发现：[DL-2026-01]\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("data-log.md", result["message"])
+        self.assertNotIn("[DL-2026-01]", result["message"])
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertEqual(notices[0]["category"], "stage_write_blocked")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_write_file_review_checklist_and_review_before_review_started_rejected(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+        for file_path, content in (
+            ("plan/review-checklist.md", "# Review checklist\n\n- [ ] 核对事实引用\n"),
+            ("plan/review.md", "# Review notes\n\n- 修订建议：补强结论证据。\n"),
+        ):
+            self._read_file_for_turn(handler, file_path)
+            result = handler._execute_tool(
+                self.project_id,
+                self._make_tool_call(
+                    "write_file",
+                    json.dumps(
+                        {"file_path": file_path, "content": content},
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+
+            self.assertEqual(result["status"], "error", file_path)
+            self.assertIn("开始审查", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_write_file_delivery_log_before_review_passed_rejected_for_report_only(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/delivery-log.md")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/delivery-log.md",
+                        "content": "# Delivery log\n\n- 交付记录：已发送可审草稿。\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("审查通过", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_write_file_delivery_log_before_presentation_ready_rejected_for_presentation_mode(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        overview_path = self.project_dir / "plan" / "project-overview.md"
+        overview_path.write_text(
+            overview_path.read_text(encoding="utf-8").replace(
+                "**交付形式**: 仅报告",
+                "**交付形式**: 报告+演示",
+            ),
+            encoding="utf-8",
+        )
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_passed_at")
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/delivery-log.md")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/delivery-log.md",
+                        "content": "# Delivery log\n\n- 交付记录：已发送可审草稿。\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("演示准备", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_notice_dual_class_notices_can_coexist_within_turn(self, mock_openai):
@@ -8342,8 +8554,6 @@ class S0WriteFileGateTests(ChatRuntimeTests):
     S0_BLOCKED = [
         "plan/outline.md",
         "plan/research-plan.md",
-        "plan/data-log.md",
-        "plan/analysis-notes.md",
     ]
     S0_ALLOWED = [
         "plan/notes.md",
@@ -8362,7 +8572,7 @@ class S0WriteFileGateTests(ChatRuntimeTests):
             ),
         )
 
-    def test_s0_blocks_each_of_four_files(self):
+    def test_s0_blocks_outline_and_research_plan_files(self):
         handler = self._make_handler_with_project()
         for path in self.S0_BLOCKED:
             tool_call = self._make_tool_call(path, "# content\n" * 5)
@@ -8389,14 +8599,13 @@ class S0WriteFileGateTests(ChatRuntimeTests):
             "S0 阶段" in n.get("reason", "") for n in notices
         ))
 
-    def test_s0_write_notice_mentions_analysis_notes(self):
+    def test_s0_analysis_notes_uses_data_log_stage_gate(self):
         handler = self._make_handler_with_project()
         tool_call = self._make_tool_call("plan/analysis-notes.md", "# x\n")
         handler._execute_tool(self.project_id, tool_call)
         notices = handler._turn_context.get("pending_system_notices", [])
-        # Reason must list all four file categories per §1 spec
         reason_text = " ".join(n.get("reason", "") for n in notices)
-        self.assertIn("分析笔记", reason_text)
+        self.assertIn("data-log.md", reason_text)
 
     def test_post_s0_outline_write_not_blocked(self):
         import json

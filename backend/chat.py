@@ -309,8 +309,6 @@ class ChatHandler:
     _S0_BLOCKED_PLAN_FILES = frozenset({
         "plan/outline.md",
         "plan/research-plan.md",
-        "plan/data-log.md",
-        "plan/analysis-notes.md",
     })
     _NEGATION_RE = re.compile(r"(不要|别|没|不是|不想|不|并非|非要|非得)[^。！？!?\n]{0,9}$")
     _NEGATION_WINDOW_CHARS = 10
@@ -4482,7 +4480,7 @@ class ChatHandler:
             if stage_state.get("stage_code") == "S0":
                 reason = (
                     "S0 阶段：请先对 seed 做一轮澄清，"
-                    "再写大纲/研究计划/资料清单/分析笔记"
+                    "再写大纲/研究计划"
                 )
                 self._emit_system_notice_once(
                     category="s0_write_blocked",
@@ -4519,6 +4517,16 @@ class ChatHandler:
         normalized_path = self.skill_engine.validate_plan_write(project_id, file_path)
         if self._is_canonical_report_draft_path(normalized_path):
             normalized_path = self.skill_engine.REPORT_DRAFT_PATH
+        stage_write_error = self._validate_stage_write_allowed(project_id, normalized_path)
+        if stage_write_error:
+            self._emit_system_notice_once(
+                category="stage_write_blocked",
+                path=normalized_path,
+                reason=stage_write_error,
+                user_action="请先通过 `advance_stage` 推进到对应阶段，再写入该阶段文件。",
+                surface_to_user=True,
+            )
+            return {"status": "error", "message": stage_write_error}
         if source_tool_name == "write_file":
             canonical_write_file_error = self._build_canonical_draft_write_file_block_message(
                 project_id,
@@ -4653,6 +4661,89 @@ class ChatHandler:
             result=result,
         )
         return result
+
+    def _validate_stage_write_allowed(self, project_id: str, normalized_path: str) -> str | None:
+        normalized_path = self._normalize_project_file_path(normalized_path)
+        if not normalized_path.startswith("plan/") or not normalized_path.endswith(".md"):
+            return None
+
+        if normalized_path in {
+            "plan/project-overview.md",
+            "plan/notes.md",
+            "plan/references.md",
+        }:
+            return None
+
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return None
+
+        checkpoints = self.skill_engine._load_stage_checkpoints(project_path)
+
+        if normalized_path in {"plan/outline.md", "plan/research-plan.md"}:
+            if "s0_interview_done_at" not in checkpoints:
+                return (
+                    f"写入 `{normalized_path}` 前需要先完成需求访谈"
+                    "（advance_stage: s0_interview_done_at）。"
+                )
+            return None
+
+        if normalized_path == "plan/data-log.md":
+            if "outline_confirmed_at" not in checkpoints:
+                return (
+                    "写入 `plan/data-log.md` 前需要先确认大纲"
+                    "（advance_stage: outline_confirmed_at）。"
+                )
+            return None
+
+        if normalized_path == "plan/analysis-notes.md":
+            targets = self.skill_engine._resolve_length_targets(project_path)
+            required = targets["data_log_min"]
+            current = self.skill_engine._count_valid_data_log_sources(project_path)
+            if current < required:
+                return (
+                    "写入 `plan/analysis-notes.md` 前需要先补足 "
+                    f"`plan/data-log.md` 的有效来源：当前 {current}/{required}。"
+                )
+            return None
+
+        if normalized_path in {"plan/review-checklist.md", "plan/review.md"}:
+            if "review_started_at" not in checkpoints:
+                return (
+                    f"写入 `{normalized_path}` 前需要先开始审查"
+                    "（advance_stage: review_started_at）。"
+                )
+            return None
+
+        if normalized_path == "plan/presentation-plan.md":
+            if not self.skill_engine._delivery_mode_requires_presentation(project_path):
+                return (
+                    "仅报告项目不需要写入 `plan/presentation-plan.md`；"
+                    "只有交付形式为报告+演示时才进入演示准备。"
+                )
+            if "review_passed_at" not in checkpoints:
+                return (
+                    "写入 `plan/presentation-plan.md` 前需要先确认审查通过"
+                    "（advance_stage: review_passed_at）。"
+                )
+            return None
+
+        if normalized_path == "plan/delivery-log.md":
+            if self.skill_engine._delivery_mode_requires_presentation(project_path):
+                if "presentation_ready_at" not in checkpoints:
+                    return (
+                        "写入 `plan/delivery-log.md` 前需要先完成演示准备"
+                        "（advance_stage: presentation_ready_at）。"
+                    )
+                return None
+            if "review_passed_at" not in checkpoints:
+                return (
+                    "写入 `plan/delivery-log.md` 前需要先确认审查通过"
+                    "（advance_stage: review_passed_at）。"
+                )
+            return None
+
+        return None
 
     def _validate_analysis_notes_refs_for_write(
         self,
