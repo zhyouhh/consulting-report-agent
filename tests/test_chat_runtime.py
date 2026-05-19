@@ -9521,6 +9521,10 @@ class StageClaimMismatchNoticeTests(ChatRuntimeTests):
             "无法进入 S2。",
             "不应进入 S2。",
             "进入 S2 前，需要先确认大纲。",
+            "如果已进入 S2，请开始资料采集。",
+            "若已进入 S2，请开始资料采集。",
+            "如果现在进入 S2，会缺少前置条件。",
+            "如果已进入资料采集阶段，就可以写 data-log。",
         ]
         for claim in blocked_claims:
             with self.subTest(claim=claim):

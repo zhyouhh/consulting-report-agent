@@ -100,6 +100,9 @@ _STAGE_ADVANCE_CLAIM_RE = re.compile(
 _STAGE_ADVANCE_CLAIM_NEGATION_RE = re.compile(
     r"(?:无法|不应|不能|不要|不代表|不是|并非|尚未|还未|还没|未|没有|别|无需)[^，,；;。！？!?\n：:]{0,12}$"
 )
+_STAGE_ADVANCE_CLAIM_CONDITION_BEFORE_RE = re.compile(
+    r"(?:如果|若|假如|假设|倘若|一旦)"
+)
 _STAGE_ADVANCE_CLAIM_CLAUSE_BOUNDARY_RE = re.compile(r"[，,；;。！？!?\n：:]")
 _STAGE_ADVANCE_CLAIM_CONDITION_AFTER_RE = re.compile(r"^\s*前")
 TOOL_LOG_COMMENT_RE = re.compile(
@@ -121,6 +124,8 @@ def _has_stage_advance_claim(content: str) -> bool:
         prefix = text[max(0, match.start() - 18):match.start()]
         clause_prefix = _STAGE_ADVANCE_CLAIM_CLAUSE_BOUNDARY_RE.split(prefix)[-1]
         if _STAGE_ADVANCE_CLAIM_NEGATION_RE.search(clause_prefix):
+            continue
+        if _STAGE_ADVANCE_CLAIM_CONDITION_BEFORE_RE.search(clause_prefix):
             continue
         suffix = text[match.end():match.end() + 4]
         if _STAGE_ADVANCE_CLAIM_CONDITION_AFTER_RE.search(suffix):
