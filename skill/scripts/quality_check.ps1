@@ -1,4 +1,4 @@
-# 咨询报告质量检查脚本 (PowerShell)
+﻿# 咨询报告质量检查脚本 (PowerShell)
 # 用途：对 Markdown 报告做非阻断式分级告警
 
 param(

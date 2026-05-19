@@ -1,4 +1,5 @@
 import unittest
+import codecs
 from pathlib import Path
 
 
@@ -13,3 +14,17 @@ class SkillAssetTests(unittest.TestCase):
 
         for file_path in required_files:
             self.assertTrue(file_path.exists(), f"缺少运行资产: {file_path}")
+
+    def test_windows_powershell_scripts_use_utf8_bom(self):
+        root = Path(__file__).resolve().parents[1]
+        ps1_files = [
+            root / "skill" / "scripts" / "quality_check.ps1",
+            root / "skill" / "scripts" / "export_draft.ps1",
+        ]
+
+        for file_path in ps1_files:
+            self.assertTrue(file_path.exists(), f"缺少 PowerShell 脚本: {file_path}")
+            self.assertTrue(
+                file_path.read_bytes().startswith(codecs.BOM_UTF8),
+                f"{file_path.name} 必须带 UTF-8 BOM，否则 Windows PowerShell 会按 ANSI 解析中文并报错",
+            )
