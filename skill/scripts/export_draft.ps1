@@ -6,6 +6,10 @@
     [string]$OutputDir
 )
 
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path -LiteralPath $InputPath)) {

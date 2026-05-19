@@ -6,6 +6,10 @@ param(
     [string]$FilePath
 )
 
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+
 if (-not (Test-Path $FilePath)) {
     Write-Host "[ERROR] 文件不存在: $FilePath" -ForegroundColor Red
     exit 1

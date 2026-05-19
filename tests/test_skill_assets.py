@@ -28,3 +28,15 @@ class SkillAssetTests(unittest.TestCase):
                 file_path.read_bytes().startswith(codecs.BOM_UTF8),
                 f"{file_path.name} 必须带 UTF-8 BOM，否则 Windows PowerShell 会按 ANSI 解析中文并报错",
             )
+
+    def test_windows_powershell_scripts_force_utf8_stdout(self):
+        root = Path(__file__).resolve().parents[1]
+        ps1_files = [
+            root / "skill" / "scripts" / "quality_check.ps1",
+            root / "skill" / "scripts" / "export_draft.ps1",
+        ]
+
+        for file_path in ps1_files:
+            text = file_path.read_text(encoding="utf-8-sig")
+            self.assertIn("[Console]::OutputEncoding", text)
+            self.assertIn("$OutputEncoding", text)

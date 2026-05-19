@@ -92,13 +92,18 @@ _STAGE_ADVANCE_CLAIM_RE = re.compile(
     r"S0\s*已完成并进入\s*S1"
     r"|(?:已进入|现在进入)\s*S[1-7]"
     r"|已推进[到至]\s*(?:S[1-7]|(?:研究设计|资料采集|分析|报告撰写|质量审查|演示准备|交付归档)(?:阶段|状态|环节))"
-    r"|已?进入(?:研究设计|资料采集|分析|报告撰写|质量审查|演示准备|交付归档)(?:阶段|状态|环节)"
+    r"|(?:已进入|现在进入|进入)(?:研究设计|资料采集|报告撰写|质量审查|演示准备|交付归档)(?:阶段|状态|环节)?"
+    r"|(?:已进入|现在进入|进入)分析(?:阶段|状态|环节)"
     r"|需求访谈已完成"
+    r"|(?:质量)?审查通过(?:了)?[，,；;。.!！？?\s]*(?:可以|开始)?交付(?:归档)?"
     r"|项目已归档完成"
     r")",
 )
 _STAGE_ADVANCE_CLAIM_NEGATION_RE = re.compile(
     r"(?:无法|不应|不能|不要|不代表|不是|并非|尚未|还未|还没|未|没有|别|无需)[^，,；;。.!！？?\n：:]{0,12}$"
+)
+_STAGE_ADVANCE_CLAIM_INSTRUCTION_PREFIX_RE = re.compile(
+    r"(?:需要|请|必须|要|应当|应该|先|可|可以)[^，,；;。.!！？?\n：:]{0,8}$"
 )
 _STAGE_ADVANCE_CLAIM_CONDITION_BEFORE_RE = re.compile(
     r"(?:如果|若|假如|假设|倘若|一旦|只要|待)"
@@ -137,6 +142,8 @@ def _has_stage_advance_claim(content: str) -> bool:
         clause_end = next_boundary.start() if next_boundary else len(text)
         clause_prefix = text[clause_start:match.start()]
         if _STAGE_ADVANCE_CLAIM_NEGATION_RE.search(clause_prefix):
+            continue
+        if _STAGE_ADVANCE_CLAIM_INSTRUCTION_PREFIX_RE.search(clause_prefix):
             continue
         if _STAGE_ADVANCE_CLAIM_CONDITION_BEFORE_RE.search(clause_prefix):
             continue
@@ -4618,13 +4625,13 @@ class ChatHandler:
         if self.skill_engine.is_protected_stage_checkpoints_path(normalized_path):
             reason = (
                 "stage_checkpoints.json 是用户确认真值源，模型不能直接写入。"
-                "推进阶段需要用户点击右侧工作区对应按钮（例如\"确认大纲，进入资料采集\"）。"
+                "推进阶段必须调用 advance_stage，或由用户点击右侧工作区对应按钮。"
             )
             self._emit_system_notice_once(
                 category="checkpoint_forge_blocked",
                 path=normalized_path,
                 reason=reason,
-                user_action="请告知用户需要他们点击工作区按钮来推进阶段；不要尝试直接写这个文件。",
+                user_action="请调用 advance_stage 推进阶段；不要尝试直接写这个文件。",
                 surface_to_user=True,
             )
             return {"status": "error", "message": reason}
