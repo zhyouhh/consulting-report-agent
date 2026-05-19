@@ -5917,6 +5917,63 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertIn("开始审查", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
+    def test_write_file_presentation_plan_rejected_for_report_only_mode(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_passed_at")
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/presentation-plan.md")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/presentation-plan.md",
+                        "content": "# Presentation plan\n\n- PPT：整理汇报页\n- Q&A：准备答疑\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("仅报告项目不需要", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_write_file_presentation_plan_before_review_passed_rejected_for_presentation_mode(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        overview_path = self.project_dir / "plan" / "project-overview.md"
+        overview_path.write_text(
+            overview_path.read_text(encoding="utf-8").replace(
+                "**交付形式**: 仅报告",
+                "**交付形式**: 报告+演示",
+            ),
+            encoding="utf-8",
+        )
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+        self._read_file_for_turn(handler, "plan/presentation-plan.md")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/presentation-plan.md",
+                        "content": "# Presentation plan\n\n- PPT：整理汇报页\n- Q&A：准备答疑\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("审查通过", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
     def test_write_file_delivery_log_before_review_passed_rejected_for_report_only(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
