@@ -28,9 +28,9 @@
 - 触发条件：UI 重构立项时一起做（设计稿在 `docs/design_UI.pdf`）
 
 5. **UI 重构**
-- 状态：`待 packaged GUI 启动崩溃修复后立项`
+- 状态：`待立项`
 - 设计稿：`docs/design_UI.pdf`（用户用 Claude design 做的 3 套初步设计稿）
-- 触发条件：先恢复当前打包 GUI 可打开，再决定是否进入设计重构；不要把 P0 启动崩溃埋进大重构里
+- 触发条件：当前打包 GUI 已恢复可打开；后续如立项 UI 重构，先单独定范围，不要把渠道稳定性和打包小债混进大重构里
 
 6. **stage-advance-gates Bug G/H 低优先级待复核**
 - 状态：`低优先级待复核`
@@ -66,7 +66,7 @@
 - 打包态记录：[2026-05-19 stage conductor packaged QA](superpowers/handoffs/2026-05-19-stage-conductor-packaged-qa.md)
 
 0e. **DeepSeek 官渠 tool-call 400 根治 + 打包态后端 S0-S7 QA（2026-05-13）**
-- 状态：`代码已修复；打包态后端生命周期已跑到 done；GUI 仍有 P0 启动崩溃，见当前 Item 1`
+- 状态：`代码已修复；打包态后端生命周期已跑到 done；当时遗留的 GUI 启动崩溃已在 2026-05-19 关闭`
 - 根因：
   - DeepSeek 官渠 reasoner route 会拒绝显式 `tool_choice="auto"`
   - thinking/tool-call follow-up 需要把非空 `reasoning_content` 随 assistant tool-call message 回传
@@ -85,11 +85,11 @@
 - Handoff：[2026-05-13 packaged S0-S7 QA handoff](superpowers/handoffs/2026-05-13-packaged-s0-s7-qa.md)
 
 0d. **DeepSeek Migration Commit 1-3 + cutover report 完成（2026-05-09）**
-- 状态：`已完成；packaged QA 后续已转入 0e 和当前 Item 1`
+- 状态：`已完成；packaged QA 后续已转入 0e，并在 2026-05-19 完成 stage conductor 打包态复测`
 - Commit chain：`69730c7 Add migration toolset foundation` → `118f383 Cut traffic from legacy report draft tools` → `9a59955 Delete legacy report draft control layer`
 - Cutover report：[docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md](superpowers/cutover_report_2026-05-08_deepseek-migration.md)（commit `a5f1cd1 docs(deepseek-migration): add cutover report`）
 - 验证：backend fast `834 passed, 1 skipped, 3 deselected, 13 warnings, 22 subtests passed`；backend including slow `837 passed, 1 skipped, 13 warnings, 22 subtests passed`；frontend node tests `183 passed`；Windows build `build.bat` 成功并重建 `dist\咨询报告助手\`；legacy grep gates 7 类 clean
-- 注意：原 Task 38 packaged UI/chat manual E2E 已在 2026-05-13 复测；GUI 阻断转入当前 Item 1
+- 注意：原 Task 38 packaged UI/chat manual E2E 已在 2026-05-13 复测；当时 GUI 阻断已在 2026-05-19 关闭
 
 0c. **DeepSeek Migration Commit 0 + spec + plan 全 APPROVED（2026-05-07~08）**
 - 状态：`Commit 0 已 ship 3 commits + spec 3 轮 codex review APPROVED + plan 4 轮 codex review APPROVED`
@@ -102,7 +102,7 @@
   - `8b3ad16` catch the last two gemini-3-flash refs in README + proxy contract
 - 默认模型名同步覆盖了原 worklist item #3"默认渠道文案与默认模型决策"，整体合入 DeepSeek Migration
 - 2026-05-08 E2E 实测：DeepSeek V4 Pro 9 次工具调用 schema 100% 正确，模型行为本身没问题；6 个产品/工程问题（`<think>` 标签泄露 / S0 门槛被动 / per-turn search 配额过严 / packaged stderr 吞没 / version_info 空 / 老用户 config heal）作为本轮 plan 的 in-scope items 一次性处理
-- 后续实施已完成，见 0d 与 cutover report；当前仅剩 packaged UI/chat 手工验收（见上方 Item 1）
+- 后续实施已完成，见 0d 与 cutover report；packaged UI/chat 手工验收在 2026-05-13 与 2026-05-19 分阶段完成
 
 0b. **S4 mutation-limit 二次写入真实字数提示（2026-05-07）**
 - 状态：`已修复并打包验证`
