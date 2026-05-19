@@ -88,7 +88,15 @@ _STAGE_ACK_STRIP_RE = re.compile(
     re.IGNORECASE,
 )
 _STAGE_ADVANCE_CLAIM_RE = re.compile(
-    r"(进入资料采集|进入分析|进入报告撰写|进入质量审查|已推进到)",
+    r"("
+    r"已?进入\s*S[2-7]"
+    r"|已推进[到至]\s*(?:S[2-7]|资料采集|分析|报告撰写|质量审查|演示准备|交付归档)(?:阶段)?"
+    r"|已?进入(?:资料采集|分析|报告撰写|质量审查|演示准备|交付归档)(?:阶段)?"
+    r"|项目已归档完成"
+    r")",
+)
+_STAGE_ADVANCE_CLAIM_NEGATION_RE = re.compile(
+    r"(?:不能|不要|不代表|不是|并非|尚未|还未|还没|未|没有|别|无需)[^。！？!?\n]{0,12}$"
 )
 TOOL_LOG_COMMENT_RE = re.compile(
     r'<!--\s*tool-log'
@@ -101,6 +109,16 @@ def _strip_legacy_stage_ack(content: str) -> str:
     if not content or "<stage-ack" not in content.lower():
         return content
     return re.sub(r"\n{3,}", "\n\n", _STAGE_ACK_STRIP_RE.sub("", content)).strip()
+
+
+def _has_stage_advance_claim(content: str) -> bool:
+    text = content or ""
+    for match in _STAGE_ADVANCE_CLAIM_RE.finditer(text):
+        prefix = text[max(0, match.start() - 18):match.start()]
+        if _STAGE_ADVANCE_CLAIM_NEGATION_RE.search(prefix):
+            continue
+        return True
+    return False
 
 
 def strip_tool_log_comments(content: str) -> str:
@@ -5824,8 +5842,7 @@ class ChatHandler:
             "web_search_performed": False,
             "fetch_url_performed": False,
             "web_search_count": 0,
-            "user_notice_emitted": False,
-            "internal_notice_emitted": False,
+            "emitted_system_notice_keys": set(),
             "pending_system_notices": [],
             "draft_followup_flags": None,
             "read_file_paths": set(),
@@ -6157,7 +6174,7 @@ class ChatHandler:
     def _maybe_emit_stage_claim_mismatch_notice(self, project_id: str, visible_content: str) -> None:
         if self._turn_context.get("checkpoint_event"):
             return
-        if not _STAGE_ADVANCE_CLAIM_RE.search(visible_content or ""):
+        if not _has_stage_advance_claim(visible_content):
             return
 
         before = self._turn_context.get("stage_code_before_turn")
@@ -6185,8 +6202,12 @@ class ChatHandler:
         user_action: str,
         surface_to_user: bool,
     ) -> None:
-        flag_key = "user_notice_emitted" if surface_to_user else "internal_notice_emitted"
-        if self._turn_context.get(flag_key):
+        notice_key = (bool(surface_to_user), category, path or "")
+        notice_keys = self._turn_context.setdefault("emitted_system_notice_keys", set())
+        if not isinstance(notice_keys, set):
+            notice_keys = set(notice_keys)
+            self._turn_context["emitted_system_notice_keys"] = notice_keys
+        if notice_key in notice_keys:
             return
         notice = {
             "type": "system_notice",
@@ -6196,7 +6217,7 @@ class ChatHandler:
             "user_action": user_action,
             "surface_to_user": surface_to_user,
         }
-        self._turn_context[flag_key] = True
+        notice_keys.add(notice_key)
         queue = self._turn_context.setdefault("pending_system_notices", [])
         queue.append(notice)
 

@@ -5739,8 +5739,6 @@ class ChatRuntimeTests(unittest.TestCase):
             "can_write_non_plan": True,
             "web_search_disabled": False,
             "pending_system_notices": [],
-            "user_notice_emitted": False,
-            "internal_notice_emitted": False,
         }
         self._read_file_for_turn(handler, "plan/analysis-notes.md")
 
@@ -6067,9 +6065,11 @@ class ChatRuntimeTests(unittest.TestCase):
         events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
         notices = [event for event in events if event["type"] == "system_notice"]
 
-        self.assertEqual(len(notices), 1)
-        self.assertEqual(notices[0]["category"], "non_plan_write_blocked")
-        self.assertNotIn("surface_to_user", notices[0])
+        categories = [notice["category"] for notice in notices]
+        self.assertEqual(len(notices), 2)
+        self.assertEqual(categories.count("stage_write_blocked"), 1)
+        self.assertEqual(categories.count("non_plan_write_blocked"), 1)
+        self.assertTrue(all("surface_to_user" not in notice for notice in notices))
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_notice_reset_between_turns(self, mock_openai):
@@ -9458,6 +9458,79 @@ class StageClaimMismatchNoticeTests(ChatRuntimeTests):
         self.assertEqual(notices[0]["category"], "stage_claim_without_checkpoint")
         self.assertTrue(notices[0]["surface_to_user"])
         self.assertIn("advance_stage", notices[0]["user_action"])
+
+    def test_stage_claim_notice_coexists_with_prior_user_visible_notice(self):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        (self.project_dir / "plan" / "data-log.md").unlink()
+        handler._turn_context = handler._build_turn_context(self.project_id, "继续")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/data-log.md",
+                        "content": (
+                            "# Data log\n\n"
+                            "### [DL-2024-01] test\n"
+                            "- **URL**：https://www.example.com/policy\n"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        self.assertEqual(result["status"], "error")
+        self._finalize_assistant_for_test(handler, "已进入资料采集阶段。")
+
+        notices = handler._turn_context.get("pending_system_notices", [])
+        categories = [notice["category"] for notice in notices]
+        self.assertEqual(categories.count("stage_write_blocked"), 1)
+        self.assertEqual(categories.count("stage_claim_without_checkpoint"), 1)
+
+    def test_stage_claim_detector_covers_skill_phrases(self):
+        claims = [
+            "已进入 S2。",
+            "已进入 S3。",
+            "已进入 S4。",
+            "已进入 S5。",
+            "已进入 S6。",
+            "已进入 S7。",
+            "进入 S2。",
+            "已推进至 S3。",
+            "已推进到 S5。",
+            "进入演示准备阶段。",
+            "进入交付归档阶段。",
+            "项目已归档完成。",
+        ]
+        for claim in claims:
+            with self.subTest(claim=claim):
+                handler = self._make_handler_with_project()
+                handler._turn_context = handler._build_turn_context(self.project_id, "继续")
+
+                self._finalize_assistant_for_test(handler, claim)
+
+                notices = handler._turn_context.get("pending_system_notices", [])
+                self.assertEqual(len(notices), 1)
+                self.assertEqual(notices[0]["category"], "stage_claim_without_checkpoint")
+
+    def test_stage_claim_detector_suppresses_negated_phrases(self):
+        negated_claims = [
+            "当前还不能进入资料采集阶段。",
+            "请不要进入质量审查。",
+            "这不代表已进入报告撰写阶段。",
+        ]
+        for claim in negated_claims:
+            with self.subTest(claim=claim):
+                handler = self._make_handler_with_project()
+                handler._turn_context = handler._build_turn_context(self.project_id, "继续")
+
+                self._finalize_assistant_for_test(handler, claim)
+
+                notices = handler._turn_context.get("pending_system_notices", [])
+                self.assertEqual(notices, [])
 
     def test_finalize_stage_claim_no_notice_when_stage_changed_without_checkpoint(self):
         handler = self._make_handler_with_project()
