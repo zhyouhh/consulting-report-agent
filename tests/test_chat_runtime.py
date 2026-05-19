@@ -9525,6 +9525,12 @@ class StageClaimMismatchNoticeTests(ChatRuntimeTests):
             "若已进入 S2，请开始资料采集。",
             "如果现在进入 S2，会缺少前置条件。",
             "如果已进入资料采集阶段，就可以写 data-log。",
+            "如果用户已经明确在工作区确认了大纲并且已进入 S2，请开始资料采集。",
+            "当已进入 S2 时，请开始资料采集。",
+            "在已进入 S2 后，请开始资料采集。",
+            "已进入 S2 后，请开始资料采集。",
+            "只要已进入 S2，请开始资料采集。",
+            "待已进入 S2 后，请开始资料采集。",
         ]
         for claim in blocked_claims:
             with self.subTest(claim=claim):
