@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-05-13（DeepSeek 官渠 tool-call 400 已修复并重打包；packaged S0-S7 QA 跑到 `done`，但暴露 GUI 启动崩溃、质量检查脚本编码和导出依赖问题）
+最后更新：2026-05-19（stage conductor v0 已把阶段推进收敛到 `advance_stage`，并修复 checkpoint 越级 / stage desync / legacy stage-ack runtime side effect；GUI 启动崩溃、质量检查脚本编码和导出依赖问题仍未解决）
 
 ## 当前未解决 / 待验证
 
@@ -28,13 +28,7 @@
   - B. 用 Python 原生 `.docx` 生成基础可审稿：包更轻、Markdown 格式还原需要取舍
 - 下一步：先定方案，再补导出 smoke 和文档说明
 
-4. **P2：checkpoint API 可越级推进**
-- 状态：`待修复`
-- 现象：QA 中 workspace 仍在 S2 时，`review-started` checkpoint 被接受；原因是 endpoint 只校验目标 checkpoint 的直接前置文件，不校验前序阶段已完成
-- 用户影响：UI 正常路径可能不易触发，但 API 调用或后续自动化可制造不一致状态
-- 下一步：`SkillEngine.record_stage_checkpoint()` 增加 predecessor-stage validation；补拒绝越级的单测
-
-5. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现，已推后）
+4. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现，已推后）
 - 状态：`已推后到 UI 重构一并处理`（spec §2.2 Out of Scope）
 - 现状：`frontend/src/utils/modelCapabilities.js` 的 `supportsImageAttachments` 对 `mode==="managed"` 一律 return true（gemini-3-flash 时代多模态行为）
 - 问题：DeepSeek V4 Pro 是 text-only reasoning 模型，前端不拦图片附件 → 用户传图后请求会被上游 400 拒（postMessage、上传按钮、拖拽都不会有 UX 提示）
@@ -42,35 +36,42 @@
 - 关联文件：`frontend/src/utils/modelCapabilities.js`、`frontend/tests/modelCapabilities.test.mjs`、各上传/粘贴入口组件
 - 触发条件：UI 重构立项时一起做（设计稿在 `docs/design_UI.pdf`）
 
-6. **UI 重构**
+5. **UI 重构**
 - 状态：`待 packaged GUI 启动崩溃修复后立项`
 - 设计稿：`docs/design_UI.pdf`（用户用 Claude design 做的 3 套初步设计稿）
 - 触发条件：先恢复当前打包 GUI 可打开，再决定是否进入设计重构；不要把 P0 启动崩溃埋进大重构里
 
-7. **stage-advance-gates Bug G/H 低优先级待复核**
+6. **stage-advance-gates Bug G/H 低优先级待复核**
 - 状态：`低优先级待复核`
 - Bug G：回退 checkpoint 后 `content/*.md` 仍存在，状态可能不自洽；复核时决定级联清理还是 UI 标红提示。
 - Bug H：S1 回退后 UI「下一步建议」显示"暂无"，`next_stage_hint` S1 分支缺；复核时补齐提示或确认新版流程已绕开。
 
-8. **新建项目表单与废 UI 整理**（待 UI 重构时并入/评估）
+7. **新建项目表单与废 UI 整理**（待 UI 重构时并入/评估）
 - 状态：`待 UI 重构时评估`
 - 目标：清理"填了像没填"的字段、重复输入项和旧流程遗留 UI，包括截止日期控件、材料/备注语义重叠、项目类型/主题/目标读者/篇幅字段利用率。
 - 关联：Task 7 的 `length_fallback` chip 目前只是非交互提示；如做项目表单 edit 模式，可顺便让 chip 点击打开编辑面板。
 
-9. **`draw.io skill` 评估**
+8. **`draw.io skill` 评估**
 - 状态：`待评估`
 - 目标：判断它对咨询报告场景是否真有价值，还是只会增加复杂度。
 
-10. **前端生产包优化**
+9. **前端生产包优化**
 - 状态：`待优化`
 - 现状：`vite build` 已通过，但主 JS chunk 仍接近 `1 MB`。
 - 目标：在不引入复杂度失控的前提下做基本拆包，降低首屏和构建产物压力。
 
-11. **技术债清理**
+10. **技术债清理**
 - 状态：`待清理`
 - 当前明确项：`pydantic` deprecation warning、打包依赖排除空间。
 
 ## 最近已解决
+
+0f. **stage conductor v0 阶段推进清理（2026-05-19）**
+- 状态：`已解决；等待下一轮打包态 S0-S7 QA 做整链路回归`
+- 覆盖问题：checkpoint API 越级推进、写作阶段与 checkpoint desync、legacy `<stage-ack>` 被误当作运行时推进信号。
+- 当前规则：阶段推进 / 回退只能通过 `advance_stage(checkpoint_key, action, reason)`，并由 `SkillEngine.record_stage_checkpoint()` 统一校验前序阶段、实质文件和质量门禁；`POST /api/projects/{id}/checkpoints/{name}` 也委派同一服务，不能绕过前序阶段。
+- 已关闭的旧路径：用户强关键词不再触发 checkpoint side effect；legacy `<stage-ack>` 只作为历史残留做后端 / 前端剥离，不再设置 checkpoint。若畸形 legacy tag 未被 sanitizer 命中，残留风险只剩可见文本污染，不再是阶段推进风险。
+- 回归入口：`tests/test_skill_engine.py` 覆盖 transition validation；`tests/test_chat_runtime.py` 覆盖 `advance_stage`、强关键词无副作用、legacy tag 无 checkpoint；`tests/test_main_api.py` 覆盖 checkpoint endpoint；`tests/test_packaging_docs.py` 锁定 `skill/SKILL.md` 不再含 stage-ack 指令。
 
 0e. **DeepSeek 官渠 tool-call 400 根治 + 打包态后端 S0-S7 QA（2026-05-13）**
 - 状态：`代码已修复；打包态后端生命周期已跑到 done；GUI 仍有 P0 启动崩溃，见当前 Item 1`
@@ -130,7 +131,7 @@
   - **Task 2**（4 commits）：`292bf6f` `68eb8a2` `2717760` `43b6c68` — turn_context fields + obligation detector + read_file mtime hook
   - **Task 3**（7 commits 含 fix1）：`0c0f387` `c75ff0d` `0404f67` `1644620` `400e433` `dd5a322` + fix1 `5d88e2b` — 4 tools impl + 51 ToolTests + retry hook + Critical fix (legacy gate accepts semantic edit tools)
   - **Task 4**（2 commits）：`fa3088c` `3f28957` — SKILL.md §S4 重写 + chat.py user_action wording
-  - **Task 5**（5 commits 含 fix1）：`911a9d2` `8bd0abc` `bac9112` `4ab5010` + fix1 `c53b5f3` — the big delete (-6594 lines) + StageAckRegression + wire append dispatch (Task 3 deferral 关闭) + canonical_draft_mutation merge fix
+  - **Task 5**（5 commits 含 fix1）：`911a9d2` `8bd0abc` `bac9112` `4ab5010` + fix1 `c53b5f3` — the big delete (-6594 lines) + legacy tag regression + wire append dispatch (Task 3 deferral 关闭) + canonical_draft_mutation merge fix
   - **Task 6.1+6.2**（1 commit）：`d482235` — dist rebuild 86.09MB / 3.16 min + tool-selection benchmark schema sanity
 - Net diff：17 files changed, **+4844 / -6535 = -1691 lines net**
 - Test acceptance：
@@ -178,7 +179,7 @@
 - 二轮新暴露问题见 1b（已修）
 
 1a. **[BUG 串] stage-advance-gates 实机链条性失效 — A/B/C/D/F 已修，G/H 移入当前待办**
-- 状态：`A/B/C/D/F 已修；G/H 已移入上方当前待办 Item 4`（2026-04-21 3 路并行 codex + general-purpose 派活，全部合 main；C 后续被 S0 interview 实施覆盖，详见 1d）
+- 状态：`A/B/C/D/F 已修；G/H 已移入上方 stage-advance-gates Bug G/H 待复核项`（2026-04-21 3 路并行 codex + general-purpose 派活，全部合 main；C 后续被 S0 interview 实施覆盖，详见 1d）
 - 关联 plan：`docs/superpowers/plans/2026-04-21-smoke-test-bugfix.md`
 - 测试基线：403 passed / 1 skipped（基线 397 → 403，加 6 条新测试）
 
@@ -186,7 +187,7 @@
 
 **Bug B ✅** — `backend/skill.py:record_stage_checkpoint` 在 `set` 前校验对应 plan 文件有效存在（outline/report_draft/review_checklist/presentation_plan/delivery_log），缺文件 raise ValueError。commit `7e262cf fix(skill): validate stage checkpoint prerequisites`。
 
-**Bug C ✅** — 已被 S0 interview + stage-ack 实施覆盖（spec/plan APPROVED 后 19 个 task 全套合 main，commits `3817c43`「Add s0_interview_done_at to stage checkpoint infrastructure」+ `aca1350`「Gate S0 completion on s0_interview_done_at checkpoint」+ `916f135`「Remove weak advance keyword table; add s0 strong keywords」+ `0ab565c`「Gate S0 write_file for four downstream plan files」等）。`stage_zero_complete` 不再依赖 `project_overview_ready`，必须 LLM 主动发 `<stage-ack>s0_interview_done</stage-ack>` 才推进。详见 1d。
+**Bug C ✅** — 已先由 S0 interview + legacy stage signal 实施覆盖（spec/plan APPROVED 后 19 个 task 全套合 main），后由 2026-05-19 stage conductor v0 收敛为 `advance_stage`。`stage_zero_complete` 不再依赖 `project_overview_ready`；当前必须由 `advance_stage(checkpoint_key="s0_interview_done_at", action="set", reason="...")` 成功落 checkpoint 才推进。详见 1d 与 0f。
 
 **Bug D ✅** — `skill/SKILL.md` §S2 明确 `### [DL-YYYY-NN]` 格式 + 完整示例，并写明"表格形式不会被识别"；首次写 `plan/data-log.md` 时通过 `_emit_system_notice_once` 注入格式提示。commits `7a50bb3` / `88f10d7` / `4a6a7da`。
 
@@ -194,9 +195,9 @@
 
 **Bug F ✅** — `backend/chat.py:_expected_plan_writes_for_message` 白名单从硬编码 5 条路径改成正则匹配 `report_draft_v\d+\.md` 和 `(content|output)/*.md`，`_is_expected_report_write_path` 方法抽出可复用。+28 行测试。commit `1e180cc fix(chat): detect versioned report draft claims`。
 
-**Bug G ↗** — 回退 checkpoint 后 `content/*.md` 仍存在，状态不自洽；已移入当前待办 Item 4。
+**Bug G ↗** — 回退 checkpoint 后 `content/*.md` 仍存在，状态不自洽；已移入当前 stage-advance-gates Bug G/H 待复核项。
 
-**Bug H ↗** — S1 回退后 UI「下一步建议」显示"暂无"，`next_stage_hint` S1 分支缺；已移入当前待办 Item 4。
+**Bug H ↗** — S1 回退后 UI「下一步建议」显示"暂无"，`next_stage_hint` S1 分支缺；已移入当前 stage-advance-gates Bug G/H 待复核项。
 
 ~~**Bug I**~~ — 已排除，黄色警告是当轮新触发。
 
@@ -211,8 +212,8 @@
 
 **新 Bug 1 ✅（S0 门槛回归，关联旧 1a#Bug C）** — 图5
 - 原现象：填完新建项目表单 → 右侧「已完成」直接四项全勾，对话一句没说
-- 修法：S0 interview + stage-ack 全套 19 个 task 实施完毕（spec/plan APPROVED 后），`stage_zero_complete` 改成必须 LLM 发 `<stage-ack>s0_interview_done</stage-ack>` 才推进。`backend/skill.py` 不再用 `stage_zero_complete = project_overview_ready` 短路。详见 1d。
-- 关键 commits：`3817c43` / `aca1350` / `916f135` / `0ab565c` / `8f63570 Update SKILL.md with S0 mandatory interview and stage-ack rules`
+- 修法：S0 interview 全套 19 个 task 实施完毕（spec/plan APPROVED 后），`stage_zero_complete` 改成必须落 `s0_interview_done_at` checkpoint 才推进。2026-05-19 后当前落点是 `advance_stage(checkpoint_key="s0_interview_done_at", action="set", reason="...")`；legacy tag 只做 sanitizer。`backend/skill.py` 不再用 `stage_zero_complete = project_overview_ready` 短路。详见 1d 与 0f。
+- 关键 commits：`3817c43` / `aca1350` / `916f135` / `0ab565c` / `8f63570`（当时更新 S0 访谈规则，当前已被 `advance_stage` 口径取代）
 
 **新 Bug 2 ✅（tool 结果气泡吞 assistant 正文）** — 图6
 - 现象：`✅ 结果: {...}` 气泡把紧跟的 assistant 正文首段一起吞入同一个气泡
@@ -223,7 +224,7 @@
 
 **新 Bug 3 ✅（口头"确认"不推进阶段）** — 图8
 - 原现象：用户回"确认"（响应模型"请回复'确认大纲'或'按此大纲执行'"），`stage_checkpoints.json` 未写入 `outline_confirmed_at`
-- 修法：选了决策点 (b) 中期重构。新增 `StageAckParser`（commits `088d648 Add StageAckParser parse_raw with unknown-key events` + `c0e30b3 Add tag position judgment` + `41d21ef Add StageAckParser.strip` + `9a81d69 Wire StageAckParser finalize into both chat paths with tag priority` 等），LLM 在 assistant 尾部输出 `<stage-ack>KEY</stage-ack>`，后端校验前置文件后 set checkpoint 并剥掉标签。`_WEAK_ADVANCE_BY_STAGE` 弱关键词表整张删除（commit `916f135 Remove weak advance keyword table; add s0 strong keywords`）。五个 checkpoint 通吃。详见 1d。
+- 修法：当时选了决策点 (b) 中期重构，删除 `_WEAK_ADVANCE_BY_STAGE` 弱关键词表，并短期引入 legacy stage tag 解析来替代口头强关键词 fallback。2026-05-19 stage conductor v0 已进一步收敛：模型必须调用 `advance_stage`，legacy tag 只剥离、不落 checkpoint。详见 1d 与 0f。
 
 1c. **[归档] Gemini-era 模型行为硬伤 — 主体修复已合 main，复测路径已被 DeepSeek Migration 取代**
 - 状态：`核心兜底全部落地；Gemini reality_test 复测路径已停止推进`
@@ -246,13 +247,13 @@
 - 修复：`max_iterations` 默认值 10 → 20（commit `ec976b8 fix(chat): raise stream max_iterations from 10 to 20`），`_chat_stream_unlocked` + `chat_stream` 两处。非流式 `chat()` 仍 5（仅测试用）。test_chat_runtime 342 passed / 1 skipped 零回归
 - 当时重打包已完成（2026-05-04，dist 104 MB / exe 14 MB）；后续不再以 Gemini reality_test 作为当前验收路径。
 
-1d. **[已完成] S0 interview + stage-ack 19 个 task 全套实施**
-- 状态：`全部合 main`（2026-04-21 spec/plan APPROVED → 2026-04-21~04-22 19 个 task 实施 → 全部进入 main）
+1d. **[已完成 / 已被 0f supersede] S0 interview + legacy stage signal 19 个 task 全套实施**
+- 状态：`全部合 main；阶段推进运行时已在 2026-05-19 被 stage conductor v0 收敛到 advance_stage`
 - 关联文档：`docs/superpowers/specs/2026-04-21-s0-interview-and-stage-ack-design.md` / `docs/superpowers/plans/2026-04-21-s0-interview-and-stage-ack-impl.md` / `docs/superpowers/handoffs/2026-04-21-s0-impl-handoff.md`
 - 覆盖范围：
-  - **S0 硬门禁**（解 1a Bug C / 1b Bug 1）：`stage_zero_complete` 不再依赖 `project_overview_ready`，必须 `s0_interview_done_at` checkpoint 才推进。`backend/skill.py` 新增 `s0_interview_done_at` infra（commit `3817c43`）+ gating（`aca1350`）；`backend/chat.py` 加 S0 软门禁阻挡 LLM 在访谈未完成时直接写 outline / report-draft（commits `0ab565c` / `216f5f1` / `167e10f`）
-  - **stage-ack 信号**（解 1b Bug 3）：删除整张 `_WEAK_ADVANCE_BY_STAGE` 弱关键词表（`916f135`），改成 LLM 在 assistant 尾部输出 `<stage-ack>KEY</stage-ack>`。新增 `StageAckParser`（`088d648` parse_raw / `c0e30b3` 位置判断 / `41d21ef` strip / `9a81d69` finalize 接线）+ 流式 tail guard 防标签泄漏（`5d2f00e`）+ 历史消息 sanitize（`4ba744e`）+ 兜底防御性 strip（`5356f3c`）
-  - **路由 + 配套**：新增 `POST /api/projects/{id}/checkpoints/s0-interview-done`（`504801f`，`action=set` 直接 400）；`workspaceSummary` 暴露 `s0InterviewDone` flag（`31dc7cf`）；`SKILL.md` 写明 S0 强制访谈与 stage-ack 规则（`8f63570`）；S2+ 增加"重置 S0"高级回退选项（`2332822`）
+  - **S0 硬门禁**（解 1a Bug C / 1b Bug 1）：`stage_zero_complete` 不再依赖 `project_overview_ready`，必须 `s0_interview_done_at` checkpoint 才推进。`backend/skill.py` 新增 `s0_interview_done_at` infra（commit `3817c43`）+ gating（`aca1350`）；`backend/chat.py` 加 S0 软门禁阻挡 LLM 在访谈未完成时直接写 outline / report-draft（commits `0ab565c` / `216f5f1` / `167e10f`）。当前推进方式是 `advance_stage(checkpoint_key="s0_interview_done_at", action="set", reason="...")`。
+  - **legacy stage signal**（解 1b Bug 3 的历史实现）：删除整张 `_WEAK_ADVANCE_BY_STAGE` 弱关键词表（`916f135`），短期引入 assistant 尾部控制 tag 解析、流式 tail guard、历史消息 sanitize 和兜底 strip。2026-05-19 后这些 tag 只作为历史残留清理对象，不再触发 checkpoint side effect。
+  - **路由 + 配套**：新增 `POST /api/projects/{id}/checkpoints/s0-interview-done`（`504801f`，`action=set` 直接 400）；`workspaceSummary` 暴露 `s0InterviewDone` flag（`31dc7cf`）；`SKILL.md` 当前写明 S0 强制访谈与 `advance_stage` 规则；S2+ 增加"重置 S0"高级回退选项（`2332822`）
   - **migration**：增量 schema 迁移（`cf26609`），legacy 项目不会被新判据推回 S0
 - 测试基线：spec 5 轮 / plan 3 轮 codex review；实施期 19 个 task 各 commit 跑 review
 - 结论：1a Bug C ✅ / 1b Bug 1 ✅ / 1b Bug 3 ✅ 全部由本块覆盖，无需独立追踪
@@ -315,8 +316,8 @@
 - 状态：`已完成`（2026-04-21 3 路并行派活，全部合 main）
 - 5 个 commit：`cb15e4c` / `7e262cf` / `1e180cc`（task-4 Bug A/B/F）+ `4a6a7da` / `88f10d7` / `7a50bb3`（task-5 Bug D）+ `341de44`（frontend-copy 复制体验）
 - 测试：后端 403 passed（397→403，+6 新测试）；前端 139 passed；`npm run build` 零错
-- 详情见最近已解决 1a；G/H 已移入当前待办 Item 4。
-- 归档说明：二轮 smoke 与重打包后续已完成；新暴露问题已归入 1b / 1d / 当前 Item 4，不再从本历史块发起 smoke。
+- 详情见最近已解决 1a；G/H 已移入当前 stage-advance-gates Bug G/H 待复核项。
+- 归档说明：二轮 smoke 与重打包后续已完成；新暴露问题已归入 1b / 1d / 当前 stage-advance-gates Bug G/H 待复核项，不再从本历史块发起 smoke。
 
 1. ⭐ **阶段推进门禁重构（stage-advance-gates，Task 1-8 全闭环）**
 - 状态：`已完成`（2026-04-21 分支 `feat/stage-advance-gates` 合 main）
@@ -324,7 +325,7 @@
 - 覆盖：
   - Task 1/2 — stage_checkpoints.json storage + length target + quality gate helpers（含 regex 加固）
   - Task 3a/3b/3c — 重写 `_infer_stage_state`（三条件投影）+ migration cascade + `get_workspace_summary` 扩 `checkpoints` / `length_targets` / `quality_progress` / `flags` / `next_stage_hint` / `stalled_since` / `word_count` / `delivery_mode` / `length_fallback_used`
-  - Task 4 — `POST /api/projects/{id}/checkpoints/{name}` endpoint + stage-aware `_detect_stage_keyword`（strong / weak S4 排除 / rollback / negation 抑制 / `非常同意` 不误伤 / tie-break）+ `_should_allow_non_plan_write` blocking-first 优先级 + 两轮 follow-up（`checkpoint_event` 字段 / OK/ok 大小写 spec 同步 / `SkillEngine.record_stage_checkpoint` 解耦 `backend.main` / 4 张 checkpoint 表 invariant test）
+  - Task 4 — `POST /api/projects/{id}/checkpoints/{name}` endpoint + legacy keyword checkpoint detector（strong / weak S4 排除 / rollback / negation 抑制 / `非常同意` 不误伤 / tie-break；2026-05-19 已由 `advance_stage` 取代）+ `_should_allow_non_plan_write` blocking-first 优先级 + 两轮 follow-up（`checkpoint_event` 字段 / OK/ok 大小写 spec 同步 / `SkillEngine.record_stage_checkpoint` 解耦 `backend.main` / 4 张 checkpoint 表 invariant test）
   - Task 5 — `write_file` 自签名拦截 + `system_notice` 三段链路（`_emit_system_notice_once` + stream pop drain + `ChatResponse.system_notices`）
   - Task 6 — `skill/SKILL.md` 阶段推进与工具错误规则
   - Task 7 — 前端 `StageAdvanceControl` + `RollbackMenu` + `ConfirmDialog` + `WorkspacePanel` chip + `ChatPanel` `system_notice` 渲染 + `workspaceSummary` 契约映射 + 7 fix round（`flags.outline_ready` 字段名 / length_fallback chip 非交互 / `delivery_mode` 中文字面量 / "调整大纲"触发 prompt / `next_stage_hint` 消费守护 / checkpoint 错误反馈 + `pending` 态 / ConfirmDialog a11y / 隐藏后台阶段码 / `length_targets.report_word_floor` 契约对齐）
