@@ -87,6 +87,9 @@ _STAGE_ACK_STRIP_RE = re.compile(
     r'<stage-ack(?:\s+action="(?:set|clear)")?>[a-z_0-9]+</stage-ack>',
     re.IGNORECASE,
 )
+_STAGE_ADVANCE_CLAIM_RE = re.compile(
+    r"(进入资料采集|进入分析|进入报告撰写|进入质量审查|已推进到)",
+)
 TOOL_LOG_COMMENT_RE = re.compile(
     r'<!--\s*tool-log'
     r'(?:[\s\S]*?-->|[\s\S]*$)',
@@ -5828,6 +5831,7 @@ class ChatHandler:
             "read_file_paths": set(),
             "canonical_draft_mutations": [],
             "checkpoint_event": None,
+            "stage_code_before_turn": None,
             "s0_confirmation_completed": True,
             "s0_non_whitelist_tool_attempted": False,
             "user_message_text": "",                  # spec §3.3 NEW
@@ -5868,6 +5872,11 @@ class ChatHandler:
 
     def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, object]:
         self._turn_context = self._new_turn_context(can_write_non_plan=False)
+        try:
+            summary = self.skill_engine.get_workspace_summary(project_id)
+        except ValueError:
+            summary = {}
+        self._turn_context["stage_code_before_turn"] = summary.get("stage_code")
         conversation_state = self._load_conversation_state(project_id)
         s0_completed = conversation_state.get("s0_confirmation_completed", True)
         self._turn_context["s0_confirmation_completed"] = (
@@ -6105,6 +6114,7 @@ class ChatHandler:
 
         had_legacy_stage_ack = "<stage-ack" in (assistant_message or "").lower()
         visible_content = _strip_legacy_stage_ack(assistant_message)
+        self._maybe_emit_stage_claim_mismatch_notice(project_id, visible_content)
 
         # Empty visible reply goes through A3 before any tool-log append.
         if not visible_content:
@@ -6143,6 +6153,28 @@ class ChatHandler:
         ])
         self._save_conversation(project_id, history)
         return persisted_content
+
+    def _maybe_emit_stage_claim_mismatch_notice(self, project_id: str, visible_content: str) -> None:
+        if self._turn_context.get("checkpoint_event"):
+            return
+        if not _STAGE_ADVANCE_CLAIM_RE.search(visible_content or ""):
+            return
+
+        before = self._turn_context.get("stage_code_before_turn")
+        try:
+            current = self.skill_engine.get_workspace_summary(project_id).get("stage_code")
+        except ValueError:
+            current = before
+        if current != before:
+            return
+
+        self._emit_system_notice_once(
+            category="stage_claim_without_checkpoint",
+            path=None,
+            reason="助手声称推进阶段，但本轮没有成功调用 advance_stage。",
+            user_action="请先调用 advance_stage；如果阶段未推进，请明确说明当前仍停留在原阶段。",
+            surface_to_user=True,
+        )
 
     def _emit_system_notice_once(
         self,

@@ -9425,6 +9425,92 @@ class SystemNoticeDualDedupeTests(ChatRuntimeTests):
             )
 
 
+class StageClaimMismatchNoticeTests(ChatRuntimeTests):
+    def _seed_data_log(self, project_dir: Path, n_entries: int) -> None:
+        lines = ["# Data log\n"]
+        for i in range(n_entries):
+            lines.extend([
+                f"\n### [DL-2026-{i + 1:02d}] entry {i + 1}",
+                f"- **来源**: source-{i + 1}",
+                f"- **时间**: 2026-05-04",
+                f"- **URL**: https://example.com/{i + 1}",
+                f"- **用途**: test",
+                "",
+            ])
+        (project_dir / "plan" / "data-log.md").write_text(
+            "\n".join(lines),
+            encoding="utf-8",
+        )
+
+    def _prepare_s2_project(self, handler) -> None:
+        self._write_stage_one_prerequisites(self.project_dir)
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "s0_interview_done_at")
+        handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+
+    def test_finalize_emits_stage_claim_notice_without_checkpoint(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._build_turn_context(self.project_id, "继续")
+
+        self._finalize_assistant_for_test(handler, "已进入资料采集阶段。")
+
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["category"], "stage_claim_without_checkpoint")
+        self.assertTrue(notices[0]["surface_to_user"])
+        self.assertIn("advance_stage", notices[0]["user_action"])
+
+    def test_finalize_stage_claim_no_notice_when_stage_changed_without_checkpoint(self):
+        handler = self._make_handler_with_project()
+        self._prepare_s2_project(handler)
+        self._seed_data_log(self.project_dir, 3)
+        self.assertEqual(
+            handler.skill_engine.get_workspace_summary(self.project_id)["stage_code"],
+            "S2",
+        )
+        handler._turn_context = handler._build_turn_context(self.project_id, "继续采集")
+
+        self._seed_data_log(self.project_dir, 4)
+        self.assertEqual(
+            handler.skill_engine.get_workspace_summary(self.project_id)["stage_code"],
+            "S3",
+        )
+        self._finalize_assistant_for_test(handler, "已推进到 S3。")
+
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertEqual(notices, [])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_non_streaming_surfaces_stage_claim_notice(self, mock_openai):
+        handler = self._make_handler_with_project()
+        mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="已进入资料采集阶段。",
+                        tool_calls=[],
+                    )
+                )
+            ],
+        )
+
+        result = handler.chat(self.project_id, "继续", max_iterations=1)
+
+        notices = result.get("system_notices") or []
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0].category, "stage_claim_without_checkpoint")
+        self.assertTrue(notices[0].surface_to_user)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in StageClaimMismatchNoticeTests.__dict__
+    ):
+        setattr(StageClaimMismatchNoticeTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 class ToolResultQualityHintTests(ChatRuntimeTests):
     def _seed_data_log(self, project_dir, n_entries):
         lines = ["# Data log\n"]
