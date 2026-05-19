@@ -1,32 +1,23 @@
 # Current Worklist
 
-最后更新：2026-05-19（stage conductor v0 已把阶段推进收敛到 `advance_stage`，并修复 checkpoint 越级 / stage desync / legacy stage-ack runtime side effect；GUI 启动崩溃、质量检查脚本编码和导出依赖问题仍未解决）
+最后更新：2026-05-19（stage conductor v0 已把阶段推进收敛到 `advance_stage`；打包态 GUI 启动、S0-S7 确定性阶段推进、Markdown 表格渲染、质量检查和导出接口均已验证。真实 managed 模型长链路仍受渠道 timeout / 无首包影响。）
 
 ## 当前未解决 / 待验证
 
-1. **P0/P1：打包态 GUI 启动崩溃**
-- 状态：`阻断交付`
-- 现象：启动 `dist\咨询报告助手\咨询报告助手.exe` 后打开 `http://127.0.0.1:8080`，页面显示「应用出错，请刷新页面」
-- 控制台：`TypeError: Cannot read properties of null (reading 'mode')`
-- 已知边界：`/api/settings`、`/api/projects` 返回 200，后端可运行；问题更像前端初始 settings/null state 处理
-- 证据：本地 QA 输出 `.gstack/qa-reports/screenshots/s0-s7-initial.png`；可提交摘要见 [2026-05-13 packaged S0-S7 QA handoff](superpowers/handoffs/2026-05-13-packaged-s0-s7-qa.md)
-- 下一步：从 `frontend/src` 中读取 settings 的路径查起，补 null/加载态回归测试，再重打包验证
+1. **P1/P2：`export-draft` 仍依赖系统 Pandoc，包内未自带**
+- 状态：`待交付形态落地`
+- 现状：`skill/scripts/export_draft.ps1` 通过 `Get-Command pandoc` 找系统安装；本机打包态导出已通过，但 `dist\咨询报告助手\` 内没有 `pandoc.exe`，`consulting_report.spec` 也未收集 Pandoc
+- 用户影响：如果同事电脑没有系统 Pandoc，导出可审草稿仍会失败
+- 下一步：若继续采用 Pandoc 路线，需随 Windows 包携带 `pandoc.exe` 或在启动/导出时给出清晰安装指引；随后补无系统 Pandoc 的打包态 smoke
 
-2. **P1：打包态 `quality_check.ps1` 编码失败**
-- 状态：`阻断质量检查功能`
-- 现象：`POST /api/projects/{id}/quality-check` 返回 `{"status":"error","output":null}`；直接跑 `_internal\skill\scripts\quality_check.ps1` 会出现中文乱码和 PowerShell parser errors
-- 初步根因：UTF-8 `.ps1` 在 Windows PowerShell 中按 legacy code page 解析
-- 下一步：统一 `.ps1` 打包编码（优先 UTF-8 with BOM）或改成编码安全的 Python 执行路径；新增打包态脚本 smoke
-- 关联文件：`skill/scripts/quality_check.ps1`、`backend/report_tools.py`、`tests/smoke_packaged_app.py`
+2. **P1：managed 真实模型长链路 timeout / 无首包**
+- 状态：`待渠道稳定性复核`
+- 现象：2026-05-19 实测中，真实模型 S0 首轮和一次 `advance_stage` 可工作，但后续请求出现上游 timeout / 长时间无首包；确定性打包态 S0-S7 阶段机已通过
+- 下一步：区分网关/渠道问题与应用重试 UX 问题，必要时增加 no-first-byte 观测日志和用户可理解的恢复提示
 
-3. **P2/P3：`export-draft` 依赖外部 Pandoc，包内未自带**
-- 状态：`待产品决策`
-- 现状：`skill/scripts/export_draft.ps1` 通过 `Get-Command pandoc` 找系统安装；`dist\咨询报告助手\` 内没有 `pandoc.exe`，`consulting_report.spec` 也未收集 Pandoc
-- 用户影响：目标用户是不懂技术的同事，要求他们自行安装 Pandoc 不符合产品定位
-- 选择：
-  - A. 随 Windows 包带 Pandoc：转换稳定、包更大
-  - B. 用 Python 原生 `.docx` 生成基础可审稿：包更轻、Markdown 格式还原需要取舍
-- 下一步：先定方案，再补导出 smoke 和文档说明
+3. **P2：打包 / 前端小债**
+- 状态：`待清理`
+- 当前明确项：`favicon.ico` 404、输入框缺少 `id` 或 `name` 的可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning
 
 4. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现，已推后）
 - 状态：`已推后到 UI 重构一并处理`（spec §2.2 Out of Scope）
@@ -67,11 +58,12 @@
 ## 最近已解决
 
 0f. **stage conductor v0 阶段推进清理（2026-05-19）**
-- 状态：`已解决；等待下一轮打包态 S0-S7 QA 做整链路回归`
-- 覆盖问题：checkpoint API 越级推进、写作阶段与 checkpoint desync、legacy `<stage-ack>` 被误当作运行时推进信号。
+- 状态：`已解决；打包态确定性 S0-S7 与 Markdown 表格渲染已验证`
+- 覆盖问题：checkpoint API 越级推进、写作阶段与 checkpoint desync、legacy `<stage-ack>` 被误当作运行时推进信号、`settings.mode=null` GUI 启动崩溃、Windows PowerShell 脚本源码/输出编码、聊天 Markdown 表格原样显示。
 - 当前规则：阶段推进 / 回退只能通过 `advance_stage(checkpoint_key, action, reason)`，并由 `SkillEngine.record_stage_checkpoint()` 统一校验前序阶段、实质文件和质量门禁；`POST /api/projects/{id}/checkpoints/{name}` 也委派同一服务，不能绕过前序阶段。
 - 已关闭的旧路径：用户强关键词不再触发 checkpoint side effect；legacy `<stage-ack>` 只作为历史残留做后端 / 前端剥离，不再设置 checkpoint。若畸形 legacy tag 未被 sanitizer 命中，残留风险只剩可见文本污染，不再是阶段推进风险。
 - 回归入口：`tests/test_skill_engine.py` 覆盖 transition validation；`tests/test_chat_runtime.py` 覆盖 `advance_stage`、强关键词无副作用、legacy tag 无 checkpoint；`tests/test_main_api.py` 覆盖 checkpoint endpoint；`tests/test_packaging_docs.py` 锁定 `skill/SKILL.md` 不再含 stage-ack 指令。
+- 打包态记录：[2026-05-19 stage conductor packaged QA](superpowers/handoffs/2026-05-19-stage-conductor-packaged-qa.md)
 
 0e. **DeepSeek 官渠 tool-call 400 根治 + 打包态后端 S0-S7 QA（2026-05-13）**
 - 状态：`代码已修复；打包态后端生命周期已跑到 done；GUI 仍有 P0 启动崩溃，见当前 Item 1`

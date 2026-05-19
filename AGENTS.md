@@ -42,13 +42,20 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 
 ## 打包态 QA 接续（2026-05-19）
 
-正式待办仍以 `docs/current-worklist.md` 为唯一真值源；最近一次打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-13-packaged-s0-s7-qa.md`。当前接续优先级：
+正式待办仍以 `docs/current-worklist.md` 为唯一真值源；最近一次打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-19-stage-conductor-packaged-qa.md`。
 
-1. 先修打包态 GUI 启动崩溃：`settings.mode` null 导致首页 error boundary，用户无法进入产品
-2. 再修 `_internal\skill\scripts\quality_check.ps1` 在 Windows PowerShell 下的编码解析失败，并补打包态脚本 smoke
-3. 决策 `export_draft.ps1` 依赖系统 Pandoc 的交付形态：随包带 Pandoc，或改 Python 原生 `.docx` 导出
+已修复并打包验证：
 
-checkpoint endpoint 越级推进 / stage desync / stage-ack runtime side effect 已由 stage conductor v0 修复；后续只在下一轮打包态 S0-S7 QA 做回归确认。
+- 打包态 GUI 启动崩溃：`settings.mode` null 不再触发首页 error boundary。
+- `_internal\skill\scripts\quality_check.ps1` / `export_draft.ps1` 在 Windows PowerShell 下的源码解析和 stdout 编码问题。
+- checkpoint endpoint 越级推进 / stage desync / legacy `<stage-ack>` runtime side effect。
+- 聊天气泡 Markdown GFM 表格渲染。
+
+仍需接续：
+
+1. `export_draft.ps1` 仍依赖系统 `pandoc`；本机打包态导出通过，但 `dist\咨询报告助手\` 尚未自带 `pandoc.exe`。
+2. managed 真实模型长链路偶发 timeout / 无首包，阶段机本身已用确定性打包态 S0-S7 验收。
+3. 打包与前端小债：`favicon.ico` 404、输入框 id/name 可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning。
 
 ## Skill 工作流（S0-S7）
 

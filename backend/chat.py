@@ -103,7 +103,7 @@ _STAGE_ADVANCE_CLAIM_NEGATION_RE = re.compile(
     r"(?:无法|不应|不能|不要|不代表|不是|并非|尚未|还未|还没|未|没有|别|无需)[^，,；;。.!！？?\n：:]{0,12}$"
 )
 _STAGE_ADVANCE_CLAIM_INSTRUCTION_PREFIX_RE = re.compile(
-    r"(?:需要|请|必须|要|应当|应该|先|可|可以)[^，,；;。.!！？?\n：:]{0,8}$"
+    r"(?:需要|请|必须|要|应当|应该|先|可|可以|下一步|接下来|后续)[^，,；;。.!！？?\n：:]{0,8}$"
 )
 _STAGE_ADVANCE_CLAIM_CONDITION_BEFORE_RE = re.compile(
     r"(?:如果|若|假如|假设|倘若|一旦|只要|待)"

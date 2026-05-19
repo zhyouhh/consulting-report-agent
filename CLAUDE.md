@@ -40,14 +40,22 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 - 不要把 SDK `model_dump()` 里的 null 字段原样塞回历史消息；`reasoning_content: null`、`audio: null` 这类字段会触发官渠 400
 - 回归测试集中在 `tests/test_chat_runtime.py` 的 DeepSeek/tool-call follow-up 用例
 
-## 打包态 QA 接续（2026-05-13）
+## 打包态 QA 接续（2026-05-19）
 
-正式待办仍以 `docs/current-worklist.md` 为唯一真值源；最近一次打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-13-packaged-s0-s7-qa.md`。当前接续优先级：
+正式待办仍以 `docs/current-worklist.md` 为唯一真值源；最近一次打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-19-stage-conductor-packaged-qa.md`。
 
-1. 先修打包态 GUI 启动崩溃：`settings.mode` null 导致首页 error boundary，用户无法进入产品
-2. 再修 `_internal\skill\scripts\quality_check.ps1` 在 Windows PowerShell 下的编码解析失败，并补打包态脚本 smoke
-3. 决策 `export_draft.ps1` 依赖系统 Pandoc 的交付形态：随包带 Pandoc，或改 Python 原生 `.docx` 导出
-4. 最后补 checkpoint endpoint 的越级推进校验，避免 API/自动化制造不一致阶段状态
+已修复并打包验证：
+
+- 打包态 GUI 启动崩溃：`settings.mode` null 不再触发首页 error boundary。
+- `_internal\skill\scripts\quality_check.ps1` / `export_draft.ps1` 在 Windows PowerShell 下的源码解析和 stdout 编码问题。
+- checkpoint endpoint 越级推进 / stage desync / legacy `<stage-ack>` runtime side effect。
+- 聊天气泡 Markdown GFM 表格渲染。
+
+仍需接续：
+
+1. `export_draft.ps1` 仍依赖系统 `pandoc`；本机打包态导出通过，但 `dist\咨询报告助手\` 尚未自带 `pandoc.exe`。
+2. managed 真实模型长链路偶发 timeout / 无首包，阶段机本身已用确定性打包态 S0-S7 验收。
+3. 打包与前端小债：`favicon.ico` 404、输入框 id/name 可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning。
 
 ## Skill 工作流（S0-S7）
 
@@ -57,6 +65,10 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 - `plan/stage-gates.md`、`plan/progress.md`、`plan/tasks.md` **由后端自动回写**，模型不能手写，测试/代码里也别假设它们是手工维护
 - `plan/project-info.md` 已退役，不要新建、读取或引用
 - 禁止创建 `gate-control.md`
+- 阶段推进 / 回退的模型侧唯一入口是 `advance_stage(checkpoint_key="...", action="set|clear", reason="...")`；不要恢复 `StageAckParser`、`<stage-ack>` 执行语义、强关键词 checkpoint fallback，也不要让模型直接写 `stage_checkpoints.json`
+- `SkillEngine.record_stage_checkpoint()` 是 checkpoint 真正写入口，`set` 前必须校验前序阶段、实质文件和质量门禁；API endpoint 和 `advance_stage` 都应委派它
+- `backend/chat.py` 和前端仍保留 legacy `<stage-ack>` sanitizer / tail guard，只用于剥离历史残留；命中 sanitizer 不得产生 checkpoint side effect
+- 阶段回归测试集中在 `tests/test_skill_engine.py`（transition validation）、`tests/test_chat_runtime.py`（`advance_stage`、legacy sanitizer、写入门禁）、`tests/test_main_api.py`（checkpoint endpoint）和 `tests/test_packaging_docs.py`（SKILL 文档约束）
 - 写 `outline.md` / `research-plan.md` 前必须先 `web_search → fetch_url → 写入 notes.md/references.md`，门禁在 `backend/chat.py`（`_should_require_fetch_url_before_write`、证据计数与质量门禁逻辑）
 
 ## S4 写正文工具（2026-05-09 DeepSeek migration）
