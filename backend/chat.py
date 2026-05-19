@@ -90,7 +90,7 @@ _STAGE_ACK_STRIP_RE = re.compile(
 _STAGE_ADVANCE_CLAIM_RE = re.compile(
     r"("
     r"S0\s*已完成并进入\s*S1"
-    r"|已?进入\s*S[1-7]"
+    r"|(?:已进入|现在进入)\s*S[1-7]"
     r"|已推进[到至]\s*(?:S[1-7]|(?:研究设计|资料采集|分析|报告撰写|质量审查|演示准备|交付归档)(?:阶段|状态|环节))"
     r"|已?进入(?:研究设计|资料采集|分析|报告撰写|质量审查|演示准备|交付归档)(?:阶段|状态|环节)"
     r"|需求访谈已完成"
@@ -98,9 +98,10 @@ _STAGE_ADVANCE_CLAIM_RE = re.compile(
     r")",
 )
 _STAGE_ADVANCE_CLAIM_NEGATION_RE = re.compile(
-    r"(?:不能|不要|不代表|不是|并非|尚未|还未|还没|未|没有|别|无需)[^，,；;。！？!?\n：:]{0,12}$"
+    r"(?:无法|不应|不能|不要|不代表|不是|并非|尚未|还未|还没|未|没有|别|无需)[^，,；;。！？!?\n：:]{0,12}$"
 )
 _STAGE_ADVANCE_CLAIM_CLAUSE_BOUNDARY_RE = re.compile(r"[，,；;。！？!?\n：:]")
+_STAGE_ADVANCE_CLAIM_CONDITION_AFTER_RE = re.compile(r"^\s*前")
 TOOL_LOG_COMMENT_RE = re.compile(
     r'<!--\s*tool-log'
     r'(?:[\s\S]*?-->|[\s\S]*$)',
@@ -120,6 +121,9 @@ def _has_stage_advance_claim(content: str) -> bool:
         prefix = text[max(0, match.start() - 18):match.start()]
         clause_prefix = _STAGE_ADVANCE_CLAIM_CLAUSE_BOUNDARY_RE.split(prefix)[-1]
         if _STAGE_ADVANCE_CLAIM_NEGATION_RE.search(clause_prefix):
+            continue
+        suffix = text[match.end():match.end() + 4]
+        if _STAGE_ADVANCE_CLAIM_CONDITION_AFTER_RE.search(suffix):
             continue
         return True
     return False

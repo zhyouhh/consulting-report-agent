@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import httpx
 import requests
 
-from backend.chat import ChatHandler
+from backend.chat import ChatHandler, _has_stage_advance_claim
 from backend.config import (
     ManagedSearchLimitsConfig,
     ManagedSearchPoolConfig,
@@ -9498,7 +9498,7 @@ class StageClaimMismatchNoticeTests(ChatRuntimeTests):
             "已进入 S5。",
             "已进入 S6。",
             "已进入 S7。",
-            "进入 S2。",
+            "现在进入 S2。",
             "已推进至 S3。",
             "已推进到 S5。",
             "进入演示准备阶段。",
@@ -9515,6 +9515,37 @@ class StageClaimMismatchNoticeTests(ChatRuntimeTests):
                 notices = handler._turn_context.get("pending_system_notices", [])
                 self.assertEqual(len(notices), 1)
                 self.assertEqual(notices[0]["category"], "stage_claim_without_checkpoint")
+
+    def test_stage_claim_detector_suppresses_conditional_failure_s_number_phrases(self):
+        blocked_claims = [
+            "无法进入 S2。",
+            "不应进入 S2。",
+            "进入 S2 前，需要先确认大纲。",
+        ]
+        for claim in blocked_claims:
+            with self.subTest(claim=claim):
+                self.assertFalse(_has_stage_advance_claim(claim))
+                handler = self._make_handler_with_project()
+                handler._turn_context = handler._build_turn_context(self.project_id, "继续")
+
+                self._finalize_assistant_for_test(handler, claim)
+
+                notices = handler._turn_context.get("pending_system_notices", [])
+                self.assertEqual(notices, [])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_surfaces_stage_claim_notice(self, mock_openai):
+        handler = self._make_handler_with_project()
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="已进入 S2。"),
+        ])
+
+        events = list(handler.chat_stream(self.project_id, "继续", max_iterations=1))
+
+        notices = [event for event in events if event["type"] == "system_notice"]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["category"], "stage_claim_without_checkpoint")
+        self.assertIn("advance_stage", notices[0]["user_action"])
 
     def test_stage_claim_detector_ignores_section_transition_prose(self):
         handler = self._make_handler_with_project()
