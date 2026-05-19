@@ -7,7 +7,7 @@ param(
 )
 
 if (-not (Test-Path $FilePath)) {
-    Write-Host "❌ 文件不存在: $FilePath" -ForegroundColor Red
+    Write-Host "[ERROR] 文件不存在: $FilePath" -ForegroundColor Red
     exit 1
 }
 
@@ -83,7 +83,7 @@ function Show-LowRiskWarning {
     Write-Host ""
 }
 
-Write-Host "🔍 开始检查报告质量: $FilePath" -ForegroundColor Green
+Write-Host "[CHECK] 开始检查报告质量: $FilePath" -ForegroundColor Green
 Write-Host ""
 
 $summary = @{
@@ -109,7 +109,7 @@ if ($structureMatches) {
     $summary["低风险"] += $structureMatches.Count
 }
 
-Write-Host "📝 检查图表编号连续性..." -ForegroundColor Cyan
+Write-Host "[CHECK] 检查图表编号连续性..." -ForegroundColor Cyan
 $figureMatches = Select-String -Path $FilePath -Pattern "图(\d+)" -AllMatches
 if ($figureMatches) {
     $figureNums = $figureMatches | ForEach-Object { $_.Matches.Groups[1].Value } | Sort-Object { [int]$_ } -Unique
@@ -127,7 +127,7 @@ if ($figureMatches) {
         $prev = $numInt
     }
     if (-not $gapFound) {
-        Write-Host "✅ 图编号连续" -ForegroundColor Green
+        Write-Host "[OK] 图编号连续" -ForegroundColor Green
         Write-Host ""
     }
 } else {
@@ -135,7 +135,7 @@ if ($figureMatches) {
     Write-Host ""
 }
 
-Write-Host "📝 检查表格编号连续性..." -ForegroundColor Cyan
+Write-Host "[CHECK] 检查表格编号连续性..." -ForegroundColor Cyan
 $tableMatches = Select-String -Path $FilePath -Pattern "表(\d+)" -AllMatches
 if ($tableMatches) {
     $tableNums = $tableMatches | ForEach-Object { $_.Matches.Groups[1].Value } | Sort-Object { [int]$_ } -Unique
@@ -153,7 +153,7 @@ if ($tableMatches) {
         $prev = $numInt
     }
     if (-not $gapFound) {
-        Write-Host "✅ 表编号连续" -ForegroundColor Green
+        Write-Host "[OK] 表编号连续" -ForegroundColor Green
         Write-Host ""
     }
 } else {
@@ -168,11 +168,11 @@ if ($keyFindings -and $actionWords -lt 3) {
     $summary["低风险"] += 1
 }
 
-Write-Host "📊 检查摘要" -ForegroundColor Green
+Write-Host "[SUMMARY] 检查摘要" -ForegroundColor Green
 Write-Host "  高风险: $($summary['高风险'])"
 Write-Host "  中风险: $($summary['中风险'])"
 Write-Host "  低风险: $($summary['低风险'])"
 Write-Host ""
 
-Write-Host "✅ 检查完成（内容问题默认不阻断流程）" -ForegroundColor Green
+Write-Host "[OK] 检查完成（内容问题默认不阻断流程）" -ForegroundColor Green
 exit 0
