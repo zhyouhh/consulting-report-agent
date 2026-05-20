@@ -68,6 +68,15 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
     def _write_stage_one_prerequisites(self, project_dir: Path):
+        checkpoints_path = project_dir / "stage_checkpoints.json"
+        checkpoints = {}
+        if checkpoints_path.exists():
+            checkpoints = json.loads(checkpoints_path.read_text(encoding="utf-8"))
+        checkpoints.setdefault("s0_interview_done_at", "2026-04-21T10:00:00")
+        checkpoints_path.write_text(
+            json.dumps(checkpoints, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         self._write_evidence_gate_prerequisites(project_dir)
         (project_dir / "plan" / "outline.md").write_text(
             "# Report outline\n\n"

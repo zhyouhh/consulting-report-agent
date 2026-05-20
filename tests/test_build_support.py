@@ -6,12 +6,48 @@ from unittest import mock
 
 from build_support import (
     require_non_empty_bundle_text_file,
+    resolve_bundle_pandoc,
     validate_bundle_managed_search_pool,
     validate_bundle_managed_client_token,
 )
 
 
 class BuildSupportTests(unittest.TestCase):
+    def test_resolve_bundle_pandoc_prefers_repo_root_pandoc_exe(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pandoc = root / "pandoc.exe"
+            pandoc.write_bytes(b"fake exe")
+
+            resolved = resolve_bundle_pandoc(root)
+
+        self.assertEqual(resolved, pandoc)
+
+    @mock.patch("build_support.shutil.which")
+    def test_resolve_bundle_pandoc_falls_back_to_system_pandoc(self, mock_which):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            system_dir = root / "tools"
+            system_dir.mkdir()
+            system_pandoc = system_dir / "pandoc.exe"
+            system_pandoc.write_bytes(b"fake exe")
+            mock_which.return_value = str(system_pandoc)
+
+            resolved = resolve_bundle_pandoc(root)
+
+        self.assertEqual(resolved, system_pandoc)
+
+    @mock.patch("build_support.shutil.which", return_value=None)
+    def test_resolve_bundle_pandoc_rejects_missing_pandoc(self, _mock_which):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            with self.assertRaises(FileNotFoundError) as ctx:
+                resolve_bundle_pandoc(root)
+
+        self.assertIn("pandoc.exe", str(ctx.exception))
+        self.assertIn("CONSULTING_REPORT_PANDOC_EXE", str(ctx.exception))
+
     def test_require_non_empty_bundle_text_file_returns_existing_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

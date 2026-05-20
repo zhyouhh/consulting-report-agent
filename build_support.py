@@ -1,9 +1,42 @@
 import json
+import os
 from pathlib import Path
+import shutil
 
 import requests
 
 from backend.config import load_managed_search_pool_config_from_path
+
+
+def resolve_bundle_pandoc(root: Path, filename: str = "pandoc.exe") -> Path:
+    explicit_path = os.environ.get("CONSULTING_REPORT_PANDOC_EXE", "").strip()
+    candidates: list[Path] = []
+    if explicit_path:
+        candidates.append(Path(explicit_path))
+
+    repo_path = Path(filename)
+    if not repo_path.is_absolute():
+        repo_path = root / repo_path
+    candidates.append(repo_path)
+
+    system_pandoc = shutil.which("pandoc")
+    if system_pandoc:
+        candidates.append(Path(system_pandoc))
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.expanduser()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return candidate
+
+    raise FileNotFoundError(
+        "缺少打包必需文件 pandoc.exe。请在项目根目录放置 pandoc.exe，"
+        "或设置 CONSULTING_REPORT_PANDOC_EXE 指向 pandoc.exe，"
+        "或在构建机安装 Pandoc 并确保 pandoc 在 PATH 中。"
+    )
 
 
 def require_non_empty_bundle_text_file(root: Path, filename: str) -> Path:

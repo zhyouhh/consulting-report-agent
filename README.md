@@ -16,7 +16,7 @@ Windows first 的咨询报告桌面客户端，目标是把你自用的咨询报
 - 在桌面客户端里持续对话式推进报告写作
 - 查看工作区阶段、阶段清单和文件预览
 - 运行质量检查
-- 导出 `可审草稿`
+- 导出 `可审草稿`（Windows 发布包内置 Pandoc，同事无需另装）
 
 当前没有承诺：
 
@@ -71,7 +71,8 @@ python app.py
 build.bat
 ```
 
-打包产物在 `dist/咨询报告助手/`。
+打包机需要提前准备 `managed_client_token.txt`、`managed_search_pool.json` 和可随包分发的 Pandoc。
+打包产物在 `dist/咨询报告助手/`，其中包含 `_internal/pandoc.exe`。
 
 ## 相关文档
 

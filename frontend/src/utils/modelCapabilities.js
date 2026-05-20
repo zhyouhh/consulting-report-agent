@@ -9,13 +9,13 @@ const MULTIMODAL_MODEL_MARKERS = [
 ];
 
 export function supportsImageAttachments(settings = {}) {
-  const safeSettings = settings || {};
+  const normalizedSettings = settings || {};
 
-  if ((safeSettings.mode || "managed") === "managed") {
+  if ((normalizedSettings.mode || "managed") === "managed") {
     return true;
   }
 
-  const modelName = (safeSettings.custom_model || safeSettings.model || "").toLowerCase();
+  const modelName = (normalizedSettings.custom_model || normalizedSettings.model || "").toLowerCase();
   if (!modelName) {
     return false;
   }

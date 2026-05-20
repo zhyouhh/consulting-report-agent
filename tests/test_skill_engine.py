@@ -1581,6 +1581,31 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertNotIn("review_started_at", self.engine._read_raw_stage_checkpoints(project_dir))
 
+    def test_record_stage_checkpoint_rejects_review_pass_without_review_started_checkpoint(self):
+        project_dir = self._make_project_past_outline_confirm()
+        self._write_review_checklist(project_dir)
+
+        with self.assertRaisesRegex(ValueError, "review_started_at"):
+            self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
+
+        self.assertNotIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_record_stage_checkpoint_rejects_presentation_ready_without_review_passed_checkpoint(self):
+        project_dir = self._make_project_past_s4()
+        overview_path = project_dir / "plan" / "project-overview.md"
+        overview_text = overview_path.read_text(encoding="utf-8").replace(
+            "**交付形式**: 仅报告",
+            "**交付形式**: 报告+演示",
+        )
+        overview_path.write_text(overview_text, encoding="utf-8")
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+        self._write_presentation_plan(project_dir)
+
+        with self.assertRaisesRegex(ValueError, "review_passed_at"):
+            self.engine.record_stage_checkpoint("demo", "presentation_ready_at", "set")
+
+        self.assertNotIn("presentation_ready_at", self.engine._load_stage_checkpoints(project_dir))
+
     def test_record_delivery_archived_report_only_requires_review_passed(self):
         project_dir = self._make_project_past_s4()
         self._write_review_checklist(project_dir)
@@ -1624,6 +1649,8 @@ class SkillEngineTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "演示准备|presentation_ready"):
             self.engine.record_stage_checkpoint("demo", "delivery_archived_at", "set")
+
+        self.assertNotIn("delivery_archived_at", self.engine._load_stage_checkpoints(project_dir))
 
         self._write_presentation_plan(project_dir)
         self.engine.record_stage_checkpoint("demo", "presentation_ready_at", "set")

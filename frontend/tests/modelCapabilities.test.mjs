@@ -13,7 +13,7 @@ test("supportsImageAttachments always allows managed mode", () => {
   );
 });
 
-test("supportsImageAttachments treats null settings as managed mode", () => {
+test("supportsImageAttachments falls back safely while settings are loading", () => {
   assert.equal(supportsImageAttachments(null), true);
 });
 

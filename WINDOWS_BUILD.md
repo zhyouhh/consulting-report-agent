@@ -12,7 +12,7 @@
 
 - 面向普通同事，开箱即用。
 - 默认地址：`https://newapi.z0y0h.work/client/v1`
-- 默认模型：`gemini-3-flash`
+- 默认模型：`deepseek-v4-pro`
 - 前提：服务端薄中转已经部署完成。
 
 ### 自定义 API
@@ -51,9 +51,10 @@ npm --version
    这个文件必须是 `/client` 使用的 client token，不是上游 API key
 4. 提前准备 `managed_search_pool.json`，或设置环境变量 `CONSULTING_REPORT_MANAGED_SEARCH_POOL_FILE`
    这个文件是内置搜索池的私有配置，不应提交到 Git；如果走环境变量覆盖，`build.bat` 会在打包前临时复制它
-5. 优先把这两个私有文件直接放在仓库根目录，避免误用残留环境变量
-6. 等待脚本自动安装依赖、构建前端、执行 PyInstaller
-7. 打包产物位于 `dist\咨询报告助手\`
+5. 提前准备可随包分发的 Pandoc：项目根目录 `pandoc.exe`、`CONSULTING_REPORT_PANDOC_EXE`，或构建机 `PATH` 里的 `pandoc`
+6. 优先把私有文件和 `pandoc.exe` 直接放在仓库根目录，避免误用残留环境变量
+7. 等待脚本自动安装依赖、构建前端、执行 PyInstaller
+8. 打包产物位于 `dist\咨询报告助手\`
 
 ### 方法二：手动打包
 
@@ -65,6 +66,7 @@ python -m venv .venv
 
 copy D:\私有配置\managed_client_token.txt managed_client_token.txt
 copy D:\私有配置\portable-search-pool.json managed_search_pool.json
+copy D:\工具\pandoc.exe pandoc.exe
 
 cd frontend
 npm install
@@ -92,8 +94,8 @@ cd ..
 
 如果你不走 `build.bat`，而是直接运行 `pyinstaller consulting_report.spec`，
 就必须先手工把私有搜索池文件放到仓库根目录，并命名为 `managed_search_pool.json`，
-同时也建议使用项目自己的 `.venv`，不要直接用全局 Python 或 Anaconda 环境。加 `--noconfirm`
-可以覆盖已有的 `dist\咨询报告助手\`，便于重复打包。
+同时确保 `consulting_report.spec` 能解析到 `pandoc.exe`。也建议使用项目自己的 `.venv`，
+不要直接用全局 Python 或 Anaconda 环境。加 `--noconfirm` 可以覆盖已有的 `dist\咨询报告助手\`，便于重复打包。
 
 ## 打包产物
 
@@ -104,12 +106,13 @@ dist/
     └── _internal/
         ├── managed_client_token.txt
         ├── managed_search_pool.json
+        ├── pandoc.exe
         ├── skill/
         ├── frontend/
         └── ...
 ```
 
-PyInstaller 把所有 `datas`（skill、frontend/dist、私有文件）都收到 `_internal/` 下面，运行时通过 `sys._MEIPASS` 寻址。
+PyInstaller 把所有 `datas`（skill、frontend/dist、私有文件）都收到 `_internal/` 下面，`pandoc.exe` 也会跟随发布包分发，运行时通过 `sys._MEIPASS` 寻址。
 
 ## 分发说明
 
@@ -175,6 +178,7 @@ npm run build
 
 - 优先使用 [consulting_report.spec](D:/Codex/CodexProjects/Consulting-report-agent/.worktrees/client-v2/consulting_report.spec)
 - 确认 `frontend/dist` 和 `skill/` 已存在
+- 缺少 Pandoc 时，在项目根目录放 `pandoc.exe`，或设置 `CONSULTING_REPORT_PANDOC_EXE`
 - 如果包体突然膨胀到数百 MB 甚至 1GB 以上，优先检查是不是误用了全局 Python/Anaconda，而不是项目 `.venv`
 
 ## 技术说明

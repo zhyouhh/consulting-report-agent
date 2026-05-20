@@ -48,14 +48,15 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 
 - 打包态 GUI 启动崩溃：`settings.mode` null 不再触发首页 error boundary。
 - `_internal\skill\scripts\quality_check.ps1` / `export_draft.ps1` 在 Windows PowerShell 下的源码解析和 stdout 编码问题。
+- `export_draft.ps1` 优先使用包内 `pandoc.exe`，`consulting_report.spec` 会把 Pandoc 打入 `_internal`。
 - checkpoint endpoint 越级推进 / stage desync / legacy `<stage-ack>` runtime side effect。
 - 聊天气泡 Markdown GFM 表格渲染。
 
 仍需接续：
 
-1. `export_draft.ps1` 仍依赖系统 `pandoc`；本机打包态导出通过，但 `dist\咨询报告助手\` 尚未自带 `pandoc.exe`。
-2. managed 真实模型长链路偶发 timeout / 无首包，阶段机本身已用确定性打包态 S0-S7 验收。
-3. 打包与前端小债：`favicon.ico` 404、输入框 id/name 可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning。
+1. managed 真实模型长链路偶发 timeout / 无首包，阶段机本身已用确定性打包态 S0-S7 验收。
+2. 打包与前端小债：`favicon.ico` 404、输入框 id/name 可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning。
+3. 图片附件按 `managed_model` 分流已推后到 UI 重构；stage-advance-gates Bug G/H 低优先级复核。
 
 ## Skill 工作流（S0-S7）
 
@@ -141,7 +142,7 @@ build.bat                    # 等价于 powershell -File build.ps1
 
 - `docs/current-worklist.md` — 当前待解决/待验证事项的唯一真值源
 - `docs/debug-backlog.md` — 已归档的调试历史，**不再维护**当前待办
-- `docs/superpowers/plans/` 与 `docs/superpowers/specs/` — 正式变更的设计和落地计划，新功能改动前先去这里看最近的 spec
+- `docs/superpowers/plans/` 与 `docs/superpowers/specs/` — 正式变更的设计和落地计划，新功能改动前先去这里看相关 spec
 
 发现正式待办别在 `debug-backlog.md` 里加新条目，直接加到 `current-worklist.md`。
 
