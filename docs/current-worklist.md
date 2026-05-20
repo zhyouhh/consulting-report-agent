@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-05-19（stage conductor v0 已把阶段推进收敛到 `advance_stage`；打包态 GUI 启动、S0-S7 确定性阶段推进、Markdown 表格渲染、质量检查、包内 Pandoc 导出接口均已验证。真实 managed 模型长链路仍受渠道 timeout / 无首包影响。）
+最后更新：2026-05-21（stage conductor v0 已把阶段推进收敛到 `advance_stage`；打包态 GUI 启动、S0-S7 确定性阶段推进、Markdown 表格渲染、质量检查、包内 Pandoc 导出接口均已验证。真实 managed 模型长链路仍受渠道 timeout / 无首包影响；S5 review-checklist 格式契约已列为待验收项。）
 
 ## 当前未解决 / 待验证
 
@@ -9,11 +9,19 @@
 - 现象：2026-05-19 实测中，真实模型 S0 首轮和一次 `advance_stage` 可工作，但后续请求出现上游 timeout / 长时间无首包；确定性打包态 S0-S7 阶段机已通过
 - 下一步：区分网关/渠道问题与应用重试 UX 问题，必要时增加 no-first-byte 观测日志和用户可理解的恢复提示
 
-2. **P2：打包 / 前端小债**
+2. **P1：S5 review-checklist 格式契约 / 验收项**
+- 状态：`待方案确认`
+- 现象：真实项目 `piggy` 中，模型已写入 `plan/review-checklist.md`，但使用表格 + `✅` 表示通过；后端 `_has_effective_review_checklist()` 当前只识别 `- [x]` checkbox 列表，导致 UI 和 `advance_stage(review_passed_at)` 仍提示“需要先补齐 review-checklist.md”。
+- 用户影响：用户看到“AI 已完成审查”和“系统说未完成审查”同时存在，无法判断下一步该让 AI 改文件、点按钮，还是重新审查。
+- 验收目标：S5 审查清单的生成格式、后端判定规则、UI 错误提示必须形成同一个契约；用户不应看到“文件存在但仍提示缺文件”的反馈。
+- 方案边界：当前讨论仅作为待讨论方案，不作为已定实现；不要用“兼容 AI 可能写出的所有格式”来解决。候选方向包括收敛 `review-checklist.md` 为唯一 checkbox 格式、加强模型提示/模板、或引入结构化审查写入工具。
+- 临时人工处理：让助手把现有表格版 `review-checklist.md` 改写成 `- [x]` checkbox 列表后，再点击“审查通过”。
+
+3. **P2：打包 / 前端小债**
 - 状态：`待清理`
 - 当前明确项：`favicon.ico` 404、输入框缺少 `id` 或 `name` 的可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning
 
-3. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现，已推后）
+4. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现，已推后）
 - 状态：`已推后到 UI 重构一并处理`（spec §2.2 Out of Scope）
 - 现状：`frontend/src/utils/modelCapabilities.js` 的 `supportsImageAttachments` 对 `mode==="managed"` 一律 return true（gemini-3-flash 时代多模态行为）
 - 问题：DeepSeek V4 Pro 是 text-only reasoning 模型，前端不拦图片附件 → 用户传图后请求会被上游 400 拒（postMessage、上传按钮、拖拽都不会有 UX 提示）
@@ -21,31 +29,31 @@
 - 关联文件：`frontend/src/utils/modelCapabilities.js`、`frontend/tests/modelCapabilities.test.mjs`、各上传/粘贴入口组件
 - 触发条件：UI 重构立项时一起做（设计稿在 `docs/design_UI.pdf`）
 
-4. **UI 重构**
+5. **UI 重构**
 - 状态：`待立项`
 - 设计稿：`docs/design_UI.pdf`（用户用 Claude design 做的 3 套初步设计稿）
 - 触发条件：当前打包 GUI 已恢复可打开；后续如立项 UI 重构，先单独定范围，不要把渠道稳定性和打包小债混进大重构里
 
-5. **stage-advance-gates Bug G/H 低优先级待复核**
+6. **stage-advance-gates Bug G/H 低优先级待复核**
 - 状态：`低优先级待复核`
 - Bug G：回退 checkpoint 后 `content/*.md` 仍存在，状态可能不自洽；复核时决定级联清理还是 UI 标红提示。
 - Bug H：S1 回退后 UI「下一步建议」显示"暂无"，`next_stage_hint` S1 分支缺；复核时补齐提示或确认新版流程已绕开。
 
-6. **新建项目表单与废 UI 整理**（待 UI 重构时并入/评估）
+7. **新建项目表单与废 UI 整理**（待 UI 重构时并入/评估）
 - 状态：`待 UI 重构时评估`
 - 目标：清理"填了像没填"的字段、重复输入项和旧流程遗留 UI，包括截止日期控件、材料/备注语义重叠、项目类型/主题/目标读者/篇幅字段利用率。
 - 关联：Task 7 的 `length_fallback` chip 目前只是非交互提示；如做项目表单 edit 模式，可顺便让 chip 点击打开编辑面板。
 
-7. **`draw.io skill` 评估**
+8. **`draw.io skill` 评估**
 - 状态：`待评估`
 - 目标：判断它对咨询报告场景是否真有价值，还是只会增加复杂度。
 
-8. **前端生产包优化**
+9. **前端生产包优化**
 - 状态：`待优化`
 - 现状：`vite build` 已通过，但主 JS chunk 仍接近 `1 MB`。
 - 目标：在不引入复杂度失控的前提下做基本拆包，降低首屏和构建产物压力。
 
-9. **技术债清理**
+10. **技术债清理**
 - 状态：`待清理`
 - 当前明确项：`pydantic` deprecation warning、打包依赖排除空间。
 
