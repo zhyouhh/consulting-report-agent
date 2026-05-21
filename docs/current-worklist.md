@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-05-21（S5 Independent Review Redesign 的 spec + plan 经 codex 11 轮 review 全部 APPROVED 并落 commit `6e5c2fc`；待派 codex 按 5-commit 拆分实施。stage conductor v0 + 打包态 GUI 启动 / S0-S7 确定性阶段推进 / Markdown 表格 / 质量检查 / 包内 Pandoc 导出仍稳定。真实 managed 模型长链路 timeout 用户已切官渠暂不处理。）
+最后更新：2026-05-22（S5 Independent Review Redesign 自动化收尾已落：packaged smoke 覆盖扩展、endpoint 测试补差、cutover report 与 worklist 同步；`build.bat` 重建、piggy-v2 GUI E2E、打包内容复验仍留给用户手工执行。stage conductor v0 + 打包态 GUI 启动 / S0-S7 确定性阶段推进 / Markdown 表格 / 质量检查 / 包内 Pandoc 导出仍稳定。真实 managed 模型长链路 timeout 用户已切官渠暂不处理。）
 
 ## 当前未解决 / 待验证
 
@@ -10,23 +10,11 @@
 - 用户决策（2026-05-21）：暂时切换到 DeepSeek 官渠绕过，本条不影响 S5 redesign 推进
 - 后续可选：区分网关/渠道问题与应用重试 UX 问题，必要时增加 no-first-byte 观测日志和用户可理解的恢复提示
 
-2. **P1：S5 Independent Review Redesign（替换原 review-checklist 格式契约）**
-- 状态：`spec + plan APPROVED，等实施`
-- 关联文档：
-  - Spec [docs/superpowers/specs/2026-05-21-s5-independent-review-redesign-design.md](superpowers/specs/2026-05-21-s5-independent-review-redesign-design.md)（v6，6 轮 codex review APPROVED）
-  - Plan [docs/superpowers/plans/2026-05-21-s5-independent-review-redesign.md](superpowers/plans/2026-05-21-s5-independent-review-redesign.md)（v5，5 轮 codex review APPROVED）
-  - 同落 commit `6e5c2fc docs(s5-redesign): land spec + plan...`
-- 设计要点：砍掉模型自评 `review-checklist.md`；改成两个用户主动触发按钮——「独立审查」派独立 LLM 会话审 5 个判断维度，落 `plan/independent-review.md`；「AI 味自查」跑 PowerShell 脚本扫 4 个机械维度，落 `plan/lint-report.md`。两份报告生成后前端自动起主代理 turn，主代理读报告 + 跟用户讨论。
-- 实施分 5 commit（每个 commit 嵌入 codex spec-compliance + quality 双轮 review）：
-  1. Commit 1：后端 100% additive dormant（新 helper / 字段 / schema 扩展，不接生产路径）
-  2. Commit 2：FORMAL_PLAN_FILES 加新文件 + 主代理拒写拦截 + 独立审查代理 + lint 脚本（内 atomic，避免独立性破洞）
-  3. Commit 3：endpoints + chat_stream system_trigger 分支 + S5 welcome helper（dormant 不接调用点）
-  4. Commit 4：用户可见 atomic cutover（backend gate + SKILL + 前端按钮 + smoke 一次性落）
-  5. Commit 5：端到端 piggy-v2 + 打包态 smoke + cutover doc
-- 硬约束：S0-S4 流程零变更
-- 高风险点：
-  - Commit 3 `_chat_stream_unlocked` 加 `system_trigger` 分支（来回 4 轮才稳定，实施时需严格按 plan Task 3.3 Step 3 方案三 v2 写）
-  - Commit 4 atomic cutover（11+ 文件一次切换）
+2. **P3：v1 chunk fallback（超 30k 字 map-reduce 重审）**
+- 状态：`低优先级`
+- 背景：S5 Independent Review Redesign v0 对 30k 字以上正文采用 friendly fail，提示用户精简后重试；这是有意保守策略，避免在 cutover 期引入 chunk 聚合复杂度。
+- 目标：后续如真实长文需求频繁出现，再设计 map-reduce 重审：按章节切片审查、合并 5 维度发现、保留来源章节定位，并继续保证 `plan/independent-review.md` 只有独立审查代理可写。
+- 关联：S5 cutover report [docs/superpowers/cutover_report_2026-05-22_s5-redesign.md](superpowers/cutover_report_2026-05-22_s5-redesign.md)
 
 3. **P2：打包 / 前端小债**
 - 状态：`待清理`
@@ -69,6 +57,13 @@
 - 当前明确项：`pydantic` deprecation warning、打包依赖排除空间。
 
 ## 已解决记录
+
+0g. **S5 Independent Review Redesign（2026-05-22）**
+- 状态：**已解决（2026-05-22）**
+- 修复：旧 `review-checklist.md` 模型自评路径退出生产推进路径，S5 改为用户主动触发「独立审查」与「AI 味自查」；两份报告分别落 `plan/independent-review.md` 与 `plan/lint-report.md`，主代理只读报告并与用户讨论修改。
+- 兼容性：旧项目里的 `review-checklist.md` 保留为用户数据；`_has_effective_review_checklist` 保留为 backwards-compat helper，但 `review_passed_at` 生产路径改为校验新两份报告。老项目升级后不会阻断 S0-S4，若 S5 推进缺报告，错误消息会引导用户点击新按钮。
+- 验证与限制：自动化收尾覆盖 packaged smoke 断言、endpoint lock/SSE/summary 测试和文档同步；`build.bat` 重建、piggy-v2 GUI E2E、打包内容复验仍需用户手工执行。
+- Cutover report：[docs/superpowers/cutover_report_2026-05-22_s5-redesign.md](superpowers/cutover_report_2026-05-22_s5-redesign.md)
 
 0f. **Packaged QA 前四个阻断/一致性问题修复（2026-05-13）**
 - 状态：`已修复并重打包验证`

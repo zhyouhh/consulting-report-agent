@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -106,6 +107,34 @@ def http_post(path: str, port: int, timeout: float = 10.0) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def http_request_json(
+    path: str,
+    port: int,
+    *,
+    method: str = "GET",
+    payload: dict | None = None,
+    timeout: float = 10.0,
+) -> tuple[int, dict]:
+    url = f"http://127.0.0.1:{port}{path}"
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+            return resp.status, json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        try:
+            payload_body = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            payload_body = {"detail": body}
+        return exc.code, payload_body
+
+
 def http_delete(path: str, port: int, timeout: float = 5.0) -> dict:
     url = f"http://127.0.0.1:{port}{path}"
     req = urllib.request.Request(url, method="DELETE")
@@ -149,12 +178,25 @@ def check_private_files(bundle_internal: Path) -> None:
 
     if not (bundle_internal / "skill" / "SKILL.md").exists():
         raise SmokeFailure("skill/SKILL.md 未打入 _internal/skill/")
+    independent_review_template = bundle_internal / "skill" / "plan-template" / "independent-review.md"
+    lint_report_template = bundle_internal / "skill" / "plan-template" / "lint-report.md"
+    if not independent_review_template.exists():
+        raise SmokeFailure(f"independent-review.md 模板未打入: {independent_review_template}")
+    if not lint_report_template.exists():
+        raise SmokeFailure(f"lint-report.md 模板未打入: {lint_report_template}")
+
+    quality_script = bundle_internal / "skill" / "scripts" / "quality_check.ps1"
+    if not quality_script.exists():
+        raise SmokeFailure(f"quality_check.ps1 未打入: {quality_script}")
+    if "-OutputPath" not in quality_script.read_text(encoding="utf-8-sig"):
+        raise SmokeFailure(f"quality_check.ps1 缺 -OutputPath 参数: {quality_script}")
     if not (bundle_internal / "frontend" / "dist").exists():
         raise SmokeFailure("frontend/dist 未打入 _internal/frontend/dist/")
     pandoc_path = bundle_internal / "pandoc.exe"
     if not pandoc_path.exists() or not pandoc_path.stat().st_size:
         raise SmokeFailure(f"pandoc.exe 缺失或为空: {pandoc_path}")
     log_step("skill/、frontend/dist/ 与 pandoc.exe 注入", True)
+    log_step("S5 review 模板与新版 quality_check.ps1 注入", True)
 
 
 def wait_for_server(port: int, timeout: int) -> None:
@@ -251,6 +293,28 @@ def check_project_scaffolding(port: int, temp_workspace: Path) -> tuple[str, Pat
     return project_id, project_dir
 
 
+def check_s5_endpoint_guards(port: int, project_id: str) -> None:
+    status, payload = http_request_json(
+        f"/api/projects/{project_id}/lint-report",
+        port,
+        method="POST",
+    )
+    if status != 400 or "S5" not in str(payload.get("detail", "")):
+        raise SmokeFailure(f"lint-report S0 拒绝不符合预期: status={status}, payload={payload}")
+    log_step("S0 下 lint-report endpoint 拒绝", True)
+
+    status, payload = http_request_json(
+        f"/api/projects/{project_id}/independent-review/stream",
+        port,
+        method="GET",
+    )
+    if status != 400 or "S5" not in str(payload.get("detail", "")):
+        raise SmokeFailure(
+            f"independent-review S0 拒绝不符合预期: status={status}, payload={payload}"
+        )
+    log_step("S0 下 independent-review endpoint 拒绝", True)
+
+
 def check_review_tools(port: int, project_id: str, project_dir: Path) -> None:
     report_path = project_dir / "content" / "report_draft_v1.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -345,6 +409,7 @@ def run_smoke(bundle_dir: Path, port: int) -> bool:
         print(f"[3/4] 调用 HTTP API 验证业务流（不打 /api/chat）...")
         check_settings(port)
         created_project_id, project_dir = check_project_scaffolding(port, temp_workspace)
+        check_s5_endpoint_guards(port, created_project_id)
         check_review_tools(port, created_project_id, project_dir)
         delete_test_project(port, created_project_id)
         created_project_id = None
@@ -391,6 +456,12 @@ def main() -> int:
         print("剩余必须人工验证：GUI 弹窗渲染、真实 chat 往返、流式体感、web_search→fetch_url→write_file 门禁、杀软首次拦截。")
         return 0
     return 0
+
+
+def test_packaged_bundle_smoke() -> None:
+    if os.environ.get("RUN_PACKAGED_SMOKE") != "1":
+        pytest.skip("Packaged smoke needs a fresh dist; set RUN_PACKAGED_SMOKE=1 to run it under pytest.")
+    run_smoke(DEFAULT_BUNDLE_DIR, DEFAULT_PORT)
 
 
 if __name__ == "__main__":

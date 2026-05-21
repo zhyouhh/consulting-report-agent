@@ -506,7 +506,7 @@ class WorkspaceApiTests(unittest.TestCase):
 
     @mock.patch("backend.main.IndependentReviewAgent")
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_returns_sse(self, mock_summary, mock_agent_cls):
+    def test_independent_review_endpoint_returns_sse_content_type(self, mock_summary, mock_agent_cls):
         mock_summary.return_value = {"stage_code": "S5"}
         mock_agent_cls.return_value.run.return_value = [
             {"type": "progress", "message": "开始审查"},
@@ -556,7 +556,7 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertTrue(any('"type": "progress"' in chunk for chunk in chunks))
 
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_409_when_concurrent(self, mock_summary):
+    def test_independent_review_endpoint_409_when_lock_held(self, mock_summary):
         from backend.independent_review import get_independent_review_lock
 
         project_id = "demo-review-concurrent"
@@ -572,7 +572,7 @@ class WorkspaceApiTests(unittest.TestCase):
 
     @mock.patch("backend.main.IndependentReviewAgent")
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_releases_lock_on_client_disconnect(
+    def test_independent_review_endpoint_releases_lock_on_disconnect(
         self,
         mock_summary,
         mock_agent_cls,
