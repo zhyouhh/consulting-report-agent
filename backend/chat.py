@@ -818,6 +818,7 @@ class ChatHandler:
             "compact_state": None,
             "draft_followup_state": None,
             "s0_confirmation_completed": False,
+            "s5_welcome_shown_at": None,
         }
 
     def _get_conversation_state_path(self, project_id: str):
@@ -946,6 +947,9 @@ class ChatHandler:
                     )
                 else:
                     state["s0_confirmation_completed"] = True
+                welcome_shown = payload.get("s5_welcome_shown_at")
+                if isinstance(welcome_shown, str) and welcome_shown:
+                    state["s5_welcome_shown_at"] = welcome_shown
 
             compact_state = state.get("compact_state")
             if compact_state and self._compact_state_is_drifted(compact_state, history, state["memory_entries"]):
@@ -1010,6 +1014,12 @@ class ChatHandler:
             s0_completed = payload.get("s0_confirmation_completed")
             if isinstance(s0_completed, bool):
                 state["s0_confirmation_completed"] = s0_completed
+            welcome_shown = payload.get("s5_welcome_shown_at")
+            if isinstance(welcome_shown, str) and welcome_shown:
+                state["s5_welcome_shown_at"] = welcome_shown
+
+        if not state.get("s5_welcome_shown_at"):
+            state.pop("s5_welcome_shown_at", None)
 
         state_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = state_path.with_suffix(".json.tmp")

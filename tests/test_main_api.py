@@ -8,9 +8,45 @@ from pathlib import Path
 from unittest import mock
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 import backend.main as main_module
 from backend.chat import LEGACY_EMPTY_ASSISTANT_FALLBACKS, USER_VISIBLE_FALLBACK
+from backend.models import ChatRequest
+
+
+class ChatRequestValidationTests(unittest.TestCase):
+    def test_chat_request_validator_rejects_empty_message_without_trigger(self):
+        with self.assertRaises(ValidationError):
+            ChatRequest.model_validate(
+                {
+                    "project_id": "demo",
+                    "message_text": "",
+                    "system_trigger": None,
+                }
+            )
+
+    def test_chat_request_validator_accepts_empty_message_with_trigger(self):
+        req = ChatRequest.model_validate(
+            {
+                "project_id": "demo",
+                "message_text": "",
+                "system_trigger": "independent_review_done",
+            }
+        )
+
+        self.assertEqual(req.system_trigger, "independent_review_done")
+        self.assertEqual(req.message_text, "")
+
+    def test_chat_request_validator_accepts_non_empty_message_without_trigger(self):
+        req = ChatRequest.model_validate(
+            {
+                "project_id": "demo",
+                "message_text": "hello",
+            }
+        )
+
+        self.assertIsNone(req.system_trigger)
 
 
 class CheckpointTableInvariantTests(unittest.TestCase):
@@ -211,6 +247,30 @@ class WorkspaceApiTests(unittest.TestCase):
     def test_workspace_endpoint_returns_404_for_missing_project(self):
         response = self.client.get("/api/projects/definitely-missing-project/workspace")
         self.assertEqual(response.status_code, 404)
+
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_workspace_summary_includes_new_review_flags(self, mock_summary):
+        mock_summary.return_value = {
+            "stage_code": "S5",
+            "status": "进行中",
+            "completed_items": [],
+            "next_actions": [],
+            "flags": {
+                "review_checklist_ready": True,
+                "independent_review_ready": False,
+                "lint_report_ready": False,
+                "review_reports_ready": False,
+            },
+        }
+
+        response = self.client.get("/api/projects/demo/workspace")
+
+        self.assertEqual(response.status_code, 200)
+        flags = response.json()["flags"]
+        self.assertIn("review_checklist_ready", flags)
+        self.assertIs(flags["independent_review_ready"], False)
+        self.assertIs(flags["lint_report_ready"], False)
+        self.assertIs(flags["review_reports_ready"], False)
 
     @mock.patch("backend.main.skill_engine.get_project_path")
     def test_clear_conversation_removes_new_and_legacy_sidecars(self, mock_get_project_path):

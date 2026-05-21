@@ -246,6 +246,55 @@ class SkillEngineTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _write_independent_review(
+        self,
+        project_dir: Path,
+        *,
+        anchors: list[str] | None = None,
+        include_marker: bool = True,
+    ):
+        anchors = anchors or self.engine.INDEPENDENT_REVIEW_ANCHORS
+        lines = ["# Independent review", ""]
+        for anchor in anchors:
+            lines.extend(
+                [
+                    anchor,
+                    "审查结论: 本维度已有实质复核结论。",
+                    "证据说明: 对照报告正文、资料记录和关键假设完成核验。",
+                    "",
+                ]
+            )
+        if include_marker:
+            lines.append(self.engine.INDEPENDENT_REVIEW_COMPLETION_MARKER)
+        (project_dir / "plan" / "independent-review.md").write_text(
+            "\n".join(lines).strip() + "\n",
+            encoding="utf-8",
+        )
+
+    def _write_lint_report(
+        self,
+        project_dir: Path,
+        *,
+        include_marker: bool = True,
+    ):
+        lines = [
+            "# AI 味自查",
+            "",
+            "## 总览",
+            "结论: 已完成全文表达检查并识别优先修改项。",
+            "预计修改时间: 30 分钟。",
+            "",
+            "## 按章节排列",
+            "- 执行摘要: 删除空泛形容词，补充业务含义。",
+            "- 建议章节: 将笼统动词改为可执行动作。",
+        ]
+        if include_marker:
+            lines.append(self.engine.LINT_REPORT_COMPLETION_MARKER)
+        (project_dir / "plan" / "lint-report.md").write_text(
+            "\n".join(lines).strip() + "\n",
+            encoding="utf-8",
+        )
+
     def _write_presentation_plan(self, project_dir: Path):
         (project_dir / "plan" / "presentation-plan.md").write_text(
             "# Presentation plan\n\n"
@@ -1268,6 +1317,95 @@ class SkillEngineTests(unittest.TestCase):
 
             self.assertEqual(summary["stage_code"], "S5")
             self._assert_items_include(summary["next_actions"], "review-checklist.md")
+
+    def test_has_effective_independent_review_rejects_template_stub(self):
+        project_dir = self._make_project()
+        (project_dir / "plan" / "independent-review.md").write_text(
+            "[等待运行 - 请在 S5 阶段点击工作区“独立审查”按钮]\n",
+            encoding="utf-8",
+        )
+
+        self.assertFalse(self.engine._has_effective_independent_review(project_dir))
+
+    def test_has_effective_independent_review_requires_all_5_anchors(self):
+        project_dir = self._make_project()
+        self._write_independent_review(
+            project_dir,
+            anchors=self.engine.INDEPENDENT_REVIEW_ANCHORS[:-1],
+        )
+
+        self.assertFalse(self.engine._has_effective_independent_review(project_dir))
+
+    def test_has_effective_independent_review_requires_completion_marker(self):
+        project_dir = self._make_project()
+        self._write_independent_review(project_dir, include_marker=False)
+
+        self.assertFalse(self.engine._has_effective_independent_review(project_dir))
+
+    def test_has_effective_independent_review_accepts_valid_report(self):
+        project_dir = self._make_project()
+        self._write_independent_review(project_dir)
+
+        self.assertTrue(self.engine._has_effective_independent_review(project_dir))
+
+    def test_has_effective_lint_report_rejects_template_and_missing_marker(self):
+        project_dir = self._make_project()
+        (project_dir / "plan" / "lint-report.md").write_text(
+            "[等待运行 - 请在 S5 阶段点击工作区“AI 味自查”按钮]\n",
+            encoding="utf-8",
+        )
+
+        self.assertFalse(self.engine._has_effective_lint_report(project_dir))
+
+        self._write_lint_report(project_dir, include_marker=False)
+
+        self.assertFalse(self.engine._has_effective_lint_report(project_dir))
+
+    def test_has_effective_review_reports_requires_both(self):
+        project_dir = self._make_project()
+        self._write_independent_review(project_dir)
+
+        self.assertFalse(self.engine._has_effective_review_reports(project_dir))
+
+        self._write_lint_report(project_dir)
+
+        self.assertTrue(self.engine._has_effective_review_reports(project_dir))
+
+    def test_stage_five_completion_state_includes_new_fields(self):
+        project_dir = self._make_project_past_s4()
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+        self._write_review_checklist(project_dir)
+
+        state = self.engine._stage_five_completion_state(project_dir)
+        inferred_flags = self.engine._infer_stage_state(project_dir)["flags"]
+
+        self.assertTrue(state["review_checklist_ready"])
+        self.assertFalse(state["independent_review_ready"])
+        self.assertFalse(state["lint_report_ready"])
+        self.assertFalse(state["review_reports_ready"])
+        self.assertFalse(inferred_flags["independent_review_ready"])
+        self.assertFalse(inferred_flags["lint_report_ready"])
+        self.assertFalse(inferred_flags["review_reports_ready"])
+        self.assertNotIn("review-checklist.md", state["missing_for_review_pass"])
+
+    def test_stage_five_completion_state_review_reports_ready_requires_both(self):
+        project_dir = self._make_project_past_s4()
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+        self._write_independent_review(project_dir)
+
+        state = self.engine._stage_five_completion_state(project_dir)
+
+        self.assertTrue(state["independent_review_ready"])
+        self.assertFalse(state["lint_report_ready"])
+        self.assertFalse(state["review_reports_ready"])
+
+        self._write_lint_report(project_dir)
+        state = self.engine._stage_five_completion_state(project_dir)
+        inferred_flags = self.engine._infer_stage_state(project_dir)["flags"]
+
+        self.assertTrue(state["review_reports_ready"])
+        self.assertTrue(inferred_flags["review_reports_ready"])
+        self.assertIn("review-checklist.md", state["missing_for_review_pass"])
 
     def test_workspace_summary_keeps_stage_at_s0_when_project_overview_is_invalid_even_with_later_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:

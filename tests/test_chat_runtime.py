@@ -942,6 +942,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "compact_state": None,
                 "draft_followup_state": None,
                 "s0_confirmation_completed": False,
+                "s5_welcome_shown_at": None,
             },
         )
         self.assertFalse((Path(project["project_dir"]) / "conversation_state.json").exists())
@@ -1050,6 +1051,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "compact_state": None,
                 "draft_followup_state": None,
                 "s0_confirmation_completed": False,
+                "s5_welcome_shown_at": None,
             },
         )
         self.assertFalse(legacy_path.exists())
@@ -1104,6 +1106,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "compact_state": None,
                 "draft_followup_state": None,
                 "s0_confirmation_completed": False,
+                "s5_welcome_shown_at": None,
             },
         )
         self.assertFalse(legacy_path.exists())
@@ -1213,6 +1216,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "compact_state": None,
                 "draft_followup_state": None,
                 "s0_confirmation_completed": False,
+                "s5_welcome_shown_at": None,
             },
         )
         self.assertFalse(state_path.exists())
@@ -10087,6 +10091,59 @@ class S0ConversationStateRoundtripTests(ChatRuntimeTests):
         loaded = handler._load_conversation_state(self.project_id)
         self.assertIs(persisted["s0_confirmation_completed"], False)
         self.assertIs(loaded["s0_confirmation_completed"], False)
+
+    def test_load_conversation_state_without_s5_welcome_field(self):
+        handler = self._make_handler_with_project()
+        (self.project_dir / "conversation_state.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "events": [],
+                    "memory_entries": [],
+                    "compact_state": None,
+                    "draft_followup_state": None,
+                    "s0_confirmation_completed": True,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        state = handler._load_conversation_state(self.project_id)
+
+        self.assertIsNone(state["s5_welcome_shown_at"])
+
+    def test_save_load_roundtrip_preserves_s5_welcome(self):
+        handler = self._make_handler_with_project()
+        state = handler._empty_conversation_state()
+        state["s5_welcome_shown_at"] = "2026-05-21T12:00:00+08:00"
+
+        handler._save_conversation_state_atomically(self.project_id, state)
+
+        persisted = json.loads((self.project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+        loaded = handler._load_conversation_state(self.project_id)
+        self.assertEqual(persisted["s5_welcome_shown_at"], "2026-05-21T12:00:00+08:00")
+        self.assertEqual(loaded["s5_welcome_shown_at"], "2026-05-21T12:00:00+08:00")
+
+    def test_save_skips_none_s5_welcome(self):
+        handler = self._make_handler_with_project()
+        state = handler._empty_conversation_state()
+        state["s5_welcome_shown_at"] = None
+
+        handler._save_conversation_state_atomically(self.project_id, state)
+
+        persisted = json.loads((self.project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+        self.assertNotIn("s5_welcome_shown_at", persisted)
+
+    def test_save_skips_empty_string_s5_welcome(self):
+        handler = self._make_handler_with_project()
+        state = handler._empty_conversation_state()
+        state["s5_welcome_shown_at"] = ""
+
+        handler._save_conversation_state_atomically(self.project_id, state)
+
+        persisted = json.loads((self.project_dir / "conversation_state.json").read_text(encoding="utf-8"))
+        self.assertNotIn("s5_welcome_shown_at", persisted)
 
     def test_new_turn_context_defaults_s0_confirmation_completed_true(self):
         handler = self._make_handler_with_project()

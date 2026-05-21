@@ -42,15 +42,25 @@ class TransientAttachment(BaseModel):
         return self
 
 
+SystemTriggerType = Literal["independent_review_done", "lint_report_done"]
+
+
 class ChatRequest(BaseModel):
     """Chat request payload."""
 
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(..., min_length=1, max_length=100)
-    message_text: str = Field(..., min_length=1, max_length=10000)
+    message_text: str = Field(default="", max_length=10000)
     attached_material_ids: List[str] = Field(default_factory=list)
     transient_attachments: List[TransientAttachment] = Field(default_factory=list)
+    system_trigger: Optional[SystemTriggerType] = None
+
+    @model_validator(mode="after")
+    def validate_message_or_trigger(self):
+        if self.system_trigger is None and not self.message_text.strip():
+            raise ValueError("message_text must be non-empty when system_trigger is None")
+        return self
 
 
 class TokenUsage(BaseModel):

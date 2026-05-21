@@ -165,6 +165,16 @@ class SkillEngine:
     }
     REPORT_DRAFT_PATH = "content/report_draft_v1.md"
     REPORT_DRAFT_CANDIDATES = (REPORT_DRAFT_PATH,)
+    INDEPENDENT_REVIEW_ANCHORS = [
+        "## 1. 结论-证据一致性",
+        "## 2. 关键假设与逻辑链",
+        "## 3. 数据口径一致性",
+        "## 4. 建议可执行性",
+        "## 5. 目标读者匹配",
+    ]
+    INDEPENDENT_REVIEW_COMPLETION_MARKER = "<!-- independent-review:complete -->"
+    LINT_REPORT_ANCHORS = ["## 按章节排列", "## 总览"]
+    LINT_REPORT_COMPLETION_MARKER = "<!-- lint-report:complete -->"
     CHECKPOINT_PREREQ = {
         "s0_interview_done_at": None,
         "outline_confirmed_at": (
@@ -472,6 +482,9 @@ class SkillEngine:
         )
 
         review_checklist_ready = self._has_effective_review_checklist(project_path)
+        independent_review_ready = self._has_effective_independent_review(project_path)
+        lint_report_ready = self._has_effective_lint_report(project_path)
+        review_reports_ready = independent_review_ready and lint_report_ready
         review_passed = "review_passed_at" in checkpoints
 
         missing_for_review_pass = list(stage_four_state["missing_for_stage_four"])
@@ -484,6 +497,9 @@ class SkillEngine:
 
         return {
             "review_checklist_ready": review_checklist_ready,
+            "independent_review_ready": independent_review_ready,
+            "lint_report_ready": lint_report_ready,
+            "review_reports_ready": review_reports_ready,
             "review_passed": review_passed,
             "review_pass_prerequisites_complete": not missing_for_review_pass,
             "stage_five_complete": not missing_for_stage_five,
@@ -1562,6 +1578,9 @@ class SkillEngine:
         analysis_quality_ok = stage_four_state["analysis_quality_ok"]
         report_ready = stage_four_state["report_ready"]
         review_checklist_ready = stage_five_state["review_checklist_ready"]
+        independent_review_ready = stage_five_state["independent_review_ready"]
+        lint_report_ready = stage_five_state["lint_report_ready"]
+        review_reports_ready = stage_five_state["review_reports_ready"]
         presentation_ready = stage_six_state["presentation_ready"]
         delivery_ready = self._has_effective_delivery_log(project_path)
         presentation_required = stage_six_state["presentation_required"]
@@ -1622,6 +1641,9 @@ class SkillEngine:
             "analysis_ready": analysis_quality_ok,
             "report_ready": report_ready,
             "review_checklist_ready": review_checklist_ready,
+            "independent_review_ready": independent_review_ready,
+            "lint_report_ready": lint_report_ready,
+            "review_reports_ready": review_reports_ready,
             "review_notes_ready": self._has_effective_review_notes(project_path),
             "review_ready": review_checklist_ready and review_passed,
             "presentation_ready": presentation_ready,
@@ -1957,6 +1979,32 @@ class SkillEngine:
         total_items = re.findall(r"^\s*-\s+\[[ xX/]\]\s+.+\S$", review_text, flags=re.MULTILINE)
         checked_items = re.findall(r"^\s*-\s+\[[xX]\]\s+.+\S$", review_text, flags=re.MULTILINE)
         return len(total_items) >= 3 and len(checked_items) == len(total_items)
+
+    def _has_effective_independent_review(self, project_path: Path) -> bool:
+        review_text = self._read_plan_file(project_path, "independent-review.md")
+        if not review_text or self._is_template_content(review_text, "independent-review.md"):
+            return False
+        if not all(anchor in review_text for anchor in self.INDEPENDENT_REVIEW_ANCHORS):
+            return False
+        if self.INDEPENDENT_REVIEW_COMPLETION_MARKER not in review_text:
+            return False
+        return self._has_substantive_body(review_text)
+
+    def _has_effective_lint_report(self, project_path: Path) -> bool:
+        lint_text = self._read_plan_file(project_path, "lint-report.md")
+        if not lint_text or self._is_template_content(lint_text, "lint-report.md"):
+            return False
+        if not all(anchor in lint_text for anchor in self.LINT_REPORT_ANCHORS):
+            return False
+        if self.LINT_REPORT_COMPLETION_MARKER not in lint_text:
+            return False
+        return self._has_substantive_body(lint_text)
+
+    def _has_effective_review_reports(self, project_path: Path) -> bool:
+        return (
+            self._has_effective_independent_review(project_path)
+            and self._has_effective_lint_report(project_path)
+        )
 
     def _has_effective_review_notes(self, project_path: Path) -> bool:
         review_text = self._read_plan_file(project_path, "review.md")
