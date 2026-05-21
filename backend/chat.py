@@ -10,7 +10,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Dict, List
 from html import unescape
 from urllib.parse import urljoin, urlparse
@@ -71,6 +71,21 @@ LEGACY_EMPTY_ASSISTANT_FALLBACKS = frozenset({
     "（本轮" "无回复）",
     USER_VISIBLE_FALLBACK,
 })
+SYSTEM_TRIGGER_PROMPTS = {
+    "independent_review_done": "[系统通知] 独立审查报告已生成（plan/independent-review.md）。请用 read_file 阅读，按 5 个维度向用户报告主要发现，然后询问用户是否需要修改正文。不要把整份报告原文贴进聊天框。",
+    "lint_report_done": "[系统通知] AI 味自查报告已生成（plan/lint-report.md）。请用 read_file 阅读，按章节向用户报告主要发现，然后询问用户是否需要修改正文。不要把整份报告原文贴进聊天框。",
+}
+S5_WELCOME_PROMPT = """[S5 阶段进入提醒]
+用户刚进入 S5 质量审查阶段。S5 的玩法跟以前不一样了：
+
+不再要求你自己填写 review-checklist.md。审查由两个用户主动触发的工具完成：
+1. 用户点"独立审查"按钮：会派一个独立审查代理读 data-log / analysis-notes / 正文 / references / outline，按 5 个判断类维度审查，落 plan/independent-review.md。
+2. 用户点"AI 味自查"按钮：会跑机械化脚本扫正文，按 4 个机械维度查 AI 腔、占位符、数据标注、章节 So What 密度，落 plan/lint-report.md。
+
+请你**在本轮回复**用一句话提醒用户使用上方两个新按钮，简单说明两个按钮的区别。
+不要假装审查已完成。
+不要自己写 plan/review-checklist.md（已退役）。
+"""
 S0_FIRST_TURN_ALLOWED_TOOLS = frozenset({
     "read_file",
     "read_material_file",
@@ -1066,6 +1081,22 @@ class ChatHandler:
 
         self._mutate_conversation_state(project_id, mutate)
 
+    def _should_emit_s5_welcome(self, project_id: str) -> bool:
+        workspace = self.skill_engine.get_workspace_summary(project_id)
+        if workspace.get("stage_code") != "S5":
+            return False
+        if not workspace.get("checkpoints", {}).get("review_started_at"):
+            return False
+        state = self._load_conversation_state(project_id)
+        if state.get("s5_welcome_shown_at"):
+            return False
+        return True
+
+    def _mark_s5_welcome_shown(self, project_id: str) -> None:
+        state = self._load_conversation_state(project_id)
+        state["s5_welcome_shown_at"] = datetime.now(timezone.utc).isoformat()
+        self._save_conversation_state_atomically(project_id, state)
+
     def _finalize_empty_assistant_turn(
         self,
         project_id: str,
@@ -1080,7 +1111,8 @@ class ChatHandler:
         3. Record empty_assistant event in conversation_state
         Returns: USER_VISIBLE_FALLBACK string (caller yields to frontend)
         """
-        history.append(current_user_message)
+        if not self._turn_context.get("system_triggered"):
+            history.append(current_user_message)
         self._save_conversation(project_id, history)
         self._record_empty_assistant_event(project_id, diagnostic)
         return USER_VISIBLE_FALLBACK
@@ -2471,6 +2503,7 @@ class ChatHandler:
         attached_material_ids: List[str] | None = None,
         transient_attachments: List[Dict] | None = None,
         max_iterations: int = 20,
+        system_trigger: str | None = None,
     ):
         """流式处理对话，yield 每个 chunk"""
         if len(user_message) > 10000:
@@ -2478,17 +2511,37 @@ class ChatHandler:
             return
 
         history = self._load_conversation(project_id)
-        current_user_message = self._build_persisted_user_message(
-            user_message=user_message,
-            attached_material_ids=attached_material_ids or [],
-        )
-        self._turn_context = self._build_turn_context(project_id, user_message)
-        provider_user_message = {
-            **current_user_message,
-            "transient_attachments": transient_attachments or [],
-        }
+        if system_trigger:
+            self._turn_context = self._build_turn_context(project_id, "")
+            self._turn_context["system_triggered"] = True
+            self._turn_context["user_message_text"] = ""
+            self._turn_context["canonical_obligation"] = None
+            self._turn_context["checkpoint_event"] = None
+
+            trigger_prompt = SYSTEM_TRIGGER_PROMPTS.get(system_trigger)
+            if not trigger_prompt:
+                yield {"type": "error", "data": f"未知 system_trigger: {system_trigger}"}
+                return
+
+            current_user_message = {"role": "user", "content": ""}
+            provider_user_message = current_user_message
+            transient_system_messages = [{"role": "system", "content": trigger_prompt}]
+            include_current_user = False
+            obligation_write_snapshots = {}
+        else:
+            current_user_message = self._build_persisted_user_message(
+                user_message=user_message,
+                attached_material_ids=attached_material_ids or [],
+            )
+            self._turn_context = self._build_turn_context(project_id, user_message)
+            provider_user_message = {
+                **current_user_message,
+                "transient_attachments": transient_attachments or [],
+            }
+            transient_system_messages = None
+            include_current_user = True
+            obligation_write_snapshots = self._build_obligation_write_snapshots(project_id, user_message)
         active_model = self._get_active_model_name()
-        obligation_write_snapshots = self._build_obligation_write_snapshots(project_id, user_message)
 
         iterations = 0
         missing_write_retries = 0
@@ -2514,6 +2567,8 @@ class ChatHandler:
                 provider_user_message,
                 current_turn_messages=current_turn_messages,
                 exclude_current_turn_memory=True,
+                additional_system_messages=transient_system_messages,
+                include_current_user=include_current_user,
             )
             try:
                 conversation, _, iteration_compressed, policy, current_turn_start_index = self._fit_conversation_to_budget(
@@ -3073,6 +3128,7 @@ class ChatHandler:
         attached_material_ids: List[str] | None = None,
         transient_attachments: List[Dict] | None = None,
         max_iterations: int = 20,
+        system_trigger: str | None = None,
     ):
         request_lock = self._get_project_request_lock(project_id)
         with request_lock:
@@ -3082,6 +3138,7 @@ class ChatHandler:
                 attached_material_ids=attached_material_ids,
                 transient_attachments=transient_attachments,
                 max_iterations=max_iterations,
+                system_trigger=system_trigger,
             )
 
     def chat(
@@ -3254,10 +3311,12 @@ class ChatHandler:
         self,
         project_id: str,
         history: List[Dict],
-        current_user_message: Dict,
+        current_user_message: Dict | None,
         current_turn_messages: List[Dict] | None = None,
         *,
         exclude_current_turn_memory: bool = False,
+        additional_system_messages: list[dict] | None = None,
+        include_current_user: bool = True,
     ) -> tuple[List[Dict], int]:
         conversation = [{"role": "system", "content": self._build_system_prompt(project_id)}]
         history_messages, _ = self._build_memory_aware_history_messages(
@@ -3270,8 +3329,17 @@ class ChatHandler:
             ),
         )
         conversation.extend(history_messages)
-        conversation.append(self._to_provider_message(project_id, current_user_message, include_images=True))
-        current_turn_start_index = len(conversation) - 1
+
+        if additional_system_messages:
+            current_turn_start_index = len(conversation)
+            conversation.extend(additional_system_messages)
+        elif include_current_user and current_user_message is not None:
+            current_turn_start_index = None
+        else:
+            current_turn_start_index = len(conversation)
+
+        if include_current_user and current_user_message is not None:
+            conversation.append(self._to_provider_message(project_id, current_user_message, include_images=True))
         if current_turn_messages:
             conversation.extend(self._strip_legacy_stage_ack_from_provider_messages(current_turn_messages))
         # v5: 合并相邻 user role（必须在 budget fit 之前）
@@ -3279,10 +3347,15 @@ class ChatHandler:
 
         # v2 修订：合并可能改变 current_turn_start_index——重新定位
         # current user message 现在被合并到了"最后一个 user role 块"里
-        new_current_turn_start_index = next(
-            (i for i in range(len(coalesced) - 1, -1, -1) if coalesced[i].get("role") == "user"),
-            len(coalesced),
-        )
+        if current_turn_start_index is None:
+            new_current_turn_start_index = next(
+                (i for i in range(len(coalesced) - 1, -1, -1) if coalesced[i].get("role") == "user"),
+                len(coalesced),
+            )
+        else:
+            new_current_turn_start_index = len(
+                self._coalesce_consecutive_user_messages(conversation[:current_turn_start_index])
+            )
         return coalesced, new_current_turn_start_index
 
     def _strip_legacy_stage_ack_from_provider_messages(self, messages: List[Dict]) -> List[Dict]:
@@ -6240,10 +6313,15 @@ class ChatHandler:
             )
 
         # Step 6: persist this turn.
-        history.extend([
-            current_user_message,
-            {"role": "assistant", "content": persisted_content},
-        ])
+        if self._turn_context.get("system_triggered"):
+            history.extend([
+                {"role": "assistant", "content": persisted_content},
+            ])
+        else:
+            history.extend([
+                current_user_message,
+                {"role": "assistant", "content": persisted_content},
+            ])
         self._save_conversation(project_id, history)
         return persisted_content
 

@@ -487,6 +487,137 @@ class WorkspaceApiTests(unittest.TestCase):
             "D:/skill/scripts/quality_check.ps1",
         )
 
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_independent_review_endpoint_requires_s5(self, mock_summary):
+        mock_summary.return_value = {"stage_code": "S4"}
+
+        response = self.client.get("/api/projects/demo/independent-review/stream")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("独立审查只能在 S5 阶段使用", response.json()["detail"])
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_independent_review_endpoint_returns_sse(self, mock_summary, mock_agent_cls):
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_agent_cls.return_value.run.return_value = [
+            {"type": "progress", "message": "开始审查"},
+        ]
+
+        response = self.client.get("/api/projects/demo-sse/independent-review/stream")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
+        self.assertIn('"type": "progress"', response.text)
+        self.assertIn("data: [DONE]", response.text)
+
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_independent_review_endpoint_409_when_concurrent(self, mock_summary):
+        from backend.independent_review import get_independent_review_lock
+
+        project_id = "demo-review-concurrent"
+        mock_summary.return_value = {"stage_code": "S5"}
+        lock = get_independent_review_lock(project_id)
+        self.assertTrue(lock.acquire(blocking=False))
+        self.addCleanup(lock.release)
+
+        response = self.client.get(f"/api/projects/{project_id}/independent-review/stream")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("上一次独立审查仍在进行中", response.json()["detail"])
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_independent_review_endpoint_releases_lock_on_client_disconnect(
+        self,
+        mock_summary,
+        mock_agent_cls,
+    ):
+        from backend.independent_review import get_independent_review_lock
+
+        class DisconnectedRequest:
+            async def is_disconnected(self):
+                return True
+
+        async def collect_response():
+            response = await main_module.independent_review_stream(
+                "demo-review-disconnect",
+                DisconnectedRequest(),
+            )
+            chunks = []
+            async for chunk in response.body_iterator:
+                chunks.append(chunk)
+            return chunks
+
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_agent_cls.return_value.run.return_value = [
+            {"type": "progress", "message": "should not emit"},
+        ]
+
+        chunks = asyncio.run(collect_response())
+
+        self.assertEqual(chunks, [])
+        lock = get_independent_review_lock("demo-review-disconnect")
+        self.assertTrue(lock.acquire(blocking=False))
+        lock.release()
+
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_lint_report_endpoint_requires_s5(self, mock_summary):
+        mock_summary.return_value = {"stage_code": "S4"}
+
+        response = self.client.post("/api/projects/demo/lint-report")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("AI 味自查只能在 S5 阶段使用", response.json()["detail"])
+
+    @mock.patch("backend.main.run_lint_report")
+    @mock.patch("backend.main.skill_engine.get_script_path")
+    @mock.patch("backend.main.skill_engine.get_project_path")
+    @mock.patch("backend.main.skill_engine.get_primary_report_path")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_lint_report_endpoint_returns_summary(
+        self,
+        mock_summary,
+        mock_report_path,
+        mock_project_path,
+        mock_script_path,
+        mock_run_lint,
+    ):
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_report_path.return_value = "D:/tmp/report.md"
+        mock_project_path.return_value = Path("D:/tmp/project")
+        mock_script_path.return_value = "D:/skill/scripts/quality_check.ps1"
+        mock_run_lint.return_value = {
+            "status": "ok",
+            "path": "D:/tmp/project/plan/lint-report.md",
+            "summary": {"ai_style": 2},
+        }
+
+        response = self.client.post("/api/projects/demo-lint/lint-report")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["summary"]["ai_style"], 2)
+        mock_run_lint.assert_called_once_with(
+            "D:/tmp/report.md",
+            str(Path("D:/tmp/project") / "plan" / "lint-report.md"),
+            "D:/skill/scripts/quality_check.ps1",
+        )
+
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_lint_report_endpoint_409_when_concurrent(self, mock_summary):
+        from backend.report_tools import get_lint_report_lock
+
+        project_id = "demo-lint-concurrent"
+        mock_summary.return_value = {"stage_code": "S5"}
+        lock = get_lint_report_lock(project_id)
+        self.assertTrue(lock.acquire(blocking=False))
+        self.addCleanup(lock.release)
+
+        response = self.client.post(f"/api/projects/{project_id}/lint-report")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("上一次 AI 味自查仍在进行中", response.json()["detail"])
+
     @mock.patch("backend.main.export_reviewable_draft")
     @mock.patch("backend.main.skill_engine.ensure_output_dir")
     @mock.patch("backend.main.skill_engine.get_script_path")
@@ -670,6 +801,34 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(response.json()["content"], "已拦截伪造写入")
         self.assertEqual(len(response.json()["system_notices"]), 1)
         self.assertEqual(response.json()["system_notices"][0]["category"], "write_blocked")
+
+    @mock.patch("backend.main.get_chat_handler")
+    def test_chat_stream_endpoint_forwards_system_trigger(self, mock_get_chat_handler):
+        handler = mock.Mock()
+        handler.chat_stream.return_value = iter([
+            {"type": "content", "data": "已读取独立审查报告。"},
+        ])
+        mock_get_chat_handler.return_value = handler
+
+        response = self.client.post(
+            "/api/chat/stream",
+            json={
+                "project_id": "proj-demo",
+                "message_text": "",
+                "system_trigger": "independent_review_done",
+                "attached_material_ids": [],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("已读取独立审查报告", response.text)
+        handler.chat_stream.assert_called_once_with(
+            "proj-demo",
+            "",
+            [],
+            [],
+            system_trigger="independent_review_done",
+        )
 
 
 class GetConversationSanitizeTests(unittest.TestCase):

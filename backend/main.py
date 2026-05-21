@@ -25,8 +25,14 @@ from .chat import (
 )
 from .config import Settings, get_base_path, heal_stale_managed_model, load_settings, save_settings
 from .context_policy import clamp_custom_context_limit_override
+from .independent_review import IndependentReviewAgent, get_independent_review_lock
 from .models import ChatRequest, ChatResponse, ProjectInfo
-from .report_tools import export_reviewable_draft, run_quality_check
+from .report_tools import (
+    export_reviewable_draft,
+    get_lint_report_lock,
+    run_lint_report,
+    run_quality_check,
+)
 from .skill import SkillEngine
 
 
@@ -325,6 +331,62 @@ async def quality_check(project_id: str):
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@app.get("/api/projects/{project_id}/independent-review/stream")
+async def independent_review_stream(project_id: str, request: Request):
+    try:
+        workspace = skill_engine.get_workspace_summary(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if workspace.get("stage_code") != "S5":
+        raise HTTPException(status_code=400, detail="独立审查只能在 S5 阶段使用")
+
+    lock = get_independent_review_lock(project_id)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="上一次独立审查仍在进行中，请等待")
+
+    async def generate():
+        try:
+            agent = IndependentReviewAgent(skill_engine, settings)
+            for event in agent.run(project_id):
+                if await request.is_disconnected():
+                    return
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            lock.release()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/projects/{project_id}/lint-report")
+async def lint_report(project_id: str):
+    try:
+        workspace = skill_engine.get_workspace_summary(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if workspace.get("stage_code") != "S5":
+        raise HTTPException(status_code=400, detail="AI 味自查只能在 S5 阶段使用")
+
+    lock = get_lint_report_lock(project_id)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="上一次 AI 味自查仍在进行中，请等待")
+    try:
+        report_path = skill_engine.get_primary_report_path(project_id)
+        output_path = str(skill_engine.get_project_path(project_id) / "plan" / "lint-report.md")
+        script_path = skill_engine.get_script_path("quality_check.ps1")
+        return run_lint_report(report_path, output_path, script_path)
+    finally:
+        lock.release()
+
+
 @app.post("/api/projects/{project_id}/export-draft")
 async def export_draft(project_id: str):
     try:
@@ -437,6 +499,7 @@ def chat_stream(request: Request, chat_request: ChatRequest):
                 chat_request.message_text,
                 chat_request.attached_material_ids,
                 [item.model_dump() for item in chat_request.transient_attachments],
+                system_trigger=chat_request.system_trigger,
             ):
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"

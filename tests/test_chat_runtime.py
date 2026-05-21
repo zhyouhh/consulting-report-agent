@@ -8438,6 +8438,133 @@ del _inherited_test_name
 
 
 
+class S5WelcomeHelperTests(ChatRuntimeTests):
+    def test_should_emit_s5_welcome_returns_true_when_s5_entered_no_history(self):
+        handler = self._make_handler_with_project()
+        with mock.patch.object(
+            handler.skill_engine,
+            "get_workspace_summary",
+            return_value={
+                "stage_code": "S5",
+                "checkpoints": {"review_started_at": "2026-05-21T10:00:00+00:00"},
+            },
+        ):
+            self.assertTrue(handler._should_emit_s5_welcome(self.project_id))
+
+    def test_should_emit_s5_welcome_returns_false_when_not_s5(self):
+        handler = self._make_handler_with_project()
+        with mock.patch.object(
+            handler.skill_engine,
+            "get_workspace_summary",
+            return_value={
+                "stage_code": "S4",
+                "checkpoints": {"review_started_at": "2026-05-21T10:00:00+00:00"},
+            },
+        ):
+            self.assertFalse(handler._should_emit_s5_welcome(self.project_id))
+
+    def test_should_emit_s5_welcome_returns_false_when_already_shown(self):
+        handler = self._make_handler_with_project()
+        state = handler._empty_conversation_state()
+        state["s5_welcome_shown_at"] = "2026-05-21T10:00:00+00:00"
+        handler._save_conversation_state_atomically(self.project_id, state)
+        with mock.patch.object(
+            handler.skill_engine,
+            "get_workspace_summary",
+            return_value={
+                "stage_code": "S5",
+                "checkpoints": {"review_started_at": "2026-05-21T10:00:00+00:00"},
+            },
+        ):
+            self.assertFalse(handler._should_emit_s5_welcome(self.project_id))
+
+    def test_mark_s5_welcome_shown_writes_iso_timestamp(self):
+        from datetime import datetime
+
+        handler = self._make_handler_with_project()
+
+        handler._mark_s5_welcome_shown(self.project_id)
+
+        state = handler._load_conversation_state(self.project_id)
+        shown_at = state.get("s5_welcome_shown_at")
+        self.assertIsInstance(shown_at, str)
+        datetime.fromisoformat(shown_at)
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in S5WelcomeHelperTests.__dict__
+    ):
+        setattr(S5WelcomeHelperTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class FinalizeSystemTriggeredTests(ChatRuntimeTests):
+    def test_finalize_assistant_turn_skips_user_when_system_triggered(self):
+        handler = self._make_handler_with_project()
+        history = []
+        current_user = {"role": "user", "content": "", "attached_material_ids": []}
+        handler._turn_context = handler._build_turn_context(self.project_id, "")
+        handler._turn_context["system_triggered"] = True
+
+        result = handler._finalize_assistant_turn(
+            self.project_id,
+            history,
+            current_user,
+            "系统触发回复",
+            [],
+            user_message="",
+        )
+
+        self.assertEqual(result, "系统触发回复")
+        self.assertEqual(history, [{"role": "assistant", "content": "系统触发回复"}])
+
+    def test_finalize_assistant_turn_keeps_user_for_normal_turn(self):
+        handler = self._make_handler_with_project()
+        history = []
+        current_user = {"role": "user", "content": "继续", "attached_material_ids": []}
+        handler._turn_context = handler._build_turn_context(self.project_id, "继续")
+
+        handler._finalize_assistant_turn(
+            self.project_id,
+            history,
+            current_user,
+            "普通回复",
+            [],
+            user_message="继续",
+        )
+
+        self.assertEqual(history[0], current_user)
+        self.assertEqual(history[1], {"role": "assistant", "content": "普通回复"})
+
+    def test_finalize_assistant_empty_turn_skips_user_when_system_triggered(self):
+        handler = self._make_handler_with_project()
+        history = []
+        current_user = {"role": "user", "content": "", "attached_material_ids": []}
+        handler._turn_context = handler._build_turn_context(self.project_id, "")
+        handler._turn_context["system_triggered"] = True
+
+        fallback = handler._finalize_empty_assistant_turn(
+            self.project_id,
+            history,
+            current_user,
+            diagnostic="stream_truncated",
+        )
+
+        self.assertIn("没有产出可见回复", fallback)
+        self.assertEqual(history, [])
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in FinalizeSystemTriggeredTests.__dict__
+    ):
+        setattr(FinalizeSystemTriggeredTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
 class EmptyAssistantFallbackTests(ChatRuntimeTests):
     def test_finalize_empty_assistant_does_not_persist_assistant(self):
         handler = self._make_handler_with_project()
@@ -10036,6 +10163,85 @@ class CoalesceConsecutiveUserTests(ChatRuntimeTests):
         self.assertEqual(conv[idx].get("role"), "user")
         self.assertIn("current", conv[idx]["content"])
 
+    def test_build_provider_turn_conversation_appends_additional_system_messages(self):
+        handler = self._make_handler_with_project()
+
+        conv, _ = handler._build_provider_turn_conversation(
+            project_id=self.project_id,
+            history=[{"role": "user", "content": "hi", "attached_material_ids": []}],
+            current_user_message={"role": "user", "content": "new", "attached_material_ids": []},
+            additional_system_messages=[{"role": "system", "content": "TRIGGER"}],
+        )
+
+        self.assertTrue(any(m.get("content") == "TRIGGER" for m in conv))
+
+    def test_build_provider_turn_conversation_skips_current_user_when_disabled(self):
+        handler = self._make_handler_with_project()
+
+        conv, idx = handler._build_provider_turn_conversation(
+            project_id=self.project_id,
+            history=[],
+            current_user_message={"role": "user", "content": "placeholder", "attached_material_ids": []},
+            include_current_user=False,
+        )
+
+        self.assertFalse(any(m.get("content") == "placeholder" for m in conv))
+        self.assertGreaterEqual(idx, 1)
+
+    def test_build_provider_turn_conversation_backwards_compatible(self):
+        handler = self._make_handler_with_project()
+        history = [{"role": "user", "content": "previous", "attached_material_ids": []}]
+        current = {"role": "user", "content": "current", "attached_material_ids": []}
+
+        conv, idx = handler._build_provider_turn_conversation(
+            project_id=self.project_id,
+            history=history,
+            current_user_message=current,
+        )
+
+        user_msgs = [m for m in conv if m.get("role") == "user"]
+        self.assertEqual(len(user_msgs), 1)
+        self.assertIn("previous", user_msgs[0]["content"])
+        self.assertIn("current", user_msgs[0]["content"])
+        self.assertEqual(conv[idx], user_msgs[0])
+
+    def test_additional_system_messages_survive_long_history_compression(self):
+        from backend.context_policy import ResolvedContextPolicy
+
+        handler = self._make_handler_with_project()
+        handler._estimate_message_tokens = mock.Mock(
+            side_effect=lambda message: 120 if message.get("content") == "TRIGGER" else 900
+        )
+        handler._resolve_context_policy = mock.Mock(
+            return_value=ResolvedContextPolicy(
+                normalized_model="test-model",
+                provider_context_limit=4096,
+                effective_context_limit=4096,
+                reserved_output_tokens=512,
+                compress_threshold=2000,
+                resolution_source="test",
+            )
+        )
+        history = [
+            {"role": "user", "content": f"old user {index}", "attached_material_ids": []}
+            for index in range(10)
+        ]
+
+        conv, idx = handler._build_provider_turn_conversation(
+            project_id=self.project_id,
+            history=history,
+            current_user_message={"role": "user", "content": "current", "attached_material_ids": []},
+            additional_system_messages=[{"role": "system", "content": "TRIGGER"}],
+        )
+        fitted, _, compressed, _, _ = handler._fit_conversation_to_budget(
+            conv,
+            current_turn_start_index=idx,
+            return_current_turn_start_index=True,
+        )
+
+        self.assertTrue(compressed)
+        self.assertTrue(any(m.get("content") == "TRIGGER" for m in fitted))
+
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
@@ -10043,6 +10249,171 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in CoalesceConsecutiveUserTests.__dict__
     ):
         setattr(CoalesceConsecutiveUserTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class SystemTriggerStreamTests(ChatRuntimeTests):
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_with_system_trigger_skips_user_message(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="已读取审查报告。"),
+        ])
+
+        events = list(
+            handler.chat_stream(
+                self.project_id,
+                "",
+                system_trigger="independent_review_done",
+                max_iterations=1,
+            )
+        )
+
+        self.assertTrue(any(event.get("type") == "content" for event in events))
+        first_messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
+        self.assertFalse(any(message.get("role") == "user" and message.get("content") == "" for message in first_messages))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_independent_review_system_trigger_injects_correct_prompt(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="独立审查摘要。"),
+        ])
+
+        list(
+            handler.chat_stream(
+                self.project_id,
+                "",
+                system_trigger="independent_review_done",
+                max_iterations=1,
+            )
+        )
+
+        messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
+        self.assertTrue(any("独立审查报告已生成" in message.get("content", "") for message in messages))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_lint_report_system_trigger_injects_correct_prompt(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="AI 味自查摘要。"),
+        ])
+
+        list(
+            handler.chat_stream(
+                self.project_id,
+                "",
+                system_trigger="lint_report_done",
+                max_iterations=1,
+            )
+        )
+
+        messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
+        self.assertTrue(any("AI 味自查报告已生成" in message.get("content", "") for message in messages))
+
+    def test_chat_stream_invalid_system_trigger_returns_error(self):
+        handler = self._make_handler_with_project()
+
+        events = list(
+            handler.chat_stream(
+                self.project_id,
+                "",
+                system_trigger="unknown",
+                max_iterations=1,
+            )
+        )
+
+        self.assertEqual(events, [{"type": "error", "data": "未知 system_trigger: unknown"}])
+
+    def test_system_triggered_turn_does_not_inherit_stale_checkpoint_event(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._build_turn_context(self.project_id, "上一轮")
+        handler._turn_context["checkpoint_event"] = {"checkpoint_key": "outline_confirmed_at"}
+
+        list(
+            handler.chat_stream(
+                self.project_id,
+                "",
+                system_trigger="unknown",
+                max_iterations=1,
+            )
+        )
+
+        self.assertTrue(handler._turn_context.get("system_triggered"))
+        self.assertIsNone(handler._turn_context.get("checkpoint_event"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_system_triggered_turn_keeps_trigger_in_follow_up_iterations(self, mock_openai):
+        def tool_stream():
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-1",
+                        name="read_file",
+                        arguments='{"file_path":"plan/independent-review.md"}',
+                    )
+                ]
+            )
+
+        def final_stream():
+            yield self._make_chunk(content="按 5 个维度汇报。")
+
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            tool_stream(),
+            final_stream(),
+        ]
+
+        with mock.patch.object(
+            handler,
+            "_execute_tool",
+            return_value={"status": "success", "content": "# 独立审查报告"},
+        ):
+            list(
+                handler.chat_stream(
+                    self.project_id,
+                    "",
+                    system_trigger="independent_review_done",
+                    max_iterations=2,
+                )
+            )
+
+        first_messages = mock_openai.return_value.chat.completions.create.call_args_list[0].kwargs["messages"]
+        second_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        self.assertTrue(any("独立审查报告已生成" in message.get("content", "") for message in first_messages))
+        self.assertTrue(any("独立审查报告已生成" in message.get("content", "") for message in second_messages))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_system_triggered_turn_does_not_crash_on_finalize(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="已汇报。"),
+        ])
+
+        events = list(
+            handler.chat_stream(
+                self.project_id,
+                "",
+                system_trigger="independent_review_done",
+                max_iterations=1,
+            )
+        )
+
+        self.assertTrue(any(event.get("type") == "usage" for event in events))
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in SystemTriggerStreamTests.__dict__
+    ):
+        setattr(SystemTriggerStreamTests, _inherited_test_name, None)
 del _inherited_test_name
 
 
