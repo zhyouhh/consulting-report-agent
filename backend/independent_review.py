@@ -120,14 +120,8 @@ INDEPENDENT_REVIEW_SYSTEM_PROMPT = """你是独立审查代理。你的任务是
 
 
 CANONICAL_REVIEW_PATH = "plan/independent-review.md"
-INDEPENDENT_REVIEW_COMPLETION_MARKER = "<!-- independent-review:complete -->"
-INDEPENDENT_REVIEW_ANCHORS = (
-    "## 1. 结论-证据一致性",
-    "## 2. 关键假设与逻辑链",
-    "## 3. 数据口径一致性",
-    "## 4. 建议可执行性",
-    "## 5. 目标读者匹配",
-)
+INDEPENDENT_REVIEW_COMPLETION_MARKER = SkillEngine.INDEPENDENT_REVIEW_COMPLETION_MARKER
+INDEPENDENT_REVIEW_ANCHORS = SkillEngine.INDEPENDENT_REVIEW_ANCHORS
 INDEPENDENT_REVIEW_TOOLS = [
     {
         "type": "function",
@@ -282,8 +276,9 @@ class IndependentReviewAgent:
                 if not review_written:
                     yield {"type": "error", "detail": "审查代理未生成报告，请重试"}
                     return
-                if not self._verify_completion_marker(project_id):
-                    yield {"type": "error", "detail": "审查报告缺少完成标记，请重试"}
+                review_error = self._verify_review_completeness(project_id)
+                if review_error:
+                    yield {"type": "error", "detail": review_error}
                     return
                 yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH}
                 return
@@ -343,12 +338,19 @@ class IndependentReviewAgent:
 
         return {"status": "error", "detail": f"未知工具 {tool_name}", "summary": "未知工具"}
 
-    def _verify_completion_marker(self, project_id: str) -> bool:
+    def _verify_review_completeness(self, project_id: str) -> str | None:
         try:
             text = self.skill_engine.read_file(project_id, CANONICAL_REVIEW_PATH)
         except Exception:
-            return False
-        return INDEPENDENT_REVIEW_COMPLETION_MARKER in text
+            return "读取审查报告失败，请重试"
+        if INDEPENDENT_REVIEW_COMPLETION_MARKER not in text:
+            return "审查报告缺少完成标记，请重试"
+        missing_anchors = [anchor for anchor in INDEPENDENT_REVIEW_ANCHORS if anchor not in text]
+        if missing_anchors:
+            return "审查报告未完整生成：缺少审查维度章节，请重试"
+        if not self.skill_engine._has_substantive_body(text):
+            return "审查报告未完整生成：正文为空，请重试"
+        return None
 
 
 _INDEPENDENT_REVIEW_LOCKS: dict[str, threading.Lock] = {}

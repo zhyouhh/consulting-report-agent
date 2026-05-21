@@ -45,6 +45,8 @@ class ReportToolsTests(unittest.TestCase):
                 "- 缺标注：3 处\n"
                 "- 章节 So What 偏少：1 章\n\n"
                 "**预估改完所需时间**：约 4 分钟\n\n"
+                "## 按章节排列\n\n"
+                "无。\n\n"
                 "<!-- lint-report:complete -->\n",
                 encoding="utf-8",
             )

@@ -3,6 +3,12 @@ import re
 import subprocess
 import threading
 
+from .skill import SkillEngine
+
+
+LINT_REPORT_COMPLETION_MARKER = SkillEngine.LINT_REPORT_COMPLETION_MARKER
+LINT_REPORT_ANCHORS = SkillEngine.LINT_REPORT_ANCHORS
+
 
 def _run_powershell(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -35,8 +41,23 @@ def run_lint_report(
     result = _run_powershell(args)
     if result.returncode != 0:
         return {"status": "error", "detail": result.stderr or result.stdout}
+    if not dry_run and not _validate_lint_report_output(output_path):
+        return {"status": "error", "detail": "脚本完成但输出未通过校验"}
     summary = _parse_lint_summary(output_path) if not dry_run else {}
     return {"status": "ok", "path": output_path, "summary": summary}
+
+
+def _validate_lint_report_output(output_path: str) -> bool:
+    path = Path(output_path)
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return False
+    if LINT_REPORT_COMPLETION_MARKER not in text:
+        return False
+    return all(anchor in text for anchor in LINT_REPORT_ANCHORS)
 
 
 def _parse_lint_summary(output_path: str) -> dict:

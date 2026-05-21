@@ -1432,20 +1432,20 @@ class SkillEngine:
             raise ValueError(f"项目不存在: {project_id}")
         if action not in ("set", "clear"):
             raise ValueError(f"未知 action: {action}")
-        if key == "review_passed_at" and action == "set":
-            from backend.independent_review import get_independent_review_lock
-            from backend.report_tools import get_lint_report_lock
-
-            review_lock = get_independent_review_lock(project_id)
-            if review_lock.locked():
-                raise ValueError("独立审查正在进行中，请等待完成后再标记审查通过")
-
-            lint_lock = get_lint_report_lock(project_id)
-            if lint_lock.locked():
-                raise ValueError("AI 味自查正在进行中，请等待完成后再标记审查通过")
-
         lock = _get_project_request_lock(project_id)
         with lock:
+            if key == "review_passed_at" and action == "set":
+                from backend.independent_review import get_independent_review_lock
+                from backend.report_tools import get_lint_report_lock
+
+                review_lock = get_independent_review_lock(project_id)
+                if review_lock.locked():
+                    raise ValueError("独立审查正在进行中，请等待完成后再标记审查通过")
+
+                lint_lock = get_lint_report_lock(project_id)
+                if lint_lock.locked():
+                    raise ValueError("AI 味自查正在进行中，请等待完成后再标记审查通过")
+
             if action == "set":
                 self._validate_stage_checkpoint_transition(project_path, key)
                 timestamp = self._save_stage_checkpoint(project_path, key)

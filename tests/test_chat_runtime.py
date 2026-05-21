@@ -5951,6 +5951,11 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("只能由独立审查代理生成", result["message"])
         self.assertIn("独立审查", result["message"])
         self.assertNotIn("get_independent_review_lock", result["message"])
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertEqual(notices[0]["category"], "stage_write_blocked")
+        self.assertIn("独立审查", notices[0]["user_action"])
+        self.assertIn("按钮", notices[0]["user_action"])
+        self.assertNotIn("advance_stage", notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_main_agent_cannot_write_lint_report_md(self, mock_openai):
@@ -5976,6 +5981,11 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("只能由 AI 味自查脚本生成", result["message"])
         self.assertIn("AI 味自查", result["message"])
         self.assertNotIn("run_lint_report", result["message"])
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertEqual(notices[0]["category"], "stage_write_blocked")
+        self.assertIn("AI 味自查", notices[0]["user_action"])
+        self.assertIn("按钮", notices[0]["user_action"])
+        self.assertNotIn("advance_stage", notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_main_agent_cannot_edit_independent_review_md(self, mock_openai):
@@ -6004,6 +6014,10 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("只能由独立审查代理生成", result["message"])
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertEqual(notices[0]["category"], "stage_write_blocked")
+        self.assertIn("独立审查", notices[0]["user_action"])
+        self.assertNotIn("advance_stage", notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_main_agent_cannot_edit_lint_report_md(self, mock_openai):
@@ -6032,6 +6046,10 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("只能由 AI 味自查脚本生成", result["message"])
+        notices = handler._turn_context.get("pending_system_notices", [])
+        self.assertEqual(notices[0]["category"], "stage_write_blocked")
+        self.assertIn("AI 味自查", notices[0]["user_action"])
+        self.assertNotIn("advance_stage", notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_presentation_plan_rejected_for_report_only_mode(self, mock_openai):

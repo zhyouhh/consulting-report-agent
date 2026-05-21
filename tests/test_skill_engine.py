@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 from backend.skill import SkillEngine
 
@@ -1824,6 +1825,33 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_record_stage_checkpoint_checks_review_locks_inside_project_request_lock(self):
+        from backend.chat import _get_project_request_lock
+
+        project_dir = self._make_project_past_s4()
+        self._write_review_checklist(project_dir)
+        self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
+        project_lock = _get_project_request_lock("demo")
+        observations: list[bool] = []
+
+        class _ObservedUnlockedLock:
+            def locked(self):
+                is_owned = getattr(project_lock, "_is_owned", lambda: False)
+                observations.append(bool(is_owned()))
+                return False
+
+        with mock.patch(
+            "backend.independent_review.get_independent_review_lock",
+            return_value=_ObservedUnlockedLock(),
+        ), mock.patch(
+            "backend.report_tools.get_lint_report_lock",
+            return_value=_ObservedUnlockedLock(),
+        ):
+            result = self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(observations, [True, True])
 
     def test_record_stage_checkpoint_rejects_presentation_ready_without_review_passed_checkpoint(self):
         project_dir = self._make_project_past_s4()

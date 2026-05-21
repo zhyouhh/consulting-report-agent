@@ -3,6 +3,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from backend.report_tools import run_lint_report
 
 
 @unittest.skipIf(shutil.which("powershell") is None, "PowerShell is required for lint report tests")
@@ -214,3 +217,42 @@ class LintReportScriptTests(unittest.TestCase):
             report = output_path.read_text(encoding="utf-8-sig")
             self.assertIn("超长报告，仅显示前 30 条 issue", report)
             self.assertLessEqual(report.count("`AI 腔`"), 30)
+
+
+class LintReportWrapperTests(unittest.TestCase):
+    @mock.patch("backend.report_tools.subprocess.run")
+    def test_lint_report_review_completion_rejects_missing_output_file(self, mock_run):
+        mock_run.return_value = mock.Mock(returncode=0, stdout="[OK]", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "lint-report.md"
+            result = run_lint_report(
+                "D:/tmp/report.md",
+                str(output_path),
+                "D:/skill/scripts/quality_check.ps1",
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("输出未通过校验", result["detail"])
+
+    @mock.patch("backend.report_tools.subprocess.run")
+    def test_lint_report_review_completion_rejects_missing_anchor(self, mock_run):
+        mock_run.return_value = mock.Mock(returncode=0, stdout="[OK]", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "lint-report.md"
+            output_path.write_text(
+                "# AI 味自查报告\n\n"
+                "## 总览\n\n"
+                "- AI 腔：0 处\n\n"
+                "<!-- lint-report:complete -->\n",
+                encoding="utf-8",
+            )
+            result = run_lint_report(
+                "D:/tmp/report.md",
+                str(output_path),
+                "D:/skill/scripts/quality_check.ps1",
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("输出未通过校验", result["detail"])

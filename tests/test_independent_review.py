@@ -9,6 +9,7 @@ from backend.chat import ChatHandler
 from backend.config import Settings
 from backend.independent_review import (
     CANONICAL_REVIEW_PATH,
+    INDEPENDENT_REVIEW_ANCHORS,
     INDEPENDENT_REVIEW_COMPLETION_MARKER,
     IndependentReviewAgent,
 )
@@ -151,6 +152,41 @@ class IndependentReviewAgentTests(unittest.TestCase):
         self.assertIn("审查报告缺少完成标记", events[-1]["detail"])
         self.assertNotIn("review-completed", [event["type"] for event in events])
 
+    def test_run_rejects_marker_without_all_anchors(self):
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        del engine, project_dir
+        incomplete_review = (
+            "# 独立审查报告\n\n"
+            + "\n未发现问题\n".join(INDEPENDENT_REVIEW_ANCHORS[:-1])
+            + "\n\n"
+            f"{INDEPENDENT_REVIEW_COMPLETION_MARKER}\n"
+        )
+        responses = [
+            self._response(
+                _FakeMessage(
+                    tool_calls=[
+                        self._tool_call(
+                            "write_file",
+                            {
+                                "file_path": CANONICAL_REVIEW_PATH,
+                                "content": incomplete_review,
+                            },
+                            "call-1",
+                        )
+                    ]
+                )
+            ),
+            self._response(_FakeMessage(content="完成", tool_calls=[])),
+        ]
+
+        with mock.patch("backend.independent_review.OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.side_effect = responses
+            events = list(agent.run(project["id"], draft_word_count=100))
+
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertIn("审查报告未完整生成", events[-1]["detail"])
+        self.assertNotIn("review-completed", [event["type"] for event in events])
+
     def test_run_max_iterations_15(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
@@ -189,14 +225,27 @@ class IndependentReviewAgentTests(unittest.TestCase):
                     agent._should_send_explicit_tool_choice(model),
                 )
 
-        tool_call = self._tool_call("read_file", {"file_path": "plan/data-log.md"})
-        message = _FakeMessage(
-            content=None,
-            tool_calls=[tool_call],
-            dumped={"reasoning_content": "hidden reasoning", "audio": None},
-        )
-        serialized = agent._serialize_assistant_tool_call_message(message)
-        self.assertEqual(serialized["content"], "")
-        self.assertEqual(serialized["reasoning_content"], "hidden reasoning")
-        self.assertNotIn("audio", serialized)
-        self.assertEqual(serialized["tool_calls"][0]["function"]["name"], "read_file")
+        messages = [
+            _FakeMessage(
+                content=None,
+                tool_calls=[self._tool_call("read_file", {"file_path": "plan/data-log.md"})],
+                dumped={"reasoning_content": "hidden reasoning", "audio": None},
+            ),
+            _FakeMessage(
+                content="工具调用",
+                tool_calls=[self._tool_call("write_file", {"file_path": CANONICAL_REVIEW_PATH, "content": "x"})],
+                reasoning_content="direct reasoning",
+                dumped={"reasoning_content": None, "audio": None},
+            ),
+        ]
+
+        for message in messages:
+            with self.subTest(content=message.content):
+                self.assertEqual(
+                    chat_handler._extract_reasoning_content_from_message(message),
+                    agent._extract_reasoning_content_from_message(message),
+                )
+                self.assertEqual(
+                    chat_handler._assistant_tool_call_message_from_response(message),
+                    agent._serialize_assistant_tool_call_message(message),
+                )

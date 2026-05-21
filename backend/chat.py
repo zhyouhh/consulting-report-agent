@@ -4598,7 +4598,7 @@ class ChatHandler:
                 category="stage_write_blocked",
                 path=normalized_path,
                 reason=stage_write_error,
-                user_action="请先通过 `advance_stage` 推进到对应阶段，再写入该阶段文件。",
+                user_action=self._stage_write_block_user_action(normalized_path),
                 surface_to_user=True,
             )
             return {"status": "error", "message": stage_write_error}
@@ -4831,6 +4831,14 @@ class ChatHandler:
             return None
 
         return None
+
+    def _stage_write_block_user_action(self, normalized_path: str) -> str:
+        normalized_path = self._normalize_project_file_path(normalized_path)
+        if normalized_path == "plan/independent-review.md":
+            return "请前往 S5 工作区点击'独立审查'按钮生成这份报告。"
+        if normalized_path == "plan/lint-report.md":
+            return "请前往 S5 工作区点击'AI 味自查'按钮生成这份报告。"
+        return "请先通过 `advance_stage` 推进到对应阶段，再写入该阶段文件。"
 
     def _validate_analysis_notes_refs_for_write(
         self,
