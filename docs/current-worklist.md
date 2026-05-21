@@ -1,21 +1,32 @@
 # Current Worklist
 
-最后更新：2026-05-21（stage conductor v0 已把阶段推进收敛到 `advance_stage`；打包态 GUI 启动、S0-S7 确定性阶段推进、Markdown 表格渲染、质量检查、包内 Pandoc 导出接口均已验证。真实 managed 模型长链路仍受渠道 timeout / 无首包影响；S5 review-checklist 格式契约已列为待验收项。）
+最后更新：2026-05-21（S5 Independent Review Redesign 的 spec + plan 经 codex 11 轮 review 全部 APPROVED 并落 commit `6e5c2fc`；待派 codex 按 5-commit 拆分实施。stage conductor v0 + 打包态 GUI 启动 / S0-S7 确定性阶段推进 / Markdown 表格 / 质量检查 / 包内 Pandoc 导出仍稳定。真实 managed 模型长链路 timeout 用户已切官渠暂不处理。）
 
 ## 当前未解决 / 待验证
 
 1. **P1：managed 真实模型长链路 timeout / 无首包**
-- 状态：`待渠道稳定性复核`
+- 状态：`暂不处理（用户已切官渠绕过）`
 - 现象：2026-05-19 实测中，真实模型 S0 首轮和一次 `advance_stage` 可工作，但后续请求出现上游 timeout / 长时间无首包；确定性打包态 S0-S7 阶段机已通过
-- 下一步：区分网关/渠道问题与应用重试 UX 问题，必要时增加 no-first-byte 观测日志和用户可理解的恢复提示
+- 用户决策（2026-05-21）：暂时切换到 DeepSeek 官渠绕过，本条不影响 S5 redesign 推进
+- 后续可选：区分网关/渠道问题与应用重试 UX 问题，必要时增加 no-first-byte 观测日志和用户可理解的恢复提示
 
-2. **P1：S5 review-checklist 格式契约 / 验收项**
-- 状态：`待方案确认`
-- 现象：真实项目 `piggy` 中，模型已写入 `plan/review-checklist.md`，但使用表格 + `✅` 表示通过；后端 `_has_effective_review_checklist()` 当前只识别 `- [x]` checkbox 列表，导致 UI 和 `advance_stage(review_passed_at)` 仍提示“需要先补齐 review-checklist.md”。
-- 用户影响：用户看到“AI 已完成审查”和“系统说未完成审查”同时存在，无法判断下一步该让 AI 改文件、点按钮，还是重新审查。
-- 验收目标：S5 审查清单的生成格式、后端判定规则、UI 错误提示必须形成同一个契约；用户不应看到“文件存在但仍提示缺文件”的反馈。
-- 方案边界：当前讨论仅作为待讨论方案，不作为已定实现；不要用“兼容 AI 可能写出的所有格式”来解决。候选方向包括收敛 `review-checklist.md` 为唯一 checkbox 格式、加强模型提示/模板、或引入结构化审查写入工具。
-- 临时人工处理：让助手把现有表格版 `review-checklist.md` 改写成 `- [x]` checkbox 列表后，再点击“审查通过”。
+2. **P1：S5 Independent Review Redesign（替换原 review-checklist 格式契约）**
+- 状态：`spec + plan APPROVED，等实施`
+- 关联文档：
+  - Spec [docs/superpowers/specs/2026-05-21-s5-independent-review-redesign-design.md](superpowers/specs/2026-05-21-s5-independent-review-redesign-design.md)（v6，6 轮 codex review APPROVED）
+  - Plan [docs/superpowers/plans/2026-05-21-s5-independent-review-redesign.md](superpowers/plans/2026-05-21-s5-independent-review-redesign.md)（v5，5 轮 codex review APPROVED）
+  - 同落 commit `6e5c2fc docs(s5-redesign): land spec + plan...`
+- 设计要点：砍掉模型自评 `review-checklist.md`；改成两个用户主动触发按钮——「独立审查」派独立 LLM 会话审 5 个判断维度，落 `plan/independent-review.md`；「AI 味自查」跑 PowerShell 脚本扫 4 个机械维度，落 `plan/lint-report.md`。两份报告生成后前端自动起主代理 turn，主代理读报告 + 跟用户讨论。
+- 实施分 5 commit（每个 commit 嵌入 codex spec-compliance + quality 双轮 review）：
+  1. Commit 1：后端 100% additive dormant（新 helper / 字段 / schema 扩展，不接生产路径）
+  2. Commit 2：FORMAL_PLAN_FILES 加新文件 + 主代理拒写拦截 + 独立审查代理 + lint 脚本（内 atomic，避免独立性破洞）
+  3. Commit 3：endpoints + chat_stream system_trigger 分支 + S5 welcome helper（dormant 不接调用点）
+  4. Commit 4：用户可见 atomic cutover（backend gate + SKILL + 前端按钮 + smoke 一次性落）
+  5. Commit 5：端到端 piggy-v2 + 打包态 smoke + cutover doc
+- 硬约束：S0-S4 流程零变更
+- 高风险点：
+  - Commit 3 `_chat_stream_unlocked` 加 `system_trigger` 分支（来回 4 轮才稳定，实施时需严格按 plan Task 3.3 Step 3 方案三 v2 写）
+  - Commit 4 atomic cutover（11+ 文件一次切换）
 
 3. **P2：打包 / 前端小债**
 - 状态：`待清理`
