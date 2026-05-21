@@ -23,7 +23,7 @@ Commit 链：
 | Commit 2 | `d034faf feat(s5-redesign): add independent review isolation primitives`<br>`18f95b7 fix(s5-redesign): align quality_check.ps1 rules with spec §3.1-3.4`<br>`ea57827 fix(s5-redesign): address quality review R1 important issues` | independent review isolation primitives、lint 脚本、主代理拒写审查报告 |
 | Commit 3 | `e93fc80 feat(s5-redesign): wire endpoints + chat_stream system_trigger branch (dormant)`<br>`d59b65a fix(s5-redesign): address quality review R1 issues (async sse + endpoint error shape)`<br>`0123caf fix(s5-redesign): support cooperative cancel in IndependentReviewAgent.run()` | endpoints、system_trigger、SSE/lock/cancel |
 | Commit 4 | `98a7e0a feat(s5-redesign): atomic cutover to independent review workflow`<br>`6acf7c5 fix(s5-redesign): address commit 4 quality review (project guard + error UX)` | 用户可见 atomic cutover：backend gate、SKILL、前端按钮、smoke 文件列表 |
-| Commit 5 | `6bd8982 docs(s5-redesign): land cutover report and smoke coverage` | packaged smoke 扩展、endpoint 覆盖补差、cutover doc、worklist 更新 |
+| Commit 5 | `6bd8982 docs(s5-redesign): land cutover report and smoke coverage`<br>`0b7212e docs(s5-redesign): improve cutover report and smoke clarity`<br>本 commit 同属 Commit 5，hash 见 git log（cutover doc 自引用最终 hash 是循环） | packaged smoke 扩展、endpoint 覆盖补差、cutover doc、worklist 更新 |
 
 ## 验证结果
 
