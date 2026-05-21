@@ -99,6 +99,36 @@ S4 阶段（大纲已确认）报告正文唯一规范路径是 `content/report_
 
 **历史背景**：原 `<draft-action>` tag system + classifier + gate + scope enforcement 整套（含 fix4 v5 amendment）已于 2026-05-06 删除；4 专用工具中的 3 个旧工具与 gemini 时代 obligation / family-lock 控制层已于 2026-05-09 DeepSeek migration 删除。详见 `docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md`。
 
+## S5 用户触发审查（2026-05-22 S5 redesign）
+
+S5 阶段审查从模型自评 `review-checklist.md` 改为**两个用户主动触发按钮**：
+
+| 入口 | 路径 | 写入者 |
+|---|---|---|
+| 工作区"独立审查"按钮 | `plan/independent-review.md` | `backend/independent_review.py:IndependentReviewAgent`（独立 LLM 会话，5 维度判断）|
+| 工作区"AI 味自查"按钮 | `plan/lint-report.md` | `skill/scripts/quality_check.ps1`（PowerShell 脚本，4 机械维度）|
+
+两份报告生成后前端自动起主代理 turn（`ChatRequest.system_trigger` 协议 + `_chat_stream_unlocked` 内 `if system_trigger:` 分支）；主代理 `read_file` 报告并 partner 风格摘要给用户。
+
+**关键约束**：
+- `_has_effective_review_reports()` 是 `CHECKPOINT_PREREQ.review_passed_at` 生产门禁；要求两份报告 marker + anchor + substantive body 全部命中
+- 主代理 `write_file` / `edit_file` 对 `plan/independent-review.md` / `plan/lint-report.md` **显式拒绝**（独立性硬约束，chat.py:4785 附近）；这两份报告只能由 IndependentReviewAgent / lint 脚本写入
+- `_has_effective_review_checklist()` 函数保留向后兼容但**不再被生产路径调用**；`review-checklist.md` 模板文件保留为老项目数据
+- `IndependentReviewAgent.run()` 阈值 `MAX_DRAFT_WORDS_FOR_REVIEW = 100000`，超 100k 字 friendly fail（v0；DeepSeek V4 Pro 实际 1M context，预留升级空间——超 100k 字 chunk fallback 在 worklist P3）
+- per-project lock（`_INDEPENDENT_REVIEW_LOCKS` / `_LINT_REPORT_LOCKS`）：同一项目同时只能跑一次独立审查 / 一次 lint，409 拒并发；lock 检查在 `record_stage_checkpoint` 持有 project lock 期内（避免 TOCTOU）
+- `IndependentReviewAgent.run(cancel_event=...)` 协作取消：endpoint client 断开时 set event，agent 在每轮 LLM 调用前查，及时退出释放 token + lock
+- DeepSeek 兼容 helpers（`_should_send_explicit_tool_choice` / `_extract_reasoning_content_from_message` / `_serialize_assistant_tool_call_message`）在 `independent_review.py` 复用 `chat.py` 同款行为，测试矩阵锁定（`test_deepseek_compat_helpers_match_chat_helpers`）
+
+**前端**：
+- `IndependentReviewDrawer.jsx` 用 fetch + ReadableStream + AbortController + ESC 关闭 + 自动关闭（不显示关闭按钮）
+- `StagePanel.jsx` 按钮阶段化：S5 才显示两个新按钮 + 高亮；S6/S7/done 才显示"导出可审草稿"；"运行质量检查"按钮删除
+- `ChatPanel` `forwardRef + useImperativeHandle` 暴露 `triggerSystemTurn(triggerType)`，`App.jsx` wire `chatPanelRef` 给 WorkspacePanel
+- `WorkspacePanel` 在触发 system turn 前先 `axios.get` workspace 二次确认 `independent_review_ready` / `lint_report_ready`（避免软门禁未通过时主代理读到 stub）+ 复用 `shouldApplyProjectResponse` guard（避免项目切换 race）
+
+**回归测试**：集中在 `tests/test_independent_review.py`、`tests/test_lint_report.py`、`tests/test_main_api.py`（endpoints + workspace flags）、`tests/test_chat_runtime.py`（system_trigger / S5 welcome / 主代理拒写）、`tests/test_skill_engine.py`（CHECKPOINT_PREREQ + flags + lock）。
+
+详见 `docs/superpowers/cutover_report_2026-05-22_s5-redesign.md`。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
