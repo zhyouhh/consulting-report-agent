@@ -140,39 +140,84 @@ export default function WorkspacePanel({
   }, [])
 
   const onIndependentReviewCompleted = useCallback(async () => {
-    if (!projectId) return
+    const requestProject = projectId
+    if (!requestProject) return
     try {
+      const ws = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/workspace`)
+      if (!shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        return
+      }
       onProjectMutated?.()
-      const ws = await axios.get(`/api/projects/${encodeURIComponent(projectId)}/workspace`)
       if (ws.data.flags?.independent_review_ready) {
         onTriggerSystemTurn?.('independent_review_done')
       } else {
         showError('独立审查报告未通过服务端校验，请重试')
       }
     } catch (error) {
+      if (!shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        return
+      }
       showError('独立审查校验失败: ' + (error.response?.data?.detail || error.message))
     } finally {
-      setReviewRunning(false)
+      if (shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        setReviewRunning(false)
+      }
     }
   }, [projectId, onProjectMutated, onTriggerSystemTurn])
 
   const runLintReport = async () => {
-    if (!projectId || lintRunning || reviewRunning) return
+    const requestProject = projectId
+    if (!requestProject || lintRunning || reviewRunning) return
     setLintRunning(true)
     try {
-      const res = await axios.post(`/api/projects/${encodeURIComponent(projectId)}/lint-report`)
-      if (res.data.status !== 'ok') return
+      const res = await axios.post(`/api/projects/${encodeURIComponent(requestProject)}/lint-report`)
+      if (!shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        return
+      }
+      if (res.data.status !== 'ok') {
+        showError(res.data.detail || 'AI 味自查失败，请重试')
+        return
+      }
+      const ws = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/workspace`)
+      if (!shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        return
+      }
       onProjectMutated?.()
-      const ws = await axios.get(`/api/projects/${encodeURIComponent(projectId)}/workspace`)
       if (ws.data.flags?.lint_report_ready) {
         onTriggerSystemTurn?.('lint_report_done')
       } else {
         showError('AI 味自查报告未通过服务端校验，请重试')
       }
     } catch (error) {
+      if (!shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        return
+      }
       showError('AI 味自查失败: ' + (error.response?.data?.detail || error.message))
     } finally {
-      setLintRunning(false)
+      if (shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        setLintRunning(false)
+      }
     }
   }
 

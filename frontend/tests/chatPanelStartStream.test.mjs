@@ -45,8 +45,8 @@ test("App.jsx wires chatPanelRef.triggerSystemTurn into WorkspacePanel via onTri
 
 test("WorkspacePanel.runLintReport awaits workspace GET before onTriggerSystemTurn", () => {
   const src = readSrc("../src/components/WorkspacePanel.jsx");
-  assert.match(src, /axios\.post\(`\/api\/projects\/\$\{encodeURIComponent\(projectId\)\}\/lint-report`\)/);
-  assert.match(src, /axios\.get\(`\/api\/projects\/\$\{encodeURIComponent\(projectId\)\}\/workspace`\)/);
+  assert.match(src, /axios\.post\(`\/api\/projects\/\$\{encodeURIComponent\(requestProject\)\}\/lint-report`\)/);
+  assert.match(src, /axios\.get\(`\/api\/projects\/\$\{encodeURIComponent\(requestProject\)\}\/workspace`\)/);
   assert.match(src, /lint_report_ready|lintReportReady/);
   assert.match(src, /onTriggerSystemTurn\?\.\(['"]lint_report_done['"]\)/);
 });

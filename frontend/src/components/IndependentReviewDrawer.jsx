@@ -68,7 +68,7 @@ export default function IndependentReviewDrawer({
               return
             }
             if (data.type === 'error') {
-              setError(data.detail || '审查失败')
+              setError(data.message || '审查失败')
               setTimeout(() => onClose?.(), 3000)
               return
             }
