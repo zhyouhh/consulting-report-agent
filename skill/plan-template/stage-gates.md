@@ -38,8 +38,8 @@
 - [ ] 执行摘要与图表同步更新
 
 ### S5 质量审查 ⬜
-- [ ] review-checklist.md 完成
-- [ ] review.md 记录修订意见
+- [ ] 独立审查完成（plan/independent-review.md）
+- [ ] AI 味自查完成（plan/lint-report.md）
 - [ ] 事实、逻辑与语言质量审查完成
 
 ### S6 演示准备（可选） ⬜

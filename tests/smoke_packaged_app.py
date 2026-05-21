@@ -45,10 +45,11 @@ REQUIRED_PLAN_FILES = {
     "research-plan.md",
     "references.md",
     "tasks.md",
+    "review.md",
     "data-log.md",
     "analysis-notes.md",
-    "review-checklist.md",
-    "review.md",
+    "independent-review.md",
+    "lint-report.md",
     "presentation-plan.md",
     "delivery-log.md",
 }

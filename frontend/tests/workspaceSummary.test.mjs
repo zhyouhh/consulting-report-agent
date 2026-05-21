@@ -89,6 +89,21 @@ test("summarizeWorkspace uses safe defaults when new fields are absent", () => {
   assert.deepEqual(summary.checkpoints, {});
 });
 
+test("summarizeWorkspace maps independent review readiness flags", () => {
+  const summary = summarizeWorkspace({
+    stage_code: "S5",
+    flags: {
+      independent_review_ready: true,
+      lint_report_ready: false,
+      review_reports_ready: false,
+    },
+  });
+
+  assert.equal(summary.flags.independentReviewReady, true);
+  assert.equal(summary.flags.lintReportReady, false);
+  assert.equal(summary.flags.reviewReportsReady, false);
+});
+
 test("isS4ReviewButtonVisible returns false when no lengthTargets", () => {
   assert.equal(isS4ReviewButtonVisible(3000, null), false);
   assert.equal(isS4ReviewButtonVisible(3000, {}), false);

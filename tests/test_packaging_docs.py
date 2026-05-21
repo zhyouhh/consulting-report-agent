@@ -114,6 +114,27 @@ class SkillMdS0InterviewLockTests(unittest.TestCase):
         self.assertIn("read_file", self.skill_md)
         self.assertNotIn("draft-action 标签规范", self.skill_md)
 
+    def test_skill_md_s5_section_uses_new_workflow(self):
+        self.assertIn("独立审查", self.skill_md)
+        self.assertIn("AI 味自查", self.skill_md)
+        self.assertIn("plan/independent-review.md", self.skill_md)
+        self.assertIn("plan/lint-report.md", self.skill_md)
+        self.assertNotIn("完成 review-checklist.md", self.skill_md)
+
+    def test_lifecycle_and_tracking_templates_use_new_s5_workflow(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        lifecycle = (repo_root / "skill" / "modules" / "consulting-lifecycle.md").read_text(encoding="utf-8")
+        progress = (repo_root / "skill" / "plan-template" / "progress.md").read_text(encoding="utf-8")
+        gates = (repo_root / "skill" / "plan-template" / "stage-gates.md").read_text(encoding="utf-8")
+        tasks = (repo_root / "skill" / "plan-template" / "tasks.md").read_text(encoding="utf-8")
+
+        self.assertIn("完成独立审查与 AI 味自查", lifecycle)
+        self.assertIn("`independent-review.md` / `lint-report.md`", progress)
+        self.assertIn("独立审查完成（plan/independent-review.md）", gates)
+        self.assertIn("AI 味自查完成（plan/lint-report.md）", gates)
+        self.assertIn('点击工作区"独立审查"按钮', tasks)
+        self.assertIn('点击工作区"AI 味自查"按钮', tasks)
+
 
 if __name__ == "__main__":
     unittest.main()

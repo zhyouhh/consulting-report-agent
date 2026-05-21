@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import axios from 'axios'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -54,7 +54,7 @@ const assistantMarkdownComponents = {
   ),
 }
 
-export default function ChatPanel({
+const ChatPanel = forwardRef(function ChatPanel({
   projectId,
   project,
   settings,
@@ -65,7 +65,7 @@ export default function ChatPanel({
   onToggleWorkspacePanel,
   injectedPrompt,
   onInjectedPromptConsumed,
-}) {
+}, ref) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -408,64 +408,38 @@ export default function ChatPanel({
     return payload
   }
 
-  const sendMessage = async () => {
-    const trimmedInput = input.trim()
-    if (!trimmedInput || !projectId || uploading) return
-    if ((selectedMaterials.some(material => material.media_kind === 'image_like') || pendingImageAttachments.length > 0) && !canSendImages) {
-      showError('当前模型不支持图片输入，请切换模型或取消选择图片材料')
-      return
-    }
+  const startStream = useCallback(async ({
+    messageText = '',
+    systemTrigger = null,
+    attachedMaterialIds = [],
+    transientAttachments = [],
+    renderUserBubble = true,
+  }) => {
+    if (!projectId || loading || uploading) return false
 
-    const persistentDocumentFiles = pendingDocumentAttachments.map(attachment => attachment.file)
-    let requestAttachedMaterialIds = selectedMaterialIds
-    let transientAttachmentsPayload = []
-    let preparationStage = 'documents'
+    const requestProjectId = projectId
+    const requestMessageText = systemTrigger
+      ? (typeof messageText === 'string' ? messageText : '')
+      : (typeof messageText === 'string' ? messageText.trim() : '')
+    if (!requestMessageText && !systemTrigger) return false
 
-    if (pendingDocumentAttachments.length > 0 || pendingImageAttachments.length > 0) {
-      setUploading(true)
-      try {
-        if (persistentDocumentFiles.length > 0) {
-          const uploadedMaterials = await uploadDocumentFiles(persistentDocumentFiles)
-          if (uploadedMaterials.length > 0) {
-            requestAttachedMaterialIds = mergeMaterialIds(selectedMaterialIds, uploadedMaterials)
-            setSelectedMaterialIds(requestAttachedMaterialIds)
-            setPendingAttachments(pendingImageAttachments)
-            showSuccess(`已导入 ${uploadedMaterials.length} 份材料`)
-          }
-        }
-
-        if (pendingImageAttachments.length > 0) {
-          preparationStage = 'images'
-          transientAttachmentsPayload = await buildTransientAttachmentsPayload(pendingImageAttachments)
-        }
-      } catch (error) {
-        const detail = error?.response?.data?.detail || error?.message || '未知错误'
-        const prefix = preparationStage === 'images' ? '处理图片失败: ' : '上传材料失败: '
-        showError(prefix + detail)
-        setUploading(false)
-        return
+    if (renderUserBubble) {
+      const userMsg = {
+        id: `${Date.now()}-${Math.random()}`,
+        role: 'user',
+        content: requestMessageText,
+        attachedMaterialIds,
       }
-      setUploading(false)
+      setMessages(prev => [...prev, userMsg])
     }
 
-    const userMsg = {
-      id: `${Date.now()}-${Math.random()}`,
-      role: 'user',
-      content: trimmedInput,
-      attachedMaterialIds: requestAttachedMaterialIds,
-    }
-    setMessages(prev => [...prev, userMsg])
-    const userInput = trimmedInput
-    const attachedMaterialIds = requestAttachedMaterialIds
     setLoading(true)
 
     const controller = new AbortController()
-    const requestProjectId = projectId
     abortControllerRef.current = controller
     setAbortController(controller)
     let streamFailed = false
 
-    // 创建助手消息占位
     const assistantId = `${Date.now()}-${Math.random()}`
     clearStreamingQueue(assistantId)
     setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '' }])
@@ -475,10 +449,11 @@ export default function ChatPanel({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildChatRequest({
-          projectId,
-          messageText: userInput,
+          projectId: requestProjectId,
+          messageText: requestMessageText,
           attachedMaterialIds,
-          transientAttachments: transientAttachmentsPayload,
+          transientAttachments,
+          systemTrigger,
         })),
         signal: controller.signal
       })
@@ -544,7 +519,6 @@ export default function ChatPanel({
                   streamCompleted = true
                   break
                 }
-                // 显示工具调用信息
                 setMessages(prev => prev.map(m =>
                   m.id === assistantId ? { ...m, content: appendToolEventContent(m.content, parsed.data) } : m
                 ))
@@ -555,7 +529,6 @@ export default function ChatPanel({
                 }
                 setTokenUsage(parsed.data)
               } else if (parsed.type === 'system_notice') {
-                // §9 system_notice: inject as a special message in the stream
                 if (!isActiveProjectRequest(requestProjectId)) {
                   streamCompleted = true
                   break
@@ -621,15 +594,85 @@ export default function ChatPanel({
     if (isActiveProjectRequest(requestProjectId)) {
       setLoading(false)
       setAbortController(current => (current === controller ? null : current))
-      if (!streamFailed) {
+      if (!streamFailed && renderUserBubble) {
         setInput('')
         setSelectedMaterialIds([])
         clearPendingAttachmentQueue()
-      } else {
-        setSelectedMaterialIds(requestAttachedMaterialIds)
+      } else if (streamFailed && renderUserBubble) {
+        setSelectedMaterialIds(attachedMaterialIds)
       }
       onProjectMutated?.()
     }
+    return !streamFailed
+  }, [
+    projectId,
+    loading,
+    uploading,
+    clearStreamingQueue,
+    flushStreamingQueueImmediately,
+    isActiveProjectRequest,
+    enqueueAssistantContent,
+    clearPendingAttachmentQueue,
+    onProjectMutated,
+  ])
+
+  const triggerSystemTurn = useCallback((triggerType) => {
+    startStream({
+      messageText: '',
+      systemTrigger: triggerType,
+      renderUserBubble: false,
+    })
+  }, [startStream])
+
+  useImperativeHandle(ref, () => ({ triggerSystemTurn }), [triggerSystemTurn])
+
+  const sendMessage = async () => {
+    const trimmedInput = input.trim()
+    if (!trimmedInput || !projectId || uploading) return
+    if ((selectedMaterials.some(material => material.media_kind === 'image_like') || pendingImageAttachments.length > 0) && !canSendImages) {
+      showError('当前模型不支持图片输入，请切换模型或取消选择图片材料')
+      return
+    }
+
+    const persistentDocumentFiles = pendingDocumentAttachments.map(attachment => attachment.file)
+    let requestAttachedMaterialIds = selectedMaterialIds
+    let transientAttachmentsPayload = []
+    let preparationStage = 'documents'
+
+    if (pendingDocumentAttachments.length > 0 || pendingImageAttachments.length > 0) {
+      setUploading(true)
+      try {
+        if (persistentDocumentFiles.length > 0) {
+          const uploadedMaterials = await uploadDocumentFiles(persistentDocumentFiles)
+          if (uploadedMaterials.length > 0) {
+            requestAttachedMaterialIds = mergeMaterialIds(selectedMaterialIds, uploadedMaterials)
+            setSelectedMaterialIds(requestAttachedMaterialIds)
+            setPendingAttachments(pendingImageAttachments)
+            showSuccess(`已导入 ${uploadedMaterials.length} 份材料`)
+          }
+        }
+
+        if (pendingImageAttachments.length > 0) {
+          preparationStage = 'images'
+          transientAttachmentsPayload = await buildTransientAttachmentsPayload(pendingImageAttachments)
+        }
+      } catch (error) {
+        const detail = error?.response?.data?.detail || error?.message || '未知错误'
+        const prefix = preparationStage === 'images' ? '处理图片失败: ' : '上传材料失败: '
+        showError(prefix + detail)
+        setUploading(false)
+        return
+      }
+      setUploading(false)
+    }
+
+    await startStream({
+      messageText: trimmedInput,
+      systemTrigger: null,
+      attachedMaterialIds: requestAttachedMaterialIds,
+      transientAttachments: transientAttachmentsPayload,
+      renderUserBubble: true,
+    })
   }
 
   const handleSelectFiles = (event) => {
@@ -995,4 +1038,6 @@ export default function ChatPanel({
       </div>
     </div>
   )
-}
+})
+
+export default ChatPanel

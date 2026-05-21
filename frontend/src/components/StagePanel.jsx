@@ -1,5 +1,6 @@
 import React from 'react'
 import { summarizeWorkspace, shouldShowPresentationStage, getStageName } from '../utils/workspaceSummary'
+import { getStageButtonState } from '../utils/stagePanelButtons'
 import StageAdvanceControl from './StageAdvanceControl'
 import RollbackMenu from './RollbackMenu'
 
@@ -114,10 +115,13 @@ export default function StagePanel({
   projectId,
   workspace,
   qualityResult,
-  onRunQualityCheck,
+  onRunIndependentReview,
+  onRunLintReport,
   onExportDraft,
   onCheckpointSet,
   onInsertPrompt,
+  reviewRunning = false,
+  lintRunning = false,
 }) {
   const summary = summarizeWorkspace(workspace)
   const {
@@ -132,6 +136,25 @@ export default function StagePanel({
     lengthFallbackUsed,
     checkpoints,
   } = summary
+  const independentReviewButton = getStageButtonState(
+    'independent_review',
+    stageCode,
+    summary.flags,
+    { reviewRunning, lintRunning },
+  )
+  const lintReportButton = getStageButtonState(
+    'lint_report',
+    stageCode,
+    summary.flags,
+    { reviewRunning, lintRunning },
+  )
+  const exportButton = getStageButtonState('export_draft', stageCode, summary.flags)
+  const s5ToolButtonClass = (state) => [
+    'flex-1 px-3 py-2 rounded-lg text-sm transition-colors disabled:bg-[#20203a] disabled:text-[#77789a]',
+    state.highlighted
+      ? 'btn-highlight-pulse bg-[#38645b] text-[#f4fffb] hover:bg-[#43776c]'
+      : 'bg-[#26315d] text-[#eef1ff] hover:bg-[#32407a]',
+  ].join(' ')
 
   return (
     <div className="flex-1 overflow-y-auto p-5 bg-[#101224]">
@@ -174,22 +197,40 @@ export default function StagePanel({
           summary={summary}
           onCheckpointSet={onCheckpointSet}
           onInsertPrompt={onInsertPrompt}
+          stageToolsRunning={reviewRunning || lintRunning}
         />
 
-        {/* Export button */}
+        {/* S5 tools and export button */}
         <div className="flex gap-2 mt-4">
-          <button
-            onClick={onRunQualityCheck}
-            className="flex-1 px-3 py-2 rounded-lg bg-[#26315d] text-[#eef1ff] text-sm hover:bg-[#32407a] transition-colors"
-          >
-            运行质量检查
-          </button>
-          <button
-            onClick={onExportDraft}
-            className="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700 transition-colors"
-          >
-            导出可审草稿
-          </button>
+          {independentReviewButton.visible && (
+            <button
+              type="button"
+              onClick={onRunIndependentReview}
+              disabled={independentReviewButton.disabled}
+              className={s5ToolButtonClass(independentReviewButton)}
+            >
+              独立审查
+            </button>
+          )}
+          {lintReportButton.visible && (
+            <button
+              type="button"
+              onClick={onRunLintReport}
+              disabled={lintReportButton.disabled}
+              className={s5ToolButtonClass(lintReportButton)}
+            >
+              AI 味自查
+            </button>
+          )}
+          {exportButton.visible && (
+            <button
+              type="button"
+              onClick={onExportDraft}
+              className="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700 transition-colors"
+            >
+              导出可审草稿
+            </button>
+          )}
         </div>
       </div>
 

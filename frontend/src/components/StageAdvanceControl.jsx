@@ -13,7 +13,7 @@ import { showError } from '../utils/toast'
  *   onCheckpointSet {() => void} — called after successful checkpoint POST; triggers loadWorkspace
  *   onInsertPrompt  {(text: string) => void} — inserts text into chat input (S4 "继续扩写")
  */
-export default function StageAdvanceControl({ projectId, summary, onCheckpointSet, onInsertPrompt }) {
+export default function StageAdvanceControl({ projectId, summary, onCheckpointSet, onInsertPrompt, stageToolsRunning = false }) {
   const [confirmState, setConfirmState] = useState(null) // { title, body, onConfirm }
   const [pending, setPending] = useState(false)
 
@@ -117,7 +117,7 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
         <div className="mt-4 flex gap-2">
           <button
             onClick={() => postCheckpoint('review-passed')}
-            disabled={pending}
+            disabled={pending || stageToolsRunning}
             className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {pending ? '处理中…' : '审查通过，准备交付'}
@@ -133,7 +133,7 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
                 }
               )
             }
-            disabled={pending}
+            disabled={pending || stageToolsRunning}
             className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#262a4c] text-[#a8accc] hover:bg-[#30365a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             回去再改

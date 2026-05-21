@@ -937,9 +937,9 @@ class WorkspaceApiTests(unittest.TestCase):
             "system_notices": [
                 {
                     "category": "write_blocked",
-                    "path": "plan/review-checklist.md",
-                    "reason": "review-checklist.md 的\"审查人\"字段必须由真实用户签字，请保留\"审查人：[待用户确认]\"让用户在 UI 上签字。",
-                    "user_action": "请联系用户在右侧工作区完成对应的确认后再写入",
+                    "path": "plan/independent-review.md, plan/lint-report.md",
+                    "reason": "需要先完成独立审查和 AI 味自查，才能标记审查通过。",
+                    "user_action": "请先在 S5 阶段点击上方'独立审查'和'AI 味自查'按钮，再确认审查通过。",
                     "surface_to_user": True,
                 }
             ],

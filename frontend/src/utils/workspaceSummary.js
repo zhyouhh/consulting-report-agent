@@ -36,6 +36,9 @@ export function summarizeWorkspace(apiSummary = {}) {
     flags: {
       ...(source.flags || {}),
       s0InterviewDone: Boolean((source.flags || {}).s0_interview_done),
+      independentReviewReady: (source.flags || {}).independent_review_ready ?? false,
+      lintReportReady: (source.flags || {}).lint_report_ready ?? false,
+      reviewReportsReady: (source.flags || {}).review_reports_ready ?? false,
     },
     checkpoints: source.checkpoints || {},
     // §9.2 S4 word count / length targets

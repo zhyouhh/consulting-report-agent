@@ -5337,12 +5337,10 @@ class ChatRuntimeTests(unittest.TestCase):
             )
 
     @mock.patch("backend.chat.OpenAI")
-    def test_write_file_rejects_self_signed_review_checklist(self, mock_openai):
+    def test_write_file_rejects_retired_review_checklist_plan_file(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
-        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
-        self._read_file_for_turn(handler, "plan/review-checklist.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5351,7 +5349,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 json.dumps(
                     {
                         "file_path": "plan/review-checklist.md",
-                        "content": "**审查人：咨询报告写作助手**\n...",
+                        "content": "# Review checklist\n\n- [x] legacy\n",
                     },
                     ensure_ascii=False,
                 ),
@@ -5359,15 +5357,13 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("审查人", result["message"])
+        self.assertIn("not an official plan file", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_write_file_rejects_self_signed_review_checklist_with_fullwidth_space(self, mock_openai):
+    def test_write_file_rejects_main_agent_independent_review_report(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
-        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
-        self._read_file_for_turn(handler, "plan/review-checklist.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5375,8 +5371,8 @@ class ChatRuntimeTests(unittest.TestCase):
                 "write_file",
                 json.dumps(
                     {
-                        "file_path": "plan/review-checklist.md",
-                        "content": "审查人： 咨询报告写作助手",
+                        "file_path": "plan/independent-review.md",
+                        "content": "# 独立审查报告\n\n主代理伪造 second opinion。\n",
                     },
                     ensure_ascii=False,
                 ),
@@ -5384,14 +5380,13 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("审查人", result["message"])
+        self.assertIn("只能由独立审查代理生成", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_write_file_rejects_premature_review_verdict_without_checkpoint(self, mock_openai):
+    def test_write_file_rejects_main_agent_lint_report(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
-        self._read_file_for_turn(handler, "plan/review-checklist.md")
 
         result = handler._execute_tool(
             self.project_id,
@@ -5399,8 +5394,8 @@ class ChatRuntimeTests(unittest.TestCase):
                 "write_file",
                 json.dumps(
                     {
-                        "file_path": "plan/review-checklist.md",
-                        "content": "审查结论：通过\n建议通过",
+                        "file_path": "plan/lint-report.md",
+                        "content": "# AI 味自查\n\n主代理伪造机械脚本结果。\n",
                     },
                     ensure_ascii=False,
                 ),
@@ -5408,56 +5403,63 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("开始审查", result["message"])
+        self.assertIn("只能由 AI 味自查脚本生成", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_write_file_accepts_review_verdict_after_review_started(self, mock_openai):
+    def test_edit_file_rejects_main_agent_independent_review_report(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
-        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
+        (self.project_dir / "plan" / "independent-review.md").write_text(
+            "# 独立审查报告\n\n旧内容。\n",
+            encoding="utf-8",
+        )
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
-        self._read_file_for_turn(handler, "plan/review-checklist.md")
 
         result = handler._execute_tool(
             self.project_id,
             self._make_tool_call(
-                "write_file",
+                "edit_file",
                 json.dumps(
                     {
-                        "file_path": "plan/review-checklist.md",
-                        "content": "审查结论：建议通过",
+                        "file_path": "plan/independent-review.md",
+                        "old_string": "旧内容",
+                        "new_string": "新内容",
                     },
                     ensure_ascii=False,
                 ),
             ),
         )
 
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("只能由独立审查代理生成", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_write_file_auto_disables_review_interception_when_review_passed(self, mock_openai):
+    def test_edit_file_rejects_main_agent_lint_report(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
-        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_started_at")
-        handler.skill_engine._save_stage_checkpoint(self.project_dir, "review_passed_at")
+        (self.project_dir / "plan" / "lint-report.md").write_text(
+            "# AI 味自查\n\n旧内容。\n",
+            encoding="utf-8",
+        )
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
-        self._read_file_for_turn(handler, "plan/review-checklist.md")
 
         result = handler._execute_tool(
             self.project_id,
             self._make_tool_call(
-                "write_file",
+                "edit_file",
                 json.dumps(
                     {
-                        "file_path": "plan/review-checklist.md",
-                        "content": "审查人：咨询报告写作助手",
+                        "file_path": "plan/lint-report.md",
+                        "old_string": "旧内容",
+                        "new_string": "新内容",
                     },
                     ensure_ascii=False,
                 ),
             ),
         )
 
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("只能由 AI 味自查脚本生成", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_rejects_inline_placeholder_feedback(self, mock_openai):
@@ -5902,14 +5904,13 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(notices[0]["category"], "stage_write_blocked")
 
     @mock.patch("backend.chat.OpenAI")
-    def test_write_file_review_checklist_and_review_before_review_started_rejected(self, mock_openai):
+    def test_write_file_review_notes_before_review_started_rejected(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
         handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
 
         for file_path, content in (
-            ("plan/review-checklist.md", "# Review checklist\n\n- [ ] 核对事实引用\n"),
             ("plan/review.md", "# Review notes\n\n- 修订建议：补强结论证据。\n"),
         ):
             self._read_file_for_turn(handler, file_path)
@@ -6176,8 +6177,8 @@ class ChatRuntimeTests(unittest.TestCase):
             name="write_file",
             arguments=json.dumps(
                 {
-                    "file_path": "plan/review-checklist.md",
-                    "content": "审查人：咨询报告写作助手",
+                    "file_path": "plan/independent-review.md",
+                    "content": "# 独立审查报告\n\n主代理不能伪造审查。\n",
                 },
                 ensure_ascii=False,
             ),
@@ -10414,6 +10415,71 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         )
 
         self.assertTrue(any(event.get("type") == "usage" for event in events))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_s5_first_entry_injects_welcome_and_marks_shown(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="请先点击两个审查按钮。"),
+        ])
+
+        with mock.patch.object(handler, "_should_emit_s5_welcome", return_value=True), \
+                mock.patch.object(handler, "_mark_s5_welcome_shown") as mark_shown:
+            events = list(handler.chat_stream(self.project_id, "进入审查", max_iterations=1))
+
+        messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
+        self.assertTrue(any("S5 阶段进入提醒" in message.get("content", "") for message in messages))
+        self.assertTrue(any(message.get("role") == "user" and message.get("content") == "进入审查" for message in messages))
+        mark_shown.assert_called_once_with(self.project_id)
+        self.assertTrue(any(event.get("type") == "usage" for event in events))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_s5_repeat_entry_no_double_welcome(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="继续审查。"),
+        ])
+
+        with mock.patch.object(handler, "_should_emit_s5_welcome", return_value=False), \
+                mock.patch.object(handler, "_mark_s5_welcome_shown") as mark_shown:
+            list(handler.chat_stream(self.project_id, "继续", max_iterations=1))
+
+        messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
+        self.assertFalse(any("S5 阶段进入提醒" in message.get("content", "") for message in messages))
+        mark_shown.assert_not_called()
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_s5_welcome_not_marked_when_turn_fails(self, mock_openai):
+        def broken_stream():
+            raise RuntimeError("stream failed")
+            yield  # pragma: no cover
+
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        mock_openai.return_value.chat.completions.create.return_value = broken_stream()
+
+        with mock.patch.object(handler, "_should_emit_s5_welcome", return_value=True), \
+                mock.patch.object(handler, "_mark_s5_welcome_shown") as mark_shown:
+            events = list(handler.chat_stream(self.project_id, "进入审查", max_iterations=1))
+
+        self.assertTrue(any(event.get("type") == "error" for event in events))
+        mark_shown.assert_not_called()
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_s5_welcome_not_emitted_in_non_s5_stages(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="普通回复。"),
+        ])
+
+        with mock.patch.object(handler, "_should_emit_s5_welcome", return_value=False):
+            list(handler.chat_stream(self.project_id, "普通问题", max_iterations=1))
+
+        messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
+        self.assertFalse(any("S5 阶段进入提醒" in message.get("content", "") for message in messages))
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):

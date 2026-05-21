@@ -96,3 +96,12 @@ select, input, textarea {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+@keyframes btn-highlight-pulse {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
+}
+
+.btn-highlight-pulse {
+  animation: btn-highlight-pulse 1.4s ease-in-out infinite;
+}

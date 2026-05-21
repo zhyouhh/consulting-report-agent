@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import StagePanel from './StagePanel'
 import FilePreviewPanel from './FilePreviewPanel'
+import IndependentReviewDrawer from './IndependentReviewDrawer'
 import { showError, showSuccess } from '../utils/toast'
 import { getNextQualityResult } from '../utils/workspacePanelState'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
@@ -18,12 +19,16 @@ export default function WorkspacePanel({
   onProjectMutated,
   onCheckpointSet,
   onInsertPrompt,
+  onTriggerSystemTurn,
 }) {
   const [activeTab, setActiveTab] = useState('stage')
   const [files, setFiles] = useState([])
   const [currentFile, setCurrentFile] = useState('plan/project-overview.md')
   const [content, setContent] = useState('')
   const [qualityResult, setQualityResult] = useState(null)
+  const [reviewDrawerOpen, setReviewDrawerOpen] = useState(false)
+  const [reviewRunning, setReviewRunning] = useState(false)
+  const [lintRunning, setLintRunning] = useState(false)
   const previousProjectRef = useRef(projectId)
   const activeProjectRef = useRef(projectId)
 
@@ -106,6 +111,9 @@ export default function WorkspacePanel({
       previousProject: previousProjectRef.current,
       nextProject: projectId,
     }))
+    setReviewDrawerOpen(false)
+    setReviewRunning(false)
+    setLintRunning(false)
     previousProjectRef.current = projectId
   }, [projectId])
 
@@ -117,6 +125,54 @@ export default function WorkspacePanel({
       onProjectMutated?.()
     } catch (error) {
       showError('质量检查失败: ' + (error.response?.data?.detail || error.message))
+    }
+  }
+
+  const runIndependentReview = () => {
+    if (!projectId || reviewRunning || lintRunning) return
+    setReviewRunning(true)
+    setReviewDrawerOpen(true)
+  }
+
+  const handleCloseReviewDrawer = useCallback(() => {
+    setReviewDrawerOpen(false)
+    setReviewRunning(false)
+  }, [])
+
+  const onIndependentReviewCompleted = useCallback(async () => {
+    if (!projectId) return
+    try {
+      onProjectMutated?.()
+      const ws = await axios.get(`/api/projects/${encodeURIComponent(projectId)}/workspace`)
+      if (ws.data.flags?.independent_review_ready) {
+        onTriggerSystemTurn?.('independent_review_done')
+      } else {
+        showError('独立审查报告未通过服务端校验，请重试')
+      }
+    } catch (error) {
+      showError('独立审查校验失败: ' + (error.response?.data?.detail || error.message))
+    } finally {
+      setReviewRunning(false)
+    }
+  }, [projectId, onProjectMutated, onTriggerSystemTurn])
+
+  const runLintReport = async () => {
+    if (!projectId || lintRunning || reviewRunning) return
+    setLintRunning(true)
+    try {
+      const res = await axios.post(`/api/projects/${encodeURIComponent(projectId)}/lint-report`)
+      if (res.data.status !== 'ok') return
+      onProjectMutated?.()
+      const ws = await axios.get(`/api/projects/${encodeURIComponent(projectId)}/workspace`)
+      if (ws.data.flags?.lint_report_ready) {
+        onTriggerSystemTurn?.('lint_report_done')
+      } else {
+        showError('AI 味自查报告未通过服务端校验，请重试')
+      }
+    } catch (error) {
+      showError('AI 味自查失败: ' + (error.response?.data?.detail || error.message))
+    } finally {
+      setLintRunning(false)
     }
   }
 
@@ -185,10 +241,13 @@ export default function WorkspacePanel({
           projectId={projectId}
           workspace={workspace}
           qualityResult={qualityResult}
-          onRunQualityCheck={runQualityCheck}
+          onRunIndependentReview={runIndependentReview}
+          onRunLintReport={runLintReport}
           onExportDraft={exportDraft}
           onCheckpointSet={onCheckpointSet}
           onInsertPrompt={onInsertPrompt}
+          reviewRunning={reviewRunning}
+          lintRunning={lintRunning}
         />
       ) : activeTab === 'files' ? (
         <FilePreviewPanel
@@ -229,6 +288,12 @@ export default function WorkspacePanel({
           )}
         </div>
       )}
+      <IndependentReviewDrawer
+        projectId={projectId}
+        isOpen={reviewDrawerOpen}
+        onClose={handleCloseReviewDrawer}
+        onCompleted={onIndependentReviewCompleted}
+      />
     </div>
   )
 }

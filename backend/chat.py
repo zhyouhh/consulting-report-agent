@@ -2511,6 +2511,7 @@ class ChatHandler:
             return
 
         history = self._load_conversation(project_id)
+        welcome_injected = False
         if system_trigger:
             self._turn_context = self._build_turn_context(project_id, "")
             self._turn_context["system_triggered"] = True
@@ -2541,6 +2542,9 @@ class ChatHandler:
             transient_system_messages = None
             include_current_user = True
             obligation_write_snapshots = self._build_obligation_write_snapshots(project_id, user_message)
+            if self._should_emit_s5_welcome(project_id):
+                welcome_injected = True
+                transient_system_messages = [{"role": "system", "content": S5_WELCOME_PROMPT}]
         active_model = self._get_active_model_name()
 
         iterations = 0
@@ -2890,6 +2894,13 @@ class ChatHandler:
             current_turn_messages,
             user_message=str(current_user_message.get("content") or ""),
         )
+        if (
+            welcome_injected
+            and result_content
+            and result_content.strip()
+            and result_content not in LEGACY_EMPTY_ASSISTANT_FALLBACKS
+        ):
+            self._mark_s5_welcome_shown(project_id)
         self._persist_draft_followup_state_for_turn(
             project_id,
             result_content,
@@ -4855,7 +4866,7 @@ class ChatHandler:
                 )
             return None
 
-        if normalized_path in {"plan/review-checklist.md", "plan/review.md"}:
+        if normalized_path == "plan/review.md":
             if "review_started_at" not in checkpoints:
                 return (
                     f"写入 `{normalized_path}` 前需要先开始审查"

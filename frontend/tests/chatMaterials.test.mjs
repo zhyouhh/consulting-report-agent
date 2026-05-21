@@ -32,7 +32,20 @@ test("toggleMaterialSelection removes a selected material", () => {
   assert.deepEqual(toggleMaterialSelection(["mat-1", "mat-2"], "mat-2"), ["mat-1"]);
 });
 
-test("buildChatRequest trims message text and preserves selected materials", () => {
+test("buildChatRequest trims messageText by default", () => {
+  assert.deepEqual(
+    buildChatRequest({
+      projectId: "proj-1",
+      messageText: "  请整理这份纪要  ",
+    }),
+    {
+      project_id: "proj-1",
+      message_text: "请整理这份纪要",
+    },
+  );
+});
+
+test("buildChatRequest preserves selected materials when provided", () => {
   assert.deepEqual(
     buildChatRequest({
       projectId: "proj-1",
@@ -45,6 +58,19 @@ test("buildChatRequest trims message text and preserves selected materials", () 
       attached_material_ids: ["mat-1", "mat-3"],
     },
   );
+});
+
+test("buildChatRequest omits empty optional fields", () => {
+  const req = buildChatRequest({
+    projectId: "proj-1",
+    messageText: "  请继续  ",
+    attachedMaterialIds: [],
+    transientAttachments: [],
+  });
+
+  assert.equal(Object.prototype.hasOwnProperty.call(req, "attached_material_ids"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(req, "transient_attachments"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(req, "system_trigger"), false);
 });
 
 test("buildChatRequest includes transient attachments when provided", () => {
@@ -74,4 +100,21 @@ test("buildChatRequest includes transient attachments when provided", () => {
       ],
     },
   );
+});
+
+test("buildChatRequest with systemTrigger allows empty messageText", () => {
+  const req = buildChatRequest({
+    projectId: "demo",
+    messageText: "",
+    systemTrigger: "independent_review_done",
+  });
+
+  assert.equal(req.message_text, "");
+  assert.equal(req.system_trigger, "independent_review_done");
+});
+
+test("buildChatRequest omits system_trigger when null", () => {
+  const req = buildChatRequest({ projectId: "demo", messageText: "hi", systemTrigger: null });
+
+  assert.equal(Object.prototype.hasOwnProperty.call(req, "system_trigger"), false);
 });

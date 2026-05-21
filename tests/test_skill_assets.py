@@ -80,10 +80,10 @@ class SkillAssetTests(unittest.TestCase):
         self.assertIn("independent-review.md", SkillEngine.FORMAL_PLAN_FILES)
         self.assertIn("lint-report.md", SkillEngine.FORMAL_PLAN_FILES)
 
-    def test_formal_plan_files_still_includes_review_checklist_in_commit_2(self):
+    def test_formal_plan_files_no_longer_includes_review_checklist_after_cutover(self):
         from backend.skill import SkillEngine
 
-        self.assertIn("review-checklist.md", SkillEngine.FORMAL_PLAN_FILES)
+        self.assertNotIn("review-checklist.md", SkillEngine.FORMAL_PLAN_FILES)
 
     def test_initialize_project_creates_new_review_output_stubs(self):
         from backend.skill import SkillEngine

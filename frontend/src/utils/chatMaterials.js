@@ -31,17 +31,24 @@ export function toggleMaterialSelection(selectedMaterialIds = [], materialId) {
 
 export function buildChatRequest({
   projectId,
-  messageText,
+  messageText = "",
   attachedMaterialIds = [],
   transientAttachments = [],
+  systemTrigger = null,
 }) {
+  const trimmed = typeof messageText === "string" ? messageText.trim() : "";
   const payload = {
     project_id: projectId,
-    message_text: messageText.trim(),
-    attached_material_ids: attachedMaterialIds,
+    message_text: systemTrigger ? messageText : trimmed,
   };
+  if (attachedMaterialIds.length > 0) {
+    payload.attached_material_ids = attachedMaterialIds;
+  }
   if (transientAttachments.length > 0) {
     payload.transient_attachments = transientAttachments;
+  }
+  if (systemTrigger) {
+    payload.system_trigger = systemTrigger;
   }
   return payload;
 }

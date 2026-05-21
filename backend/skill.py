@@ -31,7 +31,6 @@ class SkillEngine:
         "review.md",
         "data-log.md",
         "analysis-notes.md",
-        "review-checklist.md",
         "independent-review.md",
         "lint-report.md",
         "presentation-plan.md",
@@ -139,8 +138,8 @@ class SkillEngine:
             "\u6267\u884c\u6458\u8981\u4e0e\u56fe\u8868\u540c\u6b65\u66f4\u65b0",
         ],
         "S5": [
-            "review-checklist.md \u5b8c\u6210",
-            "review.md \u8bb0\u5f55\u4fee\u8ba2\u610f\u89c1",
+            "独立审查完成",
+            "AI 味自查完成",
             "\u4e8b\u5b9e\u3001\u903b\u8f91\u4e0e\u8bed\u8a00\u8d28\u91cf\u5ba1\u67e5\u5b8c\u6210",
         ],
         "S6": [
@@ -192,10 +191,10 @@ class SkillEngine:
             f"请先让助手写入 `{REPORT_DRAFT_PATH}`，再开始审查。",
         ),
         "review_passed_at": (
-            "_has_effective_review_checklist",
-            "plan/review-checklist.md",
-            "需要先完成有效审查清单，才能标记审查通过。",
-            "请先让助手补齐 `plan/review-checklist.md`，再确认审查通过。",
+            "_has_effective_review_reports",
+            "plan/independent-review.md, plan/lint-report.md",
+            "需要先完成独立审查和 AI 味自查，才能标记审查通过。",
+            "请先在 S5 阶段点击上方'独立审查'和'AI 味自查'按钮，再确认审查通过。",
         ),
         "presentation_ready_at": (
             "_has_effective_presentation_plan",
@@ -483,22 +482,23 @@ class SkillEngine:
             project_path, checkpoints, targets, stage_one_state
         )
 
-        review_checklist_ready = self._has_effective_review_checklist(project_path)
         independent_review_ready = self._has_effective_independent_review(project_path)
         lint_report_ready = self._has_effective_lint_report(project_path)
         review_reports_ready = independent_review_ready and lint_report_ready
         review_passed = "review_passed_at" in checkpoints
 
         missing_for_review_pass = list(stage_four_state["missing_for_stage_four"])
-        if not review_checklist_ready:
-            missing_for_review_pass.append("review-checklist.md")
+        if not independent_review_ready:
+            missing_for_review_pass.append("independent-review.md（请先点'独立审查'按钮）")
+        if not lint_report_ready:
+            missing_for_review_pass.append("lint-report.md（请先点'AI 味自查'按钮）")
 
         missing_for_stage_five = list(missing_for_review_pass)
         if not review_passed:
             missing_for_stage_five.append("review_passed_at")
 
         return {
-            "review_checklist_ready": review_checklist_ready,
+            "review_checklist_ready": False,
             "independent_review_ready": independent_review_ready,
             "lint_report_ready": lint_report_ready,
             "review_reports_ready": review_reports_ready,
@@ -1347,6 +1347,18 @@ class SkillEngine:
             for item in self.STAGE_CHECKLIST_ITEMS.get(stage_code, [])
             if item not in completed_items and item not in skipped_items
         ]
+        if stage_code == "S5":
+            flags = stage_state.get("flags", {})
+            independent_ready = bool(flags.get("independent_review_ready"))
+            lint_ready = bool(flags.get("lint_report_ready"))
+            if not independent_ready and not lint_ready:
+                next_actions = ["请点击上方'独立审查'和'AI 味自查'按钮"]
+            elif independent_ready and not lint_ready:
+                next_actions = ["还差'AI 味自查'，请点击上方按钮"]
+            elif lint_ready and not independent_ready:
+                next_actions = ["还差'独立审查'，请点击上方按钮"]
+            else:
+                next_actions = ["等主代理跟你讨论审查结果，确认通过后说'审查通过'"]
         status = "进行中"
         stage_gates_path = project_path / "plan" / "stage-gates.md"
         existing_stage_gates = stage_gates_path.read_text(encoding="utf-8") if stage_gates_path.exists() else ""
@@ -1590,7 +1602,6 @@ class SkillEngine:
         data_log_quality_ok = stage_four_state["data_log_quality_ok"]
         analysis_quality_ok = stage_four_state["analysis_quality_ok"]
         report_ready = stage_four_state["report_ready"]
-        review_checklist_ready = stage_five_state["review_checklist_ready"]
         independent_review_ready = stage_five_state["independent_review_ready"]
         lint_report_ready = stage_five_state["lint_report_ready"]
         review_reports_ready = stage_five_state["review_reports_ready"]
@@ -1653,12 +1664,12 @@ class SkillEngine:
             "data_log_ready": data_log_quality_ok,
             "analysis_ready": analysis_quality_ok,
             "report_ready": report_ready,
-            "review_checklist_ready": review_checklist_ready,
+            "review_checklist_ready": False,
             "independent_review_ready": independent_review_ready,
             "lint_report_ready": lint_report_ready,
             "review_reports_ready": review_reports_ready,
             "review_notes_ready": self._has_effective_review_notes(project_path),
-            "review_ready": review_checklist_ready and review_passed,
+            "review_ready": review_reports_ready and review_passed,
             "presentation_ready": presentation_ready,
             "delivery_ready": delivery_ready and delivery_archived,
             "presentation_required": presentation_required,
@@ -1685,8 +1696,9 @@ class SkillEngine:
             if stage == "S6" and not flags["presentation_required"]:
                 continue
             if stage == "S5":
-                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][0])
-                if flags["review_notes_ready"]:
+                if flags["independent_review_ready"]:
+                    completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][0])
+                if flags["lint_report_ready"]:
                     completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][2])
                 continue
@@ -1711,11 +1723,11 @@ class SkillEngine:
         elif stage_code == "S4" and flags["report_ready"]:
             completed.extend(self.STAGE_CHECKLIST_ITEMS["S4"])
         elif stage_code == "S5":
-            if flags["review_checklist_ready"]:
+            if flags["independent_review_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][0])
-            if flags["review_notes_ready"]:
+            if flags["lint_report_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
-            if flags["review_checklist_ready"]:
+            if flags["independent_review_ready"] and flags["lint_report_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][2])
         elif stage_code == "S6":
             completed.append(self.STAGE_CHECKLIST_ITEMS["S6"][0])

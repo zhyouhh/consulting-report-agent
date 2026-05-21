@@ -36,6 +36,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [injectedPrompt, setInjectedPrompt] = useState(null)
   const activeProjectRef = useRef(currentProjectId)
+  const chatPanelRef = useRef(null)
 
   useEffect(() => {
     initializeApp()
@@ -228,6 +229,7 @@ function App() {
           onSettingsSaved={loadSettings}
         />
         <ChatPanel
+          ref={chatPanelRef}
           projectId={currentProjectId}
           project={currentProject}
           settings={settings}
@@ -250,6 +252,7 @@ function App() {
             onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
             onCheckpointSet={loadWorkspace}
             onInsertPrompt={(text) => setInjectedPrompt(text)}
+            onTriggerSystemTurn={(triggerType) => chatPanelRef.current?.triggerSystemTurn(triggerType)}
           />
         )}
       </div>
