@@ -1,6 +1,7 @@
 r"""Smoke test for the packaged Windows bundle.
 
-不是单元测试，不会被 pytest/unittest 发现。打完 `dist\咨询报告助手\` 之后手动跑：
+默认 pytest skip；设置 RUN_PACKAGED_SMOKE=1 才会在 pytest 下执行。
+打完 `dist\咨询报告助手\` 之后也可以手动跑：
 
     .venv\Scripts\python tests\smoke_packaged_app.py
 
@@ -14,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -188,7 +190,8 @@ def check_private_files(bundle_internal: Path) -> None:
     quality_script = bundle_internal / "skill" / "scripts" / "quality_check.ps1"
     if not quality_script.exists():
         raise SmokeFailure(f"quality_check.ps1 未打入: {quality_script}")
-    if "-OutputPath" not in quality_script.read_text(encoding="utf-8-sig"):
+    quality_script_text = quality_script.read_text(encoding="utf-8-sig")
+    if not re.search(r"^\s*\[string\]\$OutputPath\b", quality_script_text, re.MULTILINE):
         raise SmokeFailure(f"quality_check.ps1 缺 -OutputPath 参数: {quality_script}")
     if not (bundle_internal / "frontend" / "dist").exists():
         raise SmokeFailure("frontend/dist 未打入 _internal/frontend/dist/")

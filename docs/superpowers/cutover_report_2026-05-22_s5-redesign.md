@@ -2,6 +2,11 @@
 
 **Status:** 自动化收尾已完成；打包重建与 GUI 端到端验收按计划留给用户手工执行。
 
+**依据文档：**
+
+- Spec：[docs/superpowers/specs/2026-05-21-s5-independent-review-redesign-design.md](specs/2026-05-21-s5-independent-review-redesign-design.md)（v6 APPROVED）
+- Plan：[docs/superpowers/plans/2026-05-21-s5-independent-review-redesign.md](plans/2026-05-21-s5-independent-review-redesign.md)（v5 APPROVED）
+
 ## 实施概述
 
 S5 从旧的模型自评 `review-checklist.md` 改为两个用户主动触发的审查入口：
@@ -14,11 +19,11 @@ Commit 链：
 
 | Phase | Commits | Scope |
 |---|---|---|
-| Commit 1 | `f8287a3` + S0 prebugfix `2f9f9b9` + worklist `69caf1c` | dormant infrastructure：S5 flags/helper/conversation state |
-| Commit 2 | `d034faf` + fixes `18f95b7` / `ea57827` | independent review isolation primitives、lint 脚本、主代理拒写审查报告 |
-| Commit 3 | `e93fc80` + fixes `d59b65a` / `0123caf` | endpoints、system_trigger、SSE/lock/cancel |
-| Commit 4 | `98a7e0a` + fix `6acf7c5` | 用户可见 atomic cutover：backend gate、SKILL、前端按钮、smoke 文件列表 |
-| Commit 5 | 本次 | packaged smoke 扩展、endpoint 覆盖补差、cutover doc、worklist 更新 |
+| Commit 1 | `f8287a3 feat(s5-redesign): add dormant infrastructure for S5 independent review`<br>`2f9f9b9 fix(s0): treat whitespace-only assistant reply as empty`<br>`69caf1c docs: sync worklist after S5 redesign spec+plan APPROVED` | dormant infrastructure：S5 flags/helper/conversation state；前置 S0 空白回复修复；worklist 同步 |
+| Commit 2 | `d034faf feat(s5-redesign): add independent review isolation primitives`<br>`18f95b7 fix(s5-redesign): align quality_check.ps1 rules with spec §3.1-3.4`<br>`ea57827 fix(s5-redesign): address quality review R1 important issues` | independent review isolation primitives、lint 脚本、主代理拒写审查报告 |
+| Commit 3 | `e93fc80 feat(s5-redesign): wire endpoints + chat_stream system_trigger branch (dormant)`<br>`d59b65a fix(s5-redesign): address quality review R1 issues (async sse + endpoint error shape)`<br>`0123caf fix(s5-redesign): support cooperative cancel in IndependentReviewAgent.run()` | endpoints、system_trigger、SSE/lock/cancel |
+| Commit 4 | `98a7e0a feat(s5-redesign): atomic cutover to independent review workflow`<br>`6acf7c5 fix(s5-redesign): address commit 4 quality review (project guard + error UX)` | 用户可见 atomic cutover：backend gate、SKILL、前端按钮、smoke 文件列表 |
+| Commit 5 | `6bd8982 docs(s5-redesign): land cutover report and smoke coverage` | packaged smoke 扩展、endpoint 覆盖补差、cutover doc、worklist 更新 |
 
 ## 验证结果
 
@@ -48,7 +53,26 @@ Commit 5 本次自动化验证范围：
 
 如果 Commit 4 用户可见 cutover 出问题：
 
-1. 整体 revert Commit 4，不要 cherry-pick 部分文件；backend gate、SKILL、前端按钮必须同步回滚。
+逻辑 Commit 与物理 git commits 的对应关系：
+
+| 逻辑 Commit | 物理 git commits |
+|---|---|
+| Commit 1 | `f8287a3` base + `2f9f9b9` S0 prebugfix + `69caf1c` worklist |
+| Commit 2 | `d034faf` base + `18f95b7` spec fix + `ea57827` quality fix |
+| Commit 3 | `e93fc80` base + `d59b65a` R1 fix + `0123caf` R2 fix |
+| Commit 4 | `98a7e0a` base + `6acf7c5` R1 fix |
+| Commit 5 | `6bd8982` docs/smoke |
+
+1. 整体 revert **逻辑 Commit 4**，不要 cherry-pick 部分文件；backend gate、SKILL、前端按钮必须同步回滚。逻辑 Commit 4 包含 `98a7e0a` base 和 `6acf7c5` fix，推荐反序 revert：
+   ```bash
+   git revert 6acf7c5  # Commit 4 fix
+   git revert 98a7e0a  # Commit 4 base
+   ```
+   或者用范围一次性选择同一段物理 commits：
+   ```bash
+   git revert 98a7e0a^..6acf7c5
+   ```
+   若需回滚 Commit 2/3 等更早逻辑 commit，也按上表把对应物理 commits 从新到旧反序 revert。
 2. 回滚后系统恢复旧路径：
    - `CHECKPOINT_PREREQ.review_passed_at` 重新指向 `_has_effective_review_checklist`。
    - SKILL.md S5 段恢复要求 `review-checklist.md`。
