@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 import subprocess
+import threading
 
 
 def _run_powershell(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -19,6 +20,43 @@ def run_quality_check(file_path: str, script_path: str) -> dict:
     return {
         "status": "ok" if result.returncode == 0 else "error",
         "output": result.stdout or result.stderr,
+    }
+
+
+def run_lint_report(
+    report_path: str,
+    output_path: str,
+    script_path: str,
+    dry_run: bool = False,
+) -> dict:
+    args = ["-File", script_path, "-FilePath", report_path, "-OutputPath", output_path]
+    if dry_run:
+        args.append("-DryRun")
+    result = _run_powershell(args)
+    if result.returncode != 0:
+        return {"status": "error", "detail": result.stderr or result.stdout}
+    summary = _parse_lint_summary(output_path) if not dry_run else {}
+    return {"status": "ok", "path": output_path, "summary": summary}
+
+
+def _parse_lint_summary(output_path: str) -> dict:
+    try:
+        text = Path(output_path).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return {}
+
+    def _extract(pattern: str) -> int:
+        match = re.search(pattern, text)
+        if not match:
+            return 0
+        return int(match.group(1))
+
+    return {
+        "ai_style": _extract(r"-\s*AI 腔：(\d+)\s*处"),
+        "content_gap": _extract(r"-\s*内容缺失：(\d+)\s*处"),
+        "citation_gap": _extract(r"-\s*缺标注：(\d+)\s*处"),
+        "section_so_what_low": _extract(r"-\s*章节 So What 偏少：(\d+)\s*章"),
+        "estimated_minutes": _extract(r"预估改完所需时间\*\*：约\s*(\d+)\s*分钟"),
     }
 
 
@@ -41,3 +79,14 @@ def _extract_output_path(stdout: str) -> str:
         return ""
 
     return str(Path(match.group(1).strip()))
+
+
+_LINT_REPORT_LOCKS: dict[str, threading.Lock] = {}
+_LINT_REPORT_LOCKS_GUARD = threading.Lock()
+
+
+def get_lint_report_lock(project_id: str) -> threading.Lock:
+    with _LINT_REPORT_LOCKS_GUARD:
+        if project_id not in _LINT_REPORT_LOCKS:
+            _LINT_REPORT_LOCKS[project_id] = threading.Lock()
+        return _LINT_REPORT_LOCKS[project_id]

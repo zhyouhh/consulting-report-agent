@@ -26,6 +26,26 @@ class ChatRequestValidationTests(unittest.TestCase):
                 }
             )
 
+    def test_chat_request_rejects_whitespace_only_message_without_trigger(self):
+        with self.assertRaises(ValidationError):
+            ChatRequest.model_validate(
+                {
+                    "project_id": "demo",
+                    "message_text": "   ",
+                    "system_trigger": None,
+                }
+            )
+
+    def test_chat_request_rejects_invalid_trigger_value(self):
+        with self.assertRaises(ValidationError):
+            ChatRequest.model_validate(
+                {
+                    "project_id": "demo",
+                    "message_text": "",
+                    "system_trigger": "garbage",
+                }
+            )
+
     def test_chat_request_validator_accepts_empty_message_with_trigger(self):
         req = ChatRequest.model_validate(
             {

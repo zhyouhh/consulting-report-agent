@@ -4790,6 +4790,18 @@ class ChatHandler:
                 )
             return None
 
+        if normalized_path == "plan/independent-review.md":
+            return (
+                "`plan/independent-review.md` 只能由独立审查代理生成（用户点'独立审查'按钮）。"
+                "你不能直接写这份报告——这是审查独立性的硬约束。"
+            )
+
+        if normalized_path == "plan/lint-report.md":
+            return (
+                "`plan/lint-report.md` 只能由 AI 味自查脚本生成（用户点'AI 味自查'按钮）。"
+                "你不能直接写这份报告。"
+            )
+
         if normalized_path == "plan/presentation-plan.md":
             if not self.skill_engine._delivery_mode_requires_presentation(project_path):
                 return (

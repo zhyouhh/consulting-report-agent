@@ -5928,6 +5928,112 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertIn("开始审查", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
+    def test_main_agent_cannot_write_independent_review_md(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/independent-review.md",
+                        "content": "# 独立审查报告\n\n伪造审查。\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("只能由独立审查代理生成", result["message"])
+        self.assertIn("独立审查", result["message"])
+        self.assertNotIn("get_independent_review_lock", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_main_agent_cannot_write_lint_report_md(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "write_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/lint-report.md",
+                        "content": "# AI 味自查报告\n\n伪造自查。\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("只能由 AI 味自查脚本生成", result["message"])
+        self.assertIn("AI 味自查", result["message"])
+        self.assertNotIn("run_lint_report", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_main_agent_cannot_edit_independent_review_md(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        (self.project_dir / "plan" / "independent-review.md").write_text(
+            "# 独立审查报告\n\n旧内容。\n",
+            encoding="utf-8",
+        )
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "edit_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/independent-review.md",
+                        "old_string": "旧内容",
+                        "new_string": "新内容",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("只能由独立审查代理生成", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_main_agent_cannot_edit_lint_report_md(self, mock_openai):
+        del mock_openai
+        handler = self._make_handler_with_project()
+        (self.project_dir / "plan" / "lint-report.md").write_text(
+            "# AI 味自查报告\n\n旧内容。\n",
+            encoding="utf-8",
+        )
+        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "edit_file",
+                json.dumps(
+                    {
+                        "file_path": "plan/lint-report.md",
+                        "old_string": "旧内容",
+                        "new_string": "新内容",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("只能由 AI 味自查脚本生成", result["message"])
+
+    @mock.patch("backend.chat.OpenAI")
     def test_write_file_presentation_plan_rejected_for_report_only_mode(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()

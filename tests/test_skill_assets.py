@@ -74,6 +74,99 @@ class SkillAssetTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
+    def test_formal_plan_files_includes_new_review_outputs(self):
+        from backend.skill import SkillEngine
+
+        self.assertIn("independent-review.md", SkillEngine.FORMAL_PLAN_FILES)
+        self.assertIn("lint-report.md", SkillEngine.FORMAL_PLAN_FILES)
+
+    def test_formal_plan_files_still_includes_review_checklist_in_commit_2(self):
+        from backend.skill import SkillEngine
+
+        self.assertIn("review-checklist.md", SkillEngine.FORMAL_PLAN_FILES)
+
+    def test_initialize_project_creates_new_review_output_stubs(self):
+        from backend.skill import SkillEngine
+
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, root / "skill")
+            project = engine.create_project(
+                {
+                    "name": "demo",
+                    "workspace_dir": str(workspace_dir),
+                    "project_type": "strategy-consulting",
+                    "theme": "AI strategy review",
+                    "target_audience": "executive audience",
+                    "deadline": "2026-04-01",
+                    "expected_length": "3000 words",
+                    "notes": "",
+                }
+            )
+            plan_dir = Path(project["project_dir"]) / "plan"
+
+            self.assertTrue((plan_dir / "independent-review.md").exists())
+            self.assertTrue((plan_dir / "lint-report.md").exists())
+            self.assertIn("independent-review:pending", (plan_dir / "independent-review.md").read_text(encoding="utf-8"))
+            self.assertIn("lint-report:pending", (plan_dir / "lint-report.md").read_text(encoding="utf-8"))
+
+    def test_new_review_output_stubs_are_template_content(self):
+        from backend.skill import SkillEngine
+
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = SkillEngine(Path(tmpdir) / "projects", root / "skill")
+            project = engine.create_project(
+                {
+                    "name": "demo",
+                    "workspace_dir": str(Path(tmpdir) / "workspace"),
+                    "project_type": "strategy-consulting",
+                    "theme": "AI strategy review",
+                    "target_audience": "executive audience",
+                    "deadline": "2026-04-01",
+                    "expected_length": "3000 words",
+                    "notes": "",
+                }
+            )
+            project_dir = Path(project["project_dir"])
+            independent_text = (project_dir / "plan" / "independent-review.md").read_text(encoding="utf-8")
+            lint_text = (project_dir / "plan" / "lint-report.md").read_text(encoding="utf-8")
+
+            self.assertTrue(engine._is_template_content(independent_text, "independent-review.md"))
+            self.assertTrue(engine._is_template_content(lint_text, "lint-report.md"))
+            self.assertFalse(engine._has_effective_independent_review(project_dir))
+            self.assertFalse(engine._has_effective_lint_report(project_dir))
+
+    def test_validate_plan_write_accepts_new_review_output_files(self):
+        from backend.skill import SkillEngine
+
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = SkillEngine(Path(tmpdir) / "projects", root / "skill")
+            project = engine.create_project(
+                {
+                    "name": "demo",
+                    "workspace_dir": str(Path(tmpdir) / "workspace"),
+                    "project_type": "strategy-consulting",
+                    "theme": "AI strategy review",
+                    "target_audience": "executive audience",
+                    "deadline": "2026-04-01",
+                    "expected_length": "3000 words",
+                    "notes": "",
+                }
+            )
+
+            self.assertEqual(
+                engine.validate_plan_write(project["id"], "plan/independent-review.md"),
+                "plan/independent-review.md",
+            )
+            self.assertEqual(
+                engine.validate_plan_write(project["id"], "plan/lint-report.md"),
+                "plan/lint-report.md",
+            )
+
     def test_export_draft_ps1_prefers_bundled_pandoc_before_system_path(self):
         root = Path(__file__).resolve().parents[1]
         script = (root / "skill" / "scripts" / "export_draft.ps1").read_text(

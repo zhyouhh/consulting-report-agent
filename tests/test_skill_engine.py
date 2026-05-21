@@ -1336,6 +1336,19 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertFalse(self.engine._has_effective_independent_review(project_dir))
 
+    def test_has_effective_independent_review_rejects_when_body_blank_despite_anchors(self):
+        project_dir = self._make_project()
+        lines = ["# Independent review", ""]
+        for anchor in self.engine.INDEPENDENT_REVIEW_ANCHORS:
+            lines.extend([anchor, ""])
+        lines.append(self.engine.INDEPENDENT_REVIEW_COMPLETION_MARKER)
+        (project_dir / "plan" / "independent-review.md").write_text(
+            "\n".join(lines),
+            encoding="utf-8",
+        )
+
+        self.assertFalse(self.engine._has_effective_independent_review(project_dir))
+
     def test_has_effective_independent_review_requires_completion_marker(self):
         project_dir = self._make_project()
         self._write_independent_review(project_dir, include_marker=False)
@@ -1360,6 +1373,39 @@ class SkillEngineTests(unittest.TestCase):
         self._write_lint_report(project_dir, include_marker=False)
 
         self.assertFalse(self.engine._has_effective_lint_report(project_dir))
+
+    def test_has_effective_lint_report_rejects_partial_anchors(self):
+        project_dir = self._make_project()
+        (project_dir / "plan" / "lint-report.md").write_text(
+            "# AI 味自查\n\n"
+            "## 总览\n"
+            "- AI 腔：0 处\n"
+            "- 内容缺失：0 处\n"
+            "- 缺标注：0 处\n"
+            "- 章节 So What 偏少：0 章\n\n"
+            f"{self.engine.LINT_REPORT_COMPLETION_MARKER}\n",
+            encoding="utf-8",
+        )
+
+        self.assertFalse(self.engine._has_effective_lint_report(project_dir))
+
+    def test_has_effective_lint_report_rejects_when_body_blank_despite_anchors(self):
+        project_dir = self._make_project()
+        (project_dir / "plan" / "lint-report.md").write_text(
+            "# AI 味自查\n\n"
+            "## 按章节排列\n\n"
+            "## 总览\n\n"
+            f"{self.engine.LINT_REPORT_COMPLETION_MARKER}\n",
+            encoding="utf-8",
+        )
+
+        self.assertFalse(self.engine._has_effective_lint_report(project_dir))
+
+    def test_read_plan_file_returns_empty_when_file_decode_fails(self):
+        project_dir = self._make_project()
+        (project_dir / "plan" / "broken.md").write_bytes(b"\xff\xfe\x00")
+
+        self.assertEqual(self.engine._read_plan_file(project_dir, "broken.md"), "")
 
     def test_has_effective_review_reports_requires_both(self):
         project_dir = self._make_project()
@@ -1727,6 +1773,57 @@ class SkillEngineTests(unittest.TestCase):
             self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
 
         self.assertNotIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_record_stage_checkpoint_rejects_review_passed_when_review_lock_held(self):
+        from backend.independent_review import get_independent_review_lock
+
+        project_dir = self._make_project_past_s4()
+        self._write_review_checklist(project_dir)
+        self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
+        lock = get_independent_review_lock("demo")
+        self.assertTrue(lock.acquire(blocking=False))
+        try:
+            with self.assertRaisesRegex(ValueError, "独立审查正在进行中"):
+                self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
+        finally:
+            lock.release()
+
+        self.assertNotIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_record_stage_checkpoint_rejects_review_passed_when_lint_lock_held(self):
+        from backend.report_tools import get_lint_report_lock
+
+        project_dir = self._make_project_past_s4()
+        self._write_review_checklist(project_dir)
+        self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
+        lock = get_lint_report_lock("demo")
+        self.assertTrue(lock.acquire(blocking=False))
+        try:
+            with self.assertRaisesRegex(ValueError, "AI 味自查正在进行中"):
+                self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
+        finally:
+            lock.release()
+
+        self.assertNotIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_record_stage_checkpoint_review_passed_succeeds_when_no_lock_held(self):
+        from backend.independent_review import get_independent_review_lock
+        from backend.report_tools import get_lint_report_lock
+
+        project_dir = self._make_project_past_s4()
+        self._write_review_checklist(project_dir)
+        self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
+        for lock in (
+            get_independent_review_lock("demo"),
+            get_lint_report_lock("demo"),
+        ):
+            self.assertTrue(lock.acquire(blocking=False))
+            lock.release()
+
+        result = self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
 
     def test_record_stage_checkpoint_rejects_presentation_ready_without_review_passed_checkpoint(self):
         project_dir = self._make_project_past_s4()

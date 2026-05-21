@@ -32,6 +32,8 @@ class SkillEngine:
         "data-log.md",
         "analysis-notes.md",
         "review-checklist.md",
+        "independent-review.md",
+        "lint-report.md",
         "presentation-plan.md",
         "delivery-log.md",
     }
@@ -165,15 +167,15 @@ class SkillEngine:
     }
     REPORT_DRAFT_PATH = "content/report_draft_v1.md"
     REPORT_DRAFT_CANDIDATES = (REPORT_DRAFT_PATH,)
-    INDEPENDENT_REVIEW_ANCHORS = [
+    INDEPENDENT_REVIEW_ANCHORS = (
         "## 1. 结论-证据一致性",
         "## 2. 关键假设与逻辑链",
         "## 3. 数据口径一致性",
         "## 4. 建议可执行性",
         "## 5. 目标读者匹配",
-    ]
+    )
     INDEPENDENT_REVIEW_COMPLETION_MARKER = "<!-- independent-review:complete -->"
-    LINT_REPORT_ANCHORS = ["## 按章节排列", "## 总览"]
+    LINT_REPORT_ANCHORS = ("## 按章节排列", "## 总览")
     LINT_REPORT_COMPLETION_MARKER = "<!-- lint-report:complete -->"
     CHECKPOINT_PREREQ = {
         "s0_interview_done_at": None,
@@ -1430,6 +1432,17 @@ class SkillEngine:
             raise ValueError(f"项目不存在: {project_id}")
         if action not in ("set", "clear"):
             raise ValueError(f"未知 action: {action}")
+        if key == "review_passed_at" and action == "set":
+            from backend.independent_review import get_independent_review_lock
+            from backend.report_tools import get_lint_report_lock
+
+            review_lock = get_independent_review_lock(project_id)
+            if review_lock.locked():
+                raise ValueError("独立审查正在进行中，请等待完成后再标记审查通过")
+
+            lint_lock = get_lint_report_lock(project_id)
+            if lint_lock.locked():
+                raise ValueError("AI 味自查正在进行中，请等待完成后再标记审查通过")
 
         lock = _get_project_request_lock(project_id)
         with lock:
@@ -1770,7 +1783,10 @@ class SkillEngine:
         file_path = project_path / "plan" / file_name
         if not file_path.exists():
             return ""
-        return file_path.read_text(encoding="utf-8").strip()
+        try:
+            return file_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            return ""
 
     def _read_project_file(self, project_path: Path, relative_path: str) -> str:
         file_path = project_path / relative_path

@@ -4,7 +4,7 @@ import tempfile
 from unittest import mock
 from pathlib import Path
 
-from backend.report_tools import export_reviewable_draft, run_quality_check
+from backend.report_tools import export_reviewable_draft, run_lint_report, run_quality_check
 
 
 class ReportToolsTests(unittest.TestCase):
@@ -23,6 +23,51 @@ class ReportToolsTests(unittest.TestCase):
         result = run_quality_check("D:/tmp/report.md", "D:/skill/scripts/quality_check.ps1")
         self.assertEqual(result["status"], "error")
         self.assertIn("脚本失败", result["output"])
+
+    @mock.patch("backend.report_tools.subprocess.run")
+    def test_run_quality_check_returns_stdout_or_stderr_backwards_compat(self, mock_run):
+        mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="stderr fallback")
+
+        result = run_quality_check("D:/tmp/report.md", "D:/skill/scripts/quality_check.ps1")
+
+        self.assertEqual(result, {"status": "error", "output": "stderr fallback"})
+
+    @mock.patch("backend.report_tools.subprocess.run")
+    def test_run_lint_report_returns_path_and_summary(self, mock_run):
+        mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "lint-report.md"
+            output_path.write_text(
+                "# AI 味自查报告\n\n"
+                "## 总览\n\n"
+                "- AI 腔：2 处\n"
+                "- 内容缺失：1 处\n"
+                "- 缺标注：3 处\n"
+                "- 章节 So What 偏少：1 章\n\n"
+                "**预估改完所需时间**：约 4 分钟\n\n"
+                "<!-- lint-report:complete -->\n",
+                encoding="utf-8",
+            )
+
+            result = run_lint_report(
+                "D:/tmp/report.md",
+                str(output_path),
+                "D:/skill/scripts/quality_check.ps1",
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(Path(result["path"]).name, "lint-report.md")
+        self.assertEqual(
+            result["summary"],
+            {
+                "ai_style": 2,
+                "content_gap": 1,
+                "citation_gap": 3,
+                "section_so_what_low": 1,
+                "estimated_minutes": 4,
+            },
+        )
+        self.assertIn("-OutputPath", mock_run.call_args.args[0])
 
     @mock.patch("backend.report_tools.subprocess.run")
     def test_export_reviewable_draft_returns_output_path(self, mock_run):
