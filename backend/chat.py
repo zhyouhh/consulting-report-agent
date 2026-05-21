@@ -6178,7 +6178,9 @@ class ChatHandler:
         self._maybe_emit_stage_claim_mismatch_notice(project_id, visible_content)
 
         # Empty visible reply goes through A3 before any tool-log append.
-        if not visible_content:
+        # Whitespace-only counts as empty: a stripped reply that becomes blank
+        # must not unlock S0 confirmation nor persist as a real assistant turn.
+        if not visible_content or not visible_content.strip():
             return self._finalize_empty_assistant_turn(
                 project_id,
                 history,
