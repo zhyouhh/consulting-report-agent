@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import threading
+import time
 import unittest
 from io import BytesIO
 from pathlib import Path
@@ -13,6 +14,13 @@ from pydantic import ValidationError
 import backend.main as main_module
 from backend.chat import LEGACY_EMPTY_ASSISTANT_FALLBACKS, USER_VISIBLE_FALLBACK
 from backend.models import ChatRequest
+
+
+async def _collect_streaming_chunks(response):
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk)
+    return chunks
 
 
 class ChatRequestValidationTests(unittest.TestCase):
@@ -511,6 +519,42 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertIn('"type": "progress"', response.text)
         self.assertIn("data: [DONE]", response.text)
 
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_independent_review_endpoint_does_not_block_event_loop(
+        self,
+        mock_summary,
+        mock_agent_cls,
+    ):
+        class ConnectedRequest:
+            async def is_disconnected(self):
+                return False
+
+        def slow_run(project_id, cancel_event=None):
+            del project_id, cancel_event
+            time.sleep(0.6)
+            yield {"type": "progress", "message": "审查完成"}
+
+        async def collect_response():
+            response = await main_module.independent_review_stream(
+                "demo-review-nonblocking",
+                ConnectedRequest(),
+            )
+            consumer = asyncio.create_task(_collect_streaming_chunks(response))
+            started_at = time.perf_counter()
+            await asyncio.sleep(0.05)
+            elapsed = time.perf_counter() - started_at
+            chunks = await consumer
+            return elapsed, chunks
+
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_agent_cls.return_value.run.side_effect = slow_run
+
+        elapsed, chunks = asyncio.run(collect_response())
+
+        self.assertLess(elapsed, 0.3)
+        self.assertTrue(any('"type": "progress"' in chunk for chunk in chunks))
+
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
     def test_independent_review_endpoint_409_when_concurrent(self, mock_summary):
         from backend.independent_review import get_independent_review_lock
@@ -539,27 +583,51 @@ class WorkspaceApiTests(unittest.TestCase):
             async def is_disconnected(self):
                 return True
 
+        worker_stopped = threading.Event()
+
+        def cancellable_run(project_id, cancel_event=None):
+            del project_id
+            for _ in range(50):
+                if cancel_event is not None and cancel_event.is_set():
+                    worker_stopped.set()
+                    return
+                time.sleep(0.01)
+            yield {"type": "progress", "message": "should not emit"}
+
         async def collect_response():
             response = await main_module.independent_review_stream(
                 "demo-review-disconnect",
                 DisconnectedRequest(),
             )
-            chunks = []
-            async for chunk in response.body_iterator:
-                chunks.append(chunk)
-            return chunks
+            return await _collect_streaming_chunks(response)
 
         mock_summary.return_value = {"stage_code": "S5"}
-        mock_agent_cls.return_value.run.return_value = [
-            {"type": "progress", "message": "should not emit"},
-        ]
+        mock_agent_cls.return_value.run.side_effect = cancellable_run
 
         chunks = asyncio.run(collect_response())
 
         self.assertEqual(chunks, [])
+        self.assertTrue(worker_stopped.is_set())
         lock = get_independent_review_lock("demo-review-disconnect")
         self.assertTrue(lock.acquire(blocking=False))
         lock.release()
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_independent_review_endpoint_emits_error_event_on_agent_exception(
+        self,
+        mock_summary,
+        mock_agent_cls,
+    ):
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_agent_cls.return_value.run.side_effect = RuntimeError("agent exploded")
+
+        response = self.client.get("/api/projects/demo-review-error/independent-review/stream")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"type": "error"', response.text)
+        self.assertIn("agent exploded", response.text)
+        self.assertIn("data: [DONE]", response.text)
 
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
     def test_lint_report_endpoint_requires_s5(self, mock_summary):
@@ -602,6 +670,91 @@ class WorkspaceApiTests(unittest.TestCase):
             str(Path("D:/tmp/project") / "plan" / "lint-report.md"),
             "D:/skill/scripts/quality_check.ps1",
         )
+
+    @mock.patch("backend.main.skill_engine.get_primary_report_path")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_lint_report_returns_error_when_report_missing(
+        self,
+        mock_summary,
+        mock_report_path,
+    ):
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_report_path.side_effect = FileNotFoundError("正文不存在")
+
+        response = self.client.post("/api/projects/demo-lint-missing-report/lint-report")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("正文不存在", response.json()["detail"])
+
+    @mock.patch("backend.main.skill_engine.get_script_path")
+    @mock.patch("backend.main.skill_engine.get_project_path")
+    @mock.patch("backend.main.skill_engine.get_primary_report_path")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_lint_report_returns_error_when_script_path_missing(
+        self,
+        mock_summary,
+        mock_report_path,
+        mock_project_path,
+        mock_script_path,
+    ):
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_report_path.return_value = "D:/tmp/report.md"
+        mock_project_path.return_value = Path("D:/tmp/project")
+        mock_script_path.side_effect = FileNotFoundError("脚本不存在")
+
+        response = self.client.post("/api/projects/demo-lint-missing-script/lint-report")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("脚本不存在", response.json()["detail"])
+
+    @mock.patch("backend.main.run_lint_report")
+    @mock.patch("backend.main.skill_engine.get_script_path")
+    @mock.patch("backend.main.skill_engine.get_project_path")
+    @mock.patch("backend.main.skill_engine.get_primary_report_path")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_lint_report_returns_error_when_run_lint_report_fails(
+        self,
+        mock_summary,
+        mock_report_path,
+        mock_project_path,
+        mock_script_path,
+        mock_run_lint,
+    ):
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_report_path.return_value = "D:/tmp/report.md"
+        mock_project_path.return_value = Path("D:/tmp/project")
+        mock_script_path.return_value = "D:/skill/scripts/quality_check.ps1"
+        mock_run_lint.return_value = {"status": "error", "detail": "脚本失败"}
+
+        response = self.client.post("/api/projects/demo-lint-error-shape/lint-report")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "error", "detail": "脚本失败"})
+
+    @mock.patch("backend.main.run_lint_report")
+    @mock.patch("backend.main.skill_engine.get_script_path")
+    @mock.patch("backend.main.skill_engine.get_project_path")
+    @mock.patch("backend.main.skill_engine.get_primary_report_path")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_lint_report_returns_error_when_run_lint_report_raises(
+        self,
+        mock_summary,
+        mock_report_path,
+        mock_project_path,
+        mock_script_path,
+        mock_run_lint,
+    ):
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_report_path.return_value = "D:/tmp/report.md"
+        mock_project_path.return_value = Path("D:/tmp/project")
+        mock_script_path.return_value = "D:/skill/scripts/quality_check.ps1"
+        mock_run_lint.side_effect = RuntimeError("powershell crashed")
+
+        response = self.client.post("/api/projects/demo-lint-raises/lint-report")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "error")
+        self.assertIn("powershell crashed", response.json()["detail"])
 
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
     def test_lint_report_endpoint_409_when_concurrent(self, mock_summary):

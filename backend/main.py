@@ -345,15 +345,57 @@ async def independent_review_stream(project_id: str, request: Request):
         raise HTTPException(status_code=409, detail="上一次独立审查仍在进行中，请等待")
 
     async def generate():
+        event_queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        cancel_event = threading.Event()
+
+        def enqueue_event(event):
+            if loop.is_closed():
+                return
+            future = asyncio.run_coroutine_threadsafe(event_queue.put(event), loop)
+            future.result()
+
+        def run_worker():
+            try:
+                agent = IndependentReviewAgent(skill_engine, settings)
+                for event in agent.run(project_id, cancel_event=cancel_event):
+                    if cancel_event.is_set():
+                        break
+                    enqueue_event(event)
+            except Exception as exc:
+                if not cancel_event.is_set():
+                    enqueue_event({"type": "error", "data": str(exc)})
+            finally:
+                try:
+                    enqueue_event(None)
+                finally:
+                    lock.release()
+
+        worker_task = asyncio.create_task(asyncio.to_thread(run_worker))
+        disconnected = False
         try:
-            agent = IndependentReviewAgent(skill_engine, settings)
-            for event in agent.run(project_id):
+            while True:
                 if await request.is_disconnected():
-                    return
+                    disconnected = True
+                    cancel_event.set()
+                    break
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                if event is None:
+                    break
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if not disconnected:
+                yield "data: [DONE]\n\n"
+        except Exception as exc:
+            cancel_event.set()
+            yield f"data: {json.dumps({'type': 'error', 'data': str(exc)}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
         finally:
-            lock.release()
+            cancel_event.set()
+            if not worker_task.done():
+                await worker_task
 
     return StreamingResponse(
         generate(),
@@ -379,10 +421,17 @@ async def lint_report(project_id: str):
     if not lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="上一次 AI 味自查仍在进行中，请等待")
     try:
-        report_path = skill_engine.get_primary_report_path(project_id)
-        output_path = str(skill_engine.get_project_path(project_id) / "plan" / "lint-report.md")
-        script_path = skill_engine.get_script_path("quality_check.ps1")
-        return run_lint_report(report_path, output_path, script_path)
+        try:
+            report_path = skill_engine.get_primary_report_path(project_id)
+            output_path = str(skill_engine.get_project_path(project_id) / "plan" / "lint-report.md")
+            script_path = skill_engine.get_script_path("quality_check.ps1")
+        except (ValueError, FileNotFoundError, OSError) as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        try:
+            return run_lint_report(report_path, output_path, script_path)
+        except Exception as e:
+            return {"status": "error", "detail": f"AI 味自查失败：{str(e)}"}
     finally:
         lock.release()
 

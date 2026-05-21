@@ -10314,6 +10314,14 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
         self.assertTrue(any("AI 味自查报告已生成" in message.get("content", "") for message in messages))
 
+    def test_system_trigger_prompts_keyset_matches_type(self):
+        from typing import get_args
+
+        from backend.chat import SYSTEM_TRIGGER_PROMPTS
+        from backend.models import SystemTriggerType
+
+        self.assertEqual(set(SYSTEM_TRIGGER_PROMPTS), set(get_args(SystemTriggerType)))
+
     def test_chat_stream_invalid_system_trigger_returns_error(self):
         handler = self._make_handler_with_project()
 

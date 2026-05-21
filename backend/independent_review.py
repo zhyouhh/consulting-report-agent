@@ -224,7 +224,18 @@ class IndependentReviewAgent:
             msg_dict["reasoning_content"] = reasoning_content
         return msg_dict
 
-    def run(self, project_id: str, draft_word_count: int | None = None) -> Iterator[Event]:
+    def run(
+        self,
+        project_id: str,
+        draft_word_count: int | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> Iterator[Event]:
+        def is_cancelled() -> bool:
+            return cancel_event is not None and cancel_event.is_set()
+
+        if is_cancelled():
+            return
+
         word_count = draft_word_count
         if word_count is None:
             try:
@@ -242,13 +253,20 @@ class IndependentReviewAgent:
             }
             return
 
+        if is_cancelled():
+            return
+
         client = self._build_client()
         model = self._resolve_model()
         messages = [{"role": "system", "content": INDEPENDENT_REVIEW_SYSTEM_PROMPT}]
         review_written = False
 
         for iteration in range(1, self.MAX_ITERATIONS + 1):
+            if is_cancelled():
+                return
             yield {"type": "progress", "step": "thinking", "detail": f"第 {iteration} 轮"}
+            if is_cancelled():
+                return
             request_kwargs = {
                 "model": model,
                 "messages": messages,
@@ -273,6 +291,8 @@ class IndependentReviewAgent:
 
             tool_calls = getattr(message, "tool_calls", None) or []
             if not tool_calls:
+                if is_cancelled():
+                    return
                 if not review_written:
                     yield {"type": "error", "detail": "审查代理未生成报告，请重试"}
                     return
@@ -284,6 +304,8 @@ class IndependentReviewAgent:
                 return
 
             for tool_call in tool_calls:
+                if is_cancelled():
+                    return
                 tool_name = getattr(getattr(tool_call, "function", None), "name", "") or ""
                 try:
                     tool_args = json.loads(getattr(tool_call.function, "arguments", "") or "{}")
@@ -291,6 +313,8 @@ class IndependentReviewAgent:
                     tool_args = {}
 
                 yield {"type": "tool_call", "tool": tool_name, "args": tool_args}
+                if is_cancelled():
+                    return
                 result = self._execute_tool(project_id, tool_name, tool_args)
                 yield {
                     "type": "tool_result",
