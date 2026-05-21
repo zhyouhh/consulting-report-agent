@@ -105,6 +105,86 @@ class LintReportScriptTests(unittest.TestCase):
             report = output_path.read_text(encoding="utf-8-sig")
             self.assertNotIn("非常显著", report)
 
+    def test_lint_report_negative_lookahead_excludes_extreme_percentage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "report.md"
+            output_path = Path(tmpdir) / "lint-report.md"
+            report_path.write_text(
+                "# 报告\n\n## 第一章 数据\n\n根据内部数据，相关系数极其 12%，建议优先处理。\n",
+                encoding="utf-8",
+            )
+
+            result = self._run_script(report_path, output_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            report = output_path.read_text(encoding="utf-8-sig")
+            self.assertNotIn("极其 12%", report)
+
+    def test_lint_report_content_gap_matches_spec_keywords(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "report.md"
+            output_path = Path(tmpdir) / "lint-report.md"
+            report_path.write_text(
+                "# 报告\n\n"
+                "## 第一章 缺口\n\n"
+                "技术规范书待补齐。\n"
+                "内部材料暂未提供。\n"
+                "AI reference 仍需删除。\n"
+                "有待进一步确认客户口径。\n"
+                "暂无数据支撑该判断。\n"
+                "后续研究再补充。\n"
+                "有待考证。\n",
+                encoding="utf-8",
+            )
+
+            result = self._run_script(report_path, output_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            report = output_path.read_text(encoding="utf-8-sig")
+            self.assertIn("- 内容缺失：7 处", report)
+            self.assertEqual(report.count("`内容缺失`"), 7)
+
+    def test_lint_report_transition_words_require_three_hits_in_section(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "report.md"
+            output_path = Path(tmpdir) / "lint-report.md"
+            report_path.write_text(
+                "# 报告\n\n"
+                "## 第一章 市场\n\n"
+                "首先梳理客户现有流程。\n"
+                "客户现状已经跑通基础审批。\n"
+                "其次识别审批链路断点。\n"
+                "审批节点仍依赖线下补材料。\n"
+                "最后形成一页整改清单。\n",
+                encoding="utf-8",
+            )
+
+            result = self._run_script(report_path, output_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            report = output_path.read_text(encoding="utf-8-sig")
+            self.assertIn("`AI 腔`", report)
+
+    def test_lint_report_transition_words_do_not_trigger_below_threshold_or_across_sections(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "report.md"
+            output_path = Path(tmpdir) / "lint-report.md"
+            report_path.write_text(
+                "# 报告\n\n"
+                "## 第一章 市场\n\n"
+                "首先梳理客户现有流程。\n"
+                "其次识别审批链路断点。\n\n"
+                "## 第二章 组织\n\n"
+                "最后形成一页整改清单。\n",
+                encoding="utf-8",
+            )
+
+            result = self._run_script(report_path, output_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            report = output_path.read_text(encoding="utf-8-sig")
+            self.assertIn("- AI 腔：0 处", report)
+
     def test_lint_report_dry_run_no_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             report_path = Path(tmpdir) / "report.md"

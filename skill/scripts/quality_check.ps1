@@ -25,8 +25,10 @@ if ($null -eq $rawContent) {
 }
 $lines = @($rawContent -split "`r?`n")
 
-$aiStylePattern = "(本章|本报告|后文|下文|进一步看|换言之|总体来看|本质上看|也正因为如此|首先|其次|最后|此外|另外|接下来|值得注意的是|需要指出的是|重要的是|必须强调的是|(?<![0-9A-Za-z])(?:非常|极其|十分|相当)(?!显著[（(]?\d|[^\s，。；、]*\d))"
-$contentGapPattern = "(XXX|待确认|TBD|TODO|待补)"
+$transitionWordPattern = "(首先|其次|最后|此外|另外|接下来)"
+$emptyAdjectivePattern = "(?<![0-9A-Za-z])(?:非常(?!\s*显著)|极其(?!\s*\d+\s*[%％])|十分|相当)"
+$aiStylePattern = "(本章|本报告|后文|下文|进一步看|换言之|总体来看|本质上看|也正因为如此|值得注意的是|需要指出的是|重要的是|必须强调的是|$emptyAdjectivePattern)"
+$contentGapPattern = "(XXX|待确认|TBD|TODO|待补|技术规范书|内部材料|AI\s+reference|有待进一步|暂无数据|后续研究|有待考证)"
 $numberPattern = "\d+(?:\.\d+)?\s*(亿元|万元|%|％|百分点|家|人|吨|万|亿)"
 $sourcePattern = "(来源|数据来源|资料来源|\[DL-|https?://|根据)"
 $actionPattern = "(建议|应当|需要|可以|应该|优先|推动|落地|执行|调整|建立|明确|补充)"
@@ -44,6 +46,8 @@ function New-Section {
         Title = $Title
         ActionCount = 0
         BodyLines = 0
+        TransitionCount = 0
+        TransitionReported = $false
     }
 }
 
@@ -99,6 +103,22 @@ for ($i = 0; $i -lt $lines.Count; $i++) {
             -Label "AI 腔" `
             -Text $trimmed `
             -Hint "删掉自我解释、机械过渡或空泛强调，直接写判断和影响。"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+        $transitionMatches = [regex]::Matches($line, $transitionWordPattern)
+        if ($transitionMatches.Count -gt 0) {
+            $currentSection.TransitionCount += $transitionMatches.Count
+            if ($currentSection.TransitionCount -ge 3 -and -not $currentSection.TransitionReported) {
+                Add-Finding `
+                    -Section $currentSection `
+                    -LineNumber $lineNumber `
+                    -Label "AI 腔" `
+                    -Text $trimmed `
+                    -Hint "同章连续机械过渡词过密，改成具体判断或直接推进论证。"
+                $currentSection.TransitionReported = $true
+            }
+        }
     }
 
     if ([regex]::IsMatch($line, $contentGapPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
