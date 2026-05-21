@@ -233,7 +233,11 @@ class IndependentReviewAgent:
         def is_cancelled() -> bool:
             return cancel_event is not None and cancel_event.is_set()
 
+        def cancelled_event() -> Event:
+            return {"type": "cancelled", "data": "客户端断开，已取消审查"}
+
         if is_cancelled():
+            yield cancelled_event()
             return
 
         word_count = draft_word_count
@@ -254,6 +258,7 @@ class IndependentReviewAgent:
             return
 
         if is_cancelled():
+            yield cancelled_event()
             return
 
         client = self._build_client()
@@ -263,10 +268,9 @@ class IndependentReviewAgent:
 
         for iteration in range(1, self.MAX_ITERATIONS + 1):
             if is_cancelled():
+                yield cancelled_event()
                 return
             yield {"type": "progress", "step": "thinking", "detail": f"第 {iteration} 轮"}
-            if is_cancelled():
-                return
             request_kwargs = {
                 "model": model,
                 "messages": messages,
@@ -276,6 +280,9 @@ class IndependentReviewAgent:
             if self._should_send_explicit_tool_choice(model):
                 request_kwargs["tool_choice"] = "auto"
 
+            if is_cancelled():
+                yield cancelled_event()
+                return
             try:
                 response = client.chat.completions.create(**request_kwargs)
             except Exception as exc:
@@ -292,6 +299,7 @@ class IndependentReviewAgent:
             tool_calls = getattr(message, "tool_calls", None) or []
             if not tool_calls:
                 if is_cancelled():
+                    yield cancelled_event()
                     return
                 if not review_written:
                     yield {"type": "error", "detail": "审查代理未生成报告，请重试"}
@@ -305,6 +313,7 @@ class IndependentReviewAgent:
 
             for tool_call in tool_calls:
                 if is_cancelled():
+                    yield cancelled_event()
                     return
                 tool_name = getattr(getattr(tool_call, "function", None), "name", "") or ""
                 try:
@@ -314,6 +323,7 @@ class IndependentReviewAgent:
 
                 yield {"type": "tool_call", "tool": tool_name, "args": tool_args}
                 if is_cancelled():
+                    yield cancelled_event()
                     return
                 result = self._execute_tool(project_id, tool_name, tool_args)
                 yield {

@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,6 +121,39 @@ class IndependentReviewAgentTests(unittest.TestCase):
         self.assertEqual(events[0]["type"], "error")
         self.assertIn("正文超过 30k 字", events[0]["detail"])
         mock_openai.assert_not_called()
+
+    def test_run_returns_early_when_cancel_event_set_before_first_call(self):
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        del engine, project_dir
+        cancel_event = threading.Event()
+        cancel_event.set()
+
+        with mock.patch("backend.independent_review.OpenAI") as mock_openai:
+            events = list(agent.run(project["id"], draft_word_count=100, cancel_event=cancel_event))
+
+        self.assertEqual(events, [{"type": "cancelled", "data": "客户端断开，已取消审查"}])
+        mock_openai.assert_not_called()
+
+    def test_run_returns_after_current_llm_call_when_cancel_set_mid_run(self):
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        del engine, project_dir
+        cancel_event = threading.Event()
+        first_response = self._response(
+            _FakeMessage(tool_calls=[self._tool_call("read_file", {"file_path": "plan/data-log.md"}, "call-1")])
+        )
+
+        def complete_first_call_then_cancel(**kwargs):
+            del kwargs
+            cancel_event.set()
+            return first_response
+
+        with mock.patch("backend.independent_review.OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.side_effect = complete_first_call_then_cancel
+            events = list(agent.run(project["id"], draft_word_count=100, cancel_event=cancel_event))
+
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 1)
+        self.assertEqual(events[-1], {"type": "cancelled", "data": "客户端断开，已取消审查"})
+        self.assertNotIn("tool_result", [event["type"] for event in events])
 
     def test_run_rejects_write_to_non_canonical_path(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()

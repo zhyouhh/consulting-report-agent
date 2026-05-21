@@ -584,9 +584,11 @@ class WorkspaceApiTests(unittest.TestCase):
                 return True
 
         worker_stopped = threading.Event()
+        received_cancel_events = []
 
         def cancellable_run(project_id, cancel_event=None):
             del project_id
+            received_cancel_events.append(cancel_event)
             for _ in range(50):
                 if cancel_event is not None and cancel_event.is_set():
                     worker_stopped.set()
@@ -607,6 +609,9 @@ class WorkspaceApiTests(unittest.TestCase):
         chunks = asyncio.run(collect_response())
 
         self.assertEqual(chunks, [])
+        self.assertEqual(len(received_cancel_events), 1)
+        self.assertIsInstance(received_cancel_events[0], threading.Event)
+        self.assertTrue(received_cancel_events[0].is_set())
         self.assertTrue(worker_stopped.is_set())
         lock = get_independent_review_lock("demo-review-disconnect")
         self.assertTrue(lock.acquire(blocking=False))
