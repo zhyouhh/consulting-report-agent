@@ -17,6 +17,9 @@ from .skill import SkillEngine
 Event = dict[str, object]
 
 
+MAX_DRAFT_WORDS_FOR_REVIEW = 100000
+
+
 INDEPENDENT_REVIEW_SYSTEM_PROMPT = """你是独立审查代理。你的任务是对咨询报告的草稿做独立、客观的审查，不参与写作、不修改任何文件以外的内容。
 
 ## 你将读取的文件
@@ -250,10 +253,10 @@ class IndependentReviewAgent:
                 yield {"type": "error", "detail": f"读取正文失败：{str(exc)}"}
                 return
 
-        if word_count > 30000:
+        if word_count > MAX_DRAFT_WORDS_FOR_REVIEW:
             yield {
                 "type": "error",
-                "detail": f"正文超过 30k 字（当前 {word_count} 字），暂不支持自动审查。建议先精简正文或拆分章节单独审查。",
+                "detail": f"正文超过 100k 字（当前 {word_count} 字），暂不支持自动审查。建议先精简正文或拆分章节单独审查。",
             }
             return
 

@@ -13,6 +13,7 @@ from backend.independent_review import (
     INDEPENDENT_REVIEW_ANCHORS,
     INDEPENDENT_REVIEW_COMPLETION_MARKER,
     IndependentReviewAgent,
+    MAX_DRAFT_WORDS_FOR_REVIEW,
 )
 from backend.skill import SkillEngine
 
@@ -111,15 +112,20 @@ class IndependentReviewAgentTests(unittest.TestCase):
         self.assertEqual(event_types[-1], "review-completed")
         self.assertEqual(events[-1]["path"], CANONICAL_REVIEW_PATH)
 
-    def test_run_word_count_over_30k_emits_friendly_error(self):
+    def test_run_word_count_over_100k_emits_friendly_error(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
-        del engine, project_dir
+        del engine
+        draft_path = project_dir / "content" / "report_draft_v1.md"
+        draft_path.write_text(
+            "# Draft\n\n" + ("hello " * (MAX_DRAFT_WORDS_FOR_REVIEW + 1)),
+            encoding="utf-8",
+        )
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
-            events = list(agent.run(project["id"], draft_word_count=30001))
+            events = list(agent.run(project["id"]))
 
         self.assertEqual(events[0]["type"], "error")
-        self.assertIn("正文超过 30k 字", events[0]["detail"])
+        self.assertIn("正文超过 100k 字", events[0]["detail"])
         mock_openai.assert_not_called()
 
     def test_run_returns_early_when_cancel_event_set_before_first_call(self):

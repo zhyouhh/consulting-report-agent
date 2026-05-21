@@ -633,10 +633,10 @@ S0-S4 的所有 helper / gate / 工具实现**不动**，包括：
 
 **Steps:**
 
-- [ ] **Step 1**: 创建模块，含完整 spec §2.3 骨架（含 30k 字 preflight、5 维度 system prompt、tool dispatcher、完成验证）。**关键实现要点**：
+- [ ] **Step 1**: 创建模块，含完整 spec §2.3 骨架（含 100k 字 preflight、5 维度 system prompt、tool dispatcher、完成验证）。**关键实现要点**：
 
   - `INDEPENDENT_REVIEW_SYSTEM_PROMPT` = spec §2.2 完整 prompt 文本（写死）
-  - `IndependentReviewAgent.run()` 第一步 word_count > 30000 friendly fail
+  - `IndependentReviewAgent.run()` 第一步 word_count > 100000 friendly fail
   - `_build_client()` 复用 `OpenAI(api_key=settings.api_key, base_url=settings.api_base, http_client=httpx.Client(timeout=120.0))`
   - `_should_send_explicit_tool_choice()` **完全 copy** chat.py:443-446：`return "deepseek" not in (active_model or "").lower()`
   - `_extract_reasoning_content_from_message()` 同 chat.py:3189-3206
@@ -665,7 +665,7 @@ S0-S4 的所有 helper / gate / 工具实现**不动**，包括：
       # mock client 返回 read_file × 3 + write_file 序列
       # 验证 SSE event 类型：progress → tool_call → tool_result → review-completed
   
-  def test_run_word_count_over_30k_emits_friendly_error(self):
+  def test_run_word_count_over_100k_emits_friendly_error(self):
       # 写超长正文 → run() 第一步 emit error，不调 client
       # 验证 mock client.chat.completions.create 调用次数 == 0
   
@@ -2084,13 +2084,13 @@ cd frontend && node --test tests/ && npm run build && cd ..
 - [ ] **Step 1**: 创建 `docs/superpowers/cutover_report_2026-05-21_s5-redesign.md`，记录：
   - 实施概述（5 commits）
   - 验证结果（测试 + 端到端 + 打包态 smoke）
-  - 已知限制（30k 字 friendly fail / 单进程 lock 假设）
+  - 已知限制（100k 字 friendly fail / 单进程 lock 假设）
   - 老项目兼容性确认（review-checklist.md 残留不阻断）
 
 - [ ] **Step 2**: 更新 `docs/current-worklist.md`：
   - 把 P1 #2 "S5 review-checklist 格式契约" 标 `已解决`
   - 加 "S5 Independent Review Redesign（2026-05-21）" 入"已解决记录"段
-  - 记录 v1 chunk fallback worklist 项（超 30k 字 map-reduce）
+  - 记录 v1 chunk fallback worklist 项（超 100k 字 map-reduce）
 
 **Acceptance Criteria:**
 

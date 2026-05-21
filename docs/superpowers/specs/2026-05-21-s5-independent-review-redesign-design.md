@@ -3,6 +3,10 @@
 > **Version**: v6（response to codex R1-R5 reviews）
 > **状态**: R5 提到的唯一 must-fix（Bug 21）+ 3 个改进建议已处理，待 R6 review
 
+## R6 Context Window Correction Annex
+
+- 阈值 30k → 100k 字（context window 真实值 1M tokens 修正，原 spec 200k 假设错误）。
+
 ## R5 Round 5 Review Response Annex
 
 Codex R5 verdict: **CHANGES_NEEDED**，但 codex 明说"只需要修 Bug 21 的 commit phasing；修完后这份 spec 可以进入 plan 阶段"。
@@ -12,7 +16,7 @@ Codex R5 verdict: **CHANGES_NEEDED**，但 codex 明说"只需要修 Bug 21 的 
 | **Bug 21**（新）— Commit 3 包含 S5 欢迎信调用点 → 前端按钮还没出现时提示用户点不存在按钮 | 高 | §13 Commit 3/4 重写 | S5 welcome **helper 实现**留 Commit 3（dormant），但 `_chat_stream_unlocked()` 的**调用点**移到 Commit 4 atomic cutover（与 backend gate + SKILL + 前端按钮一起激活）|
 | **改进建议 #1** — Commit 2 "完全等价"表述不严谨 | 低 | §13 Commit 2 改进 | 加新 stub 后文件 tab 会展示 → 改成"主流程等价；文件 tab 可能看到 pending stub，属低风险" |
 | **改进建议 #2** — Commit 4 切换清单显式写"从 FORMAL_PLAN_FILES 移除 review-checklist.md" | 低 | §13 Commit 4 补充 | 已显式列在切换清单（不只在测试 bullet 提到） |
-| **改进建议 #3** — IndependentReviewAgent.run() 骨架同步 30k preflight | 低 | §2.3 骨架补 | `_build_client()` 前加 word_count 检查，超 30k emit friendly error |
+| **改进建议 #3** — IndependentReviewAgent.run() 骨架同步 100k preflight | 低 | §2.3 骨架补 | `_build_client()` 前加 word_count 检查，超 100k emit friendly error |
 
 ## R4 Round 4 Review Response Annex
 
@@ -32,7 +36,7 @@ Codex R3 verdict: **CHANGES_NEEDED**。R2 修复 10/12 FIXED + 2 PARTIAL，新�
 
 | R3 Item | 严重度 | 处理章节 | 概述 |
 |---|---|---|---|
-| **Bug 11 + Bug 15**（PARTIAL/新）— chunk fallback 残留冲突 | 中 | §11 / §12 / §R1 Annex 全篇收敛 | 删除所有 chunk fallback 残留：§11 测试 `test_independent_review_agent_chunk_mode` 改 `test_independent_review_agent_word_count_over_30k_emits_error`；§12 风险表"v0 加 H2 chunk fallback" 改 "v0 friendly fail，v1 map-reduce worklist"；§R1 Annex Suggestion 2 标 SUPERSEDED |
+| **Bug 11 + Bug 15**（PARTIAL/新）— chunk fallback 残留冲突 | 中 | §11 / §12 / §R1 Annex 全篇收敛 | 删除所有 chunk fallback 残留：§11 测试 `test_independent_review_agent_chunk_mode` 改 `test_independent_review_agent_word_count_over_100k_emits_error`；§12 风险表"v0 加 H2 chunk fallback" 改 "v0 friendly fail，v1 map-reduce worklist"；§R1 Annex Suggestion 2 标 SUPERSEDED |
 | **Bug 13 + Bug 14**（PARTIAL/新）— Commit 拆分仍非原子可落 main | 高 | §13 重写 | 新方案：Commit 1 只做 additive backend + templates + tests（**不切** `CHECKPOINT_PREREQ` + SKILL.md 仍指向 review-checklist）；Commit 3 atomic cutover（endpoints + system_trigger + finalize 分支 + 主代理拒写 + lock + CHECKPOINT_PREREQ 切换 + SKILL/lifecycle/templates 同步）；这样每个 commit 自身可落 main，中间态不破坏 |
 | **Bug 16**（新）— `s5_welcome_shown_at` load/save 路径不完整 | 高 | §6.1 补充 | 真实 `_load_conversation_state` 从 `_empty_conversation_state()` 重建白名单字段（chat.py:813-821 / 932-948 / 995-1013）；只改 save 白名单不够；必须同步改 `_empty_conversation_state()` 加 `"s5_welcome_shown_at": None` + `_load_conversation_state()` 复制逻辑（如果 payload 字段是非空 str 则复制） |
 | **Bug 17**（新）— system-triggered turn `turn_context` 初始化不完整 | 高 | §5.2 补充 | 真实 turn_context 含 `checkpoint_event` / `stage_code_before_turn` / `s0_confirmation_completed` / `canonical_obligation` 等多字段；新路径必须显式调 `_build_turn_context(project_id, "")` 初始化，再设 `system_triggered=True`、清空 `canonical_obligation`、保证 `checkpoint_event=None`；否则会继承上一轮 stale context |
@@ -53,7 +57,7 @@ Codex R2 verdict: **CHANGES_NEEDED**。10 个必修：6 个 R1 PARTIAL + 4 个�
 | **Bug 6**（PARTIAL）— `run_quality_check` 真实返回 `stdout or stderr` | 中 | §3.6 修正 | 旧函数返回必须保留 `stdout or stderr` shape（不能改成 `.strip()`），否则 tests/test_report_tools.py:20-25 锁死的 stderr 失败回传会破坏 |
 | **Bug 8**（PARTIAL）— `with get_lock()` 阻塞不返回 409；`record_stage_checkpoint` 才是 advance_stage 真正统一入口 | 高 | §3.6 + §4.4 + §13 修正 | lint endpoint 用 `acquire(blocking=False)` 失败即 409；`record_stage_checkpoint` 在 `review_passed_at` 路径加 lock 检查（不是只在 main.py endpoint）；chat tool 调用 advance_stage 也走 record_stage_checkpoint，自动覆盖 |
 | **Bug 10**（新）— 主代理 write_file 仍能写新文件，破坏独立 second opinion 可信边界 | **关键** | §8.1 + §5.5 新增 | `chat.py:4775` 附近主代理 write_file 拦截分支显式拒绝 `plan/independent-review.md` 和 `plan/lint-report.md`；只有独立审查代理 / lint 脚本可写 |
-| **Bug 11**（新）— §2.5 chunk fallback 无法跨章审查 | 中 | §2.5 重写 | v0 **不做** chunk fallback；超长正文直接 friendly fail "正文超过 30k 字暂不支持自动审查，建议拆分章节单独审查或精简正文" |
+| **Bug 11**（新）— §2.5 chunk fallback 无法跨章审查 | 中 | §2.5 重写 | v0 **不做** chunk fallback；超长正文直接 friendly fail "正文超过 100k 字暂不支持自动审查，建议拆分章节单独审查或精简正文" |
 | **Bug 12**（新）— `s5_welcome_shown_at` 写入过早会吞掉欢迎信 | 中 | §6.1 修正 | 改为 `_finalize_assistant_turn` 成功后写；turn 失败 / 用户 abort 时不写，下次再发 |
 | **Bug 13**（新）— Commit 拆分制造中间态破坏 | 中 | §13 重写 | Commit 1 合并 §7 文档/templates/test lock 同步（FORMAL_PLAN_FILES + S5 gate + SKILL.md + modules + templates 一起落） |
 | **Suggestion 5** — 写明 module-level lock 单进程假设 | 低 | §9.3 接受 | 加 note："仅适用于当前单进程桌面部署；未来 uvicorn workers > 1 必须换文件锁/数据库锁" |
@@ -602,15 +606,15 @@ class IndependentReviewAgent:
 
     def run(self, project_id: str) -> Iterator[dict]:
         """运行审查；yield SSE event dict（caller 负责 wire 序列化）。"""
-        # R5 改进建议 #3 + R2 Bug 11：preflight 检查正文长度，超 30k 字直接 friendly fail
+        # R5 改进建议 #3 + R2 Bug 11：preflight 检查正文长度，超 100k 字直接 friendly fail
         try:
             report_path = self.skill_engine.get_primary_report_path(project_id)
             report_text = Path(report_path).read_text(encoding="utf-8")
             word_count = self.skill_engine._count_words(report_text)
-            if word_count > 30000:
+            if word_count > 100000:
                 yield {
                     "type": "error",
-                    "detail": f"正文超过 30k 字（当前 {word_count} 字），暂不支持自动审查。建议先精简正文或拆分章节单独审查。"
+                    "detail": f"正文超过 100k 字（当前 {word_count} 字），暂不支持自动审查。建议先精简正文或拆分章节单独审查。"
                 }
                 return
         except Exception as e:
@@ -801,14 +805,14 @@ def get_independent_review_lock(project_id: str) -> threading.Lock:
 
 输出审查报告：600-1000 字 ≈ 500-800 tokens
 
-DeepSeek V4 Pro context window：200k tokens，对绝大多数项目安全。
+DeepSeek V4 Pro context window：1M tokens，对绝大多数项目安全。
 
-**超长处理策略**（report_draft 超过 30k 字时）：
+**超长处理策略**（report_draft 超过 100k 字时）：
 
 - IndependentReviewAgent 在 `_build_client` 前先 `_count_words(report_draft)`
-- 如果 > 30k 字（阈值）：**直接 emit error event，不启动 LLM call**：
+- 如果 > 100k 字（阈值）：**直接 emit error event，不启动 LLM call**：
   ```json
-  {"type": "error", "detail": "正文超过 30k 字（当前 X 字），暂不支持自动审查。建议先精简正文或拆分章节单独审查。"}
+  {"type": "error", "detail": "正文超过 100k 字（当前 X 字），暂不支持自动审查。建议先精简正文或拆分章节单独审查。"}
   ```
 - 前端 drawer 显示此错误 3 秒后自动关闭；按钮重新 enabled
 - 用户可手动精简正文或选择继续不审查（强行 `advance_stage(review_passed_at)` 会被软门禁拒，但用户可以选择不进 S6 / S7）
@@ -935,7 +939,7 @@ param(
 - `章节 So What 偏少` × 60 秒
 - 总和（秒）/ 60，向上取整
 
-**Top-N 截断 fallback**：如果正文超过 30k 字 + lint 命中 > 100 处，按维度截取 top 30 条（按行号顺序），并在总览段加 `**注**：超长报告，仅显示前 30 条 issue` 提示。
+**Top-N 截断 fallback**：如果正文超过 100k 字 + lint 命中 > 100 处，按维度截取 top 30 条（按行号顺序），并在总览段加 `**注**：超长报告，仅显示前 30 条 issue` 提示。
 
 #### 3.5 章节解析
 
@@ -2186,7 +2190,7 @@ export function mapWorkspaceSummary(raw) {
 - `test_independent_review_agent_writes_only_canonical_path` — write_file 拒绝非 `plan/independent-review.md` 路径
 - `test_independent_review_agent_no_other_tools` — tools schema 只有 read_file / write_file
 - `test_independent_review_agent_max_iterations_15` — 验证超过 15 轮 emit error
-- `test_independent_review_agent_word_count_over_30k_emits_friendly_error` — 验证超过 30k 字直接 emit error event + 不启动 LLM call（R3 Bug 15）
+- `test_independent_review_agent_word_count_over_100k_emits_friendly_error` — 验证超过 100k 字直接 emit error event + 不启动 LLM call（R3 Bug 15）
 - `test_independent_review_endpoint_sse` — endpoint 返回 SSE content-type
 - `test_independent_review_endpoint_emits_completed_event` — 最后 emit `review-completed`
 - `test_independent_review_endpoint_requires_s5` — 非 S5 阶段返回 400
@@ -2364,7 +2368,7 @@ export function mapWorkspaceSummary(raw) {
 
 | 风险 | 严重度 | 缓解 |
 |---|---|---|
-| 独立审查代理超 token budget | 中 | v0 直接 friendly fail（§2.5）：超过 30k 字直接 emit error event，UI 显示"正文过长，请精简后重试"；v1 worklist 完整 map-reduce 设计（R3 Bug 15） |
+| 独立审查代理超 token budget | 中 | v0 直接 friendly fail（§2.5）：超过 100k 字直接 emit error event，UI 显示"正文过长，请精简后重试"；v1 worklist 完整 map-reduce 设计（R3 Bug 15） |
 | 独立审查代理输出格式不符（不按 5 维度结构） | 中 | system prompt 详细约束 + 严格 5/5 anchor + completion marker；测试覆盖 marker 缺失 / anchor 缺失场景 |
 | 软门禁误判（用户跑了审查但门禁说没跑） | 中 | `_has_effective_review_reports` 边界单测：空文件 / 模板 stub / 截断文件 / 缺 anchor / 缺 marker 全覆盖 |
 | 旧项目 `review-checklist.md` 残留 | 低 | 不删用户文件；软门禁不读它；UI 不展示旧 checklist 相关提示 |

@@ -172,7 +172,7 @@ $estimatedMinutes = [int][Math]::Ceiling($estimatedSeconds / 60.0)
 
 $displayFindings = @($script:AllFindings | Sort-Object LineNumber)
 $truncated = $false
-if ($rawContent.Length -gt 30000 -and $script:AllFindings.Count -gt 100) {
+if ($rawContent.Length -gt 100000 -and $script:AllFindings.Count -gt 100) {
     $displayFindings = @($displayFindings | Select-Object -First 30)
     $truncated = $true
 }

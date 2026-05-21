@@ -7,6 +7,8 @@
 - Spec：[docs/superpowers/specs/2026-05-21-s5-independent-review-redesign-design.md](specs/2026-05-21-s5-independent-review-redesign-design.md)（v6 APPROVED）
 - Plan：[docs/superpowers/plans/2026-05-21-s5-independent-review-redesign.md](plans/2026-05-21-s5-independent-review-redesign.md)（v5 APPROVED）
 
+**R6 修正：** 原 spec §2.5 把 DeepSeek V4 Pro context window 写成 200k tokens 是错误前提；真实 context window 是 1M tokens，因此 IndependentReview 阈值从 30k 字放宽到 **100k 字**，在保守和实用之间取平衡。
+
 ## 实施概述
 
 S5 从旧的模型自评 `review-checklist.md` 改为两个用户主动触发的审查入口：
@@ -45,7 +47,7 @@ Commit 5 本次自动化验证范围：
 
 ## 已知限制
 
-1. **30k 字 friendly fail 是 v0 策略**：正文过长时独立审查直接给友好错误，不做 chunk fallback；后续 v1 可做 map-reduce 重审。
+1. **100k 字 friendly fail 是 v0 策略**：正文超过 100k 字时独立审查直接给友好错误，不做 chunk fallback；后续 v1 可做 map-reduce 重审。
 2. **单进程 lock 假设**：当前 per-project lock 覆盖单进程桌面应用；多进程并发未覆盖。
 3. **打包态内容依赖重建**：本次只更新 smoke 断言；实际 `_internal/skill/...` 需要用户运行 `build.bat` 后再验证。
 

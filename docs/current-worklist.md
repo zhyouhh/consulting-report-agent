@@ -14,9 +14,9 @@
 - 状态：`待清理`
 - 当前明确项：`favicon.ico` 404、输入框缺少 `id` 或 `name` 的可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning
 
-3. **P3：v1 chunk fallback（超 30k 字 map-reduce 重审）**
+3. **P3：v1 chunk fallback（超 100k 字 map-reduce 重审）**
 - 状态：`低优先级`
-- 背景：S5 Independent Review Redesign v0 对 30k 字以上正文采用 friendly fail，提示用户精简后重试；这是有意保守策略，避免在 cutover 期引入 chunk 聚合复杂度。
+- 背景：S5 Independent Review Redesign v0 对 100k 字以上正文采用 friendly fail，提示用户精简后重试；这是有意保守策略，避免在 cutover 期引入 chunk 聚合复杂度。
 - 目标：后续如真实长文需求频繁出现，再设计 map-reduce 重审：按章节切片审查、合并 5 维度发现、保留来源章节定位，并继续保证 `plan/independent-review.md` 只有独立审查代理可写。
 - 关联：S5 cutover report [docs/superpowers/cutover_report_2026-05-22_s5-redesign.md](superpowers/cutover_report_2026-05-22_s5-redesign.md)
 
