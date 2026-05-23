@@ -706,6 +706,64 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertNotIn("reasoning_content", assistant_tool_message)
 
     @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_deepseek_advance_stage_followup_preserves_think_tag_as_reasoning_content(self, mock_openai):
+        def tool_stream():
+            yield self._make_chunk(content="<think>用户已经确认 S0 信息齐备，应该调用阶段推进工具。</think>\n\n")
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-advance",
+                        name="advance_stage",
+                        arguments=json.dumps(
+                            {
+                                "checkpoint_key": "s0_interview_done_at",
+                                "action": "set",
+                                "reason": "用户已确认 S0 信息齐备，可以进入研究设计",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                ],
+            )
+
+        def final_stream():
+            yield self._make_chunk(content="已进入研究设计阶段。")
+
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            tool_stream(),
+            final_stream(),
+        ]
+        handler = self._make_handler_with_project()
+        handler.settings.managed_model = "deepseek-v4-pro"
+        handler.settings.model = "deepseek-v4-pro"
+        (self.project_dir / "conversation.json").write_text(
+            json.dumps(
+                [
+                    {"role": "user", "content": "开始吧"},
+                    {"role": "assistant", "content": "请补充目标读者、范围和交付形式。"},
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        list(handler.chat_stream(self.project_id, "信息齐了，进入下一步", max_iterations=2))
+
+        second_request_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        assistant_tool_message = next(
+            message
+            for message in second_request_messages
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        )
+
+        self.assertEqual(
+            assistant_tool_message["reasoning_content"],
+            "用户已经确认 S0 信息齐备，应该调用阶段推进工具。",
+        )
+        self.assertEqual(assistant_tool_message["content"], "\n\n")
+
+    @mock.patch("backend.chat.OpenAI")
     def test_chat_tool_followup_omits_null_sdk_dump_fields(self, mock_openai):
         tool_call = SimpleNamespace(
             id="call-1",

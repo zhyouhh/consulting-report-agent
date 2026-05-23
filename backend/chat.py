@@ -2640,6 +2640,9 @@ class ChatHandler:
                     if not isinstance(event_data, str) or not event_data:
                         continue
                     if event_type == "thinking":
+                        collected_message["reasoning_content"] = (
+                            collected_message.get("reasoning_content", "") + event_data
+                        )
                         yield parsed_event
                         continue
                     if event_type != "content":
@@ -3292,13 +3295,14 @@ class ChatHandler:
         reasoning_content: str | None = None,
     ) -> Dict:
         assistant_content = content if isinstance(content, str) else ("" if content is None else str(content))
+        serialized_tool_calls = [
+            self._serialize_tool_call_for_provider(tool_call)
+            for tool_call in (tool_calls or [])
+        ]
         message = {
             "role": "assistant",
             "content": _strip_legacy_stage_ack(assistant_content),
-            "tool_calls": [
-                self._serialize_tool_call_for_provider(tool_call)
-                for tool_call in (tool_calls or [])
-            ],
+            "tool_calls": serialized_tool_calls,
         }
         if isinstance(reasoning_content, str) and reasoning_content:
             message["reasoning_content"] = reasoning_content
