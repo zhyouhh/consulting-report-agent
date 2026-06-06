@@ -503,7 +503,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(events[0], {"type": "content", "data": "第一段"})
         error_events = [event for event in events if event["type"] == "error"]
         self.assertEqual(len(error_events), 1)
-        self.assertIn("默认通道", error_events[0]["data"])
+        self.assertIn("试用通道", error_events[0]["data"])
         self.assertIn("超时", error_events[0]["data"])
         self.assertNotIn("The read operation timed out", error_events[0]["data"])
 

@@ -4,8 +4,8 @@
 
 - 第一阶段只支持 Windows 正式分发。
 - 交付物是一个完整文件夹，不是单独一个裸 `exe`。
-- 默认模式是 `默认通道`，指向 `https://newapi.z0y0h.work/client/v1`。
-- 只要默认托管代理已经部署完成，同事拿到包后可以直接开箱即用。
+- 默认模式是 `试用通道`，指向 `https://newapi.z0y0h.work/client/v1`。
+- 只要托管代理已经部署完成，同事拿到包后可以快速试用。
 - 仍然保留 `自定义 API` 入口，给有条件的高级用户自行配置。
 - 当前导出能力是 `可审草稿`，不是最终排版完成的 Word/PDF 成品。
 - Windows 发布包随带 `_internal/pandoc.exe`，同事不需要单独安装 Pandoc。
@@ -31,7 +31,7 @@ cd ..
 
 ### 2. 执行打包
 
-先准备默认通道客户端令牌，二选一：
+先准备试用通道客户端令牌，二选一：
 
 - 在项目根目录放一个不入库的 `managed_client_token.txt`
 - 或设置环境变量 `CONSULTING_REPORT_MANAGED_CLIENT_TOKEN`
@@ -47,7 +47,7 @@ cd ..
 - 或设置环境变量 `CONSULTING_REPORT_PANDOC_EXE` 指向 `pandoc.exe`
 - 或在构建机安装 Pandoc，并确保 `pandoc` 在 `PATH` 中
 
-`build.bat` 会在缺少这些打包依赖时直接失败，避免打出一个表面成功、实际不能开箱即用的包。
+`build.bat` 会在缺少这些打包依赖时直接失败，避免打出一个表面成功、实际不能正常试用的包。
 它还会在打包前请求 `https://newapi.z0y0h.work/client/v1/models` 做预检。
 `managed_client_token.txt` 必须放的是 `/client` 使用的 client token，不是上游 API key。
 `managed_search_pool.json` 必须包含完整的内置搜索池 schema，至少包括：
@@ -99,14 +99,14 @@ PyInstaller 把所有 `datas` 收到 `_internal/` 下面，`sys._MEIPASS` 在运
 
 - 程序会启动本地 FastAPI + PyWebView 窗口。
 - 用户配置会自动写入 `C:\Users\<用户名>\.consulting-report\config.json`。
-- 默认会使用 `默认通道`。
-- 如果默认通道不可达，用户仍可在设置中切到 `自定义 API`。
+- 默认会使用 `试用通道`。
+- 如果试用通道不可达，用户仍可在设置中切到 `自定义 API`。
 
 ## 配置说明
 
-### 默认通道
+### 试用通道
 
-- 面向普通同事，开箱即用。
+- 面向普通同事，仅供快速试用，无服务质量承诺。
 - 默认模型：`deepseek-v4-pro`
 - 默认地址：`https://newapi.z0y0h.work/client/v1`
 - 客户端不保存真实上游 key，真实凭证只存在服务端薄中转。
@@ -115,10 +115,10 @@ PyInstaller 把所有 `datas` 收到 `_internal/` 下面，`sys._MEIPASS` 在运
 
 ### 内置搜索池
 
-- 面向默认安装包，开箱即用。
+- 面向默认安装包，仅供快速试用。
 - 构建机上的私有源文件是 `managed_search_pool.json`。
 - 该文件不会入库，但会作为打包产物的一部分被复制到 `dist/咨询报告助手/_internal/managed_search_pool.json`。
-- 这意味着内置搜索池凭据会随安装包一起分发；它不是像默认通道那样的服务端薄中转令牌。
+- 这意味着内置搜索池凭据会随安装包一起分发；它不是像试用通道那样的服务端薄中转令牌。
 - 你以后真正要“自己带着走”的就是这份私有配置文件。
 - 运行时动态状态不写回包内，而是写到：
   - `C:\Users\<用户名>\.consulting-report\search_runtime_state.json`
@@ -147,7 +147,7 @@ PyInstaller 把所有 `datas` 收到 `_internal/` 下面，`sys._MEIPASS` 在运
 **Q: 打包后同事还要自己构建前后端吗？**  
 A: 不需要。分发的是打包后的完整文件夹，直接双击 `exe` 即可。
 
-**Q: 默认通道不能用怎么办？**  
+**Q: 试用通道不能用怎么办？**  
 A: 先检查 `https://newapi.z0y0h.work/client/v1/models` 是否可访问；再确认 `managed_client_token.txt` 放的是 client token，而不是上游 API key；仍不通时可临时切到 `自定义 API`。
 
 **Q: 内置搜索池文件放在哪里？**  

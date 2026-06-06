@@ -435,7 +435,7 @@ class ChatHandler:
         if any(marker in lowered for marker in timeout_markers):
             if stream and self.settings.mode == "managed":
                 return (
-                    "默认通道响应较慢，本轮在等待上游流式结果时超时了。"
+                    "试用通道响应较慢，本轮在等待上游流式结果时超时了。"
                     "请稍后重试，或把问题拆短一些后分步发送。"
                 )
             if stream:

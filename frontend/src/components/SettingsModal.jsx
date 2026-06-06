@@ -99,7 +99,7 @@ export default function SettingsModal({ onClose, onSaved }) {
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-[#1a1a2e] rounded-2xl p-6 w-[560px] border border-[#2f3158] shadow-2xl">
         <h2 className="text-lg font-semibold mb-1 text-[#e2e2f0]">连接设置</h2>
-        <p className="text-sm text-[#8f93c9] mb-5">默认通道开箱即用，自定义 API 适合有自己模型额度的人。</p>
+        <p className="text-sm text-[#8f93c9] mb-5">试用通道仅供快速试用，无服务质量承诺，推荐有条件使用自定义 API。</p>
 
         <div className="grid grid-cols-2 gap-3 mb-5">
           <button
@@ -110,8 +110,8 @@ export default function SettingsModal({ onClose, onSaved }) {
                 : 'border-[#35375d] bg-[#15162d] hover:bg-[#1b1d39]'
             }`}
           >
-            <div className="text-sm font-semibold text-[#e2e2f0] mb-1">默认通道</div>
-            <div className="text-xs text-[#8f93c9]">开箱即用</div>
+            <div className="text-sm font-semibold text-[#e2e2f0] mb-1">试用通道</div>
+            <div className="text-xs text-[#8f93c9]">仅供快速试用</div>
             <div className="text-xs text-[#64ffda] mt-2">{form.managed_model}</div>
           </button>
           <button

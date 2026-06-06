@@ -25,7 +25,7 @@ class PackagingDocsTests(unittest.TestCase):
         for doc_name in ["BUILD.md", "WINDOWS_BUILD.md"]:
             content = (ROOT / doc_name).read_text(encoding="utf-8")
             self.assertIn("Windows", content)
-            self.assertIn("默认通道", content)
+            self.assertIn("试用通道", content)
             self.assertIn("自定义 API", content)
             self.assertIn("可审草稿", content)
             self.assertIn("/client/v1/models", content)
@@ -52,7 +52,7 @@ class PackagingDocsTests(unittest.TestCase):
 
     def test_readme_describes_managed_mode_without_claiming_word_pdf_export(self):
         content = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("默认通道", content)
+        self.assertIn("试用通道", content)
         self.assertIn("自定义 API", content)
         self.assertIn("Windows", content)
         self.assertIn("可审草稿", content)

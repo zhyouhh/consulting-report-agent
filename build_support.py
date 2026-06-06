@@ -74,7 +74,7 @@ def validate_bundle_managed_client_token(
         )
     except requests.RequestException as exc:
         raise ValueError(
-            f"无法验证 {filename} 是否可用于默认通道：{exc}"
+            f"无法验证 {filename} 是否可用于试用通道：{exc}"
         ) from exc
 
     if response.status_code != 200:
@@ -82,7 +82,7 @@ def validate_bundle_managed_client_token(
         if len(detail) > 200:
             detail = detail[:200] + "..."
         raise ValueError(
-            f"{filename} 未通过默认通道校验（状态码 {response.status_code}）：{detail}\n"
+            f"{filename} 未通过试用通道校验（状态码 {response.status_code}）：{detail}\n"
             "This file must contain the managed client token for /client, not the upstream API key."
         )
 
