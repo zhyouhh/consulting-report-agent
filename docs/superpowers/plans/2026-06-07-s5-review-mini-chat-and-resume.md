@@ -1,5 +1,75 @@
 # S5 审查迷你聊天 + 断点续审 + 触发轮注入（R1 + R2）Implementation Plan
 
+> **Version**: v5（codex 5 轮 review APPROVED）
+> **状态**: ✅ **APPROVED**（2026-06-07：R1–R3 spec+quality 合并轨 + R4 对抗式红队 + R5 红队复核）。可进入实施（C1 先行）。
+
+## R4 Round 4 对抗式红队终审 Response Annex
+
+Codex R4（对抗式红队，激进挑刺、反诱导）verdict: **CHANGES_NEEDED**。**五大攻击向量全部确认扛住**；只挖到 1 BLOCKER + 2 NIT，已处理：
+
+| R4 Item | 严重度 | 处理章节 | 概述 |
+|---|---|---|---|
+| **BLOCKER 1** — C5 run-bound 注入 lock 未写死全路径 release | 高 | C5 Task 5.1 Step 3 + Step 4 测试 | `acquire(blocking=False)` + `try/finally release` 全 7 路径 + 4 个 release 测试 |
+| **NIT 1** — 前端无 no-GET source guard | 低 | C5 Task 5.2 Step 4 | guard 锁住前端用 POST、不残留 `method:'GET'` |
+| **NIT 2** — File Map main.py 仍写 GET→POST | 低 | File Map | 同步为 C4 新增 POST 保留 GET / C5 删 GET |
+
+红队确认扛住的（真挣来）：store guard 五种 worker 退出场景（成功→done / 自修失败→errored / 断连→errored / discard→清除+旧 worker no-op / 异常→finally 收敛）；C1 独立性 + `system_trigger_no_tools` 下轮 `_build_turn_context` 重置不跨轮泄漏；DeepSeek 流式 helper/隔板/reasoning 回传/snapshot provider-valid；resume 三类角色交替边界；spot-check + 前端纯函数测试可行。
+
+**R5 红队复核：✅ APPROVED**——lock release 修对（`acquire(blocking=False)` 失败不进 finally 误 release、成功后 6 路径经 finally 闭合）、五向量扛住、无新 BLOCKER；1 个不挡实施 NIT（metadata 缺失 release 测试覆盖）已吸收进 C5 Task 5.1 Step 4。
+
+---
+
+## R3 Round 3 Review Response Annex
+
+Codex R3 verdict: **CHANGES_NEEDED**（收敛到 2 BLOCKER + 2 NIT，确认 R2 BLOCKER 1/3/5 + 3 NIT 已修）。剩状态机精细边界 + spec 贴合，全部采纳：
+
+| R3 Item | 严重度 | 处理章节 | 概述 |
+|---|---|---|---|
+| **BLOCKER 1** — set_errored 覆盖 done tombstone | 高 | C3 store `set_errored` + `atomic_commit` 失败分支 | 加 `status==running` CAS 护栏，done/errored/失配 no-op |
+| **BLOCKER 2** — C3 GET 过渡路径缺 orphan 收敛 | 高 | C3 Task 3.3 Step 1/2 | GET `run_worker` finally 也 `finalize_orphan_running` + 测试 |
+| **NIT 1** — atomic_commit temp 写入在 guard 内 | 低 | C3 store `atomic_commit` + Task 3.2 Step 3 | 改锁外写 temp、guard 内只 replace+stat+tombstone（spec §86）|
+| **NIT 2** — pending 未 flush 时新 run 覆盖 | 低 | C5 Task 5.3 Step 2 | 新 run 丢弃同类型旧 pending |
+
+codex R3 确认：C4 保留 GET、completion 仅 done、C2 git add、metadata fail-fast、candidate tool_call_id 配对均已修对。R3 明示"改完可进入对抗式红队终审"。
+
+---
+
+## R2 Round 2 Review Response Annex
+
+Codex R2 verdict: **CHANGES_NEEDED**。确认 R1 修对（循环导入真断开、metadata 修对、replace failure 修到位）；v2 暴露 5 新 BLOCKER + 3 NIT，集中在 **store 状态机退出路径闭环** + **C4 dormant 边界**，全部采纳：
+
+| R2 Item | 严重度 | 处理章节 | 概述 |
+|---|---|---|---|
+| **BLOCKER 1** — C4 GET→POST 破现有前端 | 高 | C4 目标/Task 4.2 标题+Step 1；C5 Task 5.1 删 GET | C4 改 POST 但前端 C5 才切 → 中间 GET 404。改：C4 新增 POST 保留 GET，C5 切 POST 后删 GET + 测 GET 仍可跑 |
+| **BLOCKER 2** — cancel/断连残留 running | 高 | C3 Task 3.2 Step 5.5 + store `finalize_orphan_running` | agent cancel 退出前 `set_errored`（CAS，discard no-op，断连带 snapshot 可 resume） |
+| **BLOCKER 3** — completion 误发（非 done 也发）| 高 | C4 Task 4.2 Step 2 | wrapper 仅 `get_done_mtime` truthy 才发 `review-completed`，否则只 error |
+| **BLOCKER 4** — worker 异常残留 running | 高 | store `finalize_orphan_running` + C4 run_worker finally | finally 先收敛 running→errored/清除、再 release lock |
+| **BLOCKER 5** — C2 commit 漏 add 文件 | 高 | C2 Task 2.4 Step 3 | git add 补 stream_parsing.py + chat.py + test_chat_runtime.py |
+| **NIT 1** — C2 标题仍写旧抽屉验 | 低 | C2 标题 | 改 backend 单测验证 |
+| **NIT 2** — extract candidate 配对细节 | 低 | C3 Task 3.2 Step 2 | 按 tool_call_id 配对 tool result + 解析 `status=="success"` |
+| **NIT 3** — C5 缺 metadata 友好拒绝 | 低 | C5 Task 5.1 Step 3 | `independent_review_done` 缺 run_id/mtime → 明确 error、非 500 |
+
+---
+
+## R1 Round 1 Review Response Annex
+
+Codex R1 verdict: **CHANGES_NEEDED**（spec+quality 合并一轨）。5 BLOCKER + 3 NIT，**全部采纳**（逐条过项目现实闸门，无过度设计误报）：
+
+| R1 Item | 严重度 | 处理章节 | 概述 |
+|---|---|---|---|
+| **BLOCKER 1** — 循环导入 | 高 | C2 Task 2.0（新增）+ Task 2.2 Step 4 | C5 要 chat.py import `_REVIEW_SESSION_STORE`、C2 要 independent_review import parser → `chat↔independent_review` 循环。改：新增 `backend/stream_parsing.py` 抽 `ThinkingStreamParser`，两边都从它 import |
+| **BLOCKER 2** — C2 旧抽屉验 content_delta 不兼容 | 高 | C2 目标 + Task 2.4 Step 2 | 旧抽屉只渲染 `content`。改：C2 只做 backend 单测验证，端到端在 C5 |
+| **BLOCKER 3** — atomic_commit 失败残留 running 卡死 | 高 | C3 Task 3.1（`atomic_commit_report` 重写）+ Task 3.2 Step 3 | replace 失败只 `return None`、record 留 running → first-run/resume 卡死。改：失败同 guard CAS 降级 errored（加 `errored_snapshot` 参数）+ 补测试 |
+| **BLOCKER 4** — candidate 重建不忠实 spec | 高 | C3 Task 3.2 Step 2 | spec 要从 messages 重建、不私存。改：加 `extract_latest_review_candidate_from_messages` + snapshot 禁 `candidate_text` 字段 + 补 resume 重建测试 |
+| **BLOCKER 5** — 前端 metadata 被 buildChatRequest 丢 | 高 | C5 Task 5.3 Files + Step 0 | `buildChatRequest` 只接 `systemTrigger`。改：加 `chatMaterials.js` 透传 `run_id`/`report_mtime_ns`（字符串）+ 测试 |
+| **NIT 1** — get_project_path 返回 Optional | 低 | C1 Task 1.2 / C3 Task 3.2 Step 3 | None 显式 fail-fast 避免 500 |
+| **NIT 2** — tool_call 累积 if vs while | 低 | C2 Task 2.2 Step 1 | 改 `while` 填占位支持 index 乱序 |
+| **NIT 3** — 临时 run_id 续审语义混淆 | 低 | C3 边界说明 | 写清 C3 临时 run_id 不提供续审语义 |
+
+codex R1 同时**核实确认**（消解了两个原"待核实"点）：`_finalize_assistant_turn` 按 `system_triggered` flag 只存 assistant（chat.py:6331）→ C1 注入非空 user 但报告不落 `conversation.json` 成立；`get_project_path` 存在 skill.py:905、返回 `Optional[Path]`。
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: 用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 逐 task 实施。Steps 用 checkbox（`- [ ]`）跟踪。本项目约定：**实施派 Claude agent，每 commit 后 review 派 Codex（gpt-5.5 xhigh）双轨（spec + quality）**，审→修→再审直到 APPROVED。
 
 **Goal:** 把 S5「独立审查」从"闷头读→一次性 write→结束"的死机感子代理，改造成**会说话的流式迷你聊天窗口 + 断点续审**；同时修 R2「AI 味自查 / 独立审查」触发轮答非所问（报告全文注入而非靠模型自觉 read）。
@@ -68,6 +138,7 @@
 ## File Map
 
 ### 新增
+- `backend/stream_parsing.py`（C2）— 从 chat.py 抽出 `ThinkingStreamParser`，chat.py 与 independent_review.py 共享 import（**避免 chat↔independent_review 循环导入**，codex R1 BLOCKER 1）
 - `backend/independent_review.py` 内新增 `ReviewSessionStore` 类（C3）— 进程内续审存档（两锁 / run_id / tombstone / candidate staging / 原子替换）
 - `frontend/tests/reviewChatWindow.test.mjs`（C5）— 窗口状态机 / content_delta 聚合 / 409 退避上限 / pending 队列纯函数测试
 
@@ -76,7 +147,7 @@
 |---|---|---|
 | `backend/chat.py` | C1, C5 | SYSTEM_TRIGGER_PROMPTS 文案；system_trigger 分支改报告全文注入 + 禁工具 + ready fail-fast(C1)；run-bound tombstone 校验 + `trigger_metadata` 参数(C5) |
 | `backend/independent_review.py` | C2, C3 | system prompt 会说话；`run()` 流式 + 小解析器 + thinking 剥离(C2)；校验失败自修 + candidate staging + ReviewSessionStore + 原子替换(C3) |
-| `backend/main.py` | C4, C5 | GET→POST stream + resume + discard + worker 落档/tombstone + completion 时序(C4)；`/api/chat/stream` 透传 `trigger_metadata`(C5) |
+| `backend/main.py` | C4, C5 | **新增 POST stream（C4，保留 GET）** + resume + discard + worker 落档/tombstone + completion 仅 done(C4)；`/api/chat/stream` 透传 `trigger_metadata` + **删除旧 GET stream**(C5) |
 | `backend/models.py` | C4 | `ChatRequest` 加 `run_id` / `report_mtime_ns` trigger metadata（opaque string） |
 | `frontend/src/components/IndependentReviewDrawer.jsx` | C5 | 重做为 `ReviewChatWindow`（run_id 生成 + 渲染复用 + 拖动/关闭/进度 + 状态机 + 409 退避 + resume 拿成功信号） |
 | `frontend/src/components/ChatPanel.jsx` | C5 | 抽可复用消息/工具渲染片段；`triggerSystemTurn` 忙时 pending 队列（FIFO + projectId） |
@@ -167,7 +238,10 @@ if system_trigger:
         return
 
     # R2: 注入前后端 ready fail-fast（不靠模型自觉 read）
-    project_path = self.skill_engine.get_project_path(project_id)  # 核实方法名/签名
+    project_path = self.skill_engine.get_project_path(project_id)  # skill.py:905，返回 Optional[Path]
+    if project_path is None:                                        # NIT 1：None fail-fast，避免异常变 500
+        yield {"type": "error", "data": "项目不存在"}
+        return
     if system_trigger == "independent_review_done":
         ready = self.skill_engine._has_effective_independent_review(project_path)
         report_rel = "plan/independent-review.md"
@@ -221,11 +295,28 @@ if self._turn_context.get("system_trigger_no_tools"):
 
 ---
 
-# Commit 2 — 审查 agent 会说话 + 流式（dormant，旧抽屉可验"看得到文字"）
+# Commit 2 — 审查 agent 会说话 + 流式（dormant，backend 单测验证）
 
 **前置**：Pre-flight Verification 通过。
 
-**目标**（spec §3.1 D1/D2）：① system prompt 从"闷头读→一次性 write→结束"改为"边审边产出过程旁白、不在 content 下结论、写完说一句完成"；② `run()` 从非流式改流式——在 independent_review.py 内实现**小型流式解析器**（参照 chat.py:2626-2764 主循环，但审查版**不 yield thinking**），复刻官渠约束 + 复用 `ThinkingStreamParser` 剥离 `<think>`，`reasoning_content` 收集回传但**不 yield**。本 commit 仍用现有 GET 抽屉验证"看得到文字"（POST/resume 留 C4、前端重做留 C5）。
+**目标**（spec §3.1 D1/D2）：① system prompt 从"闷头读→一次性 write→结束"改为"边审边产出过程旁白、不在 content 下结论、写完说一句完成"；② `run()` 从非流式改流式——在 independent_review.py 内实现**小型流式解析器**（参照 chat.py:2626-2764 主循环，但审查版**不 yield thinking**），复刻官渠约束 + 复用 `ThinkingStreamParser` 剥离 `<think>`，`reasoning_content` 收集回传但**不 yield**。本 commit 是 dormant 后端改造，**只做 backend 单测验证**——旧 GET 抽屉 `DrawerEvent` 只认 `content`、不认 `content_delta`，不能用来验收（codex R1 BLOCKER 2）；用户可见的端到端"看得到文字"在 C5 前端重做后验证。
+
+## Task 2.0: 抽 `ThinkingStreamParser` 到 `backend/stream_parsing.py`（解循环导入，codex R1 BLOCKER 1）
+
+C2 让 independent_review.py 用 `ThinkingStreamParser`、C5 让 chat.py import `_REVIEW_SESSION_STORE`（在 independent_review.py），若 independent_review 从 chat import parser 会形成 `chat→independent_review→chat` 循环。**先把 parser 抽出**，两边都从中性模块 import。
+
+**Files:**
+- Create: `backend/stream_parsing.py`
+- Modify: `backend/chat.py:199-260`（删 `ThinkingStreamParser` 定义，改 import）
+- Test: 现有 chat thinking/stream 测试不破
+
+**Steps:**
+- [ ] **Step 1**: 把 `ThinkingStreamParser`（chat.py:199-260 整类，含 `_emit_safe_prefix`/`_partial_tag_tail_len` 等私有方法）整体移到 `backend/stream_parsing.py`。
+- [ ] **Step 2**: chat.py 顶部加 `from .stream_parsing import ThinkingStreamParser`，删原定义。
+- [ ] **Step 3**: Run: `& '.\.venv\Scripts\python.exe' -m pytest tests/test_chat_runtime.py -k "thinking or stream" -q` → 现有 thinking 流式测试仍 PASS（不跑全量）。
+
+**Acceptance Criteria:**
+- `ThinkingStreamParser` 在 stream_parsing.py；chat.py import 它、行为不变；independent_review.py（Task 2.2）从 stream_parsing import、**不 from chat**（无循环）。
 
 ## Task 2.1: system prompt 改造为"会说话"
 
@@ -325,8 +416,8 @@ try:
             yield from drain(parser.feed(delta.content))   # content 里的 <think> 也剥
         if delta.tool_calls:
             for tcc in delta.tool_calls:
-                if tcc.index >= len(collected["tool_calls"]):
-                    collected["tool_calls"].append({"id": tcc.id or "", "type": "function", "function": {"name": "", "arguments": ""}})
+                while tcc.index >= len(collected["tool_calls"]):  # while（非 if）：填占位支持 index 乱序/跳号（codex R1 NIT 2）
+                    collected["tool_calls"].append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
                 tc = collected["tool_calls"][tcc.index]
                 if tcc.id:
                     tc["id"] = tcc.id
@@ -346,7 +437,7 @@ yield from drain(parser.flush())
 
 - [ ] **Step 3**: 无 tool_call 分支（当前 303-315）逻辑不变（`review_written` 检查 + `_verify_review_completeness` + `review-completed`），但 content 已流式 yield 过、不再一次性 yield `{"type":"content"}`。tool_call 执行 + `tool_result` yield（317-350）逻辑保留。
 
-- [ ] **Step 4**: import `ThinkingStreamParser`：`from .chat import ThinkingStreamParser`——**核实无循环 import**（chat.py 是否 import independent_review？grep `import independent_review` in chat.py）。若有循环 → 把 `ThinkingStreamParser` 抽到独立 `backend/stream_parsing.py`，chat.py + independent_review.py 都 from 它 import（顺带降耦合）。codex review 校。
+- [ ] **Step 4**: import：`from .stream_parsing import ThinkingStreamParser`（Task 2.0 已抽出）。**不要** `from .chat import`（循环，codex R1 BLOCKER 1）。
 
 - [ ] **Step 5**: 测试（方法名 + 要点，mock 流式 chunk 用类似 chat_runtime 的 `_make_chunk`）：
   - `test_run_streams_content_delta`：content 分多 chunk → yield 多个 `content_delta`。
@@ -373,8 +464,8 @@ yield from drain(parser.flush())
 ## Task 2.4: Commit C2
 
 - [ ] **Step 1**: Run: `& '.\.venv\Scripts\python.exe' -m pytest tests/test_independent_review.py -q` → Expected: PASS
-- [ ] **Step 2**:（可选手工）跑真实 S5 项目点独立审查，确认现有抽屉里出现**过程旁白文字**（不只工具调用）。
-- [ ] **Step 3**: `git add backend/independent_review.py tests/test_independent_review.py && git commit -m "feat(s5-r1): make review agent speak (process narration) + streaming run() with think-stripping"`
+- [ ] **Step 2**:（codex R1 BLOCKER 2：删除旧抽屉手工验证——旧抽屉 `DrawerEvent` 只渲染 `content`、不认 `content_delta`，无法验收 C2。）C2 验收只靠 backend 单测；前端端到端在 C5。
+- [ ] **Step 3**: `git add backend/chat.py backend/stream_parsing.py backend/independent_review.py tests/test_independent_review.py tests/test_chat_runtime.py && git commit -m "feat(s5-r1): extract ThinkingStreamParser to stream_parsing; review agent speaks + streaming run() with think-stripping"`（codex R2 BLOCKER 5：含 Task 2.0 抽出的 stream_parsing.py + chat.py import 改）
 - [ ] **Step 4**: 派 codex 双轨 review C2。
 
 ---
@@ -383,7 +474,7 @@ yield from drain(parser.flush())
 
 **目标**（spec §3.1 自修 + §3.2 store）：建进程内续审存储层；`run()` 重构为"候选 staging + 锁内原子替换 + 校验失败同 run 自修 + 支持 `resume_snapshot`"。本 commit 把**首次审查的 GET 路径接到新存储**（后端临时生成 run_id 过渡），**resume/discard/前端 run_id 留 C4/C5**。
 
-> commit 边界说明：C3 后用户行为不变（仍点按钮跑一次审查），但底层从"直写 canonical"换成"候选 staging + 锁内原子替换 + tombstone"。store 类纯单测 + GET 端到端可验。前端生成 run_id（替代后端临时 run_id）+ resume/discard 在 C4/C5。
+> commit 边界说明：C3 后用户行为不变（仍点按钮跑一次审查），但底层从"直写 canonical"换成"候选 staging + 锁内原子替换 + tombstone"。store 类纯单测 + GET 端到端可验。前端生成 run_id（替代后端临时 run_id）+ resume/discard 在 C4/C5。**C3 的后端临时 run_id 仅用于让首次审查走新存储、不提供续审语义**（续审靠 C4 前端生成的稳定 run_id 消除首包 race，spec §3.2；codex R1 NIT 3）。
 
 ## Task 3.1: 新增 `ReviewSessionStore`
 
@@ -441,20 +532,24 @@ class ReviewSessionStore:
             return ("reject", None)  # running：已被他人 claim
 
     def set_errored(self, project_id: str, run_id: str, snapshot: dict) -> bool:
-        """worker 落 errored：CAS run_id 仍当前才写（防丢弃后复活，B2）。"""
+        """worker 落 errored：CAS run_id 仍当前 **且 status==running** 才写
+        （防丢弃后复活 B2 + 防 late cancel/error 把已 done 的 tombstone 覆盖成 errored，codex R3 BLOCKER 1）。
+        done / 已 errored / record missing / run_id 失配 → no-op。"""
         with self._guard:
             rec = self._records.get(project_id)
-            if not rec or rec.get("run_id") != run_id:
+            if not rec or rec.get("run_id") != run_id or rec.get("status") != "running":
                 return False
             rec["status"] = "errored"
             rec["snapshot"] = snapshot
             return True
 
-    def atomic_commit_report(self, project_id, run_id, candidate_text, canonical_abs_path):
-        """成功路径（红队：取消后不写脏文件）——store guard 下一步原子完成：
-        校验 run_id 匹配且未 cancel → 写 temp（canonical 同目录）→ os.replace 原子替换 → stat st_mtime_ns → 写 tombstone。
-        返回 report_mtime_ns（opaque str）；run_id 失配/已 cancel → None（放弃）；
-        os.replace 失败 → 不写 tombstone、保留 errored（候选可由 messages 重建重试），返回 None。"""
+    def atomic_commit_report(self, project_id, run_id, temp_abs_path, canonical_abs_path, errored_snapshot):
+        """成功路径最后一步。**temp 已由调用方锁外写好并 close**（spec §86 / codex R3 NIT 1：内容/写 temp 在 guard 外，
+        guard 临界区极短、不让 discard 等文件写完）。store guard 内只做：校验 run_id 匹配且未 cancel →
+        os.replace(temp→canonical) → stat st_mtime_ns → 写 tombstone。
+        返回 report_mtime_ns（opaque str）；run_id 失配/已 cancel → None（不动 record，调用方删 temp）；
+        os.replace 失败 → **CAS（status==running 才）降级 errored**（带 errored_snapshot 供 resume 重试），返回 None。
+        ⚠️ codex R1 BLOCKER 3 / R3 BLOCKER 1：失败降级须 status==running 护栏，既翻 running→errored、又不覆盖已 done。"""
         with self._guard:
             rec = self._records.get(project_id)
             if not rec or rec.get("run_id") != run_id:
@@ -462,18 +557,13 @@ class ReviewSessionStore:
             ce = rec.get("cancel_event")
             if ce is not None and ce.is_set():
                 return None
-            dir_ = os.path.dirname(canonical_abs_path)
-            fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")  # 同目录，避免跨卷 os.replace 失败
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(candidate_text)
-                os.replace(tmp, canonical_abs_path)  # 原子；失败抛（勿用仍打开的句柄 replace）
+                os.replace(temp_abs_path, canonical_abs_path)  # 原子；temp 同目录、已 close（勿用仍打开的句柄）
             except Exception:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                return None  # 保留 errored，便于重试最终替换
+                if rec.get("status") == "running":   # 护栏：翻 running→errored，不覆盖 done
+                    rec["status"] = "errored"
+                    rec["snapshot"] = errored_snapshot
+                return None
             mtime_ns = str(os.stat(canonical_abs_path).st_mtime_ns)  # opaque string（避 JS 2^53）
             rec["status"] = "done"
             rec["snapshot"] = None
@@ -502,6 +592,22 @@ class ReviewSessionStore:
                 return rec.get("report_mtime_ns")
             return None
 
+    def finalize_orphan_running(self, project_id, run_id, fallback_snapshot=None) -> bool:
+        """worker 退出兜底（C4 run_worker finally，codex R2 BLOCKER 2+4）：worker 任何路径退出后，
+        若 record 仍 running（agent 没来得及落档的极端：未捕获异常绕过 set_errored、断连 cancel 后没落 snapshot），
+        CAS 收敛——有 fallback_snapshot → 翻 errored（可 resume）；无 → 清 record（让用户可 first-run 重启，不留死 running）。
+        done / 已 errored / 被 discard 清（record None 或 run_id 失配）→ no-op。"""
+        with self._guard:
+            rec = self._records.get(project_id)
+            if not rec or rec.get("run_id") != run_id or rec.get("status") != "running":
+                return False
+            if fallback_snapshot is not None:
+                rec["status"] = "errored"
+                rec["snapshot"] = fallback_snapshot
+            else:
+                self._records.pop(project_id, None)
+            return True
+
 
 _REVIEW_SESSION_STORE = ReviewSessionStore()
 ```
@@ -516,6 +622,9 @@ _REVIEW_SESSION_STORE = ReviewSessionStore()
   - `test_store_atomic_commit_aborts_when_cancelled`（cancel_event set → None、不替换 canonical）。
   - `test_store_atomic_commit_aborts_on_run_id_mismatch`。
   - `test_store_discard_run_id_match_sets_cancel_and_clears`；`test_store_discard_no_op_on_mismatch`。
+  - `test_store_atomic_commit_os_replace_failure_keeps_errored_and_allows_resume`（codex R1 BLOCKER 3：replace 失败 → record CAS 翻 errored 带 snapshot、不留 running、后续 resume 可续）。
+  - `test_store_atomic_commit_cancel_returns_none_no_dirty_write`（取消后 atomic_commit 不写 done、不留脏文件；此时 record 仍 running，由 worker finally `finalize_orphan_running` 收敛，见 C4，codex R2 BLOCKER 2）。
+  - `test_store_finalize_orphan_running`（仍 running：有 snapshot→errored 可 resume / 无 snapshot→清 record 可 first-run；done/已 errored/被 discard→no-op，codex R2 BLOCKER 2+4）。
 
 **Acceptance Criteria:**
 - store 单测全过；原子替换走同目录 temp + os.replace；mtime 为 opaque string；CAS 防复活/防误杀。
@@ -530,21 +639,25 @@ _REVIEW_SESSION_STORE = ReviewSessionStore()
 
 - [ ] **Step 1**: `run()` 签名加 `run_id: str | None = None`、`store: ReviewSessionStore | None = None`、`resume_snapshot: dict | None = None`、`supplement: str | None = None`。`resume_snapshot` 非空 → 用其 `messages`/`iteration`/`review_written` 恢复后接着循环（不重头）；`supplement` 有 → 末尾若 user/corrective 则合并进该条，否则在 provider-valid 边界后追加独立 user（避免连续 user 角色交替）。
 
-- [ ] **Step 2**: write_file 改 candidate staging：`_execute_tool` 的 write_file 分支不再 `skill_engine.write_file` 直写 canonical，而是把 content 存进**候选 buffer**（run() 局部 `candidate_text`，并随 collected/messages 进 snapshot 以便 resume 重建）；`_verify_review_completeness` 改为校验 **candidate**（不读旧 canonical）。给出改动代码。
+- [ ] **Step 2**: write_file 改 candidate staging：`_execute_tool` 的 write_file 分支不再 `skill_engine.write_file` 直写 canonical，而是把 content 存进 run() 局部 `candidate_text`。**候选只活在 messages 的 write_file tool_call arguments + run() 局部变量；snapshot 绝不单独存 `candidate_text` 字段**（codex R1 BLOCKER 4 / spec §3.2）。加 helper `extract_latest_review_candidate_from_messages(messages)`：扫 messages，对每个 `write_file(plan/independent-review.md)` 的 assistant tool_call，**按 `tool_call_id` 配对其后续 `role=tool` result message、解析 result JSON 取 `status == "success"`**（tool_call 本身无成功态，codex R2 NIT 2），取**最后一个成功**的那次 tool_call arguments 里的 `content` 作 candidate——resume 后据此恢复、不重头、不读旧 canonical。`_verify_review_completeness` 改为校验 candidate（不读旧 canonical）。给出 helper + 改动代码。
 
-- [ ] **Step 3**: 成功路径：no-tool-call 分支里 `review_written` 且 candidate verify 通过 → 若 `store` + `run_id` 提供则 `store.atomic_commit_report(project_id, run_id, candidate_text, canonical_abs_path)`（拿 `report_mtime_ns`，yield `review-completed` 带 mtime）；否则（无 store，理论不应发生）回退直写。canonical 绝对路径用 `skill_engine` 解析（核实：`get_project_path`/`_project_plan_path` 之类）。
+- [ ] **Step 3**: 成功路径：no-tool-call 分支里 `review_written` 且 candidate verify 通过 → **先锁外** `mkstemp(dir=canonical 同目录)` + 写 `candidate_text` + close（spec §86 / codex R3 NIT 1：内容/temp 写在 store guard 外）→ `store.atomic_commit_report(project_id, run_id, temp_abs_path, canonical_abs_path, errored_snapshot=<当前 provider-valid snapshot>)`：成功拿 `report_mtime_ns`、yield `review-completed` 带 mtime；**返回 None（run_id 失配/cancel/os.replace 失败）时调用方删 temp** + yield error 让用户续审重试最终替换（store 是必需依赖，无直写回退）。canonical 绝对路径用 `skill_engine.get_project_path(project_id)`（codex R1 确认存在 skill.py:905、返回 `Optional[Path]`；**None fail-fast** 避免 500）拼 `plan/independent-review.md`。
 
 - [ ] **Step 4**: 校验失败自修（B4）：candidate verify 失败时，**同 run** append corrective 消息（"报告缺少 marker/anchor/body 中的 X，请补全后重新一次性 write_file 完整报告"）并重试，**上限 2 次**；仍失败 → 若 store 提供则 `store.set_errored(snapshot)`（snapshot 含 corrective 历史，使续审从"已知差什么"接着修）+ yield error。
 
 - [ ] **Step 5**: snapshot provider-valid（§3.2）：errored 落档只存"可直接发 provider 的完整 message 序列"——tool_call 必已配 tool result、corrective 已 append 后边界完整、不含半截 content/tool_call。中断点（content/tool_call 半截、tool_call 未配 result）须先补齐再落 snapshot。给出 snapshot 构造 helper。
 
+- [ ] **Step 5.5（cancel 落档，codex R2 BLOCKER 2）**: run() 的 cancel 退出路径（`is_cancelled()` → yield cancelled、return）在 return 前 `store.set_errored(project_id, run_id, snapshot)`（CAS：被 discard 已清 record 时 no-op；断连时翻 errored 带完整 provider-valid snapshot 供精确 resume）。worker finally 的 `finalize_orphan_running`（C4）只兜底 agent 完全没落档的极端。
 - [ ] **Step 6**: 测试：
   - `test_run_resume_continues_from_snapshot_not_restart`（传 resume_snapshot → 不重头、create 次数从恢复点起）。
+  - `test_run_cancel_sets_errored_when_record_present_noop_when_discarded`（断连→errored 可 resume；discard 已清→no-op）。
   - `test_run_supplement_merges_or_appends_user_avoiding_consecutive_user`。
   - `test_run_self_corrects_on_verify_fail_up_to_twice_then_errored`（snapshot 含 corrective）。
   - `test_run_candidate_staging_not_committed_until_verified`（自修期间不完整候选不落 canonical）。
   - `test_run_success_calls_atomic_commit_and_emits_mtime`。
   - `test_run_snapshot_is_provider_valid_at_interrupt_boundaries`（半截 content / tool_call 未配 result / corrective 已 append）。
+  - `test_extract_latest_review_candidate_from_messages`（多次 write_file 取最后一次成功 arguments 重建 candidate；**snapshot 不含 candidate_text 字段**，codex R1 BLOCKER 4）。
+  - `test_resume_after_staged_write_rebuilds_candidate_from_messages`（成功 write_file 后、final 原子替换前中断 → resume 从 messages 重建、不重头、不读旧 canonical → 继续校验并原子替换）。
 
 **Acceptance Criteria:**
 - resume 接着跑不重头；自修 ≤2 次；candidate 未 verify 不替换 canonical；成功走 atomic_commit + emit mtime；snapshot provider-valid。
@@ -556,8 +669,8 @@ _REVIEW_SESSION_STORE = ReviewSessionStore()
 - Test: `tests/test_main_api.py`
 
 **Steps:**
-- [ ] **Step 1**: `run_worker` 里：用 `_REVIEW_SESSION_STORE` + 后端临时生成 run_id（如 `uuid4().hex`，C4 改前端传入）；`store.claim_first` → 失败则发 error；`agent.run(project_id, run_id=..., store=_REVIEW_SESSION_STORE, cancel_event=...)`；成功 worker 已落 tombstone（agent 内 atomic_commit）；errored 已落 snapshot。给出改动代码。
-- [ ] **Step 2**: 测试：现有 6 个 independent-review endpoint 用例仍过（行为不变）+ 新增 `test_get_review_uses_store_and_writes_tombstone_on_success`（mock agent 成功 → store 有 done tombstone）。
+- [ ] **Step 1**: `run_worker` 里：用 `_REVIEW_SESSION_STORE` + 后端临时生成 run_id（如 `uuid4().hex`，C4 改前端传入）；`store.claim_first` → 失败则发 error；`agent.run(project_id, run_id=..., store=_REVIEW_SESSION_STORE, cancel_event=...)`；成功 worker 已落 tombstone（agent 内 atomic_commit）；errored 已落 snapshot。**`finally` 先 `store.finalize_orphan_running(project_id, run_id, fallback_snapshot)` 收敛（与 C4 POST worker 同款兜底，codex R3 BLOCKER 2：C3 GET worker 异常/未落档也不留 running 卡死旧前端）、再 release lock。** 给出改动代码。
+- [ ] **Step 2**: 测试：现有 6 个 independent-review endpoint 用例仍过（行为不变）+ `test_get_review_uses_store_and_writes_tombstone_on_success`（mock agent 成功 → store done tombstone）+ `test_get_review_worker_exception_leaves_no_running_record`（codex R3 BLOCKER 2：GET worker 异常 → finally finalize 收敛、不留 running）。
 
 **Acceptance Criteria:**
 - GET 路径走新存储；首次审查成功落 tombstone；现有 endpoint 测试不破。
@@ -572,7 +685,7 @@ _REVIEW_SESSION_STORE = ReviewSessionStore()
 
 # Commit 4 — endpoint POST/resume/discard + ChatRequest trigger metadata（后端契约就绪）
 
-**目标**（spec §3.3 + models）：`GET`→`POST` stream + resume（`to_thread` acquire review lock + CAS + done 分派）+ 新增 discard + worker 按**前端 run_id** 落档 + completion 在 lock 释放后发 + **lock 全路径释放**。models.py 加 `run_id`/`report_mtime_ns`（C5 前端/注入用）。本 commit 后端续审契约就绪；前端 run_id 来源 + 窗口在 C5。
+**目标**（spec §3.3 + models）：**新增 `POST` stream（保留现有 `GET` 到 C5，codex R2 BLOCKER 1）** + resume（`to_thread` acquire review lock + CAS + done 分派）+ 新增 discard + worker 按**前端 run_id** 落档 + completion 仅 done 才发 + **lock 全路径释放 + worker finally 兜底收敛 store**。models.py 加 `run_id`/`report_mtime_ns`（C5 前端/注入用）。本 commit 后端续审契约就绪、**仍 dormant**（GET 旧路径不变）；前端 run_id 来源 + 窗口 + 删 GET 在 C5。
 
 ## Task 4.1: `ChatRequest` 加 trigger metadata（opaque string）
 
@@ -601,14 +714,14 @@ class ChatRequest(BaseModel):
 **Acceptance Criteria:**
 - run_id/report_mtime_ns 可选、为 str、大整数字符串不失精。
 
-## Task 4.2: `GET`→`POST /independent-review/stream` + resume 分派
+## Task 4.2: 新增 `POST /independent-review/stream` + resume 分派（保留 GET 到 C5）
 
 **Files:**
 - Modify: `backend/main.py:334-408`
 - Test: `tests/test_main_api.py`
 
 **Steps:**
-- [ ] **Step 1**: 改 POST，body `{resume: bool, run_id, supplement?}`（run_id 前端生成、必带、全程不变）。给出分派骨架（保留现 `generate()` 的 queue + `to_thread(run_worker)` + `is_disconnected`→cancel 结构）：
+- [ ] **Step 1（codex R2 BLOCKER 1：C4 不破现有 GET）**: **新增 `POST` endpoint，保留现有 `GET` wrapper**（GET 继续走 C3 后端临时 run_id 路径，到 C5 前端切 POST 后再删 GET）——避免 C4 后现有 GET 前端 404。POST body `{resume: bool, run_id, supplement?}`（run_id 前端生成、必带、全程不变）。POST 分派骨架（复用 `generate()` 的 queue + `to_thread(run_worker)` + `is_disconnected`→cancel 结构）：
 
 ```python
 @app.post("/api/projects/{project_id}/independent-review/stream")
@@ -653,8 +766,8 @@ async def independent_review_stream(project_id: str, request: Request):
 
 - [ ] **Step 2**: `generate()`：
   - **done 分支**：不启 worker，直接与首次成功同构发 `review-completed`（带 `{run_id, report_mtime_ns: done_mtime}`）+ `[DONE]`，解决"成功但通知丢失"。
-  - **正常/续审分支**：起 worker `agent.run(project_id, run_id=run_id, store=store, resume_snapshot=resume_snapshot, supplement=supplement, cancel_event=cancel_event)`；`run_worker` 的 `finally` 释放 review lock；worker 内 atomic_commit 已落 tombstone / set_errored 已落 snapshot。
-  - **completion 时序（红队）**：endpoint wrapper 在 **`worker_task` 完成 + lock release 后** 才发 `review-completed`（带 `{run_id, store tombstone mtime}`）——**不透传 agent 队列里的同名事件**（agent 内部完成信号只驱动落档）。保证前端见 completion 时 lock 已可用（否则前端立刻 `triggerSystemTurn` 抢 review lock 偶发失败，§3.4 注入需短暂持锁）。
+  - **正常/续审分支**：起 worker `agent.run(project_id, run_id=run_id, store=store, resume_snapshot=resume_snapshot, supplement=supplement, cancel_event=cancel_event)`；`run_worker` 的 `finally`：**先 `store.finalize_orphan_running(project_id, run_id, fallback_snapshot)` 兜底**（worker 任何路径退出后 record 仍 running 则收敛 errored/清除，codex R2 BLOCKER 4）、**再释放 review lock**。正常时 agent 内 atomic_commit 已落 tombstone / set_errored / cancel 落档已处理，finalize 为 no-op。
+  - **completion 时序（红队）**：endpoint wrapper 在 **`worker_task` 完成 + lock release 后**，**仅当 `store.get_done_mtime(project_id, run_id)` 返回 truthy** 才发 `review-completed`（带 `{run_id, 该 mtime}`）；否则（worker error / atomic replace 失败 / 自修失败结束）**只透出 error、不发 completed**（codex R2 BLOCKER 3）。**不透传 agent 队列里的同名事件**（agent 内部完成信号只驱动落档）。保证前端见 completion 时 lock 已可用（否则前端立刻 `triggerSystemTurn` 抢 review lock 偶发失败，§3.4 注入需短暂持锁）。
   - 给出 done 分支 + completion 发射代码。
 
 - [ ] **Step 3**: 结构化 timeout（spec §7）：审查 stream 请求 client 用 `httpx.Timeout(connect=15, read=60, write=30, pool=30)` 取代 `IndependentReviewAgent._build_client` 现 `timeout=120.0`，缩短 provider 无首包时 worker 持 review lock 的窗口。改 `independent_review.py:168-169`。
@@ -671,6 +784,9 @@ async def independent_review_stream(project_id: str, request: Request):
   - `test_review_completed_emitted_after_lock_release`（completion 时序）。
   - `test_review_completed_carries_run_id_and_mtime`。
   - `test_review_structured_timeout_kwargs`（client timeout 是结构化 httpx.Timeout）。
+  - `test_get_review_legacy_path_still_works_after_c4`（codex R2 BLOCKER 1：C4 后 GET 旧路径仍可跑）。
+  - `test_review_worker_error_does_not_emit_completed` + `test_atomic_commit_failure_does_not_emit_completed`（codex R2 BLOCKER 3：非 done 结束不发 review-completed）。
+  - `test_review_worker_exception_leaves_no_running_record`（codex R2 BLOCKER 4：未捕获异常 → finally `finalize_orphan_running` 收敛、不留 running）。
 
 **Acceptance Criteria:**
 - POST + resume(errored 续 / done 信号 / reject) + 409 退避 + lock 全路径释放 + completion 在 lock 释放后带 mtime。
@@ -718,15 +834,16 @@ async def independent_review_discard(project_id: str, request: Request):
 
 **Files:**
 - Modify: `backend/chat.py`（`chat_stream`/`_chat_stream_unlocked` 加 `trigger_metadata` 参数；system_trigger 分支 independent 路径加 run-bound 校验）
-- Modify: `backend/main.py:540-566`（`/api/chat/stream` 透传 `trigger_metadata`）
+- Modify: `backend/main.py:540-566`（`/api/chat/stream` 透传 `trigger_metadata`）+ **删除 C3/C4 保留的旧 GET `/independent-review/stream`**（前端已切 POST，codex R2 BLOCKER 1）
 - Test: `tests/test_chat_runtime.py`
 
 **Steps:**
 - [ ] **Step 1**: `chat_stream`(chat.py:~3138) 和 `_chat_stream_unlocked`(chat.py:~2499) 签名加 `trigger_metadata: dict | None = None`（含 `{run_id, report_mtime_ns}`），前者透传后者（参照现 `system_trigger` 透传方式）。
 - [ ] **Step 2**: `/api/chat/stream` route（main.py:540-566）把 `chat_request.run_id`/`chat_request.report_mtime_ns` 组成 `trigger_metadata={"run_id":..., "report_mtime_ns":...}` 传 `handler.chat_stream(..., trigger_metadata=...)`。**红队：不能只加 ChatRequest 字段而 handler 拿不到**（否则前端发了、chat 收不到、run-bound 误拒正常成功）。
 - [ ] **Step 3**: C1 的 system_trigger 注入分支，independent 路径加 run-bound（lint 无 run_id 维持 generic）：
-  - `independent_review_done`：短暂获取 review lock（拿不到→yield "审查状态变化，请稍后重试"），锁内：`_has_effective_independent_review` + `_REVIEW_SESSION_STORE.get_done_mtime(project_id, trigger_metadata["run_id"])` 匹配 + 读 `independent-review.md` 后再 `stat st_mtime_ns` 与 `trigger_metadata["report_mtime_ns"]` 复校（TOCTOU：防校验与读取间被新 run 替换）→ 一致才注入。
+  - `independent_review_done`：**`acquired = lock.acquire(blocking=False)`；未拿到 → yield "审查状态变化，请稍后重试" 并 return；拿到后用 `try: ... finally: lock.release()` 包裹全部校验/读/注入**（红队 BLOCKER：metadata 缺失 / ready false / run_id 不匹配 / mtime 不匹配 / read|stat 异常 / 成功注入——**每条路径都必须经 finally 释放 review lock**，漏一条后续审查永久 409，与 C4 lock 全路径释放同模式）。锁内：`_has_effective_independent_review` + `_REVIEW_SESSION_STORE.get_done_mtime(project_id, trigger_metadata["run_id"])` 匹配 + 读 `independent-review.md` 后再 `stat st_mtime_ns` 与 `trigger_metadata["report_mtime_ns"]` 复校（TOCTOU：防校验与读取间被新 run 替换）→ 一致才注入。
   - 注意 `report_mtime_ns` 两边都按 str 比较或都转 int，不混。
+  - **缺 metadata fail-fast（codex R2 NIT 3）**：`independent_review_done` 若 `trigger_metadata` 无 `run_id`/`report_mtime_ns` → yield 明确 error（**不要直接 `trigger_metadata["run_id"]`**，否则 KeyError→500）；lint 路径仍允许无 metadata。
   - 给出 run-bound 校验代码片段。
 - [ ] **Step 4**: 测试 `tests/test_chat_runtime.py`（spot-check）：
   - `test_system_trigger_run_bound_rejects_mismatched_run_id`（tombstone run_id ≠ metadata → 拒绝注入、不汇报旧报告）。
@@ -734,6 +851,7 @@ async def independent_review_discard(project_id: str, request: Request):
   - `test_trigger_metadata_threads_end_to_end`（mock /api/chat/stream 带 `{run_id, report_mtime_ns}` → 进入 chat.py tombstone 校验入口）。
   - `test_mtime_ns_large_int_string_preserved`（`"1760000000123456789"` 走 ChatRequest→trigger_metadata→校验全程 str 一致、校验通过；禁 JSON number）。
   - `test_lint_trigger_stays_generic_no_run_id`（lint 路径不要 run_id 仍走 generic ready）。
+  - **run-bound lock release 全路径（红队 BLOCKER）**：`test_run_bound_releases_lock_on_success` / `_on_run_id_mismatch` / `_on_mtime_mismatch` / `_on_ready_fail_or_read_error` / `_on_metadata_missing`——各路径（含 metadata 缺失但已拿锁，R5 NIT）后 review lock 都可再 acquire（不泄漏）。
 
 **Acceptance Criteria:**
 - run-bound：run_id/mtime 不匹配拒注入；metadata 端到端贯通；mtime 大整数字符串不失精；lint 维持 generic。
@@ -771,7 +889,7 @@ async def independent_review_discard(project_id: str, request: Request):
   - 409 退避计数到上限后给出口（纯函数 `nextBackoff(attempt)` + 上限判断）。
   - `parseDrawerEvent` content_delta + report_mtime_ns 原样 str（不转 Number）。
   - resume 命中 done → 触发 done 信号（不查 generic ready）。
-  - source guard：grep `IndependentReviewDrawer.jsx` 含 draggable / 关闭按钮 / 无 `setTimeout(.*onClose.*3000)` / completed 不调 discard / 主动关闭调 discard。
+  - source guard：grep `IndependentReviewDrawer.jsx` 含 draggable / 关闭按钮 / 无 `setTimeout(.*onClose.*3000)` / completed 不调 discard / 主动关闭调 discard / **用 POST、不残留 `method: 'GET'` 调审查 stream（红队 NIT：C5 已删 GET endpoint，锁住前端不留旧调用）**。
 
 **Acceptance Criteria:**
 - `node --test frontend/tests/reviewChatWindow.test.mjs` 全过；窗口可拖/可关/带进度；错误留存可续；completed 自动关不 discard、主动关 discard；mtime 原样 str。
@@ -779,17 +897,20 @@ async def independent_review_discard(project_id: str, request: Request):
 ## Task 5.3: ChatPanel 渲染复用 + pending 队列；WorkspacePanel 触发链
 
 **Files:**
-- Modify: `frontend/src/components/ChatPanel.jsx`（抽共享渲染片段；`triggerSystemTurn` pending 队列）
+- Modify: `frontend/src/utils/chatMaterials.js`（`buildChatRequest` 透传 trigger metadata `run_id`/`report_mtime_ns`——codex R1 BLOCKER 5：现 `buildChatRequest` 只接 `systemTrigger`、会丢 metadata，前端发了也到不了后端）
+- Modify: `frontend/src/components/ChatPanel.jsx`（抽共享渲染片段；`triggerSystemTurn` pending 队列；`buildChatRequest` 调用带 `triggerMetadata`）
 - Modify: `frontend/src/components/WorkspacePanel.jsx`（completed 才触发；metadata 不被剥）
 - Modify: `frontend/src/utils/`（pending 队列纯函数）
-- Test: `frontend/tests/`
+- Test: `frontend/tests/`（含 `chatMaterials.test.mjs` 扩展：metadata 透传 + mtime 大整数不转 Number）
 
 **Steps:**
+- [ ] **Step 0（metadata 透传根，codex R1 BLOCKER 5）**: `buildChatRequest`（`chatMaterials.js`）加 `triggerMetadata` 参数，原样写入 `run_id`/`report_mtime_ns`（**字符串、不转 Number**，避 JS 2^53）；`triggerSystemTurn` 调用时传入。补 `chatMaterials.test.mjs`：带 metadata 的 payload 构造 + 大整数 `"1760000000123456789"` 原样不失精。**没有这步，前端 metadata 根本到不了后端、run-bound 注入必失败。**
 - [ ] **Step 1**: 抽可复用消息/工具渲染片段（ChatPanel 现有 message/tool-call 渲染 → 共享组件/函数），`ReviewChatWindow` 复用。**渲染后端已剥离的 content，不在前端兜底剥 `<think>`**（审查窗口 content 已是后端剥离后）。
 - [ ] **Step 2**: `triggerSystemTurn` pending 队列（红队：审查后台跑时主聊天忙 → 现 `startStream` `if (loading||uploading) return false` 会静默丢成功审查不汇报）。抽纯函数 `pendingTriggerQueue`：
   - FIFO、**可存多条**（独立审查 + lint 可能先后完成）、每项带 `{triggerType, run_id, report_mtime_ns, projectId}`。
   - 忙时 enqueue；当前流结束后 flush 补发、仍带原 metadata。
   - **项目切换**：丢弃 / 只对原 projectId flush（否则用当前项目发旧项目 run metadata，后端虽拒但用户见错误、旧审查不汇报）。
+  - **新 run 覆盖旧 pending（codex R3 NIT 2）**：用户发起新独立审查时，丢弃队列里同类型（`independent_review_done`）的旧 pending 项——否则新 run 覆盖 store done tombstone 后，旧 pending flush 必被 run-bound reject、旧审查白跑、用户见错误。
   - 给出 enqueue/flush 纯函数实现。
 - [ ] **Step 3**: `WorkspacePanel`：`completed` 才触发主代理轮；workspace fetch 只刷 UI、**不作独立审查成功判定、不剥 trigger metadata**（成功判定靠 §3.3 done tombstone / completion 带的 `{run_id, report_mtime_ns}`）；保留 `shouldApplyProjectResponse` guard。`StagePanel` 按钮阶段化沿用现状（S5 才显两个按钮）。
 - [ ] **Step 4**: 测试（纯函数 + source guard）：
@@ -820,7 +941,7 @@ async def independent_review_discard(project_id: str, request: Request):
 **Files:** `tests/test_independent_review.py`、`test_main_api.py`、`test_chat_runtime.py`、`test_lint_report.py`、`test_skill_engine.py`、`frontend/tests/`
 
 **Steps:**
-- [ ] **Step 1**: 对照 spec §6 五节清单逐项核对前 5 commit 已覆盖的用例，补缺（尤其 §6 列了但前面没落的边界）。
+- [ ] **Step 1**: 对照 spec §6 五节清单逐项核对前 5 commit 已覆盖的用例，补缺（尤其 §6 列了但前面没落的边界）。**codex R1 指出的必补三类**：① `os.replace` 失败保留 errored 并可 resume（C3）；② staged write 后中断 resume 从 messages 重建 candidate（C3）；③ `buildChatRequest` metadata 透传 + mtime 大整数不转 Number（C5）。
 - [ ] **Step 2**: ⚠️ **禁止 `test_chat_runtime.py` 全量**（22 min/趟，记忆 [[feedback-skip-full-chat-runtime]]）；按改动 `-k` spot-check。
 - [ ] **Step 3**: 分文件跑：
   - Run: `& '.\.venv\Scripts\python.exe' -m pytest tests/test_independent_review.py tests/test_main_api.py tests/test_lint_report.py tests/test_skill_engine.py -q`
@@ -871,12 +992,12 @@ async def independent_review_discard(project_id: str, request: Request):
 
 无未覆盖 spec 节。
 
-**2. 待核实接驳点**（非 placeholder——是行号会漂的真实接驳，列为 **codex review plan 重点** + 实施时对照真实代码）：
-- `skill_engine.get_project_path` / canonical 报告绝对路径解析方法名（C1/C3/C5）
-- `_chat_stream_unlocked` 内 `request_kwargs` 加 tools 的精确赋值点（C1 Task 1.2 Step 2）
-- `_finalize_assistant_turn` 是否按 `system_triggered` flag（而非 "user 是否为空"）决定 persist（C1 关键不变量——若按 user 空判断需改 flag）
-- `ThinkingStreamParser` import 方向是否循环（C2 Task 2.2 Step 4，必要时抽 `backend/stream_parsing.py`）
-- chat.py 主循环 `_normalize_collected_assistant_tool_call_message` 精确名（C2/C3 复用参照）
+**2. 待核实接驳点**（✅ = codex R1 已确认 / ⬜ = 实施时对照真实代码核实）：
+- ✅ `skill_engine.get_project_path` 存在（skill.py:905，返回 `Optional[Path]`，None 须 fail-fast）
+- ✅ `_finalize_assistant_turn` 按 `system_triggered` flag 决定 persist（chat.py:6331）——C1 注入非空 user 但报告不落 `conversation.json` 成立
+- ✅ `ThinkingStreamParser` 循环导入已解（C2 Task 2.0 抽 `backend/stream_parsing.py`）
+- ⬜ `_chat_stream_unlocked` 内 `request_kwargs` 加 tools 的精确赋值点（C1 Task 1.2 Step 2，实施时 grep）
+- ⬜ chat.py 主循环 `_normalize_collected_assistant_tool_call_message` 精确名（C2/C3 复用参照，实施时核实）
 
 **3. Type consistency**：`run_id` / `report_mtime_ns` 全程 **str**（opaque，禁 int/Number）；`ReviewSessionStore` 方法名 `claim_first` / `claim_resume` / `set_errored` / `atomic_commit_report` / `discard` / `get_done_mtime` 在 C3 定义、C4/C5 一致引用（self-review 已修：C5 run-bound 用的 `get_done_mtime` 对齐 C3 定义，原 `get_active_cancel_event` 未被引用、已替换）。
 
