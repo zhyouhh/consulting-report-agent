@@ -108,6 +108,21 @@ class ChatRequestValidationTests(unittest.TestCase):
         self.assertIsNone(req.run_id)
         self.assertIsNone(req.report_mtime_ns)
 
+    def test_chat_request_rejects_int_report_mtime_ns(self):
+        # codex C4-spec NIT 4: lock the actual behavior for a raw int report_mtime_ns. pydantic
+        # v2 REJECTS it (no silent int->str coercion in lax mode for str fields), which is the
+        # safe outcome — a bare int would overflow JS Number.MAX_SAFE_INTEGER (2^53) on the wire.
+        # If this ever starts silently coercing, this test fails and flags the JS-precision hazard.
+        with self.assertRaises(ValidationError):
+            ChatRequest.model_validate(
+                {
+                    "project_id": "demo",
+                    "message_text": "",
+                    "system_trigger": "independent_review_done",
+                    "report_mtime_ns": 1760000000123456789,
+                }
+            )
+
 
 class CheckpointTableInvariantTests(unittest.TestCase):
     def test_checkpoint_tables_key_sets_are_aligned(self):
@@ -923,6 +938,71 @@ class WorkspaceApiTests(unittest.TestCase):
         # the agent was never constructed/run for a done resume.
         mock_agent_cls.return_value.run.assert_not_called()
 
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_resume_done_rereads_tombstone_before_completed(self, mock_summary, mock_agent_cls):
+        # codex C4-quality BLOCKER + NIT 1: the resume-done branch must NOT emit a stale
+        # review-completed from the cached done_mtime. After the handler sees done + releases the
+        # lock, a concurrent discard clears the tombstone; emit_completion re-reads get_done_mtime
+        # (now empty) and emits NEITHER completed NOR any stale mtime.
+        project_id = "demo-resume-done-reread"
+        run_id = "run-reread-done"
+        mock_summary.return_value = {"stage_code": "S5"}
+        mtime = self._seed_done_tombstone(project_id, run_id)
+        store = main_module._REVIEW_SESSION_STORE
+
+        async def call():
+            class ConnectedRequest:
+                async def json(self_inner):
+                    return {"resume": True, "run_id": run_id}
+
+                async def is_disconnected(self_inner):
+                    return False
+
+            # the handler runs claim_resume (sees done) + releases the lock during this await.
+            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            # simulate a concurrent discard landing AFTER the handler resolved done_mtime but
+            # BEFORE the stream's emit_completion re-reads the tombstone.
+            store.discard(project_id, run_id)
+            return await _collect_streaming_chunks(response)
+
+        chunks = asyncio.run(call())
+        text = "".join(chunks)
+        # the re-read intercepted the cleared tombstone: no stale completed, no stale mtime.
+        self.assertNotIn("review-completed", text)
+        self.assertNotIn(str(mtime), text)
+        # still a connected stream → [DONE] terminator is emitted (only completed is suppressed).
+        self.assertIn("data: [DONE]", text)
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_post_disconnect_emits_neither_completed_nor_done(self, mock_summary, mock_agent_cls):
+        # codex C4-quality BLOCKER + NIT 1: a disconnected POST stream emits neither
+        # review-completed nor [DONE], for BOTH the done short-circuit and the worker path.
+        # Exercise the done short-circuit (a tombstone exists) under a disconnected request.
+        project_id = "demo-post-disconnect"
+        run_id = "run-disc"
+        mock_summary.return_value = {"stage_code": "S5"}
+        self._seed_done_tombstone(project_id, run_id)
+
+        async def call():
+            class DisconnectedRequest:
+                async def json(self_inner):
+                    return {"resume": True, "run_id": run_id}
+
+                async def is_disconnected(self_inner):
+                    return True
+
+            response = await main_module.independent_review_stream_post(project_id, DisconnectedRequest())
+            return await _collect_streaming_chunks(response)
+
+        chunks = asyncio.run(call())
+        text = "".join(chunks)
+        self.assertNotIn("review-completed", text)
+        self.assertNotIn("[DONE]", text)
+        # the agent never runs on a done-tombstone resume.
+        mock_agent_cls.return_value.run.assert_not_called()
+
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
     def test_review_post_resume_reject_400(self, mock_summary):
         # resume against a missing / mismatched run_id is rejected (and the lock released).
@@ -1156,11 +1236,25 @@ class WorkspaceApiTests(unittest.TestCase):
                     if acquired:
                         lk.release()
                 chunks.append(chunk)
-            return lock_free_at_completion["value"], "".join(chunks)
+            return lock_free_at_completion["value"], chunks
 
-        free, text = asyncio.run(call())
+        free, chunks = asyncio.run(call())
+        text = "".join(chunks)
         self.assertIn("review-completed", text)
         self.assertTrue(free, "review lock must be free by the time review-completed is emitted")
+        # codex C4-spec NIT 3: the wrapper emits review-completed exactly once, and the agent's
+        # internal review-completed must be filtered out (the agent yields one too) — guards
+        # against a regression that passes the internal event through and double-emits.
+        completed = [
+            json.loads(c[len("data: "):])
+            for c in "".join(chunks).split("\n\n")
+            if c.startswith("data: ") and '"review-completed"' in c
+        ]
+        self.assertEqual(len(completed), 1, f"expected exactly one review-completed, got {completed}")
+        # the surviving event is the wrapper's (run_id present), NOT the agent's internal one
+        # (which carries a 'path' and no 'run_id').
+        self.assertEqual(completed[0]["run_id"], run_id)
+        self.assertNotIn("path", completed[0])
 
     @mock.patch("backend.main.IndependentReviewAgent")
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
@@ -1287,7 +1381,14 @@ class WorkspaceApiTests(unittest.TestCase):
             with mock.patch("backend.independent_review.OpenAI"):
                 agent._build_client()
 
-        self.assertIsInstance(captured["timeout"], _httpx.Timeout)
+        timeout = captured["timeout"]
+        self.assertIsInstance(timeout, _httpx.Timeout)
+        # codex C4-spec NIT 2: lock the concrete bounds so a regression to a flat float (or a
+        # widened no-first-byte window) is caught.
+        self.assertEqual(timeout.connect, 15.0)
+        self.assertEqual(timeout.read, 60.0)
+        self.assertEqual(timeout.write, 30.0)
+        self.assertEqual(timeout.pool, 30.0)
 
     @mock.patch("backend.main.IndependentReviewAgent")
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
