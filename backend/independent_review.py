@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Iterator
@@ -166,6 +168,52 @@ INDEPENDENT_REVIEW_TOOLS = [
 ]
 
 
+def extract_latest_review_candidate_from_messages(messages) -> str | None:
+    """从 provider-valid messages 重建候选报告正文（resume 用，不读旧 canonical / 不依赖进程内 buffer）。
+
+    扫 messages：对每个 `write_file(plan/independent-review.md)` 的 assistant tool_call，**按
+    `tool_call_id` 配对其后续 `role=tool` result message**、解析 result JSON 取 `status == "success"`
+    （tool_call 本身无成功态，codex R2 NIT 2），取**最后一个成功**的那次 tool_call arguments 里的
+    `content` 作候选。无成功 write_file → None（codex R1 BLOCKER 4：snapshot 不单独存 candidate_text，
+    候选确定性地从 messages 重建）。"""
+    # tool_call_id -> result status（从 role=tool 消息收集）
+    result_status_by_id: dict[str, str] = {}
+    for m in messages:
+        if m.get("role") != "tool":
+            continue
+        tc_id = m.get("tool_call_id")
+        if not tc_id:
+            continue
+        try:
+            parsed = json.loads(m.get("content") or "{}")
+        except Exception:
+            parsed = {}
+        if isinstance(parsed, dict):
+            result_status_by_id[tc_id] = parsed.get("status", "")
+
+    latest_candidate: str | None = None
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            if (fn.get("name") or "") != "write_file":
+                continue
+            tc_id = tc.get("id") or ""
+            if not tc_id or result_status_by_id.get(tc_id) != "success":
+                continue
+            try:
+                tc_args = json.loads(fn.get("arguments") or "{}")
+            except Exception:
+                continue
+            if not isinstance(tc_args, dict):
+                continue
+            if tc_args.get("file_path") != CANONICAL_REVIEW_PATH:
+                continue
+            latest_candidate = tc_args.get("content", "")
+    return latest_candidate
+
+
 class IndependentReviewAgent:
     """Independent S5 reviewer. A caller should hold the per-project lock while running."""
 
@@ -265,51 +313,92 @@ class IndependentReviewAgent:
             msg_dict["reasoning_content"] = reasoning_content
         return msg_dict
 
+    MAX_VERIFY_SELF_CORRECTS = 2
+
     def run(
         self,
         project_id: str,
         draft_word_count: int | None = None,
         cancel_event: threading.Event | None = None,
+        run_id: str | None = None,
+        store: "ReviewSessionStore | None" = None,
+        resume_snapshot: dict | None = None,
+        supplement: str | None = None,
     ) -> Iterator[Event]:
         def is_cancelled() -> bool:
             return cancel_event is not None and cancel_event.is_set()
 
-        def cancelled_event() -> Event:
-            return {"type": "cancelled", "data": "客户端断开，已取消审查"}
+        # ---- candidate staging 状态：候选只活在 messages 的 write_file tool_call
+        # arguments + 此局部变量；snapshot 绝不单独存 candidate_text（codex R1 BLOCKER 4）。
+        candidate_text: str | None = None
+        self_correct_count = 0
+
+        def snapshot_now(iteration_value: int) -> dict:
+            return self._build_provider_valid_snapshot(
+                messages,
+                iteration_value,
+                candidate_text is not None,
+            )
+
+        def cancel_and_return(iteration_value: int) -> Iterator[Event]:
+            # cancel 落档（Step 5.5 / codex R2 BLOCKER 2）：return 前 set_errored（CAS：被 discard
+            # 已清 record 时 no-op；断连时翻 errored 带完整 provider-valid snapshot 供精确 resume）。
+            if store is not None and run_id is not None:
+                store.set_errored(project_id, run_id, snapshot_now(iteration_value))
+            yield {"type": "cancelled", "data": "客户端断开，已取消审查"}
 
         if is_cancelled():
-            yield cancelled_event()
+            # resume_snapshot 尚未恢复 messages，此处无可落档内容；直接退。
+            yield {"type": "cancelled", "data": "客户端断开，已取消审查"}
             return
 
-        word_count = draft_word_count
-        if word_count is None:
-            try:
-                report_path = self.skill_engine.get_primary_report_path(project_id)
-                report_text = Path(report_path).read_text(encoding="utf-8")
-                word_count = self.skill_engine._count_words(report_text)
-            except Exception as exc:
-                yield {"type": "error", "detail": f"读取正文失败：{str(exc)}"}
+        # 续审恢复：resume_snapshot 非空 → 用其 messages/review_written 恢复后接着循环（不重头、
+        # 不读旧 canonical）。candidate 从 messages 重建（最后一次成功 write_file 的 arguments.content）。
+        if resume_snapshot is not None:
+            messages = list(resume_snapshot.get("messages") or [])
+            if not messages:
+                messages = [{"role": "system", "content": INDEPENDENT_REVIEW_SYSTEM_PROMPT}]
+            start_iteration = int(resume_snapshot.get("iteration") or 1)
+            candidate_text = extract_latest_review_candidate_from_messages(messages)
+        else:
+            word_count = draft_word_count
+            if word_count is None:
+                try:
+                    report_path = self.skill_engine.get_primary_report_path(project_id)
+                    report_text = Path(report_path).read_text(encoding="utf-8")
+                    word_count = self.skill_engine._count_words(report_text)
+                except Exception as exc:
+                    yield {"type": "error", "detail": f"读取正文失败：{str(exc)}"}
+                    return
+
+            if word_count > MAX_DRAFT_WORDS_FOR_REVIEW:
+                yield {
+                    "type": "error",
+                    "detail": f"正文超过 100k 字（当前 {word_count} 字），暂不支持自动审查。建议先精简正文或拆分章节单独审查。",
+                }
                 return
+            messages = [{"role": "system", "content": INDEPENDENT_REVIEW_SYSTEM_PROMPT}]
+            start_iteration = 1
 
-        if word_count > MAX_DRAFT_WORDS_FOR_REVIEW:
-            yield {
-                "type": "error",
-                "detail": f"正文超过 100k 字（当前 {word_count} 字），暂不支持自动审查。建议先精简正文或拆分章节单独审查。",
-            }
-            return
+        # supplement（续审补充指令）：末尾已是 user/corrective 则合并进该条；否则在 provider-valid
+        # 边界后追加一条独立 user（避免连续 user 角色交替触发官渠 400）。
+        if supplement:
+            if messages and messages[-1].get("role") == "user":
+                existing = messages[-1].get("content") or ""
+                messages[-1]["content"] = (existing + "\n\n补充：" + supplement) if existing else supplement
+            else:
+                messages.append({"role": "user", "content": "补充：" + supplement})
 
         if is_cancelled():
-            yield cancelled_event()
+            yield from cancel_and_return(start_iteration)
             return
 
         client = self._build_client()
         model = self._resolve_model()
-        messages = [{"role": "system", "content": INDEPENDENT_REVIEW_SYSTEM_PROMPT}]
-        review_written = False
 
-        for iteration in range(1, self.MAX_ITERATIONS + 1):
+        for iteration in range(start_iteration, self.MAX_ITERATIONS + 1):
             if is_cancelled():
-                yield cancelled_event()
+                yield from cancel_and_return(iteration)
                 return
             yield {"type": "progress", "step": "thinking", "detail": f"第 {iteration} 轮"}
             request_kwargs = {
@@ -322,11 +411,13 @@ class IndependentReviewAgent:
                 request_kwargs["tool_choice"] = "auto"
 
             if is_cancelled():
-                yield cancelled_event()
+                yield from cancel_and_return(iteration)
                 return
             try:
                 response = client.chat.completions.create(**request_kwargs)
             except Exception as exc:
+                if store is not None and run_id is not None:
+                    store.set_errored(project_id, run_id, snapshot_now(iteration))
                 yield {"type": "error", "detail": f"模型调用失败：{str(exc)}"}
                 return
 
@@ -355,7 +446,9 @@ class IndependentReviewAgent:
             try:
                 for chunk in response:
                     if is_cancelled():
-                        yield cancelled_event()
+                        # 流式中断：collected 尚未 append 进 messages，snapshot 仍 provider-valid。
+                        yield from drain(parser.flush())
+                        yield from cancel_and_return(iteration)
                         return
                     if not chunk.choices:
                         continue
@@ -383,6 +476,8 @@ class IndependentReviewAgent:
                                     tc["function"]["arguments"] += tcc.function.arguments
             except Exception as exc:
                 yield from drain(parser.flush())
+                if store is not None and run_id is not None:
+                    store.set_errored(project_id, run_id, snapshot_now(iteration))
                 yield {"type": "error", "detail": f"模型调用失败：{str(exc)}"}
                 return
             yield from drain(parser.flush())
@@ -438,7 +533,8 @@ class IndependentReviewAgent:
                 messages.append(self._serialize_assistant_tool_call_message(collected))
                 for tc in tool_calls:
                     if is_cancelled():
-                        yield cancelled_event()
+                        # 中断点 tool_call 未配 result：先补齐 result 再落档（snapshot provider-valid）。
+                        yield from cancel_and_return(iteration)
                         return
                     fn = tc.get("function") or {}
                     tool_name = fn.get("name", "") or ""
@@ -449,7 +545,7 @@ class IndependentReviewAgent:
 
                     yield {"type": "tool_call", "tool": tool_name, "args": tool_args}
                     if is_cancelled():
-                        yield cancelled_event()
+                        yield from cancel_and_return(iteration)
                         return
                     result = self._execute_tool(project_id, tool_name, tool_args)
                     yield {
@@ -470,25 +566,126 @@ class IndependentReviewAgent:
                         and result.get("status") == "success"
                         and tool_args.get("file_path") == CANONICAL_REVIEW_PATH
                     ):
-                        review_written = True
+                        # candidate staging：不直写 canonical，把候选正文存进局部变量。
+                        candidate_text = tool_args.get("content", "")
                 continue
 
             # 无 tool_call：content 已在流式阶段逐段 yield 过，这里不再一次性 yield content。
             messages.append(self._serialize_assistant_tool_call_message(collected))
             if is_cancelled():
-                yield cancelled_event()
+                yield from cancel_and_return(iteration)
                 return
-            if not review_written:
+            if candidate_text is None:
+                # 从未写过候选——这是模型问题，不进自修（自修只针对"写了但不完整"）。
+                if store is not None and run_id is not None:
+                    store.set_errored(project_id, run_id, snapshot_now(iteration))
                 yield {"type": "error", "detail": "审查代理未生成报告，请重试"}
                 return
-            review_error = self._verify_review_completeness(project_id)
+            review_error = self._verify_review_completeness(candidate_text)
             if review_error:
+                # 校验失败自修（B4）：同 run append corrective + 重试，上限 2 次；仍失败 → errored 落档。
+                if self_correct_count < self.MAX_VERIFY_SELF_CORRECTS:
+                    self_correct_count += 1
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"上一版审查报告不合格：{review_error}。"
+                                "请补全缺失的完成标记 / 5 个维度章节标题 / 实质正文后，"
+                                "再一次性 write_file 写完整报告到 plan/independent-review.md。"
+                            ),
+                        }
+                    )
+                    continue
+                if store is not None and run_id is not None:
+                    store.set_errored(project_id, run_id, snapshot_now(iteration))
                 yield {"type": "error", "detail": review_error}
                 return
-            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH}
+            # 校验通过 → 成功路径：先锁外写 temp，再 store guard 内原子替换 + 写 tombstone。
+            yield from self._commit_verified_candidate(
+                project_id, run_id, store, candidate_text, snapshot_now(iteration)
+            )
             return
 
+        if store is not None and run_id is not None:
+            store.set_errored(project_id, run_id, snapshot_now(self.MAX_ITERATIONS))
         yield {"type": "error", "detail": f"审查超时（超过 {self.MAX_ITERATIONS} 轮），请重试"}
+
+    def _commit_verified_candidate(
+        self,
+        project_id: str,
+        run_id: str | None,
+        store: "ReviewSessionStore | None",
+        candidate_text: str,
+        errored_snapshot: dict,
+    ) -> Iterator[Event]:
+        """成功路径：候选已校验通过。**先锁外** mkstemp(同目录) + 写 candidate + close →
+        生产路径（store + run_id 都在）走 store.atomic_commit_report（guard 内只做 run_id/cancel
+        校验 + os.replace + stat + tombstone，spec §86 / codex R3 NIT 1：内容/写 temp 在 store guard
+        外）；atomic_commit 返回 None（run_id 失配 / cancel / os.replace 失败）→ 删 temp + yield error，
+        **无直写回退**（os.replace 失败时 store 已 CAS 降级 errored 供 resume）。
+        store/run_id 缺失（standalone：无并发可守）→ 同款锁外 temp + 直接 os.replace 原子替换。"""
+        # canonical 绝对路径：get_project_path 返回 Optional[Path]，None fail-fast（避免异常变 500）。
+        project_path = self.skill_engine.get_project_path(project_id)
+        if project_path is None:
+            if store is not None and run_id is not None:
+                store.set_errored(project_id, run_id, errored_snapshot)
+            yield {"type": "error", "detail": "项目路径不存在，无法保存审查报告，请重试"}
+            return
+        canonical_abs_path = str((project_path / CANONICAL_REVIEW_PATH).resolve())
+        canonical_dir = os.path.dirname(canonical_abs_path)
+        try:
+            os.makedirs(canonical_dir, exist_ok=True)
+            # 锁外写 temp：同目录（os.replace 跨卷会失败）+ close（勿用仍打开的句柄 replace）。
+            fd, temp_abs_path = tempfile.mkstemp(dir=canonical_dir, prefix=".independent-review-", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(candidate_text)
+            except Exception:
+                try:
+                    os.unlink(temp_abs_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as exc:
+            if store is not None and run_id is not None:
+                store.set_errored(project_id, run_id, errored_snapshot)
+            yield {"type": "error", "detail": f"写入审查报告失败：{str(exc)}"}
+            return
+
+        if store is not None and run_id is not None:
+            report_mtime_ns = store.atomic_commit_report(
+                project_id, run_id, temp_abs_path, canonical_abs_path, errored_snapshot
+            )
+            if report_mtime_ns is None:
+                # run_id 失配 / 已 cancel / os.replace 失败：删 temp（atomic_commit 失败时未消费它），
+                # yield error 让用户续审重试最终替换（os.replace 失败已在 store 内 CAS 降级 errored）。
+                # 无直写回退。
+                try:
+                    if os.path.exists(temp_abs_path):
+                        os.unlink(temp_abs_path)
+                except OSError:
+                    pass
+                yield {"type": "error", "detail": "审查报告保存被取消或失败，请重试"}
+                return
+        else:
+            # standalone（无 store）：无并发守卫需求，直接原子替换。
+            try:
+                os.replace(temp_abs_path, canonical_abs_path)
+                report_mtime_ns = str(os.stat(canonical_abs_path).st_mtime_ns)
+            except Exception as exc:
+                try:
+                    if os.path.exists(temp_abs_path):
+                        os.unlink(temp_abs_path)
+                except OSError:
+                    pass
+                yield {"type": "error", "detail": f"写入审查报告失败：{str(exc)}"}
+                return
+        yield {
+            "type": "review-completed",
+            "path": CANONICAL_REVIEW_PATH,
+            "report_mtime_ns": report_mtime_ns,
+        }
 
     def _execute_tool(self, project_id: str, tool_name: str, args: dict) -> dict:
         if tool_name == "read_file":
@@ -506,19 +703,19 @@ class IndependentReviewAgent:
                     "detail": f"独立审查代理只能写 {CANONICAL_REVIEW_PATH}，请求被拒",
                     "summary": "路径不允许",
                 }
-            try:
-                self.skill_engine.write_file(project_id, file_path, args.get("content", ""))
-                return {"status": "success", "summary": "审查报告已写入"}
-            except Exception as exc:
-                return {"status": "error", "detail": str(exc), "summary": "写入失败"}
+            # candidate staging：不再直写 canonical。候选正文只活在本次 write_file 的
+            # tool_call arguments（已在 messages）+ run() 局部 candidate_text；最终成功时由
+            # run() 锁外写 temp、store guard 内原子替换 canonical（codex R1 BLOCKER 4 / spec §3.2）。
+            # 这里只校验路径并回成功，让 run() 把 arguments.content 收作候选。
+            return {"status": "success", "summary": "审查报告已写入"}
 
         return {"status": "error", "detail": f"未知工具 {tool_name}", "summary": "未知工具"}
 
-    def _verify_review_completeness(self, project_id: str) -> str | None:
-        try:
-            text = self.skill_engine.read_file(project_id, CANONICAL_REVIEW_PATH)
-        except Exception:
-            return "读取审查报告失败，请重试"
+    def _verify_review_completeness(self, candidate_text: str | None) -> str | None:
+        """校验 candidate（不读旧 canonical）：marker + 5 维度 anchor + 实质正文。"""
+        if candidate_text is None:
+            return "审查报告未完整生成：缺少候选报告，请重试"
+        text = candidate_text
         if INDEPENDENT_REVIEW_COMPLETION_MARKER not in text:
             return "审查报告缺少完成标记，请重试"
         missing_anchors = [anchor for anchor in INDEPENDENT_REVIEW_ANCHORS if anchor not in text]
@@ -527,6 +724,43 @@ class IndependentReviewAgent:
         if not self.skill_engine._has_substantive_body(text):
             return "审查报告未完整生成：正文为空，请重试"
         return None
+
+    @staticmethod
+    def _build_provider_valid_snapshot(messages, iteration, review_written) -> dict:
+        """构造 errored 落档 snapshot：只存"可直接发 provider 的完整 message 序列"。
+        中断点若 assistant tool_call 未配 tool result（cancel mid tool loop），补齐缺失的
+        tool result stub，使续审首个请求即 provider-valid（codex Step 5；不裁剪/不存 candidate_text）。"""
+        normalized = [dict(m) for m in messages]
+        # 找尾部任何 assistant tool_call 缺失的 tool result，按 tool_call_id 补 stub。
+        existing_tool_ids = {
+            m.get("tool_call_id")
+            for m in normalized
+            if m.get("role") == "tool" and m.get("tool_call_id")
+        }
+        padding: list[dict] = []
+        for m in normalized:
+            if m.get("role") != "assistant":
+                continue
+            for tc in m.get("tool_calls") or []:
+                tc_id = tc.get("id") or ""
+                if tc_id and tc_id not in existing_tool_ids:
+                    padding.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": json.dumps(
+                                {"status": "error", "summary": "审查中断，工具结果未生成"},
+                                ensure_ascii=False,
+                            ),
+                        }
+                    )
+                    existing_tool_ids.add(tc_id)
+        normalized.extend(padding)
+        return {
+            "messages": normalized,
+            "iteration": iteration,
+            "review_written": bool(review_written),
+        }
 
 
 _INDEPENDENT_REVIEW_LOCKS: dict[str, threading.Lock] = {}
@@ -538,3 +772,125 @@ def get_independent_review_lock(project_id: str) -> threading.Lock:
         if project_id not in _INDEPENDENT_REVIEW_LOCKS:
             _INDEPENDENT_REVIEW_LOCKS[project_id] = threading.Lock()
         return _INDEPENDENT_REVIEW_LOCKS[project_id]
+
+
+class ReviewSessionStore:
+    """进程内续审存档 + 防过期写入 + 成功证据。per-project 至多一条 record。
+    两把锁拆清职责：review lock（_INDEPENDENT_REVIEW_LOCKS，运行/续审串行，长跑 worker 持有）与
+    store guard（本类，极短临界区，保护 record 原子读写）。store 读写只用 store guard，
+    绝不依赖 review lock（否则 worker 跑着时 discard 拿不到锁、无法取消）。"""
+
+    def __init__(self):
+        self._guard = threading.Lock()
+        # project_id -> {run_id, status, snapshot, cancel_event, report_mtime_ns}
+        self._records: dict[str, dict] = {}
+
+    def claim_first(self, project_id: str, run_id: str, cancel_event: threading.Event) -> bool:
+        """首次发起：CAS 写 running，覆盖旧 errored/done tombstone。
+        已有 active running → False（并发首发被拒，调用方须 release review lock）。"""
+        with self._guard:
+            rec = self._records.get(project_id)
+            if rec and rec.get("status") == "running":
+                return False
+            self._records[project_id] = {
+                "run_id": run_id, "status": "running",
+                "snapshot": None, "cancel_event": cancel_event, "report_mtime_ns": None,
+            }
+            return True
+
+    def claim_resume(self, project_id: str, run_id: str, cancel_event: threading.Event):
+        """续审分派（等 review lock 后在 store guard 下重读再调）：
+        ('errored', snapshot)→CAS running 取 snapshot 续跑；('done', mtime_ns)→已成功信号；('reject', None)→无记录/run_id 不匹配/已被 claim。"""
+        with self._guard:
+            rec = self._records.get(project_id)
+            if not rec or rec.get("run_id") != run_id:
+                return ("reject", None)
+            if rec["status"] == "errored":
+                snapshot = rec["snapshot"]
+                rec["status"] = "running"
+                rec["cancel_event"] = cancel_event
+                rec["snapshot"] = None
+                return ("errored", snapshot)
+            if rec["status"] == "done":
+                return ("done", rec.get("report_mtime_ns"))
+            return ("reject", None)  # running：已被他人 claim
+
+    def set_errored(self, project_id: str, run_id: str, snapshot: dict) -> bool:
+        """worker 落 errored：CAS run_id 仍当前 **且 status==running** 才写
+        （防丢弃后复活 B2 + 防 late cancel/error 把已 done 的 tombstone 覆盖成 errored，codex R3 BLOCKER 1）。
+        done / 已 errored / record missing / run_id 失配 → no-op。"""
+        with self._guard:
+            rec = self._records.get(project_id)
+            if not rec or rec.get("run_id") != run_id or rec.get("status") != "running":
+                return False
+            rec["status"] = "errored"
+            rec["snapshot"] = snapshot
+            return True
+
+    def atomic_commit_report(self, project_id, run_id, temp_abs_path, canonical_abs_path, errored_snapshot):
+        """成功路径最后一步。**temp 已由调用方锁外写好并 close**（spec §86 / codex R3 NIT 1：内容/写 temp 在 guard 外，
+        guard 临界区极短、不让 discard 等文件写完）。store guard 内只做：校验 run_id 匹配且未 cancel →
+        os.replace(temp→canonical) → stat st_mtime_ns → 写 tombstone。
+        返回 report_mtime_ns（opaque str）；run_id 失配/已 cancel → None（不动 record，调用方删 temp）；
+        os.replace 失败 → **CAS（status==running 才）降级 errored**（带 errored_snapshot 供 resume 重试），返回 None。
+        ⚠️ codex R1 BLOCKER 3 / R3 BLOCKER 1：失败降级须 status==running 护栏，既翻 running→errored、又不覆盖已 done。"""
+        with self._guard:
+            rec = self._records.get(project_id)
+            if not rec or rec.get("run_id") != run_id:
+                return None
+            ce = rec.get("cancel_event")
+            if ce is not None and ce.is_set():
+                return None
+            try:
+                os.replace(temp_abs_path, canonical_abs_path)  # 原子；temp 同目录、已 close（勿用仍打开的句柄）
+            except Exception:
+                if rec.get("status") == "running":   # 护栏：翻 running→errored，不覆盖 done
+                    rec["status"] = "errored"
+                    rec["snapshot"] = errored_snapshot
+                return None
+            mtime_ns = str(os.stat(canonical_abs_path).st_mtime_ns)  # opaque string（避 JS 2^53）
+            rec["status"] = "done"
+            rec["snapshot"] = None
+            rec["report_mtime_ns"] = mtime_ns
+            rec["cancel_event"] = None
+            return mtime_ns
+
+    def discard(self, project_id: str, run_id: str) -> bool:
+        """用户主动关窗：store guard 下 run_id 匹配才 invalidate + set cancel_event（不等 review lock）。
+        不匹配 no-op（防旧窗口延迟 discard 误杀新 run）。worker 下个 chunk/迭代检查到 cancel 即退。"""
+        with self._guard:
+            rec = self._records.get(project_id)
+            if not rec or rec.get("run_id") != run_id:
+                return False
+            ce = rec.get("cancel_event")
+            if ce is not None:
+                ce.set()
+            self._records.pop(project_id, None)
+            return True
+
+    def get_done_mtime(self, project_id, run_id) -> str | None:
+        """run-bound 注入校验用（C5）：done tombstone 且 run_id 匹配 → 返回 report_mtime_ns（opaque str）；否则 None。"""
+        with self._guard:
+            rec = self._records.get(project_id)
+            if rec and rec.get("run_id") == run_id and rec.get("status") == "done":
+                return rec.get("report_mtime_ns")
+            return None
+
+    def finalize_orphan_running(self, project_id, run_id, fallback_snapshot=None) -> bool:
+        """worker 退出兜底（C4 run_worker finally，codex R2 BLOCKER 2+4）：worker 任何路径退出后，
+        若 record 仍 running（agent 没来得及落档的极端：未捕获异常绕过 set_errored、断连 cancel 后没落 snapshot），
+        CAS 收敛——有 fallback_snapshot → 翻 errored（可 resume）；无 → 清 record（让用户可 first-run 重启，不留死 running）。
+        done / 已 errored / 被 discard 清（record None 或 run_id 失配）→ no-op。"""
+        with self._guard:
+            rec = self._records.get(project_id)
+            if not rec or rec.get("run_id") != run_id or rec.get("status") != "running":
+                return False
+            if fallback_snapshot is not None:
+                rec["status"] = "errored"
+                rec["snapshot"] = fallback_snapshot
+            else:
+                self._records.pop(project_id, None)
+            return True
+
+
+_REVIEW_SESSION_STORE = ReviewSessionStore()

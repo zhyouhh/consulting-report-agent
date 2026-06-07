@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import tempfile
 import threading
 import time
@@ -530,8 +531,8 @@ class WorkspaceApiTests(unittest.TestCase):
             async def is_disconnected(self):
                 return False
 
-        def slow_run(project_id, cancel_event=None):
-            del project_id, cancel_event
+        def slow_run(project_id, cancel_event=None, **kwargs):
+            del project_id, cancel_event, kwargs
             time.sleep(0.6)
             yield {"type": "progress", "message": "审查完成"}
 
@@ -586,8 +587,8 @@ class WorkspaceApiTests(unittest.TestCase):
         worker_stopped = threading.Event()
         received_cancel_events = []
 
-        def cancellable_run(project_id, cancel_event=None):
-            del project_id
+        def cancellable_run(project_id, cancel_event=None, **kwargs):
+            del project_id, kwargs
             received_cancel_events.append(cancel_event)
             for _ in range(50):
                 if cancel_event is not None and cancel_event.is_set():
@@ -633,6 +634,78 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertIn('"type": "error"', response.text)
         self.assertIn("agent exploded", response.text)
         self.assertIn("data: [DONE]", response.text)
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_get_review_uses_store_and_writes_tombstone_on_success(
+        self,
+        mock_summary,
+        mock_agent_cls,
+    ):
+        # Task 3.3: the GET worker wires the real _REVIEW_SESSION_STORE + a backend run_id
+        # into agent.run; on success the store ends with a done tombstone.
+        from backend.independent_review import CANONICAL_REVIEW_PATH
+
+        project_id = "demo-review-store-success"
+        mock_summary.return_value = {"stage_code": "S5"}
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        captured = {}
+
+        def fake_run(project_id_arg, run_id=None, store=None, cancel_event=None, **kwargs):
+            del cancel_event, kwargs
+            captured["run_id"] = run_id
+            captured["store"] = store
+            # simulate the real agent's success commit through the store (atomic replace
+            # into a temp canonical, writing a done tombstone).
+            canonical = os.path.join(tmpdir.name, "independent-review.md")
+            fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("final report")
+            mtime = store.atomic_commit_report(project_id_arg, run_id, temp_path, canonical, {"messages": []})
+            captured["mtime"] = mtime
+            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": mtime}
+
+        mock_agent_cls.return_value.run.side_effect = fake_run
+
+        response = self.client.get(f"/api/projects/{project_id}/independent-review/stream")
+
+        self.assertEqual(response.status_code, 200)
+        # the worker passed the real module-level store + a non-empty backend run_id.
+        self.assertIs(captured["store"], main_module._REVIEW_SESSION_STORE)
+        self.assertTrue(captured["run_id"])
+        # store holds a done tombstone (run-bound), surviving the worker finally's
+        # finalize_orphan_running (no-op on done).
+        self.assertIsNotNone(captured["mtime"])
+        self.assertEqual(
+            main_module._REVIEW_SESSION_STORE.get_done_mtime(project_id, captured["run_id"]),
+            captured["mtime"],
+        )
+        self.assertIn("review-completed", response.text)
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_get_review_worker_exception_leaves_no_running_record(
+        self,
+        mock_summary,
+        mock_agent_cls,
+    ):
+        # codex R3 BLOCKER 2: a GET worker exception must not leave a stuck running record
+        # (finally finalize_orphan_running converges); a fresh first-claim must succeed.
+        project_id = "demo-review-store-exc"
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_agent_cls.return_value.run.side_effect = RuntimeError("boom mid-run")
+
+        response = self.client.get(f"/api/projects/{project_id}/independent-review/stream")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"type": "error"', response.text)
+        # no dead running record remains: a brand-new first-claim succeeds.
+        self.assertTrue(
+            main_module._REVIEW_SESSION_STORE.claim_first(project_id, "fresh-run", threading.Event())
+        )
+        # cleanup the record we just created for hygiene.
+        main_module._REVIEW_SESSION_STORE.discard(project_id, "fresh-run")
 
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
     def test_lint_report_endpoint_requires_s5(self, mock_summary):

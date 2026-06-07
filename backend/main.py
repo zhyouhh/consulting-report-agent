@@ -4,6 +4,7 @@ import logging
 import shutil
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 from typing import Literal
 
@@ -25,7 +26,11 @@ from .chat import (
 )
 from .config import Settings, get_base_path, heal_stale_managed_model, load_settings, save_settings
 from .context_policy import clamp_custom_context_limit_override
-from .independent_review import IndependentReviewAgent, get_independent_review_lock
+from .independent_review import (
+    IndependentReviewAgent,
+    _REVIEW_SESSION_STORE,
+    get_independent_review_lock,
+)
 from .models import ChatRequest, ChatResponse, ProjectInfo
 from .report_tools import (
     export_reviewable_draft,
@@ -355,10 +360,25 @@ async def independent_review_stream(project_id: str, request: Request):
             future = asyncio.run_coroutine_threadsafe(event_queue.put(event), loop)
             future.result()
 
+        # C3 过渡：后端临时生成 run_id 让首次审查走新存储（前端稳定 run_id + resume/discard 在 C4/C5）。
+        run_id = uuid.uuid4().hex
+
         def run_worker():
+            claimed = False
             try:
+                # store guard 下 CAS 写 running（覆盖旧 errored/done tombstone）。review lock 已串行
+                # 化 worker，正常恒 True；失败说明 store 仍有 active running，发 error 不复跑。
+                if not _REVIEW_SESSION_STORE.claim_first(project_id, run_id, cancel_event):
+                    enqueue_event({"type": "error", "data": "上一次独立审查仍在进行中，请等待"})
+                    return
+                claimed = True
                 agent = IndependentReviewAgent(skill_engine, settings)
-                for event in agent.run(project_id, cancel_event=cancel_event):
+                for event in agent.run(
+                    project_id,
+                    run_id=run_id,
+                    store=_REVIEW_SESSION_STORE,
+                    cancel_event=cancel_event,
+                ):
                     if cancel_event.is_set():
                         break
                     enqueue_event(event)
@@ -367,9 +387,17 @@ async def independent_review_stream(project_id: str, request: Request):
                     enqueue_event({"type": "error", "data": str(exc)})
             finally:
                 try:
-                    enqueue_event(None)
+                    # worker 退出兜底（codex R3 BLOCKER 2）：若 record 仍 running（异常绕过 agent
+                    # 落档 / 断连后 agent 未来得及 set_errored）则收敛——C3 GET 无 resume 语义，传
+                    # fallback_snapshot=None 清 record，不留死 running 卡死旧前端。done/errored/被
+                    # discard / run_id 失配 → no-op。先收敛再 release review lock。
+                    if claimed:
+                        _REVIEW_SESSION_STORE.finalize_orphan_running(project_id, run_id, None)
                 finally:
-                    lock.release()
+                    try:
+                        enqueue_event(None)
+                    finally:
+                        lock.release()
 
         worker_task = asyncio.create_task(asyncio.to_thread(run_worker))
         disconnected = False
