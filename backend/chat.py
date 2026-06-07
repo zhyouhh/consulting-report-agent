@@ -347,6 +347,7 @@ class ChatHandler:
     )
     MAX_MISSING_WRITE_RETRIES = 2
     MAX_SELF_CORRECTION_RETRIES = 1
+    MAX_SYSTEM_TRIGGER_NO_TOOLS_RETRIES = 1
     NON_PLAN_WRITE_ALLOWED_STAGE_CODES = {"S4", "S5", "S6", "S7", "done"}
     QUALITY_HINT_TARGET_FILES = frozenset({"plan/data-log.md", "plan/analysis-notes.md"})
     QUALITY_HINT_STAGES = frozenset({"S2", "S3"})
@@ -2540,14 +2541,24 @@ class ChatHandler:
             if system_trigger == "independent_review_done":
                 ready = self.skill_engine._has_effective_independent_review(project_path)
                 report_rel = "plan/independent-review.md"
-            else:  # lint_report_done
+            elif system_trigger == "lint_report_done":
                 ready = self.skill_engine._has_effective_lint_report(project_path)
                 report_rel = "plan/lint-report.md"
+            else:
+                # 防御性兜底：前面 trigger_prompt 校验已拦未知 key，这里再兜一层，
+                # 避免未来新增 trigger 静默走 lint 分支。
+                yield {"type": "error", "data": f"未知 system_trigger: {system_trigger}"}
+                return
             if not ready:
                 yield {"type": "error", "data": "审查报告尚未就绪，请稍后重试"}
                 return
 
-            report_text = self.skill_engine.read_file(project_id, report_rel)
+            try:
+                report_text = self.skill_engine.read_file(project_id, report_rel)
+            except Exception:
+                # ready 与 read 之间文件被删/权限/编码异常：统一友好文案，不暴露原始异常。
+                yield {"type": "error", "data": "审查报告读取失败，请稍后重试"}
+                return
             # 报告作为本轮临时 user/context 数据消息（trust boundary：数据非指令，绝不入 system）。
             current_user_message = {
                 "role": "user",
@@ -2581,6 +2592,7 @@ class ChatHandler:
         missing_write_retries = 0
         required_write_retries = 0
         self_correction_retries = 0
+        system_trigger_no_tools_retries = 0
         assistant_message = ""
         buffer_required_write_content = bool(obligation_write_snapshots)
         compressed = False
@@ -2749,6 +2761,47 @@ class ChatHandler:
             yield from emit_parsed_stream_events(parser.flush())
             if self._looks_like_self_correction_loop(accumulated):
                 self_correction_loop_detected = True
+
+            if collected_message["tool_calls"] and self._turn_context.get("system_trigger_no_tools"):
+                # 响应层硬拦截：汇报轮（system_trigger）禁工具是 trust boundary 硬约束。
+                # 请求层已 pop 掉 tools，但 custom 模式上游不可信——若仍返回 tool_calls，
+                # 这里在 _execute_tool 之前一律拦下，绝不执行任何工具、不产生副作用。
+                if accumulated.strip():
+                    # 模式①：本轮已有可见文本，直接忽略 tool_calls，用 content 正常收尾。
+                    yield {
+                        "type": "tool",
+                        "data": "⚠️ 本轮为纯转述（禁工具），已忽略上游返回的工具调用。",
+                    }
+                    collected_message["tool_calls"] = []
+                elif system_trigger_no_tools_retries < self.MAX_SYSTEM_TRIGGER_NO_TOOLS_RETRIES:
+                    # 模式②：只有 tool_call 无可见文本，注入 corrective 让模型改用纯文本汇报。
+                    # 用"纯文本 assistant + user 反馈"做合规隔板，保持 user/model 严格交替，
+                    # 避免连续 user 触发官渠角色交替 400。
+                    system_trigger_no_tools_retries += 1
+                    yield {
+                        "type": "tool",
+                        "data": "⚠️ 本轮为纯转述（禁工具），正在要求模型直接用文字向用户汇报。",
+                    }
+                    current_turn_messages.append({
+                        "role": "assistant",
+                        "content": "（本轮为纯转述，不调用任何工具。）",
+                    })
+                    current_turn_messages.append({
+                        "role": "user",
+                        "content": (
+                            "本轮为纯转述：请直接用文字向用户汇报审查报告的主要发现，"
+                            "不要调用任何工具。"
+                        ),
+                    })
+                    iterations += 1
+                    continue
+                else:
+                    # 重试上限耗尽且仍无可见文本：丢弃 tool_calls，走空回复兜底，绝不执行工具。
+                    yield {
+                        "type": "tool",
+                        "data": "⚠️ 本轮为纯转述（禁工具），已丢弃上游返回的工具调用。",
+                    }
+                    collected_message["tool_calls"] = []
 
             if collected_message["tool_calls"]:
                 # 上游（newapi → Gemini OpenAI 兼容层）偶发会把并行 functionCall 的流式
