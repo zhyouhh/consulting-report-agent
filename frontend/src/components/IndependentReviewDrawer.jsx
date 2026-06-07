@@ -33,6 +33,12 @@ export default function ReviewChatWindow({
   const dragRef = useRef(null)
   const completedRef = useRef(false)
   const closingRef = useRef(false)
+  // Tracks the isOpen rising edge: a review starts only when the window actually OPENS, never when
+  // projectId changes while it is already open. WorkspacePanel closes the window on project switch
+  // via an async effect, so for one render the window can see the NEW projectId with isOpen still
+  // true — without this guard the open-effect would fire a fresh review against the wrong project
+  // (wasting a run + orphaning a session in the new project).
+  const openedRef = useRef(false)
   const onCompletedRef = useRef(onCompleted)
   onCompletedRef.current = onCompleted
   const onCloseRef = useRef(onClose)
@@ -153,9 +159,13 @@ export default function ReviewChatWindow({
     }
   }, [consumeStream, applyEvent])
 
-  // Open: generate a stable run_id and kick off the first (non-resume) stream.
+  // Open: generate a stable run_id and kick off the first (non-resume) stream — but ONLY on the
+  // isOpen rising edge (see openedRef). A projectId change while open must NOT restart the review.
   useEffect(() => {
+    const justOpened = isOpen && !openedRef.current
+    openedRef.current = isOpen
     if (!isOpen || !projectId) return
+    if (!justOpened) return
     closingRef.current = false
     completedRef.current = false
     runIdRef.current = genRunId()

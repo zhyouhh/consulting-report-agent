@@ -7,6 +7,7 @@ import { buildChatRequest, toggleMaterialSelection } from '../utils/chatMaterial
 import {
   createPendingTriggerItem,
   dequeuePendingTrigger,
+  dropPendingTriggersByType,
   enqueuePendingTrigger,
   scopePendingQueueToProject,
 } from '../utils/pendingTriggerQueue'
@@ -660,7 +661,18 @@ const ChatPanel = forwardRef(function ChatPanel({
   const flushNextPendingTriggerRef = useRef(flushNextPendingTrigger)
   flushNextPendingTriggerRef.current = flushNextPendingTrigger
 
-  useImperativeHandle(ref, () => ({ triggerSystemTurn }), [triggerSystemTurn])
+  // Drop pending same-type triggers for the active project when the user STARTS a new run (called
+  // from WorkspacePanel). The new run overwrites the store tombstone, so a stale pending flush
+  // would be run-bound-rejected and report the older successful review as a spurious error (B2).
+  const dropPendingReviewTriggers = useCallback((triggerType) => {
+    pendingTriggerQueueRef.current = dropPendingTriggersByType(
+      pendingTriggerQueueRef.current,
+      triggerType,
+      activeProjectIdRef.current,
+    )
+  }, [])
+
+  useImperativeHandle(ref, () => ({ triggerSystemTurn, dropPendingReviewTriggers }), [triggerSystemTurn, dropPendingReviewTriggers])
 
   const sendMessage = async () => {
     const trimmedInput = input.trim()

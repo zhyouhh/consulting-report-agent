@@ -20,6 +20,7 @@ export default function WorkspacePanel({
   onCheckpointSet,
   onInsertPrompt,
   onTriggerSystemTurn,
+  onDropPendingReviewTriggers,
 }) {
   const [activeTab, setActiveTab] = useState('stage')
   const [files, setFiles] = useState([])
@@ -130,6 +131,11 @@ export default function WorkspacePanel({
 
   const runIndependentReview = () => {
     if (!projectId || reviewRunning || lintRunning) return
+    // A new run supersedes any older pending independent_review_done for this project: drop it NOW,
+    // before the new run's claim_first overwrites the store's done tombstone. Otherwise the stale
+    // pending's later flush is run-bound-rejected and the older successful review surfaces as an
+    // error (codex C5 red-team B2).
+    onDropPendingReviewTriggers?.('independent_review_done')
     setReviewRunning(true)
     setReviewDrawerOpen(true)
   }

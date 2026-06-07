@@ -7,6 +7,7 @@ import path from "node:path";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const drawerSrc = () => readFileSync(path.join(__dirname, "../src/components/IndependentReviewDrawer.jsx"), "utf-8");
 const workspaceSrc = () => readFileSync(path.join(__dirname, "../src/components/WorkspacePanel.jsx"), "utf-8");
+const chatPanelSrc = () => readFileSync(path.join(__dirname, "../src/components/ChatPanel.jsx"), "utf-8");
 
 function sectionBetween(src, start, end) {
   const startIndex = src.indexOf(start);
@@ -118,6 +119,16 @@ test("ReviewChatWindow errored panel has a supplement input wired into resume", 
   assert.match(src, /runWithBackoff\(\{ resume: true, supplement \}\)/);
 });
 
+test("ReviewChatWindow only starts a review on the isOpen rising edge (no restart on project switch)", () => {
+  const src = drawerSrc();
+  // red-team B1: WorkspacePanel closes the window on project switch via an async effect, so for one
+  // render the window sees the NEW projectId with isOpen still true. The open-effect must NOT fire a
+  // fresh review against the new project — it guards on the rising edge via openedRef.
+  assert.match(src, /openedRef/);
+  assert.match(src, /const justOpened = isOpen && !openedRef\.current/);
+  assert.match(src, /if \(!justOpened\) return/);
+});
+
 test("WorkspacePanel completion fires the system turn from the run-bound result, not generic ready", () => {
   const src = workspaceSrc();
   const reviewCompletion = sectionBetween(src, "const onIndependentReviewCompleted", "const runLintReport");
@@ -155,4 +166,19 @@ test("WorkspacePanel surfaces lint-report non-ok responses to the user", () => {
   assert.match(lintReport, /showError\(/);
   assert.match(lintReport, /res\.data\.detail/);
   assert.match(lintReport, /AI 味自查失败，请重试/);
+});
+
+test("WorkspacePanel drops stale pending review triggers when starting a new run (red-team B2)", () => {
+  const src = workspaceSrc();
+  const runReview = sectionBetween(src, "const runIndependentReview", "const handleCloseReviewDrawer");
+  // Starting a new run must prune the older same-type pending BEFORE claim_first overwrites the
+  // store tombstone, else the stale pending flush is run-bound-rejected.
+  assert.match(runReview, /onDropPendingReviewTriggers\?\.\(['"]independent_review_done['"]\)/);
+});
+
+test("ChatPanel exposes dropPendingReviewTriggers and prunes via dropPendingTriggersByType (B2)", () => {
+  const src = chatPanelSrc();
+  assert.match(src, /dropPendingTriggersByType\(/);
+  // exposed on the imperative handle so WorkspacePanel can prune at run-start.
+  assert.match(src, /\{ triggerSystemTurn, dropPendingReviewTriggers \}/);
 });

@@ -14,6 +14,7 @@ import {
 import {
   createPendingTriggerItem,
   dequeuePendingTrigger,
+  dropPendingTriggersByType,
   enqueuePendingTrigger,
   scopePendingQueueToProject,
 } from "../src/utils/pendingTriggerQueue.js";
@@ -211,4 +212,24 @@ test("scopePendingQueueToProject drops items from other projects", () => {
     createPendingTriggerItem({ triggerType: "lint_report_done", projectId: "pb" }),
   ];
   assert.deepEqual(scopePendingQueueToProject(q, "pa").map(i => i.projectId), ["pa"]);
+});
+
+test("dropPendingTriggersByType removes same-type same-project pending (new run supersedes; B2)", () => {
+  let q = [];
+  q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "independent_review_done", runId: "old", reportMtimeNs: "1", projectId: "p" }));
+  q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "lint_report_done", projectId: "p" }));
+  // Starting a new independent review drops the stale independent_review_done pending, keeps lint.
+  const after = dropPendingTriggersByType(q, "independent_review_done", "p");
+  assert.equal(after.length, 1);
+  assert.equal(after[0].triggerType, "lint_report_done");
+});
+
+test("dropPendingTriggersByType only affects the given project (B2)", () => {
+  const q = [
+    createPendingTriggerItem({ triggerType: "independent_review_done", runId: "a", reportMtimeNs: "1", projectId: "pa" }),
+    createPendingTriggerItem({ triggerType: "independent_review_done", runId: "b", reportMtimeNs: "2", projectId: "pb" }),
+  ];
+  // Starting a new review in pa must not touch pb's pending.
+  const after = dropPendingTriggersByType(q, "independent_review_done", "pa");
+  assert.deepEqual(after.map(i => i.projectId), ["pb"]);
 });

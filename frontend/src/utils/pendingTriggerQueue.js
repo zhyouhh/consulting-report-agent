@@ -61,3 +61,15 @@ export function scopePendingQueueToProject(queue, activeProjectId) {
   const list = Array.isArray(queue) ? queue : [];
   return list.filter(entry => entry.projectId === activeProjectId);
 }
+
+// Drop pending triggers of a given type for a project — called when the user STARTS a new run of
+// that type (plan Task 5.3: a new run supersedes any older same-type pending BEFORE it completes).
+// enqueue-time pruning is too late: between "report R1 finished + queued (chat busy)" and "user
+// starts R2", R2's claim_first overwrites the store's done tombstone, so the still-queued R1 flush
+// is later run-bound-rejected and R1's successful review surfaces as a spurious error. Pruning at
+// run-start closes that window.
+export function dropPendingTriggersByType(queue, triggerType, projectId) {
+  const list = Array.isArray(queue) ? queue : [];
+  if (!triggerType || !projectId) return list;
+  return list.filter(entry => !(entry.triggerType === triggerType && entry.projectId === projectId));
+}

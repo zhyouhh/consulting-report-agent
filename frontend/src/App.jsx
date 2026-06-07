@@ -253,6 +253,7 @@ function App() {
             onCheckpointSet={loadWorkspace}
             onInsertPrompt={(text) => setInjectedPrompt(text)}
             onTriggerSystemTurn={(triggerType, metadata) => chatPanelRef.current?.triggerSystemTurn(triggerType, metadata)}
+            onDropPendingReviewTriggers={(triggerType) => chatPanelRef.current?.dropPendingReviewTriggers(triggerType)}
           />
         )}
       </div>
