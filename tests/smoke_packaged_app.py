@@ -309,7 +309,8 @@ def check_s5_endpoint_guards(port: int, project_id: str) -> None:
     status, payload = http_request_json(
         f"/api/projects/{project_id}/independent-review/stream",
         port,
-        method="GET",
+        method="POST",
+        payload={"resume": False, "run_id": "smoke-s0"},
     )
     if status != 400 or "S5" not in str(payload.get("detail", "")):
         raise SmokeFailure(

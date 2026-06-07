@@ -10,8 +10,8 @@ test("describeConnectionMode returns managed label", () => {
       managed_model: "deepseek-v4-pro",
     }),
     {
-      title: "默认通道",
-      subtitle: "开箱即用 · deepseek-v4-pro",
+      title: "试用通道",
+      subtitle: "仅供试用 · deepseek-v4-pro",
       helper: "有自己的模型/API，可点击下方“连接设置”接入。",
     },
   );
@@ -35,8 +35,8 @@ test("describeConnectionMode falls back to managed when settings are missing", (
   assert.deepEqual(
     describeConnectionMode(),
     {
-      title: "默认通道",
-      subtitle: "开箱即用 · deepseek-v4-pro",
+      title: "试用通道",
+      subtitle: "仅供试用 · deepseek-v4-pro",
       helper: "有自己的模型/API，可点击下方“连接设置”接入。",
     },
   );

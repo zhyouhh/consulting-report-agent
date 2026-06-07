@@ -1,8 +1,8 @@
 export function describeConnectionMode(settings = {}) {
   if (!settings.mode || settings.mode === "managed") {
     return {
-      title: "默认通道",
-      subtitle: `开箱即用 · ${settings.managed_model || "deepseek-v4-pro"}`,
+      title: "试用通道",
+      subtitle: `仅供试用 · ${settings.managed_model || "deepseek-v4-pro"}`,
       helper: "有自己的模型/API，可点击下方“连接设置”接入。",
     };
   }

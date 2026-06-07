@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import tempfile
 import threading
 import time
@@ -8,6 +9,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -75,6 +77,51 @@ class ChatRequestValidationTests(unittest.TestCase):
         )
 
         self.assertIsNone(req.system_trigger)
+
+    def test_chat_request_accepts_trigger_metadata(self):
+        # run_id + report_mtime_ns are opaque strings; a large st_mtime_ns string must survive
+        # round-trip without precision loss (it would overflow a JS number if sent as int).
+        big_mtime = "1760000000123456789"
+        req = ChatRequest.model_validate(
+            {
+                "project_id": "demo",
+                "message_text": "",
+                "system_trigger": "independent_review_done",
+                "run_id": "run-abc123",
+                "report_mtime_ns": big_mtime,
+            }
+        )
+
+        self.assertEqual(req.run_id, "run-abc123")
+        self.assertIsInstance(req.run_id, str)
+        self.assertEqual(req.report_mtime_ns, big_mtime)
+        self.assertIsInstance(req.report_mtime_ns, str)
+
+    def test_chat_request_metadata_optional(self):
+        req = ChatRequest.model_validate(
+            {
+                "project_id": "demo",
+                "message_text": "hello",
+            }
+        )
+
+        self.assertIsNone(req.run_id)
+        self.assertIsNone(req.report_mtime_ns)
+
+    def test_chat_request_rejects_int_report_mtime_ns(self):
+        # codex C4-spec NIT 4: lock the actual behavior for a raw int report_mtime_ns. pydantic
+        # v2 REJECTS it (no silent int->str coercion in lax mode for str fields), which is the
+        # safe outcome — a bare int would overflow JS Number.MAX_SAFE_INTEGER (2^53) on the wire.
+        # If this ever starts silently coercing, this test fails and flags the JS-precision hazard.
+        with self.assertRaises(ValidationError):
+            ChatRequest.model_validate(
+                {
+                    "project_id": "demo",
+                    "message_text": "",
+                    "system_trigger": "independent_review_done",
+                    "report_mtime_ns": 1760000000123456789,
+                }
+            )
 
 
 class CheckpointTableInvariantTests(unittest.TestCase):
@@ -495,144 +542,779 @@ class WorkspaceApiTests(unittest.TestCase):
             "D:/skill/scripts/quality_check.ps1",
         )
 
+    # ------------------------------------------------------------------
+    # C4: POST /independent-review/stream (run-bound, resume) + discard
+    # ------------------------------------------------------------------
+
+    def _seed_done_tombstone(self, project_id, run_id, body="report"):
+        """Seed the store with a done tombstone via the real atomic commit path."""
+        store = main_module._REVIEW_SESSION_STORE
+        self.assertTrue(store.claim_first(project_id, run_id, threading.Event()))
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        canonical = os.path.join(tmpdir.name, "independent-review.md")
+        fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        mtime = store.atomic_commit_report(project_id, run_id, temp_path, canonical, {"messages": []})
+        self.assertIsNotNone(mtime)
+        self.addCleanup(store.discard, project_id, run_id)
+        return mtime
+
+    def _seed_errored(self, project_id, run_id, snapshot=None):
+        store = main_module._REVIEW_SESSION_STORE
+        self.assertTrue(store.claim_first(project_id, run_id, threading.Event()))
+        self.assertTrue(
+            store.set_errored(project_id, run_id, snapshot or {"messages": [], "iteration": 2})
+        )
+        self.addCleanup(store.discard, project_id, run_id)
+
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_requires_s5(self, mock_summary):
+    def test_review_post_requires_run_id(self, mock_summary):
+        mock_summary.return_value = {"stage_code": "S5"}
+        response = self.client.post(
+            "/api/projects/demo-post-norun/independent-review/stream",
+            json={"resume": False},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("run_id required", response.json()["detail"])
+
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_post_requires_s5(self, mock_summary):
         mock_summary.return_value = {"stage_code": "S4"}
-
-        response = self.client.get("/api/projects/demo/independent-review/stream")
-
+        response = self.client.post(
+            "/api/projects/demo-post-s4/independent-review/stream",
+            json={"resume": False, "run_id": "r1"},
+        )
         self.assertEqual(response.status_code, 400)
         self.assertIn("独立审查只能在 S5 阶段使用", response.json()["detail"])
 
     @mock.patch("backend.main.IndependentReviewAgent")
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_returns_sse_content_type(self, mock_summary, mock_agent_cls):
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_agent_cls.return_value.run.return_value = [
-            {"type": "progress", "message": "开始审查"},
-        ]
+    def test_review_post_first_run(self, mock_summary, mock_agent_cls):
+        # resume=false: a worker starts with the frontend run_id + real store; on success a
+        # done tombstone is written and the wrapper emits review-completed carrying that run_id.
+        from backend.independent_review import CANONICAL_REVIEW_PATH
 
-        response = self.client.get("/api/projects/demo-sse/independent-review/stream")
+        project_id = "demo-post-first"
+        run_id = "frontend-run-1"
+        mock_summary.return_value = {"stage_code": "S5"}
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        captured = {}
+
+        def fake_run(project_id_arg, run_id=None, store=None, resume_snapshot=None, cancel_event=None, **kwargs):
+            del cancel_event, kwargs
+            captured["run_id"] = run_id
+            captured["store"] = store
+            captured["resume_snapshot"] = resume_snapshot
+            canonical = os.path.join(tmpdir.name, "independent-review.md")
+            fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("final report")
+            mtime = store.atomic_commit_report(project_id_arg, run_id, temp_path, canonical, {"messages": []})
+            captured["mtime"] = mtime
+            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": mtime}
+
+        mock_agent_cls.return_value.run.side_effect = fake_run
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": run_id},
+        )
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
-        self.assertIn('"type": "progress"', response.text)
+        self.assertEqual(captured["run_id"], run_id)
+        self.assertIs(captured["store"], main_module._REVIEW_SESSION_STORE)
+        self.assertIsNone(captured["resume_snapshot"])
+        self.assertIn("review-completed", response.text)
+        self.assertIn(run_id, response.text)
+        self.assertIn(str(captured["mtime"]), response.text)
         self.assertIn("data: [DONE]", response.text)
 
-    @mock.patch("backend.main.IndependentReviewAgent")
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_does_not_block_event_loop(
-        self,
-        mock_summary,
-        mock_agent_cls,
-    ):
-        class ConnectedRequest:
-            async def is_disconnected(self):
-                return False
-
-        def slow_run(project_id, cancel_event=None):
-            del project_id, cancel_event
-            time.sleep(0.6)
-            yield {"type": "progress", "message": "审查完成"}
-
-        async def collect_response():
-            response = await main_module.independent_review_stream(
-                "demo-review-nonblocking",
-                ConnectedRequest(),
-            )
-            consumer = asyncio.create_task(_collect_streaming_chunks(response))
-            started_at = time.perf_counter()
-            await asyncio.sleep(0.05)
-            elapsed = time.perf_counter() - started_at
-            chunks = await consumer
-            return elapsed, chunks
-
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_agent_cls.return_value.run.side_effect = slow_run
-
-        elapsed, chunks = asyncio.run(collect_response())
-
-        self.assertLess(elapsed, 0.3)
-        self.assertTrue(any('"type": "progress"' in chunk for chunk in chunks))
-
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_409_when_lock_held(self, mock_summary):
+    def test_review_post_first_run_409_when_lock_held(self, mock_summary):
         from backend.independent_review import get_independent_review_lock
 
-        project_id = "demo-review-concurrent"
+        project_id = "demo-post-locked"
         mock_summary.return_value = {"stage_code": "S5"}
         lock = get_independent_review_lock(project_id)
         self.assertTrue(lock.acquire(blocking=False))
         self.addCleanup(lock.release)
 
-        response = self.client.get(f"/api/projects/{project_id}/independent-review/stream")
-
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": "r1"},
+        )
         self.assertEqual(response.status_code, 409)
         self.assertIn("上一次独立审查仍在进行中", response.json()["detail"])
 
-    @mock.patch("backend.main.IndependentReviewAgent")
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_releases_lock_on_disconnect(
-        self,
-        mock_summary,
-        mock_agent_cls,
-    ):
+    def test_review_post_first_run_releases_lock_on_claim_fail(self, mock_summary):
+        # If claim_first CAS fails (an active running record already exists) the review lock
+        # must be released so subsequent requests are not wedged.
         from backend.independent_review import get_independent_review_lock
 
-        class DisconnectedRequest:
-            async def is_disconnected(self):
-                return True
-
-        worker_stopped = threading.Event()
-        received_cancel_events = []
-
-        def cancellable_run(project_id, cancel_event=None):
-            del project_id
-            received_cancel_events.append(cancel_event)
-            for _ in range(50):
-                if cancel_event is not None and cancel_event.is_set():
-                    worker_stopped.set()
-                    return
-                time.sleep(0.01)
-            yield {"type": "progress", "message": "should not emit"}
-
-        async def collect_response():
-            response = await main_module.independent_review_stream(
-                "demo-review-disconnect",
-                DisconnectedRequest(),
-            )
-            return await _collect_streaming_chunks(response)
-
+        project_id = "demo-post-claimfail"
         mock_summary.return_value = {"stage_code": "S5"}
-        mock_agent_cls.return_value.run.side_effect = cancellable_run
+        store = main_module._REVIEW_SESSION_STORE
+        # pre-seed an active running record under a different run_id.
+        self.assertTrue(store.claim_first(project_id, "other-run", threading.Event()))
+        self.addCleanup(store.discard, project_id, "other-run")
 
-        chunks = asyncio.run(collect_response())
-
-        self.assertEqual(chunks, [])
-        self.assertEqual(len(received_cancel_events), 1)
-        self.assertIsInstance(received_cancel_events[0], threading.Event)
-        self.assertTrue(received_cancel_events[0].is_set())
-        self.assertTrue(worker_stopped.is_set())
-        lock = get_independent_review_lock("demo-review-disconnect")
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": "mine"},
+        )
+        self.assertEqual(response.status_code, 409)
+        # lock was released despite the CAS failure.
+        lock = get_independent_review_lock(project_id)
         self.assertTrue(lock.acquire(blocking=False))
         lock.release()
 
     @mock.patch("backend.main.IndependentReviewAgent")
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_emits_error_event_on_agent_exception(
-        self,
-        mock_summary,
-        mock_agent_cls,
-    ):
+    def test_review_post_resume_errored_continues(self, mock_summary, mock_agent_cls):
+        # resume=true against an errored record: the stored snapshot is handed to agent.run.
+        project_id = "demo-post-resume-err"
+        run_id = "run-resume-1"
+        snapshot = {"messages": [{"role": "system", "content": "x"}], "iteration": 3}
+        mock_summary.return_value = {"stage_code": "S5"}
+        self._seed_errored(project_id, run_id, snapshot)
+        captured = {}
+
+        def fake_run(project_id_arg, run_id=None, store=None, resume_snapshot=None, supplement=None, cancel_event=None, **kwargs):
+            del cancel_event, kwargs
+            captured["run_id"] = run_id
+            captured["resume_snapshot"] = resume_snapshot
+            captured["supplement"] = supplement
+            yield {"type": "progress", "message": "resuming"}
+
+        mock_agent_cls.return_value.run.side_effect = fake_run
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": True, "run_id": run_id, "supplement": "再核对一下数据口径"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["run_id"], run_id)
+        self.assertEqual(captured["resume_snapshot"], snapshot)
+        self.assertEqual(captured["supplement"], "再核对一下数据口径")
+        self.assertIn('"type": "progress"', response.text)
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_post_resume_done_returns_completed_signal(self, mock_summary, mock_agent_cls):
+        # resume=true against a done tombstone: NO worker runs, the wrapper just re-emits
+        # review-completed with the stored mtime (recovers a lost success notification).
+        project_id = "demo-post-resume-done"
+        run_id = "run-done-1"
+        mock_summary.return_value = {"stage_code": "S5"}
+        mtime = self._seed_done_tombstone(project_id, run_id)
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": True, "run_id": run_id},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("review-completed", response.text)
+        self.assertIn(run_id, response.text)
+        self.assertIn(str(mtime), response.text)
+        self.assertIn("data: [DONE]", response.text)
+        # the agent was never constructed/run for a done resume.
+        mock_agent_cls.return_value.run.assert_not_called()
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_resume_done_rereads_tombstone_before_completed(self, mock_summary, mock_agent_cls):
+        # codex C4-quality BLOCKER + NIT 1: the resume-done branch must NOT emit a stale
+        # review-completed from the cached done_mtime. After the handler sees done + releases the
+        # lock, a concurrent discard clears the tombstone; emit_completion re-reads get_done_mtime
+        # (now empty) and emits NEITHER completed NOR any stale mtime.
+        project_id = "demo-resume-done-reread"
+        run_id = "run-reread-done"
+        mock_summary.return_value = {"stage_code": "S5"}
+        mtime = self._seed_done_tombstone(project_id, run_id)
+        store = main_module._REVIEW_SESSION_STORE
+
+        async def call():
+            class ConnectedRequest:
+                async def json(self_inner):
+                    return {"resume": True, "run_id": run_id}
+
+                async def is_disconnected(self_inner):
+                    return False
+
+            # the handler runs claim_resume (sees done) + releases the lock during this await.
+            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            # simulate a concurrent discard landing AFTER the handler resolved done_mtime but
+            # BEFORE the stream's emit_completion re-reads the tombstone.
+            store.discard(project_id, run_id)
+            return await _collect_streaming_chunks(response)
+
+        chunks = asyncio.run(call())
+        text = "".join(chunks)
+        # the re-read intercepted the cleared tombstone: no stale completed, no stale mtime.
+        self.assertNotIn("review-completed", text)
+        self.assertNotIn(str(mtime), text)
+        # still a connected stream → [DONE] terminator is emitted (only completed is suppressed).
+        self.assertIn("data: [DONE]", text)
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_post_disconnect_emits_neither_completed_nor_done(self, mock_summary, mock_agent_cls):
+        # codex C4-quality BLOCKER + NIT 1: a disconnected POST stream emits neither
+        # review-completed nor [DONE], for BOTH the done short-circuit and the worker path.
+        # Exercise the done short-circuit (a tombstone exists) under a disconnected request.
+        project_id = "demo-post-disconnect"
+        run_id = "run-disc"
+        mock_summary.return_value = {"stage_code": "S5"}
+        self._seed_done_tombstone(project_id, run_id)
+
+        async def call():
+            class DisconnectedRequest:
+                async def json(self_inner):
+                    return {"resume": True, "run_id": run_id}
+
+                async def is_disconnected(self_inner):
+                    return True
+
+            response = await main_module.independent_review_stream_post(project_id, DisconnectedRequest())
+            return await _collect_streaming_chunks(response)
+
+        chunks = asyncio.run(call())
+        text = "".join(chunks)
+        self.assertNotIn("review-completed", text)
+        self.assertNotIn("[DONE]", text)
+        # the agent never runs on a done-tombstone resume.
+        mock_agent_cls.return_value.run.assert_not_called()
+
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_post_resume_reject_400(self, mock_summary):
+        # resume against a missing / mismatched run_id is rejected (and the lock released).
+        from backend.independent_review import get_independent_review_lock
+
+        project_id = "demo-post-resume-reject"
+        mock_summary.return_value = {"stage_code": "S5"}
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": True, "run_id": "no-such-run"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("无可续审的会话", response.json()["detail"])
+        lock = get_independent_review_lock(project_id)
+        self.assertTrue(lock.acquire(blocking=False))
+        lock.release()
+
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_resume_409_when_worker_finalizing(self, mock_summary):
+        # resume waits up to 3s for the review lock; if a worker holds it past the timeout the
+        # endpoint returns 409 so the frontend backs off and retries.
+        from backend.independent_review import get_independent_review_lock
+
+        project_id = "demo-post-resume-busy"
+        mock_summary.return_value = {"stage_code": "S5"}
+        lock = get_independent_review_lock(project_id)
+        self.assertTrue(lock.acquire(blocking=False))
+        self.addCleanup(lock.release)
+
+        async def call():
+            class ConnectedRequest:
+                async def json(self_inner):
+                    return {"resume": True, "run_id": "r1"}
+
+                async def is_disconnected(self_inner):
+                    return False
+
+            with self.assertRaises(HTTPException) as ctx:
+                await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            return ctx.exception
+
+        # patch the 3.0s blocking acquire down to a tiny timeout so the test is fast but still
+        # exercises the to_thread(lock.acquire, True, <timeout>) path.
+        real_to_thread = asyncio.to_thread
+
+        async def fast_to_thread(func, *args, **kwargs):
+            if args and args[:1] == (True,):
+                return await real_to_thread(func, True, 0.05)
+            return await real_to_thread(func, *args, **kwargs)
+
+        with mock.patch("backend.main.asyncio.to_thread", side_effect=fast_to_thread):
+            exc = asyncio.run(call())
+        self.assertEqual(exc.status_code, 409)
+        self.assertIn("正在收尾", exc.detail)
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_resume_uses_to_thread_not_blocking_loop(self, mock_summary, mock_agent_cls):
+        # the blocking lock.acquire for resume must go through asyncio.to_thread so the event
+        # loop is never blocked.
+        project_id = "demo-post-resume-tothread"
+        run_id = "run-tt-1"
+        mock_summary.return_value = {"stage_code": "S5"}
+        self._seed_errored(project_id, run_id)
+        mock_agent_cls.return_value.run.return_value = iter(
+            [{"type": "progress", "message": "ok"}]
+        )
+
+        async def call():
+            class ConnectedRequest:
+                async def json(self_inner):
+                    return {"resume": True, "run_id": run_id}
+
+                async def is_disconnected(self_inner):
+                    return False
+
+            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            return await _collect_streaming_chunks(response)
+
+        real_to_thread = asyncio.to_thread
+        to_thread_calls = {"n": 0}
+
+        async def counting_to_thread(func, *args, **kwargs):
+            to_thread_calls["n"] += 1
+            return await real_to_thread(func, *args, **kwargs)
+
+        with mock.patch("backend.main.asyncio.to_thread", side_effect=counting_to_thread):
+            asyncio.run(call())
+        # at least the lock.acquire + the run_worker were dispatched via to_thread.
+        self.assertGreaterEqual(to_thread_calls["n"], 2)
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_resume_rereads_store_after_lock(self, mock_summary, mock_agent_cls):
+        # the record is errored at request time but flips to done while waiting for the lock;
+        # after acquiring the lock claim_resume re-reads and reports the post-wait done state
+        # (review-completed, no worker run).
+        project_id = "demo-post-resume-reread"
+        run_id = "run-reread-1"
+        mock_summary.return_value = {"stage_code": "S5"}
+        store = main_module._REVIEW_SESSION_STORE
+        self._seed_errored(project_id, run_id)
+
+        # simulate "worker finished while we waited": flip the record to done inside the
+        # to_thread(lock.acquire) call, before claim_resume re-reads it.
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        flip = {"done_mtime": None}
+
+        async def call():
+            class ConnectedRequest:
+                async def json(self_inner):
+                    return {"resume": True, "run_id": run_id}
+
+                async def is_disconnected(self_inner):
+                    return False
+
+            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            return await _collect_streaming_chunks(response)
+
+        real_to_thread = asyncio.to_thread
+
+        async def flipping_to_thread(func, *args, **kwargs):
+            result = await real_to_thread(func, *args, **kwargs)
+            # after the blocking lock.acquire succeeds, convert errored -> done so the
+            # subsequent claim_resume sees done.
+            if args and args[:1] == (True,) and flip["done_mtime"] is None:
+                # we need the record running for atomic_commit; emulate the worker's commit:
+                # set running via direct CAS then commit. The record is currently errored
+                # (from _seed_errored); move it to running by claim_resume-ing under a temp
+                # cancel event, then commit to done.
+                kind, _payload = store.claim_resume(project_id, run_id, threading.Event())
+                self.assertEqual(kind, "errored")  # now running
+                canonical = os.path.join(tmpdir.name, "independent-review.md")
+                fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write("done while waiting")
+                flip["done_mtime"] = store.atomic_commit_report(
+                    project_id, run_id, temp_path, canonical, {"messages": []}
+                )
+            return result
+
+        with mock.patch("backend.main.asyncio.to_thread", side_effect=flipping_to_thread):
+            chunks = asyncio.run(call())
+        text = "".join(chunks)
+        self.assertIn("review-completed", text)
+        self.assertIn(str(flip["done_mtime"]), text)
+        mock_agent_cls.return_value.run.assert_not_called()
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_lock_released_on_done_and_reject_and_exception(self, mock_summary, mock_agent_cls):
+        from backend.independent_review import get_independent_review_lock
+
+        mock_summary.return_value = {"stage_code": "S5"}
+        lock_owner = get_independent_review_lock
+
+        # (a) resume done -> lock released.
+        p_done = "demo-lockrel-done"
+        run_done = "run-d"
+        self._seed_done_tombstone(p_done, run_done)
+        self.client.post(
+            f"/api/projects/{p_done}/independent-review/stream",
+            json={"resume": True, "run_id": run_done},
+        )
+        self.assertTrue(lock_owner(p_done).acquire(blocking=False))
+        lock_owner(p_done).release()
+
+        # (b) resume reject -> lock released.
+        p_rej = "demo-lockrel-reject"
+        self.client.post(
+            f"/api/projects/{p_rej}/independent-review/stream",
+            json={"resume": True, "run_id": "ghost"},
+        )
+        self.assertTrue(lock_owner(p_rej).acquire(blocking=False))
+        lock_owner(p_rej).release()
+
+        # (c) worker exception -> finally releases lock.
+        p_exc = "demo-lockrel-exc"
+        mock_agent_cls.return_value.run.side_effect = RuntimeError("boom")
+        self.client.post(
+            f"/api/projects/{p_exc}/independent-review/stream",
+            json={"resume": False, "run_id": "run-e"},
+        )
+        self.assertTrue(lock_owner(p_exc).acquire(blocking=False))
+        lock_owner(p_exc).release()
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, p_exc, "run-e")
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_lock_released_even_if_response_generator_never_consumed(self, mock_summary, mock_agent_cls):
+        # codex C5 red-team B3: Starlette runs stream_response + listen_for_disconnect concurrently
+        # and cancels the task group when either finishes (starlette/responses.py). If the client
+        # already disconnected, the disconnect listener can win before stream_response is scheduled,
+        # so generate() may never execute. The worker (and thus its lock release) is created in the
+        # ENDPOINT BODY, not inside generate(). Here we await the endpoint and NEVER consume the
+        # response body (aclose it as Starlette would on cancel) — generate()'s body never runs, yet
+        # the body-created worker must still finish and release the review lock (else that project's
+        # review 409s until process restart).
+        from backend.independent_review import get_independent_review_lock
+
+        project_id = "demo-b3-no-consume"
+        run_id = "run-b3"
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_agent_cls.return_value.run.return_value = iter([{"type": "progress", "message": "ok"}])
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+
+        async def call():
+            class ConnectedRequest:
+                async def json(self_inner):
+                    return {"resume": False, "run_id": run_id}
+
+                async def is_disconnected(self_inner):
+                    return False
+
+            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            # Emulate Starlette cancelling before the body is ever iterated: close the generator
+            # WITHOUT consuming it. generate()'s body never runs; only the body-created worker can
+            # release the lock.
+            await response.body_iterator.aclose()
+            # Wait (in-loop) for the worker thread to finish and release the lock.
+            lock = get_independent_review_lock(project_id)
+            for _ in range(200):
+                if lock.acquire(blocking=False):
+                    lock.release()
+                    return True
+                await asyncio.sleep(0.02)
+            return False
+
+        released = asyncio.run(call())
+        self.assertTrue(
+            released,
+            "review lock leaked: a worker created inside generate() would never run when the "
+            "response generator is cancelled before its first iteration (B3)",
+        )
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_completed_emitted_after_lock_release(self, mock_summary, mock_agent_cls):
+        # when review-completed is emitted, the review lock is already free (the wrapper emits
+        # it only after worker_task finished + run_worker finally released the lock).
+        from backend.independent_review import CANONICAL_REVIEW_PATH, get_independent_review_lock
+
+        project_id = "demo-completed-after-release"
+        run_id = "run-after-rel"
+        mock_summary.return_value = {"stage_code": "S5"}
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+
+        def fake_run(project_id_arg, run_id=None, store=None, **kwargs):
+            del kwargs
+            canonical = os.path.join(tmpdir.name, "independent-review.md")
+            fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("body")
+            mtime = store.atomic_commit_report(project_id_arg, run_id, temp_path, canonical, {"messages": []})
+            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": mtime}
+
+        mock_agent_cls.return_value.run.side_effect = fake_run
+
+        async def call():
+            class ConnectedRequest:
+                async def json(self_inner):
+                    return {"resume": False, "run_id": run_id}
+
+                async def is_disconnected(self_inner):
+                    return False
+
+            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            chunks = []
+            lock_free_at_completion = {"value": None}
+            async for chunk in response.body_iterator:
+                if "review-completed" in chunk:
+                    lk = get_independent_review_lock(project_id)
+                    acquired = lk.acquire(blocking=False)
+                    lock_free_at_completion["value"] = acquired
+                    if acquired:
+                        lk.release()
+                chunks.append(chunk)
+            return lock_free_at_completion["value"], chunks
+
+        free, chunks = asyncio.run(call())
+        text = "".join(chunks)
+        self.assertIn("review-completed", text)
+        self.assertTrue(free, "review lock must be free by the time review-completed is emitted")
+        # codex C4-spec NIT 3: the wrapper emits review-completed exactly once, and the agent's
+        # internal review-completed must be filtered out (the agent yields one too) — guards
+        # against a regression that passes the internal event through and double-emits.
+        completed = [
+            json.loads(c[len("data: "):])
+            for c in "".join(chunks).split("\n\n")
+            if c.startswith("data: ") and '"review-completed"' in c
+        ]
+        self.assertEqual(len(completed), 1, f"expected exactly one review-completed, got {completed}")
+        # the surviving event is the wrapper's (run_id present), NOT the agent's internal one
+        # (which carries a 'path' and no 'run_id').
+        self.assertEqual(completed[0]["run_id"], run_id)
+        self.assertNotIn("path", completed[0])
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_completed_carries_run_id_and_mtime(self, mock_summary, mock_agent_cls):
+        from backend.independent_review import CANONICAL_REVIEW_PATH
+
+        project_id = "demo-completed-payload"
+        run_id = "run-payload"
+        mock_summary.return_value = {"stage_code": "S5"}
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+        holder = {}
+
+        def fake_run(project_id_arg, run_id=None, store=None, **kwargs):
+            del kwargs
+            canonical = os.path.join(tmpdir.name, "independent-review.md")
+            fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("body")
+            holder["mtime"] = store.atomic_commit_report(project_id_arg, run_id, temp_path, canonical, {"messages": []})
+            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": holder["mtime"]}
+
+        mock_agent_cls.return_value.run.side_effect = fake_run
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": run_id},
+        )
+        # locate the wrapper-emitted review-completed payload.
+        payloads = [
+            json.loads(line[len("data: "):])
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and '"review-completed"' in line
+        ]
+        self.assertTrue(payloads)
+        completed = payloads[-1]
+        self.assertEqual(completed["run_id"], run_id)
+        self.assertEqual(completed["report_mtime_ns"], holder["mtime"])
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_worker_error_does_not_emit_completed(self, mock_summary, mock_agent_cls):
+        project_id = "demo-post-worker-error"
+        run_id = "run-werr"
         mock_summary.return_value = {"stage_code": "S5"}
         mock_agent_cls.return_value.run.side_effect = RuntimeError("agent exploded")
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
 
-        response = self.client.get("/api/projects/demo-review-error/independent-review/stream")
-
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": run_id},
+        )
         self.assertEqual(response.status_code, 200)
         self.assertIn('"type": "error"', response.text)
         self.assertIn("agent exploded", response.text)
+        self.assertNotIn("review-completed", response.text)
         self.assertIn("data: [DONE]", response.text)
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_atomic_commit_failure_does_not_emit_completed(self, mock_summary, mock_agent_cls):
+        # agent yields an error after a failed atomic replace (no done tombstone) -> the
+        # wrapper must NOT synthesize review-completed.
+        project_id = "demo-post-commit-fail"
+        run_id = "run-commitfail"
+        mock_summary.return_value = {"stage_code": "S5"}
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+
+        def fake_run(project_id_arg, run_id=None, store=None, **kwargs):
+            del project_id_arg, run_id, store, kwargs
+            yield {"type": "error", "detail": "审查报告保存被取消或失败，请重试"}
+
+        mock_agent_cls.return_value.run.side_effect = fake_run
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": run_id},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"type": "error"', response.text)
+        self.assertNotIn("review-completed", response.text)
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_worker_exception_leaves_no_running_record(self, mock_summary, mock_agent_cls):
+        # codex R2 BLOCKER 4: an uncaught worker exception must converge via finally
+        # finalize_orphan_running, leaving no stuck running record (first-claim succeeds again).
+        project_id = "demo-post-exc-norun"
+        run_id = "run-exc"
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_agent_cls.return_value.run.side_effect = RuntimeError("boom mid-run")
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": run_id},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"type": "error"', response.text)
+        # no dead running record: a brand-new first-claim succeeds (first-run, no resume_snapshot
+        # so finalize cleared the record entirely).
+        self.assertTrue(
+            main_module._REVIEW_SESSION_STORE.claim_first(project_id, "fresh-after-exc", threading.Event())
+        )
+        main_module._REVIEW_SESSION_STORE.discard(project_id, "fresh-after-exc")
+
+    def test_review_structured_timeout_kwargs(self):
+        # Task 4.2 Step 3: the review client uses a structured httpx.Timeout (not a flat float),
+        # so connect/read/write/pool are bounded independently.
+        import httpx as _httpx
+        from backend.independent_review import IndependentReviewAgent
+
+        captured = {}
+
+        agent = IndependentReviewAgent(mock.Mock(), mock.Mock(mode="custom", api_key="k", api_base="http://x"))
+
+        real_client = _httpx.Client
+
+        def capture_client(*args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return real_client(*args, **kwargs)
+
+        with mock.patch("backend.independent_review.httpx.Client", side_effect=capture_client):
+            with mock.patch("backend.independent_review.OpenAI"):
+                agent._build_client()
+
+        timeout = captured["timeout"]
+        self.assertIsInstance(timeout, _httpx.Timeout)
+        # codex C4-spec NIT 2: lock the concrete bounds so a regression to a flat float (or a
+        # widened no-first-byte window) is caught.
+        self.assertEqual(timeout.connect, 15.0)
+        self.assertEqual(timeout.read, 60.0)
+        self.assertEqual(timeout.write, 30.0)
+        self.assertEqual(timeout.pool, 30.0)
+
+    # ---- discard ----
+
+    def test_discard_requires_run_id(self):
+        response = self.client.post(
+            "/api/projects/demo-discard-norun/independent-review/discard",
+            json={},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("run_id required", response.json()["detail"])
+
+    def test_discard_cancels_matching_run(self):
+        project_id = "demo-discard-match"
+        run_id = "run-discard-1"
+        store = main_module._REVIEW_SESSION_STORE
+        cancel_event = threading.Event()
+        self.assertTrue(store.claim_first(project_id, run_id, cancel_event))
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/discard",
+            json={"run_id": run_id},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["cancelled"])
+        # cancel event set and record cleared (a fresh first-claim succeeds).
+        self.assertTrue(cancel_event.is_set())
+        self.assertTrue(store.claim_first(project_id, "after-discard", threading.Event()))
+        store.discard(project_id, "after-discard")
+
+    def test_discard_no_op_on_mismatch(self):
+        project_id = "demo-discard-mismatch"
+        run_id = "run-current"
+        store = main_module._REVIEW_SESSION_STORE
+        cancel_event = threading.Event()
+        self.assertTrue(store.claim_first(project_id, run_id, cancel_event))
+        self.addCleanup(store.discard, project_id, run_id)
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/discard",
+            json={"run_id": "stale-run"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["cancelled"])
+        # the current run is untouched.
+        self.assertFalse(cancel_event.is_set())
+
+    def test_discard_does_not_acquire_review_lock(self):
+        # discard must cancel even while a worker holds the review lock (store guard only).
+        from backend.independent_review import get_independent_review_lock
+
+        project_id = "demo-discard-nolock"
+        run_id = "run-nolock"
+        store = main_module._REVIEW_SESSION_STORE
+        cancel_event = threading.Event()
+        self.assertTrue(store.claim_first(project_id, run_id, cancel_event))
+        lock = get_independent_review_lock(project_id)
+        self.assertTrue(lock.acquire(blocking=False))  # emulate a long-running worker
+        self.addCleanup(lock.release)
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/discard",
+            json={"run_id": run_id},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["cancelled"])
+        self.assertTrue(cancel_event.is_set())
+
+    def test_stale_worker_does_not_revive_after_discard(self):
+        # after discard pops the record, a late set_errored from the old worker is rejected by
+        # run_id mismatch (no revived record).
+        project_id = "demo-discard-stale"
+        run_id = "run-stale"
+        store = main_module._REVIEW_SESSION_STORE
+        cancel_event = threading.Event()
+        self.assertTrue(store.claim_first(project_id, run_id, cancel_event))
+
+        # user discards.
+        self.assertTrue(
+            self.client.post(
+                f"/api/projects/{project_id}/independent-review/discard",
+                json={"run_id": run_id},
+            ).json()["cancelled"]
+        )
+        # the old worker tries to land an errored snapshot — must be a no-op.
+        self.assertFalse(store.set_errored(project_id, run_id, {"messages": [], "iteration": 4}))
+        self.assertFalse(store.finalize_orphan_running(project_id, run_id, {"messages": []}))
+        # nothing running remains: a fresh first-claim succeeds.
+        self.assertTrue(store.claim_first(project_id, "fresh-stale", threading.Event()))
+        store.discard(project_id, "fresh-stale")
 
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
     def test_lint_report_endpoint_requires_s5(self, mock_summary):
@@ -968,6 +1650,9 @@ class WorkspaceApiTests(unittest.TestCase):
         ])
         mock_get_chat_handler.return_value = handler
 
+        # C5: the route must thread run-bound trigger metadata to the handler verbatim;
+        # report_mtime_ns is a large opaque string and must survive end-to-end unchanged.
+        big_mtime = "1760000000123456789"
         response = self.client.post(
             "/api/chat/stream",
             json={
@@ -975,6 +1660,8 @@ class WorkspaceApiTests(unittest.TestCase):
                 "message_text": "",
                 "system_trigger": "independent_review_done",
                 "attached_material_ids": [],
+                "run_id": "run-abc-123",
+                "report_mtime_ns": big_mtime,
             },
         )
 
@@ -986,7 +1673,12 @@ class WorkspaceApiTests(unittest.TestCase):
             [],
             [],
             system_trigger="independent_review_done",
+            trigger_metadata={"run_id": "run-abc-123", "report_mtime_ns": big_mtime},
         )
+        # The nanosecond mtime stays a string (never coerced to a JSON number / int).
+        forwarded = handler.chat_stream.call_args.kwargs["trigger_metadata"]
+        self.assertIsInstance(forwarded["report_mtime_ns"], str)
+        self.assertEqual(forwarded["report_mtime_ns"], big_mtime)
 
 
 class GetConversationSanitizeTests(unittest.TestCase):

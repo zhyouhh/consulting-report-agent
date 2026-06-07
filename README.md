@@ -5,7 +5,7 @@ Windows first 的咨询报告桌面客户端，目标是把你自用的咨询报
 ## 当前阶段
 
 - 第一阶段只支持 Windows 正式分发
-- 默认模式是 `默认通道`
+- 默认模式是 `试用通道`
 - 默认入口是 `https://newapi.z0y0h.work/client/v1`
 - 默认模型是 `deepseek-v4-pro`
 - 同时保留 `自定义 API` 入口，供高级用户自行配置
@@ -25,9 +25,9 @@ Windows first 的咨询报告桌面客户端，目标是把你自用的咨询报
 
 ## 运行方式
 
-### 默认通道
+### 试用通道
 
-- 面向普通同事，开箱即用
+- 面向普通同事，仅供快速试用
 - 客户端不保存真实上游 key
 - 服务端通过薄中转注入专用 key
 - 发布包通过 `managed_client_token.txt` 注入专用客户端令牌
@@ -36,7 +36,7 @@ Windows first 的咨询报告桌面客户端，目标是把你自用的咨询报
 
 - 面向高级用户
 - 支持手动填写 OpenAI 兼容 `Base URL`、`API Key`、`Model`
-- 可以作为默认通道的兜底方案
+- 可以作为试用通道的兜底方案
 
 ## 本地开发
 
@@ -78,7 +78,7 @@ build.bat
 
 - Windows 打包说明：[WINDOWS_BUILD.md](WINDOWS_BUILD.md)
 - 通用打包说明：[BUILD.md](BUILD.md)
-- 默认薄中转部署说明：[managed-proxy-deployment.md](docs/managed-proxy-deployment.md)
+- 试用通道薄中转部署说明：[managed-proxy-deployment.md](docs/managed-proxy-deployment.md)
 
 ## 项目结构
 
@@ -86,7 +86,7 @@ build.bat
 ├── backend/         # FastAPI 后端
 ├── frontend/        # React 前端
 ├── skill/           # 打包内置的咨询报告 skill 运行时资产
-├── managed_proxy/   # 默认通道薄中转
+├── managed_proxy/   # 试用通道薄中转
 ├── tests/           # Python 回归测试
 └── app.py           # 桌面应用入口
 ```

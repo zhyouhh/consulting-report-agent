@@ -281,7 +281,7 @@ def normalize_settings_payload(data: dict) -> dict:
     normalized["projects_dir"] = runtime_projects_dir
     normalized["skill_dir"] = runtime_skill_dir
 
-    # 桌面端始终以默认通道启动，保留自定义 API 信息供用户临时切换。
+    # 桌面端始终以试用通道启动，保留自定义 API 信息供用户临时切换。
     # 同时旧版本配置可能遗留开发环境路径和自定义模式，也在这里统一纠正。
     if is_legacy_config:
         normalized["mode"] = "managed"
