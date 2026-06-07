@@ -256,9 +256,11 @@ class IndependentReviewAgent:
         msg_dict = {
             "role": "assistant",
             "content": content if isinstance(content, str) else ("" if content is None else str(content)),
+            # Always emit tool_calls (even []), matching chat's
+            # _build_assistant_tool_call_message so the two serializers are byte-equal
+            # for both empty and non-empty tool_calls.
+            "tool_calls": [self._serialize_tool_call(tc) for tc in tool_calls],
         }
-        if tool_calls:
-            msg_dict["tool_calls"] = [self._serialize_tool_call(tc) for tc in tool_calls]
         if isinstance(reasoning_content, str) and reasoning_content:
             msg_dict["reasoning_content"] = reasoning_content
         return msg_dict
@@ -387,15 +389,19 @@ class IndependentReviewAgent:
 
             tool_calls = collected["tool_calls"]
             if tool_calls:
-                # 上游偶发把畸形 tool_call 流式 chunk 塞回来（未知工具名 / 坏 JSON arguments）。
-                # 直接回传会触发官渠 400，因此本轮作废、不落历史，让模型下一轮重发。用一条
-                # 纯文本 assistant + 一条 user corrective 做"合规隔板"，保持 user/model 严格
-                # 交替（绝不裸 append user，避免连续 user 触发官渠角色交替 400）。
+                # 上游偶发把畸形 tool_call 流式 chunk 塞回来（未知工具名 / 坏 JSON
+                # arguments / 缺 id）。直接回传会破坏 provider-valid 序列、触发官渠 400，
+                # 因此本轮作废、不落历史，让模型下一轮重发。用一条纯文本 assistant + 一条
+                # user corrective 做"合规隔板"，保持 user/model 严格交替（绝不裸 append
+                # user，避免连续 user 触发官渠角色交替 400）。缺 id 是上游异常 / custom 模式
+                # 不规范上游的防御——正常情况下 id 在 tool_call 首片就到、最终非空。
                 malformed_reasons: list[str] = []
                 for tc in tool_calls:
                     fn = tc.get("function") or {}
                     fn_name = fn.get("name", "") or ""
                     fn_args = fn.get("arguments", "") or ""
+                    if not (tc.get("id") or ""):
+                        malformed_reasons.append(f"缺 id 的 tool_call: {fn_name!r}")
                     if fn_name not in known_tool_names:
                         malformed_reasons.append(f"未知工具名: {fn_name!r}")
                         continue

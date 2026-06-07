@@ -233,31 +233,57 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_handles_out_of_order_tool_call_index(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
-        # First chunk references index 1 (forces while-loop padding of index 0),
-        # then index 0 gets filled. Only one real tool call (index 0) should execute
-        # meaningfully; index 1 placeholder stays empty -> malformed -> bulkhead.
-        # To keep the test focused on padding (not bulkhead), drive a single index 0.
-        review = self._complete_review_text()
-        write_chunks = iter([
-            # jump straight to index 0 but via a chunk that first lands at higher index
-            self._delta_chunk(tool_calls=[self._tc_chunk(0, id="call-1", name="write_file", arguments="")]),
-            self._delta_chunk(
-                tool_calls=[
-                    self._tc_chunk(
-                        0,
-                        id=None,
-                        name=None,
-                        arguments=json.dumps({"file_path": CANONICAL_REVIEW_PATH, "content": review}, ensure_ascii=False),
-                    )
-                ]
-            ),
+        # Genuinely out-of-order indexes: the first chunk lands at index 2 (forcing the
+        # while-loop to pad placeholder slots 0 and 1), then 0 and 1 are filled later in
+        # mixed order. All three are valid read_file calls. The accumulator must rebuild
+        # three correctly-positioned tool_calls (id/name/arguments paired per index).
+        read_chunks = iter([
+            # arrives at index 2 first -> while-loop must create placeholders for 0,1,2
+            self._delta_chunk(tool_calls=[self._tc_chunk(2, id="call-2", name="read_file", arguments="")]),
+            # now index 0
+            self._delta_chunk(tool_calls=[self._tc_chunk(0, id="call-0", name="read_file", arguments="")]),
+            # interleave: index 1
+            self._delta_chunk(tool_calls=[self._tc_chunk(1, id="call-1", name="read_file", arguments="")]),
+            # arguments dribble in, per index, out of order
+            self._delta_chunk(tool_calls=[self._tc_chunk(2, arguments='{"file_path":"plan/outline.md"}')]),
+            self._delta_chunk(tool_calls=[self._tc_chunk(0, arguments='{"file_path":"plan/data-log.md"}')]),
+            self._delta_chunk(tool_calls=[self._tc_chunk(1, arguments='{"file_path":"plan/analysis-notes.md"}')]),
         ])
-        responses = [write_chunks, self._stream_text("审查完成，报告已生成")]
+        # round 2: write a valid report; round 3: final narration
+        responses = [
+            read_chunks,
+            self._stream_single_tool_call(
+                "write_file",
+                {"file_path": CANONICAL_REVIEW_PATH, "content": self._complete_review_text()},
+                "call-w",
+            ),
+            self._stream_text("审查完成，报告已生成"),
+        ]
+
+        executed = []
+        original_execute = agent._execute_tool
+
+        def spy_execute(project_id, tool_name, args):
+            executed.append((tool_name, args))
+            return original_execute(project_id, tool_name, args)
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = responses
-            events = list(agent.run(project["id"], draft_word_count=100))
+            with mock.patch.object(agent, "_execute_tool", side_effect=spy_execute):
+                events = list(agent.run(project["id"], draft_word_count=100))
 
+        # round 1 executes the three reads in index order (0,1,2), each with the
+        # argument fragment that was routed to that index — proves padding + per-index
+        # accumulation, not first-come collapse.
+        round1_reads = [e for e in executed if e[0] == "read_file"]
+        self.assertEqual(
+            round1_reads,
+            [
+                ("read_file", {"file_path": "plan/data-log.md"}),
+                ("read_file", {"file_path": "plan/analysis-notes.md"}),
+                ("read_file", {"file_path": "plan/outline.md"}),
+            ],
+        )
         self.assertEqual(events[-1]["type"], "review-completed")
 
     def test_run_strips_think_from_content_delta(self):
@@ -341,53 +367,80 @@ class IndependentReviewAgentTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "review-completed")
 
     def test_run_malformed_tool_call_recovery(self):
-        engine, project, project_dir, agent = self._make_engine_project_and_agent()
-        del engine, project_dir
-        review = self._complete_review_text()
-        captured = {"messages_at_recovery": None}
-
-        responses = [
-            # round 1: unknown tool name -> malformed -> compliance bulkhead, round voided
-            iter([
-                self._delta_chunk(tool_calls=[self._tc_chunk(0, id="call-bad", name="not_a_tool", arguments="{}")]),
-            ]),
-            # round 2: valid write
-            self._stream_single_tool_call(
-                "write_file",
-                {"file_path": CANONICAL_REVIEW_PATH, "content": review},
-                "call-2",
+        # Three malformed shapes must all route through the same compliance bulkhead:
+        #   (a) unknown tool name, (b) known name + bad-JSON arguments, (c) missing id.
+        # Each: round voided (no tool exec), assistant placeholder + user corrective
+        # appended (never a bare user / consecutive user), corrective names the reason.
+        malformed_cases = [
+            (
+                "unknown_tool_name",
+                [self._tc_chunk(0, id="call-bad", name="not_a_tool", arguments="{}")],
+                "未知工具名",
             ),
-            # round 3: final narration
-            self._stream_text("审查完成，报告已生成"),
+            (
+                "bad_json_arguments",
+                [self._tc_chunk(0, id="call-bad", name="read_file", arguments="{not valid json")],
+                "参数 JSON 异常",
+            ),
+            (
+                "missing_id",
+                [self._tc_chunk(0, id=None, name="read_file", arguments='{"file_path":"plan/outline.md"}')],
+                "缺 id",
+            ),
         ]
 
-        call_seq = []
+        for case_name, round1_tool_calls, expected_reason in malformed_cases:
+            with self.subTest(case=case_name):
+                engine, project, project_dir, agent = self._make_engine_project_and_agent()
+                del engine, project_dir
+                responses = [
+                    # round 1: malformed -> compliance bulkhead, round voided
+                    iter([self._delta_chunk(tool_calls=round1_tool_calls)]),
+                    # round 2: valid write
+                    self._stream_single_tool_call(
+                        "write_file",
+                        {"file_path": CANONICAL_REVIEW_PATH, "content": self._complete_review_text()},
+                        "call-2",
+                    ),
+                    # round 3: final narration
+                    self._stream_text("审查完成，报告已生成"),
+                ]
 
-        def create_side_effect(**kwargs):
-            call_seq.append([dict(m) for m in kwargs["messages"]])
-            return responses[len(call_seq) - 1]
+                call_seq = []
 
-        with mock.patch("backend.independent_review.OpenAI") as mock_openai:
-            mock_openai.return_value.chat.completions.create.side_effect = create_side_effect
-            events = list(agent.run(project["id"], draft_word_count=100))
+                def create_side_effect(**kwargs):
+                    call_seq.append([dict(m) for m in kwargs["messages"]])
+                    return responses[len(call_seq) - 1]
 
-        # the messages sent on round 2 must contain the compliance bulkhead pair:
-        # a plain-text assistant placeholder followed by a user corrective (never a
-        # tool-call assistant message, and never two consecutive user messages).
-        round2_messages = call_seq[1]
-        roles = [m["role"] for m in round2_messages]
-        # last two appended messages are assistant placeholder + user corrective
-        self.assertEqual(roles[-2], "assistant")
-        self.assertEqual(roles[-1], "user")
-        self.assertNotIn("tool_calls", round2_messages[-2])
-        self.assertIn("格式异常", round2_messages[-2]["content"])
-        self.assertIn("格式异常", round2_messages[-1]["content"])
-        self.assertIn("未知工具名", round2_messages[-1]["content"])
-        # no two consecutive user roles anywhere (would trigger upstream 400)
-        for prev, cur in zip(roles, roles[1:]):
-            self.assertFalse(prev == "user" and cur == "user")
-        # the malformed round emits an error-status tool_result but no real tool exec
-        self.assertEqual(events[-1]["type"], "review-completed")
+                executed = []
+                original_execute = agent._execute_tool
+
+                def spy_execute(project_id, tool_name, args):
+                    executed.append((tool_name, args))
+                    return original_execute(project_id, tool_name, args)
+
+                with mock.patch("backend.independent_review.OpenAI") as mock_openai:
+                    mock_openai.return_value.chat.completions.create.side_effect = create_side_effect
+                    with mock.patch.object(agent, "_execute_tool", side_effect=spy_execute):
+                        events = list(agent.run(project["id"], draft_word_count=100))
+
+                # round 2's messages carry the bulkhead pair: assistant placeholder
+                # (no tool_calls payload that would carry the malformed call) + user
+                # corrective. Never two consecutive user messages.
+                round2_messages = call_seq[1]
+                roles = [m["role"] for m in round2_messages]
+                self.assertEqual(roles[-2], "assistant")
+                self.assertEqual(roles[-1], "user")
+                self.assertNotIn("tool_calls", round2_messages[-2])
+                self.assertIn("格式异常", round2_messages[-2]["content"])
+                self.assertIn("格式异常", round2_messages[-1]["content"])
+                self.assertIn(expected_reason, round2_messages[-1]["content"])
+                for prev, cur in zip(roles, roles[1:]):
+                    self.assertFalse(prev == "user" and cur == "user")
+                # the malformed round must NOT execute the malformed tool; the only
+                # _execute_tool call belongs to round 2's valid write_file.
+                self.assertEqual(executed, [("write_file", {"file_path": CANONICAL_REVIEW_PATH, "content": self._complete_review_text()})])
+                self.assertEqual(events[-1]["type"], "review-completed")
 
     def test_run_word_count_over_100k_emits_friendly_error(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
@@ -585,9 +638,12 @@ class IndependentReviewAgentTests(unittest.TestCase):
                 )
 
         # --- streaming-collected dict parity ---
-        # The dict the agent accumulates while streaming (with reasoning_content +
-        # paired tool_calls) must serialize identically to chat's collected-message
-        # normalizer (no null fields; reasoning preserved when non-empty).
+        # run() calls _serialize_assistant_tool_call_message on the accumulated dict
+        # in BOTH branches: the tool-call branch (non-empty tool_calls) AND the
+        # no-tool-call terminal branch (tool_calls == [], the final narration round).
+        # Both shapes must serialize byte-identically to chat's collected-message
+        # normalizer (which always emits tool_calls, never null fields, reasoning
+        # preserved when non-empty) — including the empty-tool_calls case.
         collected_dicts = [
             {
                 "role": "assistant",
@@ -618,15 +674,31 @@ class IndependentReviewAgentTests(unittest.TestCase):
                     }
                 ],
             },
+            # no-tool-call terminal round: empty tool_calls, with reasoning collected.
+            {
+                "role": "assistant",
+                "content": "审查完成，报告已生成",
+                "reasoning_content": "整体逻辑通顺。",
+                "tool_calls": [],
+            },
+            # no-tool-call terminal round: empty tool_calls, no reasoning at all.
+            {
+                "role": "assistant",
+                "content": "审查完成，报告已生成",
+                "tool_calls": [],
+            },
         ]
         for collected in collected_dicts:
-            with self.subTest(collected_content=collected["content"]):
+            with self.subTest(collected_tool_calls=len(collected["tool_calls"])):
                 self.assertEqual(
                     chat_handler._normalize_collected_assistant_tool_call_message(collected),
                     agent._serialize_assistant_tool_call_message(collected),
                 )
-                # contract: empty/absent reasoning never appears; non-empty preserved
                 serialized = agent._serialize_assistant_tool_call_message(collected)
+                # tool_calls key always present (matches chat), even when empty.
+                self.assertIn("tool_calls", serialized)
+                self.assertEqual(len(serialized["tool_calls"]), len(collected["tool_calls"]))
+                # contract: empty/absent reasoning never appears; non-empty preserved.
                 if collected.get("reasoning_content"):
                     self.assertEqual(serialized["reasoning_content"], collected["reasoning_content"])
                 else:
