@@ -1,8 +1,8 @@
 # Current Worklist
 
-最后更新：2026-06-05（报奖后领导评审反馈逐条 brainstorm 完成 → 落入下方「领导评审反馈整改」高优先簇（R1–R5）；产品化定位：a 优先 / b 为领导方向先 park / c 不做。详见该节。）
+最后更新：2026-06-07（批 1 = R1+R2 实施 plan v5 经 codex 5 轮 review APPROVED [R1-R3 spec+quality 合并轨 + R4 对抗式红队 + R5 复核]，待用户定实施时机（C1 先行）；「默认通道→试用通道」文案已落地。详见下方整改簇。）
 
-上一次更新：2026-05-22（S5 Independent Review Redesign 自动化收尾已落：packaged smoke 覆盖扩展、endpoint 测试补差、cutover report 与 worklist 同步；`build.bat` 重建、piggy-v2 GUI E2E、打包内容复验仍留给用户手工执行。stage conductor v0 + 打包态 GUI 启动 / S0-S7 确定性阶段推进 / Markdown 表格 / 质量检查 / 包内 Pandoc 导出仍稳定。真实 managed 模型长链路 timeout 用户已切官渠暂不处理。）
+上一次更新：2026-06-05（报奖后领导评审反馈逐条 brainstorm 完成 → 落入下方「领导评审反馈整改」高优先簇（R1–R5）；产品化定位：a 优先 / b 为领导方向先 park / c 不做。）
 
 ## 当前未解决 / 待验证
 
@@ -13,7 +13,7 @@
 **执行策略（2026-06-06 敲定 · 分 3 批，不一次性）**：批 1 = R1+R2（同在 S5 审查/chat 触发链路；R2 注入修法是 R1 触发注入的子集，合一个 plan）→ 批 2 = R3（工作区前端重构 + 后端写接口，独立子系统）→ 批 3 = R4+R5（标注/显示 + 提示词，轻）。**批 1 先走**（最高优先 + 是 demo 现场领导亲见的硬伤，观感边际收益最高）。一次性全做不可取：各批子系统不重叠，且 R1 断点续审有架构不确定性，绑一起会稀释 review。**动机分层**：批 1/批 2 是用户自驱的痛点（自己想改）；批 3 才是领导提的点（主要应答领导），R4/R5 具体形态到批 3 阶段再定（见各条「补充思路」）。
 
 R1. **S5 子代理「独立审查」重做为迷你聊天界面 + 断点续审**
-- 状态：`spec 已定稿 · 待 writing-plans`（codex 三轨 spec/quality/红队 8 轮 APPROVED，2026-06-07；spec：`docs/superpowers/specs/2026-06-06-s5-review-mini-chat-and-resume-design.md`，R1+R2 合一份）
+- 状态：`plan 已 codex 5 轮 APPROVED · 待实施（C1 先行）`（spec v16 三轨 + plan v5 5 轮 [R1-R3 spec+quality 合并轨 / R4 红队 / R5 复核] 均 APPROVED，2026-06-07；spec：`docs/superpowers/specs/2026-06-06-s5-review-mini-chat-and-resume-design.md`、plan：`docs/superpowers/plans/2026-06-07-s5-review-mini-chat-and-resume.md`，R1+R2 合一份）
 - 现象（demo 暴露）：① 审查跑很久时只能看到子代理"调用了哪些工具"，**看不到它输出的文字**，体感像死机；② 后端一抖/断连就报错，抽屉 3 秒自动关，**活全丢、无法从断处继续**；③ 抽屉只能 ESC 关，不能拖/缩/关，无进度。
 - 目标形态：把 `IndependentReviewDrawer` 重做成**迷你版主代理聊天界面**——实时显示子代理文字输出 + 工具调用（复用主聊天面板的渲染）。
 - 交互：正常审查时**输入框锁定**（自动跑）；**仅报错/断开时解锁输入框**，用户在断掉处输入、让子代理**带累计上下文从断处继续审**（非重头跑）。
@@ -21,7 +21,7 @@ R1. **S5 子代理「独立审查」重做为迷你聊天界面 + 断点续审**
 - 涉及文件：`backend/independent_review.py`、`backend/main.py`(SSE endpoint + 锁)、`frontend/src/components/IndependentReviewDrawer.jsx`、`ChatPanel.jsx`(复用渲染)。
 
 R2. **S5「AI 味自查」主代理答非所问修复**
-- 状态：`spec 已定稿 · 待 writing-plans · 实施先行`（与 R1 合一份 spec；R2 注入修复独立、低风险，§9 实施顺序第 1 步）
+- 状态：`plan 已 APPROVED · 待实施（C1=R2 先行，独立可 ship）`（与 R1 合一份 spec+plan；R2 注入修复独立、低风险，plan §9 / C1 第一步）
 - 现象：AI 味脚本跑完 → 主代理那一轮有时不针对 `plan/lint-report.md` 内容回复（非网络问题）。
 - 根因：触发那轮只给"请用 read_file 读报告"的指令，**读不读全靠模型自觉**，无保证它真读了报告才开口。
 - 修法：不依赖模型自读，**直接把 lint 报告内容/结构化摘要注入那一轮上下文**；R1 独立审查触发同理。
