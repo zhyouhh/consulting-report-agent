@@ -314,6 +314,9 @@ class IndependentReviewAgent:
         return msg_dict
 
     MAX_VERIFY_SELF_CORRECTS = 2
+    # 自修 corrective 的稳定前缀：既用于 append，也用于 resume 时从 messages 统计已用自修次数
+    # （codex C3-review BLOCKER 2：自修预算计入会话历史、resume 不重置）。改文案务必保持此前缀稳定。
+    VERIFY_CORRECTIVE_PREFIX = "[自修] 上一版审查报告不合格："
 
     def run(
         self,
@@ -348,7 +351,13 @@ class IndependentReviewAgent:
             yield {"type": "cancelled", "data": "客户端断开，已取消审查"}
 
         if is_cancelled():
-            # resume_snapshot 尚未恢复 messages，此处无可落档内容；直接退。
+            # 初始 early-cancel（断连发生在 run() 恢复 resume_snapshot 之前）。
+            # codex C3-review BLOCKER 4（取 option ①）：claim_resume 已把唯一 errored snapshot 清出
+            # record 并翻 running，此刻它只在 resume_snapshot 参数里——若直接 return cancelled 不落档，
+            # 唯一续审快照彻底丢失。故 resume 场景把 resume_snapshot CAS 写回 errored 再退（断连可续）。
+            # discard 已 pop record → set_errored run_id 失配 no-op（不复活被丢弃的 run）；首次审查无快照可保。
+            if resume_snapshot is not None and store is not None and run_id is not None:
+                store.set_errored(project_id, run_id, resume_snapshot)
             yield {"type": "cancelled", "data": "客户端断开，已取消审查"}
             return
 
@@ -360,6 +369,14 @@ class IndependentReviewAgent:
                 messages = [{"role": "system", "content": INDEPENDENT_REVIEW_SYSTEM_PROMPT}]
             start_iteration = int(resume_snapshot.get("iteration") or 1)
             candidate_text = extract_latest_review_candidate_from_messages(messages)
+            # codex C3-review BLOCKER 2：自修预算计入会话历史 → resume 时从已 append 的 corrective
+            # 条数恢复已用次数，使整个 run（含多次 resume 续跑）总自修 ≤ MAX_VERIFY_SELF_CORRECTS、不重置。
+            self_correct_count = sum(
+                1
+                for m in messages
+                if m.get("role") == "user"
+                and (m.get("content") or "").startswith(self.VERIFY_CORRECTIVE_PREFIX)
+            )
         else:
             word_count = draft_word_count
             if word_count is None:
@@ -590,7 +607,7 @@ class IndependentReviewAgent:
                         {
                             "role": "user",
                             "content": (
-                                f"上一版审查报告不合格：{review_error}。"
+                                f"{self.VERIFY_CORRECTIVE_PREFIX}{review_error}。"
                                 "请补全缺失的完成标记 / 5 个维度章节标题 / 实质正文后，"
                                 "再一次性 write_file 写完整报告到 plan/independent-review.md。"
                             ),
@@ -619,17 +636,20 @@ class IndependentReviewAgent:
         candidate_text: str,
         errored_snapshot: dict,
     ) -> Iterator[Event]:
-        """成功路径：候选已校验通过。**先锁外** mkstemp(同目录) + 写 candidate + close →
-        生产路径（store + run_id 都在）走 store.atomic_commit_report（guard 内只做 run_id/cancel
-        校验 + os.replace + stat + tombstone，spec §86 / codex R3 NIT 1：内容/写 temp 在 store guard
-        外）；atomic_commit 返回 None（run_id 失配 / cancel / os.replace 失败）→ 删 temp + yield error，
-        **无直写回退**（os.replace 失败时 store 已 CAS 降级 errored 供 resume）。
-        store/run_id 缺失（standalone：无并发可守）→ 同款锁外 temp + 直接 os.replace 原子替换。"""
+        """成功路径：候选已校验通过。**store + run_id 是必需依赖、无直写回退**（plan:644 / spec §70/§86：
+        canonical 替换只能在 store guard 下原子完成，codex C3-review BLOCKER 1）——缺任一则 fail-fast
+        error，绝不静默直写 canonical。流程：**先锁外** mkstemp(canonical 同目录) + 写 candidate + close →
+        store.atomic_commit_report（guard 内只做 run_id + status==running + 未 cancel 校验 → os.replace →
+        stat → tombstone）；返回 None（run_id 失配 / status 非 running / cancel / os.replace 失败）→ 删 temp
+        + yield error 让用户续审重试（cancel / os.replace 失败时 store 已 CAS 降级 errored 带 snapshot 供 resume）。"""
+        if store is None or run_id is None:
+            # 生产路径恒带 store + run_id；缺失即按错误处理，不走任何直写旁路（去 footgun）。
+            yield {"type": "error", "detail": "审查存储未就绪，无法保存审查报告，请重试"}
+            return
         # canonical 绝对路径：get_project_path 返回 Optional[Path]，None fail-fast（避免异常变 500）。
         project_path = self.skill_engine.get_project_path(project_id)
         if project_path is None:
-            if store is not None and run_id is not None:
-                store.set_errored(project_id, run_id, errored_snapshot)
+            store.set_errored(project_id, run_id, errored_snapshot)
             yield {"type": "error", "detail": "项目路径不存在，无法保存审查报告，请重试"}
             return
         canonical_abs_path = str((project_path / CANONICAL_REVIEW_PATH).resolve())
@@ -648,39 +668,24 @@ class IndependentReviewAgent:
                     pass
                 raise
         except Exception as exc:
-            if store is not None and run_id is not None:
-                store.set_errored(project_id, run_id, errored_snapshot)
+            store.set_errored(project_id, run_id, errored_snapshot)
             yield {"type": "error", "detail": f"写入审查报告失败：{str(exc)}"}
             return
 
-        if store is not None and run_id is not None:
-            report_mtime_ns = store.atomic_commit_report(
-                project_id, run_id, temp_abs_path, canonical_abs_path, errored_snapshot
-            )
-            if report_mtime_ns is None:
-                # run_id 失配 / 已 cancel / os.replace 失败：删 temp（atomic_commit 失败时未消费它），
-                # yield error 让用户续审重试最终替换（os.replace 失败已在 store 内 CAS 降级 errored）。
-                # 无直写回退。
-                try:
-                    if os.path.exists(temp_abs_path):
-                        os.unlink(temp_abs_path)
-                except OSError:
-                    pass
-                yield {"type": "error", "detail": "审查报告保存被取消或失败，请重试"}
-                return
-        else:
-            # standalone（无 store）：无并发守卫需求，直接原子替换。
+        report_mtime_ns = store.atomic_commit_report(
+            project_id, run_id, temp_abs_path, canonical_abs_path, errored_snapshot
+        )
+        if report_mtime_ns is None:
+            # run_id 失配 / status 非 running / 已 cancel / os.replace 失败：删 temp（atomic_commit 失败时
+            # 未消费它），yield error 让用户续审重试最终替换（cancel / os.replace 失败已在 store 内 CAS
+            # 降级 errored 带 snapshot）。无直写回退。
             try:
-                os.replace(temp_abs_path, canonical_abs_path)
-                report_mtime_ns = str(os.stat(canonical_abs_path).st_mtime_ns)
-            except Exception as exc:
-                try:
-                    if os.path.exists(temp_abs_path):
-                        os.unlink(temp_abs_path)
-                except OSError:
-                    pass
-                yield {"type": "error", "detail": f"写入审查报告失败：{str(exc)}"}
-                return
+                if os.path.exists(temp_abs_path):
+                    os.unlink(temp_abs_path)
+            except OSError:
+                pass
+            yield {"type": "error", "detail": "审查报告保存被取消或失败，请重试"}
+            return
         yield {
             "type": "review-completed",
             "path": CANONICAL_REVIEW_PATH,
@@ -829,24 +834,34 @@ class ReviewSessionStore:
 
     def atomic_commit_report(self, project_id, run_id, temp_abs_path, canonical_abs_path, errored_snapshot):
         """成功路径最后一步。**temp 已由调用方锁外写好并 close**（spec §86 / codex R3 NIT 1：内容/写 temp 在 guard 外，
-        guard 临界区极短、不让 discard 等文件写完）。store guard 内只做：校验 run_id 匹配且未 cancel →
-        os.replace(temp→canonical) → stat st_mtime_ns → 写 tombstone。
-        返回 report_mtime_ns（opaque str）；run_id 失配/已 cancel → None（不动 record，调用方删 temp）；
-        os.replace 失败 → **CAS（status==running 才）降级 errored**（带 errored_snapshot 供 resume 重试），返回 None。
-        ⚠️ codex R1 BLOCKER 3 / R3 BLOCKER 1：失败降级须 status==running 护栏，既翻 running→errored、又不覆盖已 done。"""
+        guard 临界区极短、不让 discard 等文件写完）。store guard 内只做：校验 run_id 匹配 + **status==running**
+        + 未 cancel → os.replace(temp→canonical) → stat st_mtime_ns → 写 tombstone。
+        返回 report_mtime_ns（opaque str）。各失败分支（调用方都删 temp）：
+        - run_id 失配 / status!=running（已 done/errored）→ None，不动 record（CAS 拒绝复活、不覆盖 done tombstone，
+          codex C3-review BLOCKER 3：成功路径也要 status==running 护栏，与 set_errored/finalize 一致）。
+        - 已 cancel（断连/discard）→ **CAS（status==running 才）降级 errored 带 errored_snapshot** 返回 None
+          （codex C3-review BLOCKER 5：断连场景须留 snapshot 可续审，而非让 worker finally 清档；discard 已 pop
+          record / run_id 失配在前面就 return None，不受影响）。
+        - os.replace 失败 → 同样 CAS 降级 errored 带 snapshot 返回 None（供 resume 重试最终替换）。"""
         with self._guard:
             rec = self._records.get(project_id)
-            if not rec or rec.get("run_id") != run_id:
+            # CAS 护栏：仅 run_id 匹配且 status==running 才动 record（成功路径 / 失败降级一致），
+            # 防 done/errored 的 tombstone 被同 run_id 的迟到 commit 复活或覆盖。
+            if not rec or rec.get("run_id") != run_id or rec.get("status") != "running":
                 return None
             ce = rec.get("cancel_event")
             if ce is not None and ce.is_set():
+                # 断连/discard：不脏写 canonical；status==running 已在上面保证 → CAS 翻 errored 带 snapshot，
+                # 使断连场景可续审（discard 已 pop record，到不了这里）。
+                rec["status"] = "errored"
+                rec["snapshot"] = errored_snapshot
                 return None
             try:
                 os.replace(temp_abs_path, canonical_abs_path)  # 原子；temp 同目录、已 close（勿用仍打开的句柄）
             except Exception:
-                if rec.get("status") == "running":   # 护栏：翻 running→errored，不覆盖 done
-                    rec["status"] = "errored"
-                    rec["snapshot"] = errored_snapshot
+                # status==running 已保证（上面 CAS）→ 翻 errored 带 snapshot，供 resume 重试最终替换。
+                rec["status"] = "errored"
+                rec["snapshot"] = errored_snapshot
                 return None
             mtime_ns = str(os.stat(canonical_abs_path).st_mtime_ns)  # opaque string（避 JS 2^53）
             rec["status"] = "done"

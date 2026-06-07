@@ -77,6 +77,14 @@ class IndependentReviewAgentTests(unittest.TestCase):
         settings = self._make_settings(projects_dir)
         return engine, project, project_dir, IndependentReviewAgent(skill_engine=engine, settings=settings)
 
+    def _claim_store(self, project, run_id="run-1"):
+        """store + run_id are required deps of run()'s success path (codex C3-review BLOCKER 1:
+        no store=None direct-write bypass). Tests that drive run() to a successful commit must
+        provide a claimed store. Returns (store, run_id)."""
+        store = ReviewSessionStore()
+        self.assertTrue(store.claim_first(project["id"], run_id, threading.Event()))
+        return store, run_id
+
     # ---- streaming chunk builders (mirror the OpenAI SDK stream shape) ----
 
     def _delta_chunk(self, *, content=None, tool_calls=None, reasoning_content=None):
@@ -147,6 +155,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_emits_progress_events(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
         responses = [
             self._stream_single_tool_call("read_file", {"file_path": "plan/data-log.md"}, "call-1"),
             self._stream_single_tool_call("read_file", {"file_path": "plan/analysis-notes.md"}, "call-2"),
@@ -161,7 +170,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = responses
-            events = list(agent.run(project["id"], draft_word_count=100))
+            events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
         event_types = [event["type"] for event in events]
         self.assertIn("progress", event_types)
@@ -173,6 +182,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_streams_content_delta(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
         # write the canonical report first, then a final narration spread over chunks
         responses = [
             self._stream_single_tool_call(
@@ -185,7 +195,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = responses
-            events = list(agent.run(project["id"], draft_word_count=100))
+            events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
         deltas = [event for event in events if event["type"] == "content_delta"]
         self.assertGreaterEqual(len(deltas), 3)
@@ -197,6 +207,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_accumulates_tool_call_across_chunks(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
         review = self._complete_review_text()
         # tool_call split across many chunks, including an empty-arguments first chunk
         # and out-of-order index padding (index 0 only, but name/args dribbled).
@@ -225,7 +236,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = responses
             with mock.patch.object(agent, "_execute_tool", side_effect=spy_execute):
-                events = list(agent.run(project["id"], draft_word_count=100))
+                events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
         # name fragments "write" + "_file" must be joined; arguments joined into valid JSON
         self.assertEqual(captured_args["tool_name"], "write_file")
@@ -236,6 +247,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_handles_out_of_order_tool_call_index(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
         # Genuinely out-of-order indexes: the first chunk lands at index 2 (forcing the
         # while-loop to pad placeholder slots 0 and 1), then 0 and 1 are filled later in
         # mixed order. All three are valid read_file calls. The accumulator must rebuild
@@ -273,7 +285,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = responses
             with mock.patch.object(agent, "_execute_tool", side_effect=spy_execute):
-                events = list(agent.run(project["id"], draft_word_count=100))
+                events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
         # round 1 executes the three reads in index order (0,1,2), each with the
         # argument fragment that was routed to that index — proves padding + per-index
@@ -292,6 +304,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_strips_think_from_content_delta(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
         review = self._complete_review_text()
         # First write the report, then stream a narration where a <think> block is
         # split across chunks inside delta.content -> must never reach the frontend.
@@ -312,7 +325,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = responses
-            events = list(agent.run(project["id"], draft_word_count=100))
+            events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
         delta_text = "".join(e["text"] for e in events if e["type"] == "content_delta")
         self.assertEqual(delta_text, "审查完成，报告已生成")
@@ -326,6 +339,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_collects_reasoning_for_followup_not_yielded(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
         review = self._complete_review_text()
         captured_messages = {}
         original_serialize = agent._serialize_assistant_tool_call_message
@@ -357,7 +371,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = responses
             with mock.patch.object(agent, "_serialize_assistant_tool_call_message", side_effect=spy_serialize):
-                events = list(agent.run(project["id"], draft_word_count=100))
+                events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
         # follow-up message carries non-empty reasoning_content (deepseek contract)
         self.assertIn("tool_call_msg", captured_messages)
@@ -396,6 +410,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
             with self.subTest(case=case_name):
                 engine, project, project_dir, agent = self._make_engine_project_and_agent()
                 del engine, project_dir
+                store, run_id = self._claim_store(project)
                 responses = [
                     # round 1: malformed -> compliance bulkhead, round voided
                     iter([self._delta_chunk(tool_calls=round1_tool_calls)]),
@@ -425,7 +440,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
                 with mock.patch("backend.independent_review.OpenAI") as mock_openai:
                     mock_openai.return_value.chat.completions.create.side_effect = create_side_effect
                     with mock.patch.object(agent, "_execute_tool", side_effect=spy_execute):
-                        events = list(agent.run(project["id"], draft_word_count=100))
+                        events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
                 # round 2's messages carry the bulkhead pair: assistant placeholder
                 # (no tool_calls payload that would carry the malformed call) + user
@@ -1127,6 +1142,156 @@ class IndependentReviewAgentTests(unittest.TestCase):
         self.assertEqual(dangling, [])
         self.assertIn("call-x", tool_ids)  # the interrupted call got a padded tool result
 
+    # ---- C3 review fixes (BLOCKER 1/2/4/5) ----
+
+    def test_run_success_path_requires_store_no_silent_write(self):
+        # codex C3-review BLOCKER 1: store + run_id are required for the success commit; with
+        # no store the agent must fail-fast (error) and must NOT silently direct-write canonical.
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        del engine, project_dir
+        canonical = Path(project["project_dir"]) / CANONICAL_REVIEW_PATH
+        before = canonical.read_text(encoding="utf-8")  # pending stub
+        responses = [
+            self._stream_single_tool_call(
+                "write_file",
+                {"file_path": CANONICAL_REVIEW_PATH, "content": self._complete_review_text()},
+                "call-1",
+            ),
+            self._stream_text("审查完成，报告已生成"),
+        ]
+
+        with mock.patch("backend.independent_review.OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.side_effect = responses
+            events = list(agent.run(project["id"], draft_word_count=100))  # no store / run_id
+
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertNotIn("review-completed", [e["type"] for e in events])
+        # canonical untouched: the complete report was NOT written via any direct-write bypass.
+        self.assertEqual(canonical.read_text(encoding="utf-8"), before)
+        self.assertNotIn(INDEPENDENT_REVIEW_COMPLETION_MARKER, canonical.read_text(encoding="utf-8"))
+
+    def test_run_resume_does_not_reset_self_correct_budget(self):
+        # codex C3-review BLOCKER 2: self-correct budget is counted from the conversation
+        # history, so resume continues the budget instead of resetting it. Here the resume
+        # snapshot already carries 1 corrective (1 of 2 used) -> only 1 more is allowed.
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        del engine, project_dir
+        store, run_id = self._claim_store(project)
+        bad = "# 独立审查报告\n\n缺标记\n"
+        # resume history: one prior write(bad)+result and one prior corrective (1 used).
+        resume_messages = [
+            {"role": "system", "content": INDEPENDENT_REVIEW_SYSTEM_PROMPT},
+            self._serialized_write_assistant(bad, "call-prev"),
+            self._tool_result_msg("call-prev", status="success"),
+            {"role": "user", "content": f"{agent.VERIFY_CORRECTIVE_PREFIX}审查报告缺少完成标记，请重试。请补全。"},
+        ]
+        resume_snapshot = {"messages": resume_messages, "iteration": 6, "review_written": True}
+        # feed enough bad rounds; budget should stop it after exactly 1 more self-correct.
+        responses = self._bad_review_responses_for_self_correct(bad, attempts=3)
+
+        with mock.patch("backend.independent_review.OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.side_effect = responses
+            events = list(agent.run(project["id"], run_id=run_id, store=store, resume_snapshot=resume_snapshot))
+
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertIn("审查报告缺少完成标记", events[-1]["detail"])
+        # only 1 more self-correct cycle ran (write+narrate, then 1 correct -> write+narrate) = 4 calls.
+        # if the budget had reset to 2, it would have been 6 calls.
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 4)
+        # final errored snapshot carries exactly MAX correctives total (1 pre-existing + 1 added).
+        status, snapshot = store.claim_resume(project["id"], run_id, threading.Event())
+        self.assertEqual(status, "errored")
+        correctives = [
+            m for m in snapshot["messages"]
+            if m.get("role") == "user" and (m.get("content") or "").startswith(agent.VERIFY_CORRECTIVE_PREFIX)
+        ]
+        self.assertEqual(len(correctives), agent.MAX_VERIFY_SELF_CORRECTS)
+
+    def test_run_early_cancel_after_resume_preserves_snapshot(self):
+        # codex C3-review BLOCKER 4: claim_resume clears the only snapshot into run()'s
+        # resume_snapshot arg; if cancel fired before run() restored it, an early return
+        # would lose the only resumable snapshot. The early-cancel path must write it back.
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        del engine, project_dir
+        store = ReviewSessionStore()
+        run_id = "run-resume"
+        cancel = threading.Event()
+        original_snapshot = {
+            "messages": [
+                {"role": "system", "content": INDEPENDENT_REVIEW_SYSTEM_PROMPT},
+                {"role": "user", "content": "续审上下文"},
+            ],
+            "iteration": 7,
+            "review_written": False,
+        }
+        store.claim_first(project["id"], run_id, threading.Event())
+        store.set_errored(project["id"], run_id, original_snapshot)
+        # endpoint resume dispatch: claim_resume flips running + hands snapshot to run().
+        status, dispatched = store.claim_resume(project["id"], run_id, cancel)
+        self.assertEqual(status, "errored")
+        # disconnect happens before run() restores resume_snapshot.
+        cancel.set()
+
+        with mock.patch("backend.independent_review.OpenAI") as mock_openai:
+            events = list(agent.run(
+                project["id"], cancel_event=cancel, run_id=run_id, store=store, resume_snapshot=dispatched
+            ))
+
+        self.assertEqual(events[-1]["type"], "cancelled")
+        mock_openai.assert_not_called()  # never reached the LLM
+        # the unique snapshot was written back -> a subsequent resume still has it.
+        status2, returned = store.claim_resume(project["id"], run_id, threading.Event())
+        self.assertEqual(status2, "errored")
+        self.assertEqual(returned, original_snapshot)
+
+    def test_run_commit_time_cancel_disconnect_sets_errored_resumable(self):
+        # codex C3-review BLOCKER 5 (agent integration): cancel fires after verify passes but
+        # before atomic_commit. atomic_commit's cancel branch must CAS-flip to errored with a
+        # snapshot (resumable), the temp must be cleaned up, and canonical must NOT be written.
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        del engine, project_dir
+        store = ReviewSessionStore()
+        run_id = "run-commit-cancel"
+        cancel = threading.Event()
+        store.claim_first(project["id"], run_id, cancel)
+        canonical = Path(project["project_dir"]) / CANONICAL_REVIEW_PATH
+        before = canonical.read_text(encoding="utf-8")  # pending stub
+        responses = [
+            self._stream_single_tool_call(
+                "write_file",
+                {"file_path": CANONICAL_REVIEW_PATH, "content": self._complete_review_text()},
+                "call-1",
+            ),
+            self._stream_text("审查完成，报告已生成"),
+        ]
+
+        # verify passes but sets cancel as a side effect -> simulates disconnect landing in the
+        # window between the no-tool-call cancel check and atomic_commit_report.
+        original_verify = agent._verify_review_completeness
+
+        def verify_then_cancel(candidate_text):
+            result = original_verify(candidate_text)
+            cancel.set()
+            return result
+
+        canonical_dir = canonical.parent
+        with mock.patch("backend.independent_review.OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.side_effect = responses
+            with mock.patch.object(agent, "_verify_review_completeness", side_effect=verify_then_cancel):
+                events = list(agent.run(project["id"], draft_word_count=100, cancel_event=cancel, run_id=run_id, store=store))
+
+        # committed nothing (canonical still the pending stub), surfaced an error not completion.
+        self.assertNotIn("review-completed", [e["type"] for e in events])
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertEqual(canonical.read_text(encoding="utf-8"), before)
+        # temp cleaned up (no leftover .independent-review-*.tmp).
+        leftover = list(canonical_dir.glob(".independent-review-*.tmp"))
+        self.assertEqual(leftover, [])
+        # record is errored with a snapshot (resumable on reconnect), NOT cleared, NOT done.
+        status, snapshot = store.claim_resume(project["id"], run_id, threading.Event())
+        self.assertEqual(status, "errored")
+        self.assertIsInstance(snapshot.get("messages"), list)
+
 
 class ReviewSessionStoreTests(unittest.TestCase):
     """Task 3.1: in-process resume store — two-lock split / CAS no-revive / atomic replace /
@@ -1222,15 +1387,22 @@ class ReviewSessionStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.get_done_mtime("p", "WRONG"))
 
     def test_store_atomic_commit_aborts_when_cancelled(self):
+        # codex C3-review BLOCKER 5: cancel (disconnect) before commit -> NOT a dirty write,
+        # and the record is CAS-flipped to errored with the snapshot (resumable), not left
+        # running (which the worker finally would otherwise clear, losing the session).
         cancel = threading.Event()
         self.store.claim_first("p", "run-1", cancel)
         cancel.set()
         temp = self._stage_temp()
-        result = self.store.atomic_commit_report("p", "run-1", temp, self.canonical, {"messages": []})
+        snap = {"messages": [{"role": "system"}], "iteration": 4}
+        result = self.store.atomic_commit_report("p", "run-1", temp, self.canonical, snap)
         self.assertIsNone(result)
         self.assertFalse(os.path.exists(self.canonical))  # canonical NOT replaced
-        # record left running (worker finally / finalize_orphan_running converges, see C4).
         self.assertTrue(os.path.exists(temp))  # caller is responsible for deleting temp
+        # record flipped to errored carrying the snapshot -> resume continues.
+        status, returned = self.store.claim_resume("p", "run-1", threading.Event())
+        self.assertEqual(status, "errored")
+        self.assertEqual(returned, snap)
 
     def test_store_atomic_commit_aborts_on_run_id_mismatch(self):
         self.store.claim_first("p", "run-1", threading.Event())
@@ -1255,15 +1427,49 @@ class ReviewSessionStoreTests(unittest.TestCase):
         self.assertEqual(returned, errored_snap)
 
     def test_store_atomic_commit_cancel_returns_none_no_dirty_write(self):
-        # cancelled before commit: no done tombstone, no canonical write; record stays running
-        # (finalize_orphan_running in the worker finally converges it, codex R2 BLOCKER 2).
+        # cancelled before commit: no done tombstone, no canonical write. Per BLOCKER 5 the
+        # record becomes errored+snapshot (resumable on reconnect), never done.
         cancel = threading.Event()
         self.store.claim_first("p", "run-1", cancel)
         cancel.set()
         temp = self._stage_temp()
-        self.assertIsNone(self.store.atomic_commit_report("p", "run-1", temp, self.canonical, {"messages": []}))
+        snap = {"messages": [{"role": "system"}]}
+        self.assertIsNone(self.store.atomic_commit_report("p", "run-1", temp, self.canonical, snap))
         self.assertIsNone(self.store.get_done_mtime("p", "run-1"))
         self.assertFalse(os.path.exists(self.canonical))
+        # errored, not done, not cleared.
+        self.assertEqual(self.store.claim_resume("p", "run-1", threading.Event())[0], "errored")
+
+    def test_store_atomic_commit_rejected_on_done_or_errored_no_overwrite(self):
+        # codex C3-review BLOCKER 3: success path needs a status=="running" CAS too, else a
+        # late atomic_commit with the same run_id could overwrite a done tombstone / errored
+        # record. done and errored must both reject the commit (no os.replace, no state churn).
+        # --- done tombstone is not overwritten ---
+        temp1 = self._stage_temp("first")
+        self.store.claim_first("p", "run-1", threading.Event())
+        mtime = self.store.atomic_commit_report("p", "run-1", temp1, self.canonical, {"messages": []})
+        self.assertIsInstance(mtime, str)
+        first_text = Path(self.canonical).read_text(encoding="utf-8")
+        # a second (stale) commit for the same run_id must be rejected and not touch canonical.
+        temp2 = self._stage_temp("SECOND should not land")
+        self.assertIsNone(self.store.atomic_commit_report("p", "run-1", temp2, self.canonical, {"messages": []}))
+        self.assertEqual(Path(self.canonical).read_text(encoding="utf-8"), first_text)
+        self.assertTrue(os.path.exists(temp2))  # not consumed by os.replace
+        # tombstone + mtime preserved (status still done).
+        self.assertEqual(self.store.get_done_mtime("p", "run-1"), mtime)
+
+        # --- errored record is not flipped/overwritten by a commit ---
+        self.store.claim_first("q", "run-q", threading.Event())
+        errored_snap = {"messages": [{"role": "system"}], "iteration": 2}
+        self.store.set_errored("q", "run-q", errored_snap)
+        canonical_q = os.path.join(self.tmpdir.name, "review-q.md")
+        temp_q = self._stage_temp("should not land")
+        self.assertIsNone(self.store.atomic_commit_report("q", "run-q", temp_q, canonical_q, {"messages": ["other"]}))
+        self.assertFalse(os.path.exists(canonical_q))  # no write while errored
+        # snapshot untouched -> resume returns the original errored snapshot.
+        status, returned = self.store.claim_resume("q", "run-q", threading.Event())
+        self.assertEqual(status, "errored")
+        self.assertEqual(returned, errored_snap)
 
     def test_store_discard_run_id_match_sets_cancel_and_clears(self):
         cancel = threading.Event()
