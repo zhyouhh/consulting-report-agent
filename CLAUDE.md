@@ -99,35 +99,43 @@ S4 阶段（大纲已确认）报告正文唯一规范路径是 `content/report_
 
 **历史背景**：原 `<draft-action>` tag system + classifier + gate + scope enforcement 整套（含 fix4 v5 amendment）已于 2026-05-06 删除；4 专用工具中的 3 个旧工具与 gemini 时代 obligation / family-lock 控制层已于 2026-05-09 DeepSeek migration 删除。详见 `docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md`。
 
-## S5 用户触发审查（2026-05-22 S5 redesign）
+## S5 用户触发审查（2026-05-22 两按钮重做 → 2026-06-07 R1+R2 迷你聊天 + 断点续审）
 
-S5 阶段审查从模型自评 `review-checklist.md` 改为**两个用户主动触发按钮**：
+S5 阶段审查由**两个用户主动触发按钮**驱动：
 
 | 入口 | 路径 | 写入者 |
 |---|---|---|
 | 工作区"独立审查"按钮 | `plan/independent-review.md` | `backend/independent_review.py:IndependentReviewAgent`（独立 LLM 会话，5 维度判断）|
 | 工作区"AI 味自查"按钮 | `plan/lint-report.md` | `skill/scripts/quality_check.ps1`（PowerShell 脚本，4 机械维度）|
 
-两份报告生成后前端自动起主代理 turn（`ChatRequest.system_trigger` 协议 + `_chat_stream_unlocked` 内 `if system_trigger:` 分支）；主代理 `read_file` 报告并 partner 风格摘要给用户。
+报告就绪后前端自动起一轮主代理 turn（`ChatRequest.system_trigger` 协议 + `_chat_stream_unlocked` 内 `if system_trigger:` 分支）。
 
-**关键约束**：
+**R2（2026-06-07）改了汇报轮注入方式**：不再"让主代理 `read_file` 自己读报告"，而是**把报告全文作为本轮临时 user/context 数据消息注入**（trust boundary：数据非指令、绝不入 system），且**汇报轮禁工具**（请求层 pop tools + 响应层硬拦截 `_execute_tool`）——主代理必基于注入内容回复，恶意报告无法诱导工具调用 / 阶段推进。`system_triggered` 轮只持久化 assistant（报告全文不落 `conversation.json`）。
+
+**R1（2026-06-07）把独立审查从"闷头读→一次性 write→结束"改造成流式迷你聊天窗口 + 断点续审**：
+
+- **流式会说话 agent**：`IndependentReviewAgent.run()` 从非流式改为流式，content 增量作 `content_delta` SSE 事件推前端渲染；`<think>` 三路径剥离由 `backend/stream_parsing.py:ThinkingStreamParser` 负责（chat.py 主循环与 independent_review 共享 import，解循环导入），**前端永不收到 thinking**。
+- **`ReviewSessionStore`（`independent_review.py` 内新增）**：进程内续审存档，两锁（review lock / store guard）+ `run_id` + tombstone（done/errored）+ candidate staging + 锁内原子替换（`os.replace`）+ 校验失败自修 ≤2 次后降级 errored 留 snapshot。candidate 从 messages 重建、不私存。
+- **endpoint**：`POST /api/projects/{id}/independent-review/stream {resume,run_id,supplement?}` + `POST .../discard`（**旧 GET stream 已删**）。**worker（agent.run + review lock 释放）在 endpoint 函数体创建、不在 `generate()` 内**——Starlette `StreamingResponse` 用 task group 并发 stream_response + listen_for_disconnect、disconnect 抢先 cancel 时 `generate()` 可能一行未执行；worker 在函数体保证 review lock 必释放（否则该项目审查 409 到重启，codex C5 红队 B3）。completion 仅在 lock 释放后 + 重读 done tombstone 才发 `review-completed`。
+- **run-bound 注入**：汇报轮绑定本次 run 的 tombstone，绝不汇报旧报告。`trigger_metadata={run_id, report_mtime_ns}`（**opaque 字符串、全程禁转 Number/int**，避 JS 2^53 失精）端到端透传：前端 `buildChatRequest` → `ChatRequest` → `/api/chat/stream` → chat.py tombstone 校验 + 读报告后 re-stat `mtime_ns` 复校（TOCTOU）。lint 路径无 run_id 维持 generic ready。
+
+**关键约束**（baseline + R1/R2 叠加）：
 - `_has_effective_review_reports()` 是 `CHECKPOINT_PREREQ.review_passed_at` 生产门禁；要求两份报告 marker + anchor + substantive body 全部命中
-- 主代理 `write_file` / `edit_file` 对 `plan/independent-review.md` / `plan/lint-report.md` **显式拒绝**（独立性硬约束，chat.py:4785 附近）；这两份报告只能由 IndependentReviewAgent / lint 脚本写入
-- `_has_effective_review_checklist()` 函数保留向后兼容但**不再被生产路径调用**；`review-checklist.md` 模板文件保留为老项目数据
-- `IndependentReviewAgent.run()` 阈值 `MAX_DRAFT_WORDS_FOR_REVIEW = 100000`，超 100k 字 friendly fail（v0；DeepSeek V4 Pro 实际 1M context，预留升级空间——超 100k 字 chunk fallback 在 worklist P3）
-- per-project lock（`_INDEPENDENT_REVIEW_LOCKS` / `_LINT_REPORT_LOCKS`）：同一项目同时只能跑一次独立审查 / 一次 lint，409 拒并发；lock 检查在 `record_stage_checkpoint` 持有 project lock 期内（避免 TOCTOU）
-- `IndependentReviewAgent.run(cancel_event=...)` 协作取消：endpoint client 断开时 set event，agent 在每轮 LLM 调用前查，及时退出释放 token + lock
-- DeepSeek 兼容 helpers（`_should_send_explicit_tool_choice` / `_extract_reasoning_content_from_message` / `_serialize_assistant_tool_call_message`）在 `independent_review.py` 复用 `chat.py` 同款行为，测试矩阵锁定（`test_deepseek_compat_helpers_match_chat_helpers`）
+- 主代理 `write_file` / `edit_file` 对 `plan/independent-review.md` / `plan/lint-report.md` **显式拒绝**（独立性硬约束）；这两份报告只能由 IndependentReviewAgent / lint 脚本写入
+- `_has_effective_review_checklist()` 函数与 `review-checklist.md` 模板保留向后兼容但**不再被生产路径调用**
+- `IndependentReviewAgent.run()` 阈值 `MAX_DRAFT_WORDS_FOR_REVIEW = 100000`，超 100k 字 friendly fail（v0；chunk fallback 在 worklist P3）
+- per-project lock（`_INDEPENDENT_REVIEW_LOCKS` / `_LINT_REPORT_LOCKS`）：同项目同时只能跑一次审查 / 一次 lint，409 拒并发
+- DeepSeek 兼容 helpers（`_should_send_explicit_tool_choice` / `_extract_reasoning_content_from_message` / `_serialize_assistant_tool_call_message`）在 `independent_review.py` 与 `chat.py` 行为锁定一致（`test_deepseek_compat_helpers_match_chat_helpers`，已扩展到流式 follow-up）；流式改造不得破坏官渠兼容
 
 **前端**：
-- `IndependentReviewDrawer.jsx` 用 fetch + ReadableStream + AbortController + ESC 关闭 + 自动关闭（不显示关闭按钮）
-- `StagePanel.jsx` 按钮阶段化：S5 才显示两个新按钮 + 高亮；S6/S7/done 才显示"导出可审草稿"；"运行质量检查"按钮删除
-- `ChatPanel` `forwardRef + useImperativeHandle` 暴露 `triggerSystemTurn(triggerType)`，`App.jsx` wire `chatPanelRef` 给 WorkspacePanel
-- `WorkspacePanel` 在触发 system turn 前先 `axios.get` workspace 二次确认 `independent_review_ready` / `lint_report_ready`（避免软门禁未通过时主代理读到 stub）+ 复用 `shouldApplyProjectResponse` guard（避免项目切换 race）
+- `IndependentReviewDrawer.jsx` 已重做为流式 **`ReviewChatWindow`**：前端生成 `run_id`（窗口全程不变）+ content_delta 聚合成连续 assistant 气泡（复用 `components/MarkdownMessage.jsx` 渲染）+ **可拖动 / 有关闭按钮（非仅 ESC）/ 带进度**。状态机 running（输入锁）/ errored（错误**留存不自动关**、解锁 supplement 输入框、「继续审查」带累计上下文从断处续）/ completed（自动关窗**不调 discard**；仅用户主动关才 discard）；409 指数退避有上限（5 次）后给出口；open-effect 守 `isOpen` 上升沿（切项目不误启动错误项目审查，红队 B1）。**无 jsdom**：聚合/状态机/队列抽 `utils/` 纯函数测 + 组件 source-guard。
+- `triggerSystemTurn` 主聊天忙时入 **pending 队列**（`utils/pendingTriggerQueue.js`，FIFO 多条 + projectId 隔离），结束补发带原 metadata；发起新审查时剪同类型旧 pending（红队 B2）。`ChatPanel` `forwardRef + useImperativeHandle` 暴露 `triggerSystemTurn` / `dropPendingReviewTriggers`，`App.jsx` wire `chatPanelRef` 给 WorkspacePanel。
+- `WorkspacePanel` completion 靠 run-bound 返回的 `{run_id, report_mtime_ns}` 触发（**不查 generic workspace ready**，防旧报告误判），保留 `shouldApplyProjectResponse` 项目切换 guard。
+- `StagePanel.jsx` 按钮阶段化：S5 才显两个按钮 + 高亮；S6/S7/done 才显"导出可审草稿"。
 
-**回归测试**：集中在 `tests/test_independent_review.py`、`tests/test_lint_report.py`、`tests/test_main_api.py`（endpoints + workspace flags）、`tests/test_chat_runtime.py`（system_trigger / S5 welcome / 主代理拒写）、`tests/test_skill_engine.py`（CHECKPOINT_PREREQ + flags + lock）。
+**回归测试**：`tests/test_independent_review.py`（流式/staging/自修/CAS/run_id 防护/`os.replace` 失败/thinking 剥离）、`tests/test_lint_report.py`、`tests/test_main_api.py`（POST/resume/discard/lock 全路径/B3 generator-未消费 lock 释放/completion 时序）、`tests/test_chat_runtime.py`（system_trigger 注入/run-bound/`mtime` 大整数 str/主代理拒写）、`tests/test_skill_engine.py`、前端 `reviewChatWindow.test.mjs` + `independentReviewDrawer.source.test.mjs`。
 
-详见 `docs/superpowers/cutover_report_2026-05-22_s5-redesign.md`。
+详见 `docs/superpowers/cutover_report_2026-05-22_s5-redesign.md`（baseline）+ `docs/superpowers/cutover_report_2026-06-07_s5-review-mini-chat.md`（R1+R2）。
 
 ## 管理型搜索池
 
