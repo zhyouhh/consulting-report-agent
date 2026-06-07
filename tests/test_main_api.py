@@ -983,6 +983,54 @@ class WorkspaceApiTests(unittest.TestCase):
 
     @mock.patch("backend.main.IndependentReviewAgent")
     @mock.patch("backend.main.skill_engine.get_workspace_summary")
+    def test_review_lock_released_even_if_response_generator_never_consumed(self, mock_summary, mock_agent_cls):
+        # codex C5 red-team B3: Starlette runs stream_response + listen_for_disconnect concurrently
+        # and cancels the task group when either finishes (starlette/responses.py). If the client
+        # already disconnected, the disconnect listener can win before stream_response is scheduled,
+        # so generate() may never execute. The worker (and thus its lock release) is created in the
+        # ENDPOINT BODY, not inside generate(). Here we await the endpoint and NEVER consume the
+        # response body (aclose it as Starlette would on cancel) — generate()'s body never runs, yet
+        # the body-created worker must still finish and release the review lock (else that project's
+        # review 409s until process restart).
+        from backend.independent_review import get_independent_review_lock
+
+        project_id = "demo-b3-no-consume"
+        run_id = "run-b3"
+        mock_summary.return_value = {"stage_code": "S5"}
+        mock_agent_cls.return_value.run.return_value = iter([{"type": "progress", "message": "ok"}])
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+
+        async def call():
+            class ConnectedRequest:
+                async def json(self_inner):
+                    return {"resume": False, "run_id": run_id}
+
+                async def is_disconnected(self_inner):
+                    return False
+
+            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            # Emulate Starlette cancelling before the body is ever iterated: close the generator
+            # WITHOUT consuming it. generate()'s body never runs; only the body-created worker can
+            # release the lock.
+            await response.body_iterator.aclose()
+            # Wait (in-loop) for the worker thread to finish and release the lock.
+            lock = get_independent_review_lock(project_id)
+            for _ in range(200):
+                if lock.acquire(blocking=False):
+                    lock.release()
+                    return True
+                await asyncio.sleep(0.02)
+            return False
+
+        released = asyncio.run(call())
+        self.assertTrue(
+            released,
+            "review lock leaked: a worker created inside generate() would never run when the "
+            "response generator is cancelled before its first iteration (B3)",
+        )
+
+    @mock.patch("backend.main.IndependentReviewAgent")
+    @mock.patch("backend.main.skill_engine.get_workspace_summary")
     def test_review_completed_emitted_after_lock_release(self, mock_summary, mock_agent_cls):
         # when review-completed is emitted, the review lock is already free (the wrapper emits
         # it only after worker_task finished + run_worker finally released the lock).

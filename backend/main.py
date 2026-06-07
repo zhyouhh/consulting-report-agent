@@ -390,38 +390,18 @@ async def independent_review_stream_post(project_id: str, request: Request):
             lock.release()
             raise HTTPException(status_code=400, detail="无可续审的会话")
 
-    async def generate():
-        # 统一 completion 收尾（codex C4-quality BLOCKER）：done 短路分支与 worker 分支共用同一套
-        # completion 时序，消除两分支不一致——发 review-completed 前永远 ① 检查 is_disconnected
-        # （断连 → 不发 completed、不发 [DONE]）；② 重新 store.get_done_mtime 重读 tombstone（truthy
-        # 才发，带重读到的 mtime，绝不用任何缓存值——防 release lock 后被并发 discard / 新 first-run
-        # 覆盖 tombstone 仍发 stale completed）；③ 未断连才发 [DONE]。此刻 review lock 必已释放
-        # （done 分支在 claim_resume 后即 release；worker 分支在 run_worker finally release）。
-        async def emit_completion():
-            if await request.is_disconnected():
-                return
-            final_mtime = store.get_done_mtime(project_id, run_id)
-            if final_mtime:
-                yield (
-                    "data: "
-                    + json.dumps(
-                        {
-                            "type": "review-completed",
-                            "run_id": run_id,
-                            "report_mtime_ns": final_mtime,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n\n"
-                )
-            yield "data: [DONE]\n\n"
-
-        # done 分支：worker 不启动（resume 命中已落档的 done tombstone），直接走统一 completion。
-        if done_mtime is not None:
-            async for chunk in emit_completion():
-                yield chunk
-            return
-
+    # Worker + review-lock release are created HERE (function body), NOT inside generate(), so the
+    # lock is released even if generate() never runs. Starlette StreamingResponse.__call__ runs
+    # stream_response and listen_for_disconnect concurrently in a task group and cancels the group as
+    # soon as either finishes (starlette/responses.py:249-257). If the client already disconnected,
+    # the disconnect listener can win before stream_response is scheduled, so generate()'s body —
+    # which used to create the worker — may never execute, leaking the review lock forever (that
+    # project's review then 409s until process restart; discard only clears the store, not the lock).
+    # Creating the worker in the function body guarantees run_worker's finally releases the lock
+    # regardless of whether generate() is ever consumed (codex C5 red-team B3).
+    event_queue = None
+    worker_task = None
+    if done_mtime is None:
         event_queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
@@ -465,6 +445,41 @@ async def independent_review_stream_post(project_id: str, request: Request):
                         lock.release()
 
         worker_task = asyncio.create_task(asyncio.to_thread(run_worker))
+
+    async def generate():
+        # 统一 completion 收尾（codex C4-quality BLOCKER）：done 短路分支与 worker 分支共用同一套
+        # completion 时序，消除两分支不一致——发 review-completed 前永远 ① 检查 is_disconnected
+        # （断连 → 不发 completed、不发 [DONE]）；② 重新 store.get_done_mtime 重读 tombstone（truthy
+        # 才发，带重读到的 mtime，绝不用任何缓存值——防 release lock 后被并发 discard / 新 first-run
+        # 覆盖 tombstone 仍发 stale completed）；③ 未断连才发 [DONE]。此刻 review lock 必已释放
+        # （done 分支在 claim_resume 后即 release；worker 分支在 run_worker finally release）。
+        async def emit_completion():
+            if await request.is_disconnected():
+                return
+            final_mtime = store.get_done_mtime(project_id, run_id)
+            if final_mtime:
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "review-completed",
+                            "run_id": run_id,
+                            "report_mtime_ns": final_mtime,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+            yield "data: [DONE]\n\n"
+
+        # done 分支：worker 不启动（resume 命中已落档的 done tombstone），直接走统一 completion。
+        if done_mtime is not None:
+            async for chunk in emit_completion():
+                yield chunk
+            return
+
+        # worker + review-lock release 已在函数体创建（见上方 B3 注释）；generate 只消费 event_queue。
+        # worker_task / event_queue 是函数体闭包变量（done 分支已在上方 return，到这里必为非 None）。
         try:
             while True:
                 if await request.is_disconnected():
