@@ -331,6 +331,13 @@ class IndependentReviewAgent:
         def is_cancelled() -> bool:
             return cancel_event is not None and cancel_event.is_set()
 
+        # store + run_id 是 run() 的硬依赖（codex C3-review BLOCKER 1）：在进入 provider 循环、
+        # 读正文、做任何 LLM/工具调用之前就 fail-fast，避免无 store 的调用白烧一整轮 token 才报错
+        # （之前只在 _commit_verified_candidate 提交前才拒）。
+        if store is None or run_id is None:
+            yield {"type": "error", "detail": "审查存储未就绪，无法运行审查，请重试"}
+            return
+
         # ---- candidate staging 状态：候选只活在 messages 的 write_file tool_call
         # arguments + 此局部变量；snapshot 绝不单独存 candidate_text（codex R1 BLOCKER 4）。
         candidate_text: str | None = None
@@ -643,7 +650,8 @@ class IndependentReviewAgent:
         stat → tombstone）；返回 None（run_id 失配 / status 非 running / cancel / os.replace 失败）→ 删 temp
         + yield error 让用户续审重试（cancel / os.replace 失败时 store 已 CAS 降级 errored 带 snapshot 供 resume）。"""
         if store is None or run_id is None:
-            # 生产路径恒带 store + run_id；缺失即按错误处理，不走任何直写旁路（去 footgun）。
+            # defense-in-depth：run() 入口已对 None store/run_id fail-fast（codex C3-review NIT），
+            # 正常流程到不了这里；保留此守卫以防本方法被直接调用时静默走直写旁路（去 footgun）。
             yield {"type": "error", "detail": "审查存储未就绪，无法保存审查报告，请重试"}
             return
         # canonical 绝对路径：get_project_path 返回 Optional[Path]，None fail-fast（避免异常变 500）。

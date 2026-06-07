@@ -463,6 +463,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_word_count_over_100k_emits_friendly_error(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine
+        store, run_id = self._claim_store(project)
         draft_path = project_dir / "content" / "report_draft_v1.md"
         draft_path.write_text(
             "# Draft\n\n" + ("hello " * (MAX_DRAFT_WORDS_FOR_REVIEW + 1)),
@@ -470,7 +471,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
         )
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
-            events = list(agent.run(project["id"]))
+            events = list(agent.run(project["id"], store=store, run_id=run_id))
 
         self.assertEqual(events[0]["type"], "error")
         self.assertIn("正文超过 100k 字", events[0]["detail"])
@@ -479,11 +480,12 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_returns_early_when_cancel_event_set_before_first_call(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
         cancel_event = threading.Event()
         cancel_event.set()
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
-            events = list(agent.run(project["id"], draft_word_count=100, cancel_event=cancel_event))
+            events = list(agent.run(project["id"], draft_word_count=100, cancel_event=cancel_event, store=store, run_id=run_id))
 
         self.assertEqual(events, [{"type": "cancelled", "data": "客户端断开，已取消审查"}])
         mock_openai.assert_not_called()
@@ -491,6 +493,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_returns_after_current_llm_call_when_cancel_set_mid_run(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
         cancel_event = threading.Event()
         first_response = self._stream_single_tool_call("read_file", {"file_path": "plan/data-log.md"}, "call-1")
 
@@ -501,7 +504,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = complete_first_call_then_cancel
-            events = list(agent.run(project["id"], draft_word_count=100, cancel_event=cancel_event))
+            events = list(agent.run(project["id"], draft_word_count=100, cancel_event=cancel_event, store=store, run_id=run_id))
 
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 1)
         self.assertEqual(events[-1], {"type": "cancelled", "data": "客户端断开，已取消审查"})
@@ -510,6 +513,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_rejects_write_to_non_canonical_path(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
         responses = [
             self._stream_single_tool_call(
                 "write_file", {"file_path": "plan/data-log.md", "content": "bad"}, "call-1"
@@ -519,7 +523,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = responses
-            events = list(agent.run(project["id"], draft_word_count=100))
+            events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
         tool_results = [event for event in events if event["type"] == "tool_result" and event["tool"] == "write_file"]
         self.assertEqual(tool_results[0]["status"], "error")
@@ -549,11 +553,12 @@ class IndependentReviewAgentTests(unittest.TestCase):
         # Bad candidate (no marker) -> self-correct retries twice, then terminal error.
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
         responses = self._bad_review_responses_for_self_correct("# 独立审查报告\n\n缺标记\n")
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = responses
-            events = list(agent.run(project["id"], draft_word_count=100))
+            events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
         self.assertIn("审查报告缺少完成标记", events[-1]["detail"])
         self.assertNotIn("review-completed", [event["type"] for event in events])
@@ -573,10 +578,11 @@ class IndependentReviewAgentTests(unittest.TestCase):
             f"{INDEPENDENT_REVIEW_COMPLETION_MARKER}\n"
         )
         responses = self._bad_review_responses_for_self_correct(incomplete_review)
+        store, run_id = self._claim_store(project)
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = responses
-            events = list(agent.run(project["id"], draft_word_count=100))
+            events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
         self.assertEqual(events[-1]["type"], "error")
         self.assertIn("审查报告未完整生成", events[-1]["detail"])
@@ -585,6 +591,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
     def test_run_max_iterations_15(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
+        store, run_id = self._claim_store(project)
 
         def make_read_stream(**kwargs):
             del kwargs
@@ -592,7 +599,7 @@ class IndependentReviewAgentTests(unittest.TestCase):
 
         with mock.patch("backend.independent_review.OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = make_read_stream
-            events = list(agent.run(project["id"], draft_word_count=100))
+            events = list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
 
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 15)
         self.assertEqual(events[-1]["type"], "error")
@@ -1169,6 +1176,29 @@ class IndependentReviewAgentTests(unittest.TestCase):
         # canonical untouched: the complete report was NOT written via any direct-write bypass.
         self.assertEqual(canonical.read_text(encoding="utf-8"), before)
         self.assertNotIn(INDEPENDENT_REVIEW_COMPLETION_MARKER, canonical.read_text(encoding="utf-8"))
+
+    def test_run_without_store_fails_fast_before_any_llm_call(self):
+        # codex C3-review NIT: store/run_id is a hard dep — run() must reject up front
+        # (before the provider loop), not burn a full LLM+tool+verify round then error.
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        del engine, project_dir
+
+        with mock.patch("backend.independent_review.OpenAI") as mock_openai:
+            # missing both
+            events = list(agent.run(project["id"], draft_word_count=100))
+            self.assertEqual(events, [{"type": "error", "detail": "审查存储未就绪，无法运行审查，请重试"}])
+            # missing run_id only
+            events_no_run_id = list(
+                agent.run(project["id"], draft_word_count=100, store=ReviewSessionStore())
+            )
+            self.assertEqual(events_no_run_id[-1]["type"], "error")
+            # missing store only
+            events_no_store = list(agent.run(project["id"], draft_word_count=100, run_id="run-x"))
+            self.assertEqual(events_no_store[-1]["type"], "error")
+
+        # the LLM client was never even constructed, and create() was never called.
+        mock_openai.assert_not_called()
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
 
     def test_run_resume_does_not_reset_self_correct_budget(self):
         # codex C3-review BLOCKER 2: self-correct budget is counted from the conversation
