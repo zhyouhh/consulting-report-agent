@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-06-07（批 1 = R1+R2 实施 plan v5 经 codex 5 轮 review APPROVED [R1-R3 spec+quality 合并轨 + R4 对抗式红队 + R5 复核]，待用户定实施时机（C1 先行）；「默认通道→试用通道」文案已落地。详见下方整改簇。）
+最后更新：2026-06-08（批 1 = R1+R2 **✅ 已实施闭环**：C1-C6 全绿；C5 用户可见 cutover 过 codex 三轨 review[spec/quality/红队]APPROVED——红队挖出并修复 3 个真 BLOCKER[切项目孤儿 / stale pending / Starlette pre-stream disconnect 致 review lock 永久泄漏]；spec §6 测试矩阵零缺口；cutover report 已落。**剩 finishing branch[merge/PR 待用户定] + 真实 GUI 手工 E2E[用户]**。feat 分支未 push。详见下方 R1。）
 
 上一次更新：2026-06-05（报奖后领导评审反馈逐条 brainstorm 完成 → 落入下方「领导评审反馈整改」高优先簇（R1–R5）；产品化定位：a 优先 / b 为领导方向先 park / c 不做。）
 
@@ -13,7 +13,14 @@
 **执行策略（2026-06-06 敲定 · 分 3 批，不一次性）**：批 1 = R1+R2（同在 S5 审查/chat 触发链路；R2 注入修法是 R1 触发注入的子集，合一个 plan）→ 批 2 = R3（工作区前端重构 + 后端写接口，独立子系统）→ 批 3 = R4+R5（标注/显示 + 提示词，轻）。**批 1 先走**（最高优先 + 是 demo 现场领导亲见的硬伤，观感边际收益最高）。一次性全做不可取：各批子系统不重叠，且 R1 断点续审有架构不确定性，绑一起会稀释 review。**动机分层**：批 1/批 2 是用户自驱的痛点（自己想改）；批 3 才是领导提的点（主要应答领导），R4/R5 具体形态到批 3 阶段再定（见各条「补充思路」）。
 
 R1. **S5 子代理「独立审查」重做为迷你聊天界面 + 断点续审**
-- 状态：`plan 已 codex 5 轮 APPROVED · 待实施（C1 先行）`（spec v16 三轨 + plan v5 5 轮 [R1-R3 spec+quality 合并轨 / R4 红队 / R5 复核] 均 APPROVED，2026-06-07；spec：`docs/superpowers/specs/2026-06-06-s5-review-mini-chat-and-resume-design.md`、plan：`docs/superpowers/plans/2026-06-07-s5-review-mini-chat-and-resume.md`，R1+R2 合一份）
+- 状态：`✅ 已实施闭环（C1-C6 全绿，codex 三轨 APPROVED；剩 finishing + 用户手工 E2E）`（plan：`docs/superpowers/plans/2026-06-07-s5-review-mini-chat-and-resume.md`；spec v16：`docs/superpowers/specs/2026-06-06-s5-review-mini-chat-and-resume-design.md`；cutover：`docs/superpowers/cutover_report_2026-06-07_s5-review-mini-chat.md`）
+- 实施记录（feat 分支 `feat/s5-review-mini-chat-and-resume`，未 push；subagent-driven + 每 commit codex review）：
+  - ✅ C1 R2 触发注入（0ec2e13+7f8b9d4+276b7c8）· ✅ C2 流式 agent + ThinkingStreamParser→stream_parsing.py（ddba13f+4e20a9b）· ✅ C3 ReviewSessionStore 两锁/CAS/锁内原子替换/candidate staging/自修≤2/resume（7fea285+abed413+448b265）· ✅ C4 POST/resume/discard endpoint + ChatRequest metadata（2fc16b4+456373b）— C1-C4 全双轨 APPROVED
+  - ✅ C5 用户可见 cutover（前端 ReviewChatWindow + run-bound 注入）：`67158f8` cutover → `b2063c6` 双轨 fix（SSE EOF 可续 + supplement 输入 + run-bound 锁外 yield）→ `1360c3e` 红队 B1+B2（切项目孤儿 + stale pending）→ `d9fe6c9` 红队 B3（Starlette pre-stream disconnect 致 review lock 永久泄漏：worker 创建移出 generate 到 endpoint 函数体）。**codex 三轨 APPROVED（spec/quality/红队）；红队挖出并修复 3 个真 BLOCKER（非诱导式秒过）**。
+  - ✅ C6 回归矩阵核对 spec §6 零缺口（codex R1 必补三类 os.replace/staged-write-resume/mtime 大整数全已有测试）+ cutover report
+  - 测试全绿：后端 test_main_api+independent_review+skill_engine **253 pass**、chat_runtime `-k` targeted **31 pass**、前端 `node --test` **253 pass**、vite build 通过。mtime/run_id 全程 str 无 Number 强转。
+  - **剩**：finishing branch（merge/PR 待用户定）+ 真实 GUI 手工 E2E（用户，见 cutover report「手工验收待办」：流式旁白 / 模拟断连续审 / 点审查后立刻切项目不卡死该项目审查）。
+  - 预存无关 bug（收尾后查）：`tests/test_lint_report.py` 截断测试在本机 PowerShell 即失败（`skill/scripts/quality_check.ps1` 截断逻辑本地环境问题，与 R1+R2 无关）。
 - 现象（demo 暴露）：① 审查跑很久时只能看到子代理"调用了哪些工具"，**看不到它输出的文字**，体感像死机；② 后端一抖/断连就报错，抽屉 3 秒自动关，**活全丢、无法从断处继续**；③ 抽屉只能 ESC 关，不能拖/缩/关，无进度。
 - 目标形态：把 `IndependentReviewDrawer` 重做成**迷你版主代理聊天界面**——实时显示子代理文字输出 + 工具调用（复用主聊天面板的渲染）。
 - 交互：正常审查时**输入框锁定**（自动跑）；**仅报错/断开时解锁输入框**，用户在断掉处输入、让子代理**带累计上下文从断处继续审**（非重头跑）。
@@ -21,7 +28,7 @@ R1. **S5 子代理「独立审查」重做为迷你聊天界面 + 断点续审**
 - 涉及文件：`backend/independent_review.py`、`backend/main.py`(SSE endpoint + 锁)、`frontend/src/components/IndependentReviewDrawer.jsx`、`ChatPanel.jsx`(复用渲染)。
 
 R2. **S5「AI 味自查」主代理答非所问修复**
-- 状态：`plan 已 APPROVED · 待实施（C1=R2 先行，独立可 ship）`（与 R1 合一份 spec+plan；R2 注入修复独立、低风险，plan §9 / C1 第一步）
+- 状态：`✅ 已实施闭环（= C1，codex 双轨 APPROVED）`（R2 注入修复就是 C1：报告全文作 user/context 数据注入[非 system，trust boundary] + 汇报轮禁工具[请求层 pop tools + 响应层硬拦截 _execute_tool] + 注入前 ready fail-fast；commits 0ec2e13+7f8b9d4+276b7c8）
 - 现象：AI 味脚本跑完 → 主代理那一轮有时不针对 `plan/lint-report.md` 内容回复（非网络问题）。
 - 根因：触发那轮只给"请用 read_file 读报告"的指令，**读不读全靠模型自觉**，无保证它真读了报告才开口。
 - 修法：不依赖模型自读，**直接把 lint 报告内容/结构化摘要注入那一轮上下文**；R1 独立审查触发同理。
