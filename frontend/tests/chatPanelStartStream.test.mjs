@@ -40,7 +40,21 @@ test("App.jsx wires chatPanelRef.triggerSystemTurn into WorkspacePanel via onTri
   const src = readSrc("../src/App.jsx");
   assert.match(src, /chatPanelRef/);
   assert.match(src, /ref=\{chatPanelRef\}/);
-  assert.match(src, /onTriggerSystemTurn=\{\(triggerType\) => chatPanelRef\.current\?\.triggerSystemTurn\(triggerType\)\}/);
+  // C5: the wiring forwards run-bound metadata as a second argument.
+  assert.match(
+    src,
+    /onTriggerSystemTurn=\{\(triggerType,\s*metadata\) => chatPanelRef\.current\?\.triggerSystemTurn\(triggerType,\s*metadata\)\}/,
+  );
+});
+
+test("ChatPanel.triggerSystemTurn queues triggers when busy and forwards metadata", () => {
+  const src = readSrc("../src/components/ChatPanel.jsx");
+  // triggerSystemTurn takes metadata and enqueues when loading/uploading instead of dropping.
+  assert.match(src, /const triggerSystemTurn = useCallback\(\(triggerType, metadata = null\)/);
+  assert.match(src, /enqueuePendingTrigger/);
+  assert.match(src, /flushNextPendingTrigger/);
+  // The flushed trigger re-sends the original run-bound metadata.
+  assert.match(src, /triggerMetadata: \{ run_id: item\.run_id, report_mtime_ns: item\.report_mtime_ns \}/);
 });
 
 test("WorkspacePanel.runLintReport awaits workspace GET before onTriggerSystemTurn", () => {
@@ -51,9 +65,10 @@ test("WorkspacePanel.runLintReport awaits workspace GET before onTriggerSystemTu
   assert.match(src, /onTriggerSystemTurn\?\.\(['"]lint_report_done['"]\)/);
 });
 
-test("IndependentReviewDrawer onCompleted awaits workspace independent_review_ready", () => {
+test("ReviewChatWindow onCompleted fires the system turn from the run-bound result", () => {
   const src = readSrc("../src/components/WorkspacePanel.jsx");
   assert.match(src, /onIndependentReviewCompleted/);
-  assert.match(src, /independent_review_ready|independentReviewReady/);
-  assert.match(src, /onTriggerSystemTurn\?\.\(['"]independent_review_done['"]\)/);
+  // C5: completion is judged by the {run_id, report_mtime_ns} the window returns, not by a
+  // generic workspace independent_review_ready flag (which could reflect a stale report).
+  assert.match(src, /onTriggerSystemTurn\?\.\(['"]independent_review_done['"],\s*\{ run_id: runId, report_mtime_ns: reportMtimeNs \}\)/);
 });

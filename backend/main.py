@@ -336,112 +336,12 @@ async def quality_check(project_id: str):
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@app.get("/api/projects/{project_id}/independent-review/stream")
-async def independent_review_stream(project_id: str, request: Request):
-    try:
-        workspace = skill_engine.get_workspace_summary(project_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    if workspace.get("stage_code") != "S5":
-        raise HTTPException(status_code=400, detail="独立审查只能在 S5 阶段使用")
-
-    lock = get_independent_review_lock(project_id)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="上一次独立审查仍在进行中，请等待")
-
-    async def generate():
-        event_queue = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-        cancel_event = threading.Event()
-
-        def enqueue_event(event):
-            if loop.is_closed():
-                return
-            future = asyncio.run_coroutine_threadsafe(event_queue.put(event), loop)
-            future.result()
-
-        # C3 过渡：后端临时生成 run_id 让首次审查走新存储（前端稳定 run_id + resume/discard 在 C4/C5）。
-        run_id = uuid.uuid4().hex
-
-        def run_worker():
-            claimed = False
-            try:
-                # store guard 下 CAS 写 running（覆盖旧 errored/done tombstone）。review lock 已串行
-                # 化 worker，正常恒 True；失败说明 store 仍有 active running，发 error 不复跑。
-                if not _REVIEW_SESSION_STORE.claim_first(project_id, run_id, cancel_event):
-                    enqueue_event({"type": "error", "data": "上一次独立审查仍在进行中，请等待"})
-                    return
-                claimed = True
-                agent = IndependentReviewAgent(skill_engine, settings)
-                for event in agent.run(
-                    project_id,
-                    run_id=run_id,
-                    store=_REVIEW_SESSION_STORE,
-                    cancel_event=cancel_event,
-                ):
-                    if cancel_event.is_set():
-                        break
-                    enqueue_event(event)
-            except Exception as exc:
-                if not cancel_event.is_set():
-                    enqueue_event({"type": "error", "data": str(exc)})
-            finally:
-                try:
-                    # worker 退出兜底（codex R3 BLOCKER 2）：若 record 仍 running（异常绕过 agent
-                    # 落档 / 断连后 agent 未来得及 set_errored）则收敛——C3 GET 无 resume 语义，传
-                    # fallback_snapshot=None 清 record，不留死 running 卡死旧前端。done/errored/被
-                    # discard / run_id 失配 → no-op。先收敛再 release review lock。
-                    if claimed:
-                        _REVIEW_SESSION_STORE.finalize_orphan_running(project_id, run_id, None)
-                finally:
-                    try:
-                        enqueue_event(None)
-                    finally:
-                        lock.release()
-
-        worker_task = asyncio.create_task(asyncio.to_thread(run_worker))
-        disconnected = False
-        try:
-            while True:
-                if await request.is_disconnected():
-                    disconnected = True
-                    cancel_event.set()
-                    break
-                try:
-                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    continue
-                if event is None:
-                    break
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            if not disconnected:
-                yield "data: [DONE]\n\n"
-        except Exception as exc:
-            cancel_event.set()
-            yield f"data: {json.dumps({'type': 'error', 'data': str(exc)}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-        finally:
-            cancel_event.set()
-            if not worker_task.done():
-                await worker_task
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
 @app.post("/api/projects/{project_id}/independent-review/stream")
 async def independent_review_stream_post(project_id: str, request: Request):
-    """C4: POST stream with frontend-stable run_id + resume/discard support.
+    """POST stream with frontend-stable run_id + resume/discard support.
 
-    The legacy GET endpoint above stays in place until C5 (front end still calls it),
-    so this POST path is the dormant new contract. Body: {resume, run_id, supplement?}.
+    C5 cutover: the legacy GET endpoint was deleted and the front end now drives this POST
+    contract exclusively. Body: {resume, run_id, supplement?}.
     Hard invariants (codex R2): the review lock is released on EVERY path (acquire fail,
     claim_first CAS fail, resume done/reject, worker finally); resume waits for the lock via
     to_thread (non-blocking the event loop) then re-reads the store; review-completed is
@@ -754,12 +654,20 @@ def chat_stream(request: Request, chat_request: ChatRequest):
     def generate():
         try:
             handler = get_chat_handler(chat_request.project_id)
+            # C5: thread run-bound trigger metadata end-to-end so the main agent can bind a
+            # review report to the exact run that produced it (run_id/report_mtime_ns stay
+            # opaque strings — pydantic already rejects raw ints; never coerce to Number).
+            trigger_metadata = {
+                "run_id": chat_request.run_id,
+                "report_mtime_ns": chat_request.report_mtime_ns,
+            }
             for chunk in handler.chat_stream(
                 chat_request.project_id,
                 chat_request.message_text,
                 chat_request.attached_material_ids,
                 [item.model_dump() for item in chat_request.transient_attachments],
                 system_trigger=chat_request.system_trigger,
+                trigger_metadata=trigger_metadata,
             ):
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"

@@ -542,217 +542,6 @@ class WorkspaceApiTests(unittest.TestCase):
             "D:/skill/scripts/quality_check.ps1",
         )
 
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_requires_s5(self, mock_summary):
-        mock_summary.return_value = {"stage_code": "S4"}
-
-        response = self.client.get("/api/projects/demo/independent-review/stream")
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("独立审查只能在 S5 阶段使用", response.json()["detail"])
-
-    @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_returns_sse_content_type(self, mock_summary, mock_agent_cls):
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_agent_cls.return_value.run.return_value = [
-            {"type": "progress", "message": "开始审查"},
-        ]
-
-        response = self.client.get("/api/projects/demo-sse/independent-review/stream")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
-        self.assertIn('"type": "progress"', response.text)
-        self.assertIn("data: [DONE]", response.text)
-
-    @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_does_not_block_event_loop(
-        self,
-        mock_summary,
-        mock_agent_cls,
-    ):
-        class ConnectedRequest:
-            async def is_disconnected(self):
-                return False
-
-        def slow_run(project_id, cancel_event=None, **kwargs):
-            del project_id, cancel_event, kwargs
-            time.sleep(0.6)
-            yield {"type": "progress", "message": "审查完成"}
-
-        async def collect_response():
-            response = await main_module.independent_review_stream(
-                "demo-review-nonblocking",
-                ConnectedRequest(),
-            )
-            consumer = asyncio.create_task(_collect_streaming_chunks(response))
-            started_at = time.perf_counter()
-            await asyncio.sleep(0.05)
-            elapsed = time.perf_counter() - started_at
-            chunks = await consumer
-            return elapsed, chunks
-
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_agent_cls.return_value.run.side_effect = slow_run
-
-        elapsed, chunks = asyncio.run(collect_response())
-
-        self.assertLess(elapsed, 0.3)
-        self.assertTrue(any('"type": "progress"' in chunk for chunk in chunks))
-
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_409_when_lock_held(self, mock_summary):
-        from backend.independent_review import get_independent_review_lock
-
-        project_id = "demo-review-concurrent"
-        mock_summary.return_value = {"stage_code": "S5"}
-        lock = get_independent_review_lock(project_id)
-        self.assertTrue(lock.acquire(blocking=False))
-        self.addCleanup(lock.release)
-
-        response = self.client.get(f"/api/projects/{project_id}/independent-review/stream")
-
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("上一次独立审查仍在进行中", response.json()["detail"])
-
-    @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_releases_lock_on_disconnect(
-        self,
-        mock_summary,
-        mock_agent_cls,
-    ):
-        from backend.independent_review import get_independent_review_lock
-
-        class DisconnectedRequest:
-            async def is_disconnected(self):
-                return True
-
-        worker_stopped = threading.Event()
-        received_cancel_events = []
-
-        def cancellable_run(project_id, cancel_event=None, **kwargs):
-            del project_id, kwargs
-            received_cancel_events.append(cancel_event)
-            for _ in range(50):
-                if cancel_event is not None and cancel_event.is_set():
-                    worker_stopped.set()
-                    return
-                time.sleep(0.01)
-            yield {"type": "progress", "message": "should not emit"}
-
-        async def collect_response():
-            response = await main_module.independent_review_stream(
-                "demo-review-disconnect",
-                DisconnectedRequest(),
-            )
-            return await _collect_streaming_chunks(response)
-
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_agent_cls.return_value.run.side_effect = cancellable_run
-
-        chunks = asyncio.run(collect_response())
-
-        self.assertEqual(chunks, [])
-        self.assertEqual(len(received_cancel_events), 1)
-        self.assertIsInstance(received_cancel_events[0], threading.Event)
-        self.assertTrue(received_cancel_events[0].is_set())
-        self.assertTrue(worker_stopped.is_set())
-        lock = get_independent_review_lock("demo-review-disconnect")
-        self.assertTrue(lock.acquire(blocking=False))
-        lock.release()
-
-    @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_independent_review_endpoint_emits_error_event_on_agent_exception(
-        self,
-        mock_summary,
-        mock_agent_cls,
-    ):
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_agent_cls.return_value.run.side_effect = RuntimeError("agent exploded")
-
-        response = self.client.get("/api/projects/demo-review-error/independent-review/stream")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('"type": "error"', response.text)
-        self.assertIn("agent exploded", response.text)
-        self.assertIn("data: [DONE]", response.text)
-
-    @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_get_review_uses_store_and_writes_tombstone_on_success(
-        self,
-        mock_summary,
-        mock_agent_cls,
-    ):
-        # Task 3.3: the GET worker wires the real _REVIEW_SESSION_STORE + a backend run_id
-        # into agent.run; on success the store ends with a done tombstone.
-        from backend.independent_review import CANONICAL_REVIEW_PATH
-
-        project_id = "demo-review-store-success"
-        mock_summary.return_value = {"stage_code": "S5"}
-        tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tmpdir.cleanup)
-        captured = {}
-
-        def fake_run(project_id_arg, run_id=None, store=None, cancel_event=None, **kwargs):
-            del cancel_event, kwargs
-            captured["run_id"] = run_id
-            captured["store"] = store
-            # simulate the real agent's success commit through the store (atomic replace
-            # into a temp canonical, writing a done tombstone).
-            canonical = os.path.join(tmpdir.name, "independent-review.md")
-            fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write("final report")
-            mtime = store.atomic_commit_report(project_id_arg, run_id, temp_path, canonical, {"messages": []})
-            captured["mtime"] = mtime
-            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": mtime}
-
-        mock_agent_cls.return_value.run.side_effect = fake_run
-
-        response = self.client.get(f"/api/projects/{project_id}/independent-review/stream")
-
-        self.assertEqual(response.status_code, 200)
-        # the worker passed the real module-level store + a non-empty backend run_id.
-        self.assertIs(captured["store"], main_module._REVIEW_SESSION_STORE)
-        self.assertTrue(captured["run_id"])
-        # store holds a done tombstone (run-bound), surviving the worker finally's
-        # finalize_orphan_running (no-op on done).
-        self.assertIsNotNone(captured["mtime"])
-        self.assertEqual(
-            main_module._REVIEW_SESSION_STORE.get_done_mtime(project_id, captured["run_id"]),
-            captured["mtime"],
-        )
-        self.assertIn("review-completed", response.text)
-
-    @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_get_review_worker_exception_leaves_no_running_record(
-        self,
-        mock_summary,
-        mock_agent_cls,
-    ):
-        # codex R3 BLOCKER 2: a GET worker exception must not leave a stuck running record
-        # (finally finalize_orphan_running converges); a fresh first-claim must succeed.
-        project_id = "demo-review-store-exc"
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_agent_cls.return_value.run.side_effect = RuntimeError("boom mid-run")
-
-        response = self.client.get(f"/api/projects/{project_id}/independent-review/stream")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('"type": "error"', response.text)
-        # no dead running record remains: a brand-new first-claim succeeds.
-        self.assertTrue(
-            main_module._REVIEW_SESSION_STORE.claim_first(project_id, "fresh-run", threading.Event())
-        )
-        # cleanup the record we just created for hygiene.
-        main_module._REVIEW_SESSION_STORE.discard(project_id, "fresh-run")
-
     # ------------------------------------------------------------------
     # C4: POST /independent-review/stream (run-bound, resume) + discard
     # ------------------------------------------------------------------
@@ -1390,22 +1179,6 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(timeout.write, 30.0)
         self.assertEqual(timeout.pool, 30.0)
 
-    @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_get_review_legacy_path_still_works_after_c4(self, mock_summary, mock_agent_cls):
-        # codex R2 BLOCKER 1: the legacy GET endpoint must keep working after C4 adds POST.
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_agent_cls.return_value.run.return_value = [
-            {"type": "progress", "message": "开始审查"},
-        ]
-
-        response = self.client.get("/api/projects/demo-get-after-c4/independent-review/stream")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
-        self.assertIn('"type": "progress"', response.text)
-        self.assertIn("data: [DONE]", response.text)
-
     # ---- discard ----
 
     def test_discard_requires_run_id(self):
@@ -1829,6 +1602,9 @@ class WorkspaceApiTests(unittest.TestCase):
         ])
         mock_get_chat_handler.return_value = handler
 
+        # C5: the route must thread run-bound trigger metadata to the handler verbatim;
+        # report_mtime_ns is a large opaque string and must survive end-to-end unchanged.
+        big_mtime = "1760000000123456789"
         response = self.client.post(
             "/api/chat/stream",
             json={
@@ -1836,6 +1612,8 @@ class WorkspaceApiTests(unittest.TestCase):
                 "message_text": "",
                 "system_trigger": "independent_review_done",
                 "attached_material_ids": [],
+                "run_id": "run-abc-123",
+                "report_mtime_ns": big_mtime,
             },
         )
 
@@ -1847,7 +1625,12 @@ class WorkspaceApiTests(unittest.TestCase):
             [],
             [],
             system_trigger="independent_review_done",
+            trigger_metadata={"run_id": "run-abc-123", "report_mtime_ns": big_mtime},
         )
+        # The nanosecond mtime stays a string (never coerced to a JSON number / int).
+        forwarded = handler.chat_stream.call_args.kwargs["trigger_metadata"]
+        self.assertIsInstance(forwarded["report_mtime_ns"], str)
+        self.assertEqual(forwarded["report_mtime_ns"], big_mtime)
 
 
 class GetConversationSanitizeTests(unittest.TestCase):

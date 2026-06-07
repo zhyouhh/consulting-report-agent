@@ -252,7 +252,7 @@ function App() {
             onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
             onCheckpointSet={loadWorkspace}
             onInsertPrompt={(text) => setInjectedPrompt(text)}
-            onTriggerSystemTurn={(triggerType) => chatPanelRef.current?.triggerSystemTurn(triggerType)}
+            onTriggerSystemTurn={(triggerType, metadata) => chatPanelRef.current?.triggerSystemTurn(triggerType, metadata)}
           />
         )}
       </div>

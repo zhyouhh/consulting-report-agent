@@ -16,39 +16,111 @@ function sectionBetween(src, start, end) {
   return src.slice(startIndex, endIndex);
 }
 
-test("IndependentReviewDrawer.jsx uses AbortController for fetch lifecycle", () => {
+test("ReviewChatWindow uses AbortController for fetch lifecycle", () => {
   const src = drawerSrc();
   assert.match(src, /new AbortController\(\)/);
-  assert.match(src, /controller\.abort\(\)/);
+  assert.match(src, /\.abort\(\)/);
 });
 
-test("IndependentReviewDrawer.jsx listens for ESC keydown", () => {
+test("ReviewChatWindow listens for ESC keydown", () => {
   const src = drawerSrc();
   assert.match(src, /keydown/);
   assert.match(src, /key === ['"]Escape['"]/);
 });
 
-test("IndependentReviewDrawer.jsx has no visible close button", () => {
+test("ReviewChatWindow has a real close button (not ESC-only)", () => {
   const src = drawerSrc();
-  assert.doesNotMatch(src, />\s*关闭\s*</);
+  // A clickable close control wired to the active-close handler.
+  assert.match(src, /aria-label="关闭"/);
+  assert.match(src, /onClick=\{handleActiveClose\}/);
 });
 
-test("IndependentReviewDrawer completion path triggers a system turn after ready check", () => {
-  const drawer = drawerSrc();
-  const workspace = workspaceSrc();
-  assert.match(drawer, /review-completed/);
-  assert.match(workspace, /independent_review_ready|independentReviewReady/);
-  assert.match(workspace, /onTriggerSystemTurn\?\.\(['"]independent_review_done['"]\)/);
+test("ReviewChatWindow header is draggable", () => {
+  const src = drawerSrc();
+  assert.match(src, /onMouseDown=\{handleDragStart\}/);
+  assert.match(src, /cursor-move/);
 });
 
-test("WorkspacePanel async review and lint completions guard against stale projects", () => {
+test("ReviewChatWindow shows round/action progress", () => {
+  const src = drawerSrc();
+  assert.match(src, /第 \{windowState\.round\} 轮/);
+});
+
+test("ReviewChatWindow drives the stream over POST (no residual GET to the review stream)", () => {
+  const src = drawerSrc();
+  assert.match(src, /independent-review\/stream/);
+  assert.match(src, /method: 'POST'/);
+  // The legacy GET endpoint was deleted in C5 — the window must not call it.
+  assert.doesNotMatch(src, /method: 'GET'/);
+});
+
+test("ReviewChatWindow generates a stable run_id and sends it in the body", () => {
+  const src = drawerSrc();
+  assert.match(src, /genRunId\(\)/);
+  assert.match(src, /run_id: runId/);
+});
+
+test("ReviewChatWindow error state persists (no auto-close setTimeout)", () => {
+  const src = drawerSrc();
+  // The old behaviour auto-closed the window 3s after an error; that is removed.
+  assert.doesNotMatch(src, /setTimeout\([^)]*onClose[^)]*3000/);
+  assert.doesNotMatch(src, /setTimeout\([^)]*onClose[^)]*\b3000\b/);
+});
+
+test("ReviewChatWindow completed path auto-closes WITHOUT calling /discard", () => {
+  const src = drawerSrc();
+  const completedBlock = sectionBetween(src, "if (event.type === 'review-completed')", "const runWithBackoff");
+  assert.match(completedBlock, /onCompletedRef\.current\?\.\(/);
+  assert.match(completedBlock, /onCloseRef\.current\?\.\(\)/);
+  // No discard endpoint CALL inside the completion handling / consumeStream tail (comments may
+  // mention discard; assert there is no actual fetch to the discard endpoint here).
+  assert.doesNotMatch(completedBlock, /independent-review\/discard/);
+  assert.doesNotMatch(completedBlock, /fetch\([^)]*discard/);
+});
+
+test("ReviewChatWindow active close aborts + calls /discard", () => {
+  const src = drawerSrc();
+  const closeBlock = sectionBetween(src, "const handleActiveClose", "// 继续审查");
+  assert.match(closeBlock, /\.abort\(\)/);
+  assert.match(closeBlock, /independent-review\/discard/);
+  assert.match(closeBlock, /method: 'POST'/);
+  // Guarded so a completed run is never discarded (would clear the done tombstone).
+  assert.match(closeBlock, /!completedRef\.current/);
+});
+
+test("ReviewChatWindow has exponential 409 backoff with a cap and an exit", () => {
+  const src = drawerSrc();
+  assert.match(src, /backoffExhausted/);
+  assert.match(src, /nextBackoff/);
+  assert.match(src, /status === 409/);
+});
+
+test("WorkspacePanel completion fires the system turn from the run-bound result, not generic ready", () => {
   const src = workspaceSrc();
   const reviewCompletion = sectionBetween(src, "const onIndependentReviewCompleted", "const runLintReport");
-  const lintReport = sectionBetween(src, "const runLintReport", "const exportDraft");
-
-  assert.match(reviewCompletion, /requestProject\s*=\s*projectId/);
+  // Fires on the {run_id, report_mtime_ns} returned by the window.
+  assert.match(reviewCompletion, /completion\?\.run_id/);
+  assert.match(reviewCompletion, /completion\?\.report_mtime_ns/);
+  assert.match(reviewCompletion, /onTriggerSystemTurn\?\.\(['"]independent_review_done['"],\s*\{/);
+  // Must NOT gate completion on the generic workspace flag (would risk reporting a stale report).
+  assert.doesNotMatch(reviewCompletion, /flags\?\.independent_review_ready/);
+  // Project-switch guard preserved.
   assert.match(reviewCompletion, /shouldApplyProjectResponse/);
-  assert.match(lintReport, /requestProject\s*=\s*projectId/);
+});
+
+test("WorkspacePanel does not strip run-bound metadata before triggering", () => {
+  const src = workspaceSrc();
+  const reviewCompletion = sectionBetween(src, "const onIndependentReviewCompleted", "const runLintReport");
+  // The metadata object reaches onTriggerSystemTurn intact (run_id + report_mtime_ns).
+  assert.match(reviewCompletion, /run_id:\s*runId/);
+  assert.match(reviewCompletion, /report_mtime_ns:\s*reportMtimeNs/);
+});
+
+test("WorkspacePanel lint completion stays generic (no run-bound metadata)", () => {
+  const src = workspaceSrc();
+  const lintReport = sectionBetween(src, "const runLintReport", "const exportDraft");
+  assert.match(lintReport, /lint_report_ready|lintReportReady/);
+  assert.match(lintReport, /onTriggerSystemTurn\?\.\(['"]lint_report_done['"]\)/);
   assert.match(lintReport, /shouldApplyProjectResponse/);
 });
 

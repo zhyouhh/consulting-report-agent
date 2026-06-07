@@ -35,6 +35,7 @@ export function buildChatRequest({
   attachedMaterialIds = [],
   transientAttachments = [],
   systemTrigger = null,
+  triggerMetadata = null,
 }) {
   const trimmed = typeof messageText === "string" ? messageText.trim() : "";
   const payload = {
@@ -49,6 +50,18 @@ export function buildChatRequest({
   }
   if (systemTrigger) {
     payload.system_trigger = systemTrigger;
+  }
+  // C5: run-bound trigger metadata travels with a system trigger so the backend can bind a
+  // review report to the exact run that produced it. run_id / report_mtime_ns are OPAQUE
+  // STRINGS — write them through verbatim, never Number()/parseInt (a nanosecond mtime
+  // exceeds JS Number.MAX_SAFE_INTEGER and would be silently rounded).
+  if (triggerMetadata) {
+    if (triggerMetadata.run_id != null) {
+      payload.run_id = triggerMetadata.run_id;
+    }
+    if (triggerMetadata.report_mtime_ns != null) {
+      payload.report_mtime_ns = triggerMetadata.report_mtime_ns;
+    }
   }
   return payload;
 }

@@ -29,6 +29,10 @@ from .config import (
     load_managed_search_pool_config,
 )
 from .context_policy import ResolvedContextPolicy, resolve_context_policy
+from .independent_review import (
+    _REVIEW_SESSION_STORE,
+    get_independent_review_lock,
+)
 from .models import SystemNotice
 from .search_pool import SearchRouter
 from .search_providers import (
@@ -2442,6 +2446,7 @@ class ChatHandler:
         transient_attachments: List[Dict] | None = None,
         max_iterations: int = 20,
         system_trigger: str | None = None,
+        trigger_metadata: dict | None = None,
     ):
         """流式处理对话，yield 每个 chunk"""
         if len(user_message) > 10000:
@@ -2468,25 +2473,61 @@ class ChatHandler:
                 yield {"type": "error", "data": "项目不存在"}
                 return
             if system_trigger == "independent_review_done":
-                ready = self.skill_engine._has_effective_independent_review(project_path)
-                report_rel = "plan/independent-review.md"
+                # C5 run-bound：独立审查汇报轮必须绑定本次 run 的 tombstone，绝不汇报旧报告。
+                # trigger_metadata 端到端透传 {run_id, report_mtime_ns}（opaque str，禁转 Number/int）。
+                trigger_meta = trigger_metadata or {}
+                run_id = trigger_meta.get("run_id")
+                expected_mtime_ns = trigger_meta.get("report_mtime_ns")
+                # 缺 metadata fail-fast（不要直接 trigger_metadata["run_id"]，否则 KeyError→500）。
+                if not run_id or not expected_mtime_ns:
+                    yield {"type": "error", "data": "审查状态缺失，请重新发起独立审查"}
+                    return
+                # review lock 非阻塞获取；拿到后用 try/finally 包裹全部校验/读/再 stat，
+                # 每条退出路径（含成功）都必经 finally 释放锁——漏一条后续审查永久 409
+                # （与 C4 endpoint lock 全路径释放同模式）。
+                review_lock = get_independent_review_lock(project_id)
+                if not review_lock.acquire(blocking=False):
+                    yield {"type": "error", "data": "审查状态变化，请稍后重试"}
+                    return
+                try:
+                    if not self.skill_engine._has_effective_independent_review(project_path):
+                        yield {"type": "error", "data": "审查报告尚未就绪，请稍后重试"}
+                        return
+                    # done tombstone 必须存在且 run_id 匹配（防汇报别的 run 的报告）。
+                    done_mtime_ns = _REVIEW_SESSION_STORE.get_done_mtime(project_id, run_id)
+                    if done_mtime_ns is None or str(done_mtime_ns) != str(expected_mtime_ns):
+                        yield {"type": "error", "data": "审查状态变化，请稍后重试"}
+                        return
+                    # 读 canonical 报告 + 立即 re-stat st_mtime_ns 复校（TOCTOU：防校验与读取间
+                    # 被新 run 的 os.replace 替换；读和 stat 走同一 Path 句柄保证看同一文件）。
+                    review_abs_path = project_path / "plan" / "independent-review.md"
+                    try:
+                        report_text = review_abs_path.read_text(encoding="utf-8")
+                        actual_mtime_ns = str(review_abs_path.stat().st_mtime_ns)
+                    except Exception:
+                        # 校验与读取间文件被删/权限/编码异常：统一友好文案，不暴露原始异常。
+                        yield {"type": "error", "data": "审查报告读取失败，请稍后重试"}
+                        return
+                    if actual_mtime_ns != str(expected_mtime_ns):
+                        yield {"type": "error", "data": "审查状态变化，请稍后重试"}
+                        return
+                finally:
+                    review_lock.release()
             elif system_trigger == "lint_report_done":
-                ready = self.skill_engine._has_effective_lint_report(project_path)
-                report_rel = "plan/lint-report.md"
+                # lint 路径无 run_id，维持 generic ready + read（机械脚本写入、无续审/tombstone 语义）。
+                if not self.skill_engine._has_effective_lint_report(project_path):
+                    yield {"type": "error", "data": "审查报告尚未就绪，请稍后重试"}
+                    return
+                try:
+                    report_text = self.skill_engine.read_file(project_id, "plan/lint-report.md")
+                except Exception:
+                    # ready 与 read 之间文件被删/权限/编码异常：统一友好文案，不暴露原始异常。
+                    yield {"type": "error", "data": "审查报告读取失败，请稍后重试"}
+                    return
             else:
                 # 防御性兜底：前面 trigger_prompt 校验已拦未知 key，这里再兜一层，
                 # 避免未来新增 trigger 静默走 lint 分支。
                 yield {"type": "error", "data": f"未知 system_trigger: {system_trigger}"}
-                return
-            if not ready:
-                yield {"type": "error", "data": "审查报告尚未就绪，请稍后重试"}
-                return
-
-            try:
-                report_text = self.skill_engine.read_file(project_id, report_rel)
-            except Exception:
-                # ready 与 read 之间文件被删/权限/编码异常：统一友好文案，不暴露原始异常。
-                yield {"type": "error", "data": "审查报告读取失败，请稍后重试"}
                 return
             # 报告作为本轮临时 user/context 数据消息（trust boundary：数据非指令，绝不入 system）。
             current_user_message = {
@@ -3162,6 +3203,7 @@ class ChatHandler:
         transient_attachments: List[Dict] | None = None,
         max_iterations: int = 20,
         system_trigger: str | None = None,
+        trigger_metadata: dict | None = None,
     ):
         request_lock = self._get_project_request_lock(project_id)
         with request_lock:
@@ -3172,6 +3214,7 @@ class ChatHandler:
                 transient_attachments=transient_attachments,
                 max_iterations=max_iterations,
                 system_trigger=system_trigger,
+                trigger_metadata=trigger_metadata,
             )
 
     def chat(

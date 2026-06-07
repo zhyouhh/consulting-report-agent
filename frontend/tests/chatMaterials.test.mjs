@@ -118,3 +118,45 @@ test("buildChatRequest omits system_trigger when null", () => {
 
   assert.equal(Object.prototype.hasOwnProperty.call(req, "system_trigger"), false);
 });
+
+test("buildChatRequest threads run-bound trigger metadata verbatim", () => {
+  const req = buildChatRequest({
+    projectId: "demo",
+    messageText: "",
+    systemTrigger: "independent_review_done",
+    triggerMetadata: { run_id: "run-abc-123", report_mtime_ns: "1760000000123456789" },
+  });
+
+  assert.equal(req.system_trigger, "independent_review_done");
+  assert.equal(req.run_id, "run-abc-123");
+  assert.equal(req.report_mtime_ns, "1760000000123456789");
+});
+
+test("buildChatRequest keeps report_mtime_ns a string without precision loss (>2^53)", () => {
+  // A real nanosecond mtime exceeds Number.MAX_SAFE_INTEGER; it must NOT be coerced to a
+  // Number, which would silently round it and break the backend run-bound check.
+  const bigMtime = "1760000000123456789";
+  const req = buildChatRequest({
+    projectId: "demo",
+    messageText: "",
+    systemTrigger: "independent_review_done",
+    triggerMetadata: { run_id: "run-x", report_mtime_ns: bigMtime },
+  });
+
+  assert.equal(typeof req.report_mtime_ns, "string");
+  assert.equal(req.report_mtime_ns, bigMtime);
+  // The exact string survives; the same value through Number() would have changed.
+  assert.notEqual(String(Number(bigMtime)), bigMtime);
+});
+
+test("buildChatRequest omits metadata fields when triggerMetadata is null", () => {
+  const req = buildChatRequest({
+    projectId: "demo",
+    messageText: "",
+    systemTrigger: "lint_report_done",
+    triggerMetadata: null,
+  });
+
+  assert.equal(Object.prototype.hasOwnProperty.call(req, "run_id"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(req, "report_mtime_ns"), false);
+});

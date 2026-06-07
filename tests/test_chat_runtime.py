@@ -10312,7 +10312,9 @@ del _inherited_test_name
 
 
 class SystemTriggerStreamTests(ChatRuntimeTests):
-    def _write_effective_independent_review(self, *, body: str | None = None):
+    def _write_effective_independent_review(
+        self, *, body: str | None = None, seed_tombstone: bool = True, run_id: str = "run-st-default"
+    ):
         from backend.skill import SkillEngine
 
         lines = ["# 独立审查报告", ""]
@@ -10326,10 +10328,45 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         if body:
             lines.extend([body, ""])
         lines.append(SkillEngine.INDEPENDENT_REVIEW_COMPLETION_MARKER)
-        (self.project_dir / "plan" / "independent-review.md").write_text(
+        report_path = self.project_dir / "plan" / "independent-review.md"
+        report_path.write_text(
             "\n".join(lines).strip() + "\n",
             encoding="utf-8",
         )
+        if seed_tombstone:
+            # C5 run-bound: the report-injection path now requires a done tombstone whose
+            # report_mtime_ns matches the file's actual st_mtime_ns (opaque string, never int).
+            self._seed_done_tombstone(run_id=run_id)
+        else:
+            self._independent_run_metadata = None
+
+    def _seed_done_tombstone(self, *, run_id: str = "run-st-default", mtime_ns: str | None = None):
+        """Seed _REVIEW_SESSION_STORE with a done tombstone for the current project, keyed to
+        the independent-review.md file's real mtime (unless overridden), and stash the metadata
+        the chat route would forward. Returns {run_id, report_mtime_ns}."""
+        from backend.independent_review import _REVIEW_SESSION_STORE
+
+        report_path = self.project_dir / "plan" / "independent-review.md"
+        if mtime_ns is None:
+            mtime_ns = str(report_path.stat().st_mtime_ns)
+        with _REVIEW_SESSION_STORE._guard:
+            _REVIEW_SESSION_STORE._records[self.project_id] = {
+                "run_id": run_id,
+                "status": "done",
+                "snapshot": None,
+                "cancel_event": None,
+                "report_mtime_ns": mtime_ns,
+            }
+        self.addCleanup(_REVIEW_SESSION_STORE.discard, self.project_id, run_id)
+        self._independent_run_metadata = {"run_id": run_id, "report_mtime_ns": mtime_ns}
+        return self._independent_run_metadata
+
+    def _trigger_metadata_for(self, system_trigger: str):
+        """Return the run-bound trigger metadata for independent review, None for lint
+        (lint has no run_id and stays on the generic ready path)."""
+        if system_trigger == "independent_review_done":
+            return getattr(self, "_independent_run_metadata", None)
+        return None
 
     def _write_effective_lint_report(self, *, body: str | None = None):
         from backend.skill import SkillEngine
@@ -10377,6 +10414,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                 self.project_id,
                 "",
                 system_trigger="independent_review_done",
+                trigger_metadata=self._trigger_metadata_for("independent_review_done"),
                 max_iterations=1,
             )
         )
@@ -10400,6 +10438,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                 self.project_id,
                 "",
                 system_trigger="independent_review_done",
+                trigger_metadata=self._trigger_metadata_for("independent_review_done"),
                 max_iterations=1,
             )
         )
@@ -10505,6 +10544,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                     self.project_id,
                     "",
                     system_trigger="independent_review_done",
+                    trigger_metadata=self._trigger_metadata_for("independent_review_done"),
                     max_iterations=2,
                 )
             )
@@ -10528,6 +10568,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                 self.project_id,
                 "",
                 system_trigger="independent_review_done",
+                trigger_metadata=self._trigger_metadata_for("independent_review_done"),
                 max_iterations=1,
             )
         )
@@ -10620,6 +10661,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                         self.project_id,
                         "",
                         system_trigger=system_trigger,
+                        trigger_metadata=self._trigger_metadata_for(system_trigger),
                         max_iterations=1,
                     )
                 )
@@ -10670,6 +10712,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                             self.project_id,
                             "",
                             system_trigger=system_trigger,
+                            trigger_metadata=self._trigger_metadata_for(system_trigger),
                             max_iterations=3,
                         )
                     )
@@ -10692,12 +10735,16 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
             "# 独立审查报告\n\n## 1. 结论-证据一致性\n审查结论: 半成品。\n",
             encoding="utf-8",
         )
+        # Seed valid run-bound metadata so the not-ready check (which fires before the
+        # tombstone/mtime checks) is what trips here, not the metadata-missing guard.
+        self._seed_done_tombstone(run_id="run-not-ready")
 
         events = list(
             handler.chat_stream(
                 self.project_id,
                 "",
                 system_trigger="independent_review_done",
+                trigger_metadata=self._trigger_metadata_for("independent_review_done"),
                 max_iterations=1,
             )
         )
@@ -10728,6 +10775,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                         self.project_id,
                         "",
                         system_trigger=system_trigger,
+                        trigger_metadata=self._trigger_metadata_for(system_trigger),
                         max_iterations=1,
                     )
                 )
@@ -10818,6 +10866,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                     self.project_id,
                     "",
                     system_trigger="independent_review_done",
+                    trigger_metadata=self._trigger_metadata_for("independent_review_done"),
                     max_iterations=3,
                 )
             )
@@ -10868,6 +10917,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                     self.project_id,
                     "",
                     system_trigger="independent_review_done",
+                    trigger_metadata=self._trigger_metadata_for("independent_review_done"),
                     max_iterations=3,
                 )
             )
@@ -10917,6 +10967,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                     self.project_id,
                     "",
                     system_trigger="independent_review_done",
+                    trigger_metadata=self._trigger_metadata_for("independent_review_done"),
                     max_iterations=8,
                 )
             )
@@ -10934,6 +10985,217 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in SystemTriggerStreamTests.__dict__
     ):
         setattr(SystemTriggerStreamTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class SystemTriggerRunBoundTests(SystemTriggerStreamTests):
+    """C5 run-bound injection: the independent-review reporting turn must bind the report to
+    the exact run that produced it (tombstone run_id + report_mtime_ns), and the review lock
+    must be released on EVERY exit path (success / run_id mismatch / mtime mismatch / not-ready
+    / read error / metadata missing). report_mtime_ns is an opaque string end-to-end."""
+
+    def _review_lock(self):
+        from backend.independent_review import get_independent_review_lock
+
+        return get_independent_review_lock(self.project_id)
+
+    def _assert_review_lock_free(self):
+        lock = self._review_lock()
+        acquired = lock.acquire(blocking=False)
+        self.assertTrue(acquired, "review lock leaked: not re-acquirable after the turn")
+        lock.release()
+
+    def _run_independent_trigger(self, handler, metadata, *, max_iterations=1):
+        return list(
+            handler.chat_stream(
+                self.project_id,
+                "",
+                system_trigger="independent_review_done",
+                trigger_metadata=metadata,
+                max_iterations=max_iterations,
+            )
+        )
+
+    # ---- run-bound rejection paths ----
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_system_trigger_run_bound_rejects_mismatched_run_id(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        # Effective report + a done tombstone keyed to run "A".
+        self._write_effective_independent_review(run_id="run-A")
+        # The main agent is asked to report run "B" -> get_done_mtime("B") is None -> reject,
+        # never injecting the report for a different run.
+        events = self._run_independent_trigger(
+            handler, {"run_id": "run-B", "report_mtime_ns": self._independent_run_metadata["report_mtime_ns"]}
+        )
+
+        self.assertEqual(events, [{"type": "error", "data": "审查状态变化，请稍后重试"}])
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_system_trigger_run_bound_rejects_mismatched_mtime(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        self._write_effective_independent_review(seed_tombstone=False)
+        report_path = self.project_dir / "plan" / "independent-review.md"
+        real_mtime = str(report_path.stat().st_mtime_ns)
+        # Tombstone + metadata agree on a STALE mtime (the run-bound store check passes), but the
+        # file on disk has a different real mtime -> the post-read re-stat (TOCTOU guard) rejects.
+        stale_mtime = "1" + real_mtime  # guaranteed != real_mtime, still a >2^53 digit string
+        self._seed_done_tombstone(run_id="run-stale", mtime_ns=stale_mtime)
+
+        events = self._run_independent_trigger(
+            handler, {"run_id": "run-stale", "report_mtime_ns": stale_mtime}
+        )
+
+        self.assertEqual(events, [{"type": "error", "data": "审查状态变化，请稍后重试"}])
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_system_trigger_run_bound_rejects_missing_metadata(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        self._write_effective_independent_review(run_id="run-meta")
+
+        # No metadata at all -> fail-fast (never index trigger_metadata["run_id"] -> no 500).
+        events = self._run_independent_trigger(handler, None)
+        self.assertEqual(events, [{"type": "error", "data": "审查状态缺失，请重新发起独立审查"}])
+        # Partial metadata (run_id but no mtime) is also rejected.
+        events = self._run_independent_trigger(handler, {"run_id": "run-meta"})
+        self.assertEqual(events, [{"type": "error", "data": "审查状态缺失，请重新发起独立审查"}])
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
+
+    # ---- end-to-end threading + success ----
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_trigger_metadata_threads_end_to_end(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        sentinel = "本次审查的关键发现是结论缺少第三方佐证。"
+        self._write_effective_independent_review(body=sentinel, run_id="run-e2e")
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="已向用户转述审查发现。"),
+        ])
+
+        # The metadata that the /api/chat/stream route would build from ChatRequest reaches the
+        # run-bound check; a matching run_id + mtime injects the report as user-data.
+        events = self._run_independent_trigger(handler, self._independent_run_metadata)
+
+        self.assertTrue(any(e.get("type") == "content" for e in events))
+        messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
+        user_blobs = [m.get("content", "") for m in messages if m.get("role") == "user"]
+        self.assertTrue(any(sentinel in blob for blob in user_blobs))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mtime_ns_large_int_string_preserved(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        self._write_effective_independent_review(run_id="run-bigint")
+        mtime = self._independent_run_metadata["report_mtime_ns"]
+        # A real nanosecond mtime is ~19 digits and exceeds JS Number.MAX_SAFE_INTEGER (2^53);
+        # it must round-trip ChatRequest -> trigger_metadata -> validation as an exact string.
+        self.assertIsInstance(mtime, str)
+        self.assertGreater(int(mtime), 2 ** 53)
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="已转述审查发现。"),
+        ])
+
+        events = self._run_independent_trigger(handler, {"run_id": "run-bigint", "report_mtime_ns": mtime})
+
+        # Exact-string match passed both the tombstone check and the TOCTOU re-stat -> injected.
+        self.assertTrue(any(e.get("type") == "content" for e in events))
+        # Sanity: the same value coerced through float (JS Number) would have lost precision.
+        self.assertNotEqual(str(int(float(mtime))), mtime)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_lint_trigger_stays_generic_no_run_id(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        self._write_effective_lint_report()
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="已转述 AI 味自查。"),
+        ])
+
+        # lint has no run_id/tombstone; with trigger_metadata=None it still injects via the
+        # generic ready path (the run-bound branch is independent-review only).
+        events = list(
+            handler.chat_stream(
+                self.project_id,
+                "",
+                system_trigger="lint_report_done",
+                trigger_metadata=None,
+                max_iterations=1,
+            )
+        )
+        self.assertTrue(any(e.get("type") == "content" for e in events))
+        messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
+        self.assertTrue(any("AI 味自查已完成" in m.get("content", "") for m in messages))
+
+    # ---- review lock released on EVERY exit path ----
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_run_bound_releases_lock_on_success(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        self._write_effective_independent_review(run_id="run-rel-ok")
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="已转述。"),
+        ])
+        self._run_independent_trigger(handler, self._independent_run_metadata)
+        self._assert_review_lock_free()
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_run_bound_releases_lock_on_run_id_mismatch(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        self._write_effective_independent_review(run_id="run-rel-A")
+        self._run_independent_trigger(
+            handler, {"run_id": "run-rel-other", "report_mtime_ns": self._independent_run_metadata["report_mtime_ns"]}
+        )
+        self._assert_review_lock_free()
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_run_bound_releases_lock_on_mtime_mismatch(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        self._write_effective_independent_review(seed_tombstone=False)
+        report_path = self.project_dir / "plan" / "independent-review.md"
+        stale_mtime = "1" + str(report_path.stat().st_mtime_ns)
+        self._seed_done_tombstone(run_id="run-rel-mtime", mtime_ns=stale_mtime)
+        self._run_independent_trigger(handler, {"run_id": "run-rel-mtime", "report_mtime_ns": stale_mtime})
+        self._assert_review_lock_free()
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_run_bound_releases_lock_on_ready_fail_or_read_error(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        # Non-effective report (not ready) -> reject inside the lock -> finally releases.
+        (self.project_dir / "plan" / "independent-review.md").write_text(
+            "# 独立审查报告\n\n## 1. 结论-证据一致性\n审查结论: 半成品。\n",
+            encoding="utf-8",
+        )
+        self._seed_done_tombstone(run_id="run-rel-notready")
+        events = self._run_independent_trigger(handler, self._independent_run_metadata)
+        self.assertEqual(events, [{"type": "error", "data": "审查报告尚未就绪，请稍后重试"}])
+        self._assert_review_lock_free()
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_run_bound_releases_lock_on_metadata_missing(self, mock_openai):
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        self._write_effective_independent_review(run_id="run-rel-nometa")
+        # Metadata missing -> fail-fast; the lock must remain free (never leaked).
+        self._run_independent_trigger(handler, None)
+        self._assert_review_lock_free()
+
+
+for _inherited_test_name in dir(SystemTriggerStreamTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in SystemTriggerRunBoundTests.__dict__
+    ):
+        setattr(SystemTriggerRunBoundTests, _inherited_test_name, None)
 del _inherited_test_name
 
 

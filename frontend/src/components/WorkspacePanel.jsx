@@ -139,39 +139,32 @@ export default function WorkspacePanel({
     setReviewRunning(false)
   }, [])
 
-  const onIndependentReviewCompleted = useCallback(async () => {
+  const onIndependentReviewCompleted = useCallback((completion) => {
+    // C5: completion is judged by the run-bound done tombstone the window reports
+    // ({run_id, report_mtime_ns}) — NOT a generic workspace `independent_review_ready` flag
+    // (which could reflect a stale/older report). The workspace refresh below only repaints UI.
     const requestProject = projectId
-    if (!requestProject) return
-    try {
-      const ws = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/workspace`)
-      if (!shouldApplyProjectResponse({
-        requestProject,
-        activeProject: activeProjectRef.current,
-      })) {
-        return
-      }
-      onProjectMutated?.()
-      if (ws.data.flags?.independent_review_ready) {
-        onTriggerSystemTurn?.('independent_review_done')
-      } else {
-        showError('独立审查报告未通过服务端校验，请重试')
-      }
-    } catch (error) {
-      if (!shouldApplyProjectResponse({
-        requestProject,
-        activeProject: activeProjectRef.current,
-      })) {
-        return
-      }
-      showError('独立审查校验失败: ' + (error.response?.data?.detail || error.message))
-    } finally {
-      if (shouldApplyProjectResponse({
-        requestProject,
-        activeProject: activeProjectRef.current,
-      })) {
-        setReviewRunning(false)
-      }
+    if (!requestProject) {
+      setReviewRunning(false)
+      return
     }
+    if (!shouldApplyProjectResponse({
+      requestProject,
+      activeProject: activeProjectRef.current,
+    })) {
+      setReviewRunning(false)
+      return
+    }
+    onProjectMutated?.()
+    const runId = completion?.run_id
+    const reportMtimeNs = completion?.report_mtime_ns
+    if (runId && reportMtimeNs) {
+      // run_id / report_mtime_ns travel as opaque strings — passed through verbatim.
+      onTriggerSystemTurn?.('independent_review_done', { run_id: runId, report_mtime_ns: reportMtimeNs })
+    } else {
+      showError('独立审查未返回有效结果，请重试')
+    }
+    setReviewRunning(false)
   }, [projectId, onProjectMutated, onTriggerSystemTurn])
 
   const runLintReport = async () => {

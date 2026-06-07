@@ -5,6 +5,12 @@ import remarkGfm from 'remark-gfm'
 import { showError, showInfo, showSuccess } from '../utils/toast'
 import { buildChatRequest, toggleMaterialSelection } from '../utils/chatMaterials'
 import {
+  createPendingTriggerItem,
+  dequeuePendingTrigger,
+  enqueuePendingTrigger,
+  scopePendingQueueToProject,
+} from '../utils/pendingTriggerQueue'
+import {
   appendThinkingEventContent,
   appendToolEventContent,
   buildProjectWelcomeMessage,
@@ -33,26 +39,8 @@ import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { stripToolLogComments } from '../utils/toolLogStrip.mjs'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 import ThinkingBlock from './ThinkingBlock'
-
-const assistantMarkdownComponents = {
-  table: ({ children }) => (
-    <div className="my-2 overflow-x-auto">
-      <table className="min-w-full border-collapse text-xs">
-        {children}
-      </table>
-    </div>
-  ),
-  th: ({ children }) => (
-    <th className="border border-[#3a3a5a] bg-[#1a1a2e] px-2 py-1 text-left font-semibold text-[#e2e2f0]">
-      {children}
-    </th>
-  ),
-  td: ({ children }) => (
-    <td className="border border-[#3a3a5a] px-2 py-1 align-top text-[#e2e2f0]">
-      {children}
-    </td>
-  ),
-}
+// Shared markdown rendering fragment, reused by the S5 ReviewChatWindow (same look & feel).
+import { assistantMarkdownComponents } from './MarkdownMessage'
 
 const ChatPanel = forwardRef(function ChatPanel({
   projectId,
@@ -85,6 +73,8 @@ const ChatPanel = forwardRef(function ChatPanel({
   const pendingAttachmentsRef = useRef([])
   const pendingContentRef = useRef(new Map())
   const contentFlushTimersRef = useRef(new Map())
+  // C5: queued system triggers (review/lint completions that arrived while the chat was busy).
+  const pendingTriggerQueueRef = useRef([])
   const connection = describeConnectionMode(settings || {})
   const workspaceSummary = summarizeWorkspace(workspace || {})
   const selectedMaterials = materials.filter(material => selectedMaterialIds.includes(material.id))
@@ -123,6 +113,10 @@ const ChatPanel = forwardRef(function ChatPanel({
       clearAllStreamingQueues()
       setLoading(false)
       setAbortController(null)
+      // Drop pending triggers that belong to the project we just left — re-issuing them under
+      // the new project would be run-bound-rejected by the backend and surface a spurious error
+      // while the old project's review stays unreported.
+      pendingTriggerQueueRef.current = scopePendingQueueToProject(pendingTriggerQueueRef.current, projectId)
     }
     previousProjectIdRef.current = projectId
 
@@ -411,6 +405,7 @@ const ChatPanel = forwardRef(function ChatPanel({
   const startStream = useCallback(async ({
     messageText = '',
     systemTrigger = null,
+    triggerMetadata = null,
     attachedMaterialIds = [],
     transientAttachments = [],
     renderUserBubble = true,
@@ -454,6 +449,7 @@ const ChatPanel = forwardRef(function ChatPanel({
           attachedMaterialIds,
           transientAttachments,
           systemTrigger,
+          triggerMetadata,
         })),
         signal: controller.signal
       })
@@ -602,6 +598,10 @@ const ChatPanel = forwardRef(function ChatPanel({
         setSelectedMaterialIds(attachedMaterialIds)
       }
       onProjectMutated?.()
+      // C5: the chat is free again — flush the next queued system trigger (if any) for the
+      // active project, re-issuing it with its ORIGINAL run-bound metadata. setTimeout lets the
+      // setLoading(false) above settle so the flushed startStream isn't blocked by stale loading.
+      setTimeout(() => flushNextPendingTriggerRef.current?.(), 0)
     }
     return !streamFailed
   }, [
@@ -616,13 +616,49 @@ const ChatPanel = forwardRef(function ChatPanel({
     onProjectMutated,
   ])
 
-  const triggerSystemTurn = useCallback((triggerType) => {
+  // Keep a ref to the freshest startStream so deferred flushes always use a non-stale closure
+  // (post-stream loading=false), avoiding the loading-guard early-return.
+  const startStreamRef = useRef(startStream)
+  startStreamRef.current = startStream
+
+  // triggerSystemTurn(triggerType, metadata): if the chat is busy, queue the trigger (FIFO,
+  // scoped to this project) so a finished review/lint is never silently dropped; otherwise fire
+  // it now. metadata = { run_id, report_mtime_ns } (opaque strings, threaded verbatim).
+  const triggerSystemTurn = useCallback((triggerType, metadata = null) => {
+    if (loading || uploading) {
+      pendingTriggerQueueRef.current = enqueuePendingTrigger(
+        pendingTriggerQueueRef.current,
+        createPendingTriggerItem({
+          triggerType,
+          runId: metadata?.run_id ?? null,
+          reportMtimeNs: metadata?.report_mtime_ns ?? null,
+          projectId,
+        }),
+      )
+      return
+    }
     startStream({
       messageText: '',
       systemTrigger: triggerType,
+      triggerMetadata: metadata,
       renderUserBubble: false,
     })
-  }, [startStream])
+  }, [startStream, loading, uploading, projectId])
+
+  const flushNextPendingTrigger = useCallback(() => {
+    const { item, queue } = dequeuePendingTrigger(pendingTriggerQueueRef.current, activeProjectIdRef.current)
+    pendingTriggerQueueRef.current = queue
+    if (!item) return
+    startStreamRef.current?.({
+      messageText: '',
+      systemTrigger: item.triggerType,
+      triggerMetadata: { run_id: item.run_id, report_mtime_ns: item.report_mtime_ns },
+      renderUserBubble: false,
+    })
+  }, [])
+
+  const flushNextPendingTriggerRef = useRef(flushNextPendingTrigger)
+  flushNextPendingTriggerRef.current = flushNextPendingTrigger
 
   useImperativeHandle(ref, () => ({ triggerSystemTurn }), [triggerSystemTurn])
 
