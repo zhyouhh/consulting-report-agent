@@ -95,6 +95,29 @@ test("ReviewChatWindow has exponential 409 backoff with a cap and an exit", () =
   assert.match(src, /status === 409/);
 });
 
+test("ReviewChatWindow surfaces a RESUMABLE error when the stream ends without completion", () => {
+  const src = drawerSrc();
+  // A stream that EOFs (disconnect) or [DONE]s WITHOUT review-completed/error must NOT be treated
+  // as a silent success — that would strand the window in 'running' with no resume path (the exact
+  // R1 failure: "断连后活全丢、无法从断处继续"). consumeStream tracks whether a terminal event was
+  // seen and dispatches a resumable error otherwise.
+  assert.match(src, /let sawError = false/);
+  assert.match(src, /!completedRef\.current && !sawError/);
+  assert.match(src, /可继续审查/);
+  // [DONE] no longer short-circuits to a bare `return true`; it falls through to the guard.
+  assert.doesNotMatch(src, /\[DONE\]'\) return true/);
+});
+
+test("ReviewChatWindow errored panel has a supplement input wired into resume", () => {
+  const src = drawerSrc();
+  // plan Task 5.2: errored unlocks an input box; 继续审查 carries the typed supplement into the
+  // resume stream so the agent picks up with accumulated context + the user's correction.
+  assert.match(src, /<textarea/);
+  assert.match(src, /supplementInput/);
+  assert.match(src, /setSupplementInput/);
+  assert.match(src, /runWithBackoff\(\{ resume: true, supplement \}\)/);
+});
+
 test("WorkspacePanel completion fires the system turn from the run-bound result, not generic ready", () => {
   const src = workspaceSrc();
   const reviewCompletion = sectionBetween(src, "const onIndependentReviewCompleted", "const runLintReport");

@@ -2489,30 +2489,38 @@ class ChatHandler:
                 if not review_lock.acquire(blocking=False):
                     yield {"type": "error", "data": "审查状态变化，请稍后重试"}
                     return
+                # 锁内只做校验/读/复校，结果存 run_bound_error（None=成功）；yield 移到锁外。
+                # 否则错误事件在持锁的 yield 处暂停，consumer 只读首个 error chunk 即断开时，
+                # generator 迟迟不触发 finally → 极端 partial-consume 下短暂卡 review lock（后续 409）。
+                # 与 C4 endpoint「先 release 再 emit」同模式（codex C5-quality NIT）。
+                run_bound_error = None
                 try:
                     if not self.skill_engine._has_effective_independent_review(project_path):
-                        yield {"type": "error", "data": "审查报告尚未就绪，请稍后重试"}
-                        return
-                    # done tombstone 必须存在且 run_id 匹配（防汇报别的 run 的报告）。
-                    done_mtime_ns = _REVIEW_SESSION_STORE.get_done_mtime(project_id, run_id)
-                    if done_mtime_ns is None or str(done_mtime_ns) != str(expected_mtime_ns):
-                        yield {"type": "error", "data": "审查状态变化，请稍后重试"}
-                        return
-                    # 读 canonical 报告 + 立即 re-stat st_mtime_ns 复校（TOCTOU：防校验与读取间
-                    # 被新 run 的 os.replace 替换；读和 stat 走同一 Path 句柄保证看同一文件）。
-                    review_abs_path = project_path / "plan" / "independent-review.md"
-                    try:
-                        report_text = review_abs_path.read_text(encoding="utf-8")
-                        actual_mtime_ns = str(review_abs_path.stat().st_mtime_ns)
-                    except Exception:
-                        # 校验与读取间文件被删/权限/编码异常：统一友好文案，不暴露原始异常。
-                        yield {"type": "error", "data": "审查报告读取失败，请稍后重试"}
-                        return
-                    if actual_mtime_ns != str(expected_mtime_ns):
-                        yield {"type": "error", "data": "审查状态变化，请稍后重试"}
-                        return
+                        run_bound_error = "审查报告尚未就绪，请稍后重试"
+                    else:
+                        # done tombstone 必须存在且 run_id 匹配（防汇报别的 run 的报告）。
+                        done_mtime_ns = _REVIEW_SESSION_STORE.get_done_mtime(project_id, run_id)
+                        if done_mtime_ns is None or str(done_mtime_ns) != str(expected_mtime_ns):
+                            run_bound_error = "审查状态变化，请稍后重试"
+                        else:
+                            # 读 canonical 报告 + 立即 re-stat st_mtime_ns 复校（TOCTOU：防校验与读取间
+                            # 被新 run 的 os.replace 替换；读和 stat 走同一 Path 句柄保证看同一文件）。
+                            review_abs_path = project_path / "plan" / "independent-review.md"
+                            try:
+                                report_text = review_abs_path.read_text(encoding="utf-8")
+                                actual_mtime_ns = str(review_abs_path.stat().st_mtime_ns)
+                            except Exception:
+                                # 校验与读取间文件被删/权限/编码异常：统一友好文案，不暴露原始异常。
+                                run_bound_error = "审查报告读取失败，请稍后重试"
+                            else:
+                                if actual_mtime_ns != str(expected_mtime_ns):
+                                    run_bound_error = "审查状态变化，请稍后重试"
                 finally:
                     review_lock.release()
+                # 锁已释放：错误在锁外 yield（partial-consume 不再卡 review lock）。
+                if run_bound_error is not None:
+                    yield {"type": "error", "data": run_bound_error}
+                    return
             elif system_trigger == "lint_report_done":
                 # lint 路径无 run_id，维持 generic ready + read（机械脚本写入、无续审/tombstone 语义）。
                 if not self.skill_engine._has_effective_lint_report(project_path):

@@ -11189,6 +11189,33 @@ class SystemTriggerRunBoundTests(SystemTriggerStreamTests):
         self._run_independent_trigger(handler, None)
         self._assert_review_lock_free()
 
+    @mock.patch("backend.chat.OpenAI")
+    def test_run_bound_releases_lock_before_yielding_error_on_partial_consume(self, mock_openai):
+        # codex C5-quality NIT: the run-bound error is yielded AFTER the review lock is released,
+        # not from inside the holding try/finally. A consumer that reads only the first error
+        # chunk and disconnects (without draining the generator) would otherwise leave the
+        # generator suspended at an in-lock yield -> finally never runs -> lock held until GC ->
+        # the next review 409s. Take ONLY the first event and assert the lock is free WITHOUT
+        # draining/closing the generator (the other lock tests use list() and can't catch this).
+        handler = self._make_handler_with_project()
+        self._mark_s0_confirmation_completed(handler)
+        self._write_effective_independent_review(run_id="run-partial-A")
+        gen = handler.chat_stream(
+            self.project_id,
+            "",
+            system_trigger="independent_review_done",
+            trigger_metadata={
+                "run_id": "run-partial-other",  # != tombstone run -> rejected error path
+                "report_mtime_ns": self._independent_run_metadata["report_mtime_ns"],
+            },
+            max_iterations=1,
+        )
+        first = next(gen)
+        self.assertEqual(first, {"type": "error", "data": "审查状态变化，请稍后重试"})
+        # Lock already released before this yield — proven without draining/closing gen.
+        self._assert_review_lock_free()
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 0)
+
 
 for _inherited_test_name in dir(SystemTriggerStreamTests):
     if (

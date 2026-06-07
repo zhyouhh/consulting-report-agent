@@ -23,6 +23,9 @@ export default function ReviewChatWindow({
   const [bubbles, setBubbles] = useState([])
   const [windowState, setWindowState] = useState(initialReviewWindowState())
   const [position, setPosition] = useState({ x: null, y: null })
+  // Optional supplement the user types in the errored panel before resuming (plan Task 5.2:
+  // "解锁输入框，用户在断掉处输入，让子代理带累计上下文从断处继续审"). Empty unless errored.
+  const [supplementInput, setSupplementInput] = useState('')
 
   const runIdRef = useRef(null)
   const abortControllerRef = useRef(null)
@@ -82,6 +85,8 @@ export default function ReviewChatWindow({
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let sawError = false
+    let reachedDone = false
     try {
       while (true) {
         const { done, value } = await reader.read()
@@ -92,7 +97,7 @@ export default function ReviewChatWindow({
         for (const block of blocks) {
           if (!block.startsWith('data: ')) continue
           const payload = block.slice(6)
-          if (payload === '[DONE]') return true
+          if (payload === '[DONE]') { reachedDone = true; continue }
           const event = parseDrawerEvent(payload)
           if (!event) continue
           if (event.type === 'review-completed') {
@@ -105,8 +110,19 @@ export default function ReviewChatWindow({
             onCloseRef.current?.()
             return true
           }
+          if (event.type === 'error') sawError = true
           applyEvent(event)
         }
+        if (reachedDone) break
+      }
+      // Stream ended (server [DONE] or raw EOF). A normal success already returned above via
+      // review-completed. If we reach here WITHOUT a completion and WITHOUT an explicit error,
+      // the review broke mid-flight (disconnect → backend breaks the generator with no error
+      // event; or worker ended with no valid done tombstone). Surface a RESUMABLE error so the
+      // window leaves 'running' and offers 继续审查 — never let a dropped review look "done".
+      // (R1 core: a broken review must be resumable from where it stopped, not silently lost.)
+      if (!completedRef.current && !sawError) {
+        applyEvent({ type: 'error', message: '连接已中断或审查未完成，可继续审查。' })
       }
       return true
     } catch (err) {
@@ -170,12 +186,16 @@ export default function ReviewChatWindow({
     onCloseRef.current?.()
   }, [projectId, clearBackoffTimer])
 
-  // 继续审查: resume from where the errored run left off.
+  // 继续审查: resume from where the errored run left off, optionally carrying a user supplement
+  // typed in the errored panel. The supplement is sent in the POST body (consumeStream already
+  // forwards it) so the agent picks up with the accumulated context + the user's correction.
   const handleResume = useCallback(() => {
     if (closingRef.current) return
+    const supplement = supplementInput.trim() || undefined
     applyEvent({ type: 'resume-start' })
-    runWithBackoff({ resume: true })
-  }, [applyEvent, runWithBackoff])
+    setSupplementInput('')
+    runWithBackoff({ resume: true, supplement })
+  }, [applyEvent, runWithBackoff, supplementInput])
 
   // 重新发起: after backoff exhaustion, retry the resume.
   const handleRestart = useCallback(() => {
@@ -267,6 +287,13 @@ export default function ReviewChatWindow({
         {windowState.status === 'errored' && (
           <div className="mt-4 rounded-lg border border-[#5a2330] bg-[#2a1218] p-3 text-red-300">
             <div>错误：{windowState.error}</div>
+            <textarea
+              value={supplementInput}
+              onChange={e => setSupplementInput(e.target.value)}
+              placeholder="可补充审查重点或修正方向（可选）；直接点「继续审查」则从断处接着审"
+              rows={2}
+              className="mt-2 w-full rounded bg-[#1b1d35] border border-[#3a3d6a] px-2 py-1 text-xs text-[#d9dcf5] placeholder-[#6e72a8] resize-none focus:outline-none focus:border-[#4a4e85]"
+            />
             <div className="mt-2 flex gap-2">
               <button
                 type="button"
