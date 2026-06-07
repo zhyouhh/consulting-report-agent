@@ -12,6 +12,7 @@ from openai import OpenAI
 
 from .config import Settings
 from .skill import SkillEngine
+from .stream_parsing import ThinkingStreamParser
 
 
 Event = dict[str, object]
@@ -106,12 +107,21 @@ INDEPENDENT_REVIEW_SYSTEM_PROMPT = """你是独立审查代理。你的任务是
 - 每个 issue 必须有原文位置和具体修改方向
 - **宁少而精**：5 条维度里没问题的维度写"未发现问题"，不要为了凑数胡编
 
-## 工作流
+## 工作流（边审边说，不要闷头干）
 
-1. 先 read_file 读上述 6 个必读文件（按你认为合理的顺序）；如果 plan/research-plan.md 存在也读
-2. 在脑中按 5 个维度做完整审查
-3. 一次性 write_file 把完整报告写到 plan/independent-review.md
-4. 报告写完即结束，不做任何其他动作
+1. 每次调 read_file 前，先用一句话说你要读什么、想确认什么（例：「先看正文草稿，核对结论有没有数据支撑」）。
+2. 读完用一句话说你看到了什么关键信息（不下结论，只描述你读到的事实）。
+3. 全部读完后，在脑中按 5 个维度完成审查。
+4. 一次性 write_file 把完整报告写到 plan/independent-review.md。
+5. 写完后说一句「审查完成，报告已生成」。
+
+（必读 6 个文件：plan/data-log.md、plan/analysis-notes.md、content/report_draft_v1.md、plan/references.md、plan/project-overview.md、plan/outline.md；plan/research-plan.md 存在则读。读的顺序你自己定。）
+
+## 过程发言规则（硬约束）
+
+- 你在对话里说的话是"过程旁白"——告诉用户你正在做什么、读到什么。
+- **绝对不要**在对话里罗列审查发现、列 issue、下结论、给评分。所有发现、issue、结论**只写进 plan/independent-review.md 报告**。对话里出现"发现/问题/建议清单"即违规。
+- 写完报告只说一句「审查完成，报告已生成」，不要把报告内容复述到对话里。
 
 ## 工具集
 
@@ -203,27 +213,53 @@ class IndependentReviewAgent:
                 return reasoning_content
         return ""
 
+    @staticmethod
+    def _serialize_tool_call(tool_call) -> dict:
+        # Mirrors chat._serialize_tool_call_for_provider: accept either an SDK
+        # object (non-stream message) or an accumulated dict (stream collected).
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function") or {}
+            return {
+                "id": tool_call.get("id") or "",
+                "type": tool_call.get("type") or "function",
+                "function": {
+                    "name": function.get("name") or "",
+                    "arguments": function.get("arguments") or "",
+                },
+            }
+        function = getattr(tool_call, "function", None)
+        return {
+            "id": getattr(tool_call, "id", "") or "",
+            "type": getattr(tool_call, "type", "function") or "function",
+            "function": {
+                "name": getattr(function, "name", "") or "",
+                "arguments": getattr(function, "arguments", "") or "",
+            },
+        }
+
     def _serialize_assistant_tool_call_message(self, message) -> dict:
-        content = getattr(message, "content", "")
-        tool_calls = getattr(message, "tool_calls", None) or []
+        # Accept both the SDK message object (non-stream) and the dict we
+        # accumulate during streaming. The two paths must serialize identically
+        # to chat's _assistant_tool_call_message_from_response /
+        # _normalize_collected_assistant_tool_call_message respectively, so the
+        # DeepSeek follow-up contract (non-empty reasoning_content, no null
+        # fields, paired tool_calls) is preserved.
+        if isinstance(message, dict):
+            content = message.get("content", "")
+            tool_calls = message.get("tool_calls") or []
+            reasoning_content = message.get("reasoning_content")
+        else:
+            content = getattr(message, "content", "")
+            tool_calls = getattr(message, "tool_calls", None) or []
+            reasoning_content = self._extract_reasoning_content_from_message(message)
+
         msg_dict = {
             "role": "assistant",
             "content": content if isinstance(content, str) else ("" if content is None else str(content)),
         }
         if tool_calls:
-            msg_dict["tool_calls"] = [
-                {
-                    "id": getattr(tc, "id", "") or "",
-                    "type": getattr(tc, "type", "function") or "function",
-                    "function": {
-                        "name": getattr(getattr(tc, "function", None), "name", "") or "",
-                        "arguments": getattr(getattr(tc, "function", None), "arguments", "") or "",
-                    },
-                }
-                for tc in tool_calls
-            ]
-        reasoning_content = self._extract_reasoning_content_from_message(message)
-        if reasoning_content:
+            msg_dict["tool_calls"] = [self._serialize_tool_call(tc) for tc in tool_calls]
+        if isinstance(reasoning_content, str) and reasoning_content:
             msg_dict["reasoning_content"] = reasoning_content
         return msg_dict
 
@@ -278,7 +314,7 @@ class IndependentReviewAgent:
                 "model": model,
                 "messages": messages,
                 "tools": INDEPENDENT_REVIEW_TOOLS,
-                "stream": False,
+                "stream": True,
             }
             if self._should_send_explicit_tool_choice(model):
                 request_kwargs["tool_choice"] = "auto"
@@ -292,62 +328,159 @@ class IndependentReviewAgent:
                 yield {"type": "error", "detail": f"模型调用失败：{str(exc)}"}
                 return
 
-            message = response.choices[0].message
-            messages.append(self._serialize_assistant_tool_call_message(message))
+            # ---- 小型流式解析器（参照 chat.py 主循环 emit_parsed_stream_events，审查版）----
+            # content 经 ThinkingStreamParser 剥 <think> 后逐段 yield content_delta；
+            # thinking / reasoning_content 只收集进回传 message，绝不 yield（审查窗口不展示思维链）。
+            known_tool_names = {t["function"]["name"] for t in INDEPENDENT_REVIEW_TOOLS}
+            collected = {"role": "assistant", "content": "", "tool_calls": []}
+            parser = ThinkingStreamParser()
+            accumulated = ""
 
-            content = getattr(message, "content", None)
-            if content:
-                yield {"type": "content", "text": content}
+            def drain(parsed_events):
+                nonlocal accumulated
+                for ev in parsed_events:
+                    etype, edata = ev.get("type"), ev.get("data")
+                    if not isinstance(edata, str) or not edata:
+                        continue
+                    if etype == "thinking":
+                        collected["reasoning_content"] = collected.get("reasoning_content", "") + edata
+                        continue  # 审查窗口不展示思维链
+                    if etype == "content":
+                        accumulated += edata
+                        collected["content"] = accumulated
+                        yield {"type": "content_delta", "text": edata}
 
-            tool_calls = getattr(message, "tool_calls", None) or []
-            if not tool_calls:
-                if is_cancelled():
-                    yield cancelled_event()
-                    return
-                if not review_written:
-                    yield {"type": "error", "detail": "审查代理未生成报告，请重试"}
-                    return
-                review_error = self._verify_review_completeness(project_id)
-                if review_error:
-                    yield {"type": "error", "detail": review_error}
-                    return
-                yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH}
+            try:
+                for chunk in response:
+                    if is_cancelled():
+                        yield cancelled_event()
+                        return
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    # 官渠 reasoning 走独立字段 delta.reasoning_content：收集回传、但不 yield。
+                    reasoning_delta = self._extract_reasoning_content_from_message(delta)
+                    if isinstance(reasoning_delta, str) and reasoning_delta:
+                        collected["reasoning_content"] = collected.get("reasoning_content", "") + reasoning_delta
+                    if delta.content:
+                        yield from drain(parser.feed(delta.content))  # content 里若混入 <think> 也剥
+                    if delta.tool_calls:
+                        for tcc in delta.tool_calls:
+                            # while（非 if）：填占位支持 index 乱序 / 跳号。
+                            while tcc.index >= len(collected["tool_calls"]):
+                                collected["tool_calls"].append(
+                                    {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                                )
+                            tc = collected["tool_calls"][tcc.index]
+                            if tcc.id:
+                                tc["id"] = tcc.id
+                            if tcc.function:
+                                if tcc.function.name:
+                                    tc["function"]["name"] += tcc.function.name
+                                if tcc.function.arguments:
+                                    tc["function"]["arguments"] += tcc.function.arguments
+            except Exception as exc:
+                yield from drain(parser.flush())
+                yield {"type": "error", "detail": f"模型调用失败：{str(exc)}"}
                 return
+            yield from drain(parser.flush())
 
-            for tool_call in tool_calls:
-                if is_cancelled():
-                    yield cancelled_event()
-                    return
-                tool_name = getattr(getattr(tool_call, "function", None), "name", "") or ""
-                try:
-                    tool_args = json.loads(getattr(tool_call.function, "arguments", "") or "{}")
-                except Exception:
-                    tool_args = {}
-
-                yield {"type": "tool_call", "tool": tool_name, "args": tool_args}
-                if is_cancelled():
-                    yield cancelled_event()
-                    return
-                result = self._execute_tool(project_id, tool_name, tool_args)
-                yield {
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "status": result.get("status", "error"),
-                    "summary": result.get("summary", ""),
-                }
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": getattr(tool_call, "id", "") or "",
-                        "content": json.dumps(result, ensure_ascii=False),
+            tool_calls = collected["tool_calls"]
+            if tool_calls:
+                # 上游偶发把畸形 tool_call 流式 chunk 塞回来（未知工具名 / 坏 JSON arguments）。
+                # 直接回传会触发官渠 400，因此本轮作废、不落历史，让模型下一轮重发。用一条
+                # 纯文本 assistant + 一条 user corrective 做"合规隔板"，保持 user/model 严格
+                # 交替（绝不裸 append user，避免连续 user 触发官渠角色交替 400）。
+                malformed_reasons: list[str] = []
+                for tc in tool_calls:
+                    fn = tc.get("function") or {}
+                    fn_name = fn.get("name", "") or ""
+                    fn_args = fn.get("arguments", "") or ""
+                    if fn_name not in known_tool_names:
+                        malformed_reasons.append(f"未知工具名: {fn_name!r}")
+                        continue
+                    if fn_args:
+                        try:
+                            json.loads(fn_args)
+                        except json.JSONDecodeError as exc:
+                            malformed_reasons.append(f"{fn_name} 参数 JSON 异常: {exc.msg}")
+                if malformed_reasons:
+                    yield {
+                        "type": "tool_result",
+                        "tool": "",
+                        "status": "error",
+                        "summary": "工具调用格式异常，本轮作废并让模型重发",
                     }
-                )
-                if (
-                    tool_name == "write_file"
-                    and result.get("status") == "success"
-                    and tool_args.get("file_path") == CANONICAL_REVIEW_PATH
-                ):
-                    review_written = True
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": "（上条工具调用格式异常，已作废本轮调用。）",
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "刚才的 tool_calls 格式异常（"
+                                + "；".join(malformed_reasons)
+                                + "）。请重新发起：每次只调用一个工具，等该工具返回后再发下一个。"
+                            ),
+                        }
+                    )
+                    continue
+
+                messages.append(self._serialize_assistant_tool_call_message(collected))
+                for tc in tool_calls:
+                    if is_cancelled():
+                        yield cancelled_event()
+                        return
+                    fn = tc.get("function") or {}
+                    tool_name = fn.get("name", "") or ""
+                    try:
+                        tool_args = json.loads(fn.get("arguments", "") or "{}")
+                    except Exception:
+                        tool_args = {}
+
+                    yield {"type": "tool_call", "tool": tool_name, "args": tool_args}
+                    if is_cancelled():
+                        yield cancelled_event()
+                        return
+                    result = self._execute_tool(project_id, tool_name, tool_args)
+                    yield {
+                        "type": "tool_result",
+                        "tool": tool_name,
+                        "status": result.get("status", "error"),
+                        "summary": result.get("summary", ""),
+                    }
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", "") or "",
+                            "content": json.dumps(result, ensure_ascii=False),
+                        }
+                    )
+                    if (
+                        tool_name == "write_file"
+                        and result.get("status") == "success"
+                        and tool_args.get("file_path") == CANONICAL_REVIEW_PATH
+                    ):
+                        review_written = True
+                continue
+
+            # 无 tool_call：content 已在流式阶段逐段 yield 过，这里不再一次性 yield content。
+            messages.append(self._serialize_assistant_tool_call_message(collected))
+            if is_cancelled():
+                yield cancelled_event()
+                return
+            if not review_written:
+                yield {"type": "error", "detail": "审查代理未生成报告，请重试"}
+                return
+            review_error = self._verify_review_completeness(project_id)
+            if review_error:
+                yield {"type": "error", "detail": review_error}
+                return
+            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH}
+            return
 
         yield {"type": "error", "detail": f"审查超时（超过 {self.MAX_ITERATIONS} 轮），请重试"}
 
