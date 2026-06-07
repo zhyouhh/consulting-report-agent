@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -11091,7 +11092,16 @@ class SystemTriggerRunBoundTests(SystemTriggerStreamTests):
     def test_mtime_ns_large_int_string_preserved(self, mock_openai):
         handler = self._make_handler_with_project()
         self._mark_s0_confirmation_completed(handler)
-        self._write_effective_independent_review(run_id="run-bigint")
+        # Pin the report's mtime to a DETERMINISTIC > 2^53 nanosecond value instead of the file's
+        # real wall-clock mtime. The real mtime made this test flaky: ~1/64 of real nanosecond
+        # mtimes are exactly float-representable (a multiple of 2^8 at this magnitude), so the
+        # precision-loss assertion below failed at random (~1.6%). 1893456000123456700 is
+        # 100ns-aligned (Windows round-trips it exactly) and is NOT a 2^8 multiple, so it provably
+        # loses precision through float — exactly why run_id/report_mtime_ns must travel as strings.
+        self._write_effective_independent_review(run_id="run-bigint", seed_tombstone=False)
+        report_path = self.project_dir / "plan" / "independent-review.md"
+        os.utime(report_path, ns=(1893456000123456700, 1893456000123456700))
+        self._seed_done_tombstone(run_id="run-bigint", mtime_ns=str(report_path.stat().st_mtime_ns))
         mtime = self._independent_run_metadata["report_mtime_ns"]
         # A real nanosecond mtime is ~19 digits and exceeds JS Number.MAX_SAFE_INTEGER (2^53);
         # it must round-trip ChatRequest -> trigger_metadata -> validation as an exact string.
@@ -11105,8 +11115,10 @@ class SystemTriggerRunBoundTests(SystemTriggerStreamTests):
 
         # Exact-string match passed both the tombstone check and the TOCTOU re-stat -> injected.
         self.assertTrue(any(e.get("type") == "content" for e in events))
-        # Sanity: the same value coerced through float (JS Number) would have lost precision.
-        self.assertNotEqual(str(int(float(mtime))), mtime)
+        # Sanity: this value coerced through float (a JSON number) loses precision. Asserted on the
+        # literal so it never depends on the filesystem's exact mtime round-trip (which is what made
+        # the previous version flaky).
+        self.assertNotEqual(str(int(float(1893456000123456700))), "1893456000123456700")
 
     @mock.patch("backend.chat.OpenAI")
     def test_lint_trigger_stays_generic_no_run_id(self, mock_openai):
