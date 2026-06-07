@@ -10829,6 +10829,10 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         self.assertIn("结论与证据存在缺口", content_text)
         persisted = handler._load_conversation(self.project_id)
         self.assertEqual([m["role"] for m in persisted], ["assistant"])
+        # UX: the reporting round must never announce "准备调用工具" for a dropped tool_call.
+        self.assertFalse(
+            any("准备调用工具" in e.get("data", "") for e in events if e.get("type") == "tool")
+        )
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_trigger_no_tools_drops_tool_call_only_then_corrects(self, mock_openai):
@@ -10876,6 +10880,10 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         # The corrective barrier feeds an assistant + user pair into the retry conversation.
         second_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
         self.assertTrue(any(m.get("role") == "user" and "纯转述" in m.get("content", "") for m in second_messages))
+        # UX: the reporting round must never announce "准备调用工具" for a dropped tool_call.
+        self.assertFalse(
+            any("准备调用工具" in e.get("data", "") for e in events if e.get("type") == "tool")
+        )
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_trigger_no_tools_persistent_tool_calls_terminate_without_loop(self, mock_openai):

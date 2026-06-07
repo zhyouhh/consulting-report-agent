@@ -2742,7 +2742,10 @@ class ChatHandler:
                             if (
                                 tc_chunk.index not in announced_tool_call_indexes
                                 and tc["function"]["name"] in known_tool_names
+                                and not self._turn_context.get("system_trigger_no_tools")
                             ):
+                                # 汇报轮禁工具：响应层 guard 会丢弃 tool_calls，这里就不要
+                                # 抢先 announce"准备调用工具"，否则用户会看到调用却无事发生。
                                 announced_tool_call_indexes.add(tc_chunk.index)
                                 yield {"type": "tool", "data": f"🔧 准备调用工具: {tc['function']['name']}"}
             except Exception as e:
