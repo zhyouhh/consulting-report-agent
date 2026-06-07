@@ -55,6 +55,12 @@ class ChatRequest(BaseModel):
     attached_material_ids: List[str] = Field(default_factory=list)
     transient_attachments: List[TransientAttachment] = Field(default_factory=list)
     system_trigger: Optional[SystemTriggerType] = None
+    # Trigger metadata (C4): opaque strings carried end-to-end with a system trigger so the
+    # main agent can run-bind a review report (C5). report_mtime_ns MUST stay a string — a raw
+    # st_mtime_ns (~1.7e18) exceeds JS Number.MAX_SAFE_INTEGER and would be silently rounded on
+    # the frontend, making the run-bound check always fail.
+    run_id: Optional[str] = Field(default=None, max_length=100)
+    report_mtime_ns: Optional[str] = Field(default=None, max_length=40)
 
     @model_validator(mode="after")
     def validate_message_or_trigger(self):

@@ -436,6 +436,191 @@ async def independent_review_stream(project_id: str, request: Request):
     )
 
 
+@app.post("/api/projects/{project_id}/independent-review/stream")
+async def independent_review_stream_post(project_id: str, request: Request):
+    """C4: POST stream with frontend-stable run_id + resume/discard support.
+
+    The legacy GET endpoint above stays in place until C5 (front end still calls it),
+    so this POST path is the dormant new contract. Body: {resume, run_id, supplement?}.
+    Hard invariants (codex R2): the review lock is released on EVERY path (acquire fail,
+    claim_first CAS fail, resume done/reject, worker finally); resume waits for the lock via
+    to_thread (non-blocking the event loop) then re-reads the store; review-completed is
+    re-emitted by this wrapper only after the worker finished AND the lock was released AND a
+    done tombstone exists.
+    """
+    body = await request.json()
+    resume = bool(body.get("resume"))
+    run_id = body.get("run_id")
+    supplement = body.get("supplement")
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id required")
+
+    try:
+        workspace = skill_engine.get_workspace_summary(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if workspace.get("stage_code") != "S5":
+        raise HTTPException(status_code=400, detail="独立审查只能在 S5 阶段使用")
+
+    lock = get_independent_review_lock(project_id)
+    store = _REVIEW_SESSION_STORE
+    cancel_event = threading.Event()
+    resume_snapshot = None
+    done_mtime = None
+
+    if not resume:
+        if not lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="上一次独立审查仍在进行中，请等待")
+        if not store.claim_first(project_id, run_id, cancel_event):
+            lock.release()  # CAS 失败必须 release（红队：防 lock 泄漏）
+            raise HTTPException(status_code=409, detail="已有进行中的审查")
+    else:
+        # 短 blocking 等锁，不阻塞事件循环：worker 可能正在收尾（release 在即）。
+        got = await asyncio.to_thread(lock.acquire, True, 3.0)
+        if not got:
+            raise HTTPException(status_code=409, detail="上一次审查正在收尾，请稍候")
+        # 拿到锁后重读 store（等锁期间 worker 可能已 atomic_commit 收尾、状态翻 done）。
+        kind, payload = store.claim_resume(project_id, run_id, cancel_event)
+        if kind == "errored":
+            resume_snapshot = payload
+        elif kind == "done":
+            done_mtime = payload
+            lock.release()  # done 不启 worker → 必须释放（lock 全路径）
+        else:  # reject
+            lock.release()
+            raise HTTPException(status_code=400, detail="无可续审的会话")
+
+    async def generate():
+        # done 分支：worker 不启动，与首次成功同构地补发 review-completed（解决"成功但通知丢失"）。
+        if done_mtime is not None:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "review-completed",
+                        "run_id": run_id,
+                        "report_mtime_ns": done_mtime,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        event_queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def enqueue_event(event):
+            if loop.is_closed():
+                return
+            future = asyncio.run_coroutine_threadsafe(event_queue.put(event), loop)
+            future.result()
+
+        def run_worker():
+            try:
+                agent = IndependentReviewAgent(skill_engine, settings)
+                for event in agent.run(
+                    project_id,
+                    run_id=run_id,
+                    store=store,
+                    resume_snapshot=resume_snapshot,
+                    supplement=supplement,
+                    cancel_event=cancel_event,
+                ):
+                    if cancel_event.is_set():
+                        break
+                    # 不透传 agent 内部的 review-completed：完成信号由 endpoint wrapper 在 lock
+                    # 释放后按 store.get_done_mtime 重新发射，保证前端见 completion 时锁已可用。
+                    if isinstance(event, dict) and event.get("type") == "review-completed":
+                        continue
+                    enqueue_event(event)
+            except Exception as exc:
+                if not cancel_event.is_set():
+                    enqueue_event({"type": "error", "data": str(exc)})
+            finally:
+                try:
+                    # worker 退出兜底（codex R2 BLOCKER 4）：record 仍 running 则收敛——续审场景留
+                    # snapshot 可再 resume，无则清 record。done/errored/被 discard → no-op。
+                    # 先收敛 store，再释放 review lock。
+                    store.finalize_orphan_running(project_id, run_id, resume_snapshot)
+                finally:
+                    try:
+                        enqueue_event(None)
+                    finally:
+                        lock.release()
+
+        worker_task = asyncio.create_task(asyncio.to_thread(run_worker))
+        disconnected = False
+        try:
+            while True:
+                if await request.is_disconnected():
+                    disconnected = True
+                    cancel_event.set()
+                    break
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            cancel_event.set()
+            yield f"data: {json.dumps({'type': 'error', 'data': str(exc)}, ensure_ascii=False)}\n\n"
+        finally:
+            cancel_event.set()
+            if not worker_task.done():
+                await worker_task
+
+        # completion 时序（红队）：worker 已结束 + lock 已在 run_worker finally 释放。仅当 store
+        # 落了 done tombstone（run_id 匹配）才补发 review-completed；worker error / atomic replace
+        # 失败 / 自修失败 / 断连 → 只把上面透出的 error 留给前端，不发 completed。
+        if not disconnected:
+            final_mtime = store.get_done_mtime(project_id, run_id)
+            if final_mtime:
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "review-completed",
+                            "run_id": run_id,
+                            "report_mtime_ns": final_mtime,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/projects/{project_id}/independent-review/discard")
+async def independent_review_discard(project_id: str, request: Request):
+    """C4: cancel an in-flight (or finished) review session without acquiring the review lock.
+
+    Uses only the store guard so it can cancel even while a long-running worker holds the
+    review lock. run_id must match the current record; on match it sets the cancel_event and
+    drops the record (any late commit from the old worker is then rejected by run_id mismatch).
+    This only cancels the session — it never deletes an already-written report.
+    """
+    body = await request.json()
+    run_id = body.get("run_id")
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id required")
+    cancelled = _REVIEW_SESSION_STORE.discard(project_id, run_id)
+    return {"cancelled": cancelled}
+
+
 @app.post("/api/projects/{project_id}/lint-report")
 async def lint_report(project_id: str):
     try:

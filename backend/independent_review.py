@@ -224,7 +224,12 @@ class IndependentReviewAgent:
         self.settings = settings
 
     def _build_client(self) -> OpenAI:
-        http_client = httpx.Client(timeout=120.0)
+        # Structured timeout (C4 / spec §7): bound connect/read/write/pool separately so a
+        # provider that never sends a first byte can't pin the worker (and the review lock it
+        # holds) for the full 120s. read=60 caps the no-first-token window per request.
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=30.0)
+        )
         return OpenAI(
             api_key=self.settings.api_key,
             base_url=self.settings.api_base,
