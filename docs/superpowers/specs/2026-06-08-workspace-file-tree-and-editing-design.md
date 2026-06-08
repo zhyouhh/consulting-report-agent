@@ -42,7 +42,7 @@ R3 解决这两点：文件栏改**分层 + 中文名 + 当前阶段置顶高亮
 | D3 | `plan/project-overview.md` 可编辑 | **v1 只读** | 元信息是阶段推断真值源，裸 md 编辑改坏结构影响阶段判断；编辑走结构化表单（R3③）更安全 |
 | D4 | 用户编辑 `plan/outline.md` 是否动 checkpoint | **不动 checkpoint** | 改大纲文字 ≠ 重走大纲确认；要重确认用现有聊天「调整大纲」或 `advance_stage` 回退；不耦合状态机 |
 | D5 | 编辑器形态 | **v1 raw textarea** | YAGNI + webview 兼容稳 + 低风险；「改个数字改句话」raw 够用；富文本 v2 |
-| D6 | 用户改正文后审查报告失效策略 | **advisory 标 stale，不强制清 checkpoint** | 改正文后 `review_passed_at` 与两份审查报告不再针对当前正文；但「改一字作废审查」过度，且违反项目 advisory 风格。改为：标 `review_stale` flag + UI 提示「正文已改动，建议重新审查」，不强制清除、不硬阻 S6/S7（硬门禁记后续）。详见 §5.4 |
+| D6 | 用户改正文后审查报告失效策略 | **advisory 标 stale，不强制清 checkpoint** | 改正文后 `review_passed_at` 与两份审查报告不再针对当前正文；但「改一字作废审查」过度，且违反项目 advisory 风格。改为：标 `review_stale` flag + UI 提示「正文已改动，建议重新审查」，不强制清除、不硬阻 S6/S7（硬门禁记后续）。判定**不 gate 在 `review_passed_at`**（覆盖『改正文后还没点通过』的关键窗口）。详见 §5.4 |
 | D7 | 跨源/CSRF 安全 | **记既有债，R3 只写 threat model** | `allow_origins=["*"]` 是全局现状，读接口与既有写接口同样暴露；R3 不独扛全局收紧，但写清新写接口的暴露面与后续建议（§9） |
 
 ## 4. 架构与数据流
@@ -137,7 +137,7 @@ stage 是**文件级**属性（用于置顶，§7.1）；group 是视觉分组�
 
 | 用户改了什么 | 处理 |
 |---|---|
-| `content/report_draft_v1.md` | 若 `review_passed_at` 已置：`get_workspace_summary` 增 `review_stale=true` flag，UI 提示「正文已改动，建议重新审查」。**不**强制清 checkpoint、**不**硬阻 S6/S7 推进（advisory）。判定：两份审查报告都存在时，`draft_mtime_ns > min(independent_review_mtime_ns, lint_report_mtime_ns)` 即 stale（报告写于审查那一刻，正文 mtime 晚于它＝审查后又改了正文）。**不**单比 `review_passed_at`——正常路径『报告生成→改正文→点确认通过』会让 checkpoint 时间晚于正文修改，单比 `review_passed_at` 会漏报。AI 下次动笔由现有 `check_read_before_write_canonical_draft`（基于 mtime）感知，无需新增。 |
+| `content/report_draft_v1.md` | `get_workspace_summary` 增 `review_stale=true` flag，UI 提示「正文已改动，建议重新审查」。**不**强制清 checkpoint、**不**硬阻 S6/S7（advisory）。**判定不依赖 `review_passed_at`**：两份审查报告都存在且 `draft_mtime_ns > min(independent_review_mtime_ns, lint_report_mtime_ns)` 即 stale——这覆盖最危险窗口『报告已生成、用户改了正文、**但还没点审查通过**』（此时 `review_passed_at` 未置，若 gate 在它上会漏报；而 `record_stage_checkpoint(review_passed_at)` 只校验报告结构完整、不校验是否覆盖当前正文，stale 报告会照常通过）。仅一份/无报告则不置 stale。AI 下次动笔由现有 `check_read_before_write_canonical_draft`（mtime）感知，无需新增。 |
 | `plan/outline.md`·`research-plan.md`·`data-log.md`·`analysis-notes.md`·`notes.md`·`references.md` | 维持 D4：不动任何 checkpoint。这些是过程文件，用户随时修订；要重走某阶段用聊天「调整大纲」或 `advance_stage` 回退。 |
 | `plan/presentation-plan.md` | 不动 checkpoint。 |
 
@@ -204,6 +204,8 @@ body: {"content": "<str>", "base_mtime_ns": "<str, 后端拒绝 number 类型>"}
   - workspace `refreshToken`/`loadFiles` 刷新（不得覆盖编辑态 content）；
   - **切换到另一文件**（现 `WorkspacePanel.loadFile` 会直接覆盖 `content/currentFile`）；
   - **切换项目**（`projectId` 变）、**切 tab**（阶段/文件/材料）、关闭编辑；
+  - **整页刷新 / PyWebView 关窗**：dirty 或 saving 时注册 `beforeunload` 确认（PyWebView 关窗拦截能力有限 → 标 best-effort）；
+  - **保存请求 pending（saving）期间**：禁用所有离开动作，直到成功/失败；
 - dirty 状态归属在 `FilePreviewPanel`（或上提 `WorkspacePanel`），离开动作经统一 `guardLeave(next)` 决策。
 
 ### 7.3 `StagePanel` 不变
@@ -221,7 +223,7 @@ R3 不动阶段按钮逻辑（S5 两按钮 / 导出按钮阶段化，批 1 已�
 | `test_main_api.py` | `GET /files/{path}` 返回 `{content, mtime_ns, editable}` |
 | `test_main_api.py` | `POST /files`：白名单写成功+返回新 mtime；deny 403；穿越 400；项目/文件不存在 404；mtime CAS mismatch 409；`base_mtime_ns` 传 number 被拒 |
 | `test_main_api.py` | 锁内 CAS 竞争：持 `_get_project_request_lock` 期间并发写被串行化（覆盖不丢） |
-| `test_main_api.py` / `test_skill_engine.py` | 改 `report_draft_v1.md` 后 `review_passed_at` 已置 → `get_workspace_summary` `review_stale=true`；改过程文件不置 stale |
+| `test_main_api.py` / `test_skill_engine.py` | `review_stale`：两份报告存在 + draft 比报告新即 `true`，**不论 `review_passed_at` 是否已置**（覆盖『未点通过』窗口）；改过程文件不置 stale；仅一份/无报告不置 stale |
 | `test_main_api.py` | `mtime_ns` 大整数全程 str（沿用 R1 `test_mtime_ns_large_int_string_preserved` 同款断言） |
 
 ### 8.2 前端（无 jsdom）
@@ -238,6 +240,7 @@ R3 不动阶段按钮逻辑（S5 两按钮 / 导出按钮阶段化，批 1 已�
 - **R3 增量**：`POST /files` 新增「写白名单文件任意内容」能力。理论攻击：用户浏览器访问的恶意网页跨源 `fetch` 本地 `127.0.0.1:8080`，枚举 `/api/projects` 后写白名单文件（如往正文塞内容）。
 - **缓解（本批）**：白名单制把可写面限到 8 个用户内容文件，**不含阶段追踪文件（stage-gates/progress/tasks）、checkpoint 文件、审查报告文件（independent-review/lint-report）**——即使被 CSRF，也只能改用户自己的内容文件（草稿/笔记/大纲/演示计划），不能推进阶段、不能伪造审查、不能改 checkpoint、不能越权读写其他文件；路径穿越已挡。
 - **后续（记既有债，D7）**：全局收紧 `allow_origins` 到具体 localhost origin，或加 PyWebView 注入的本地 session token 校验所有写接口。不在 R3 独扛（应统一覆盖所有既有写接口）。
+- **本地 fs 信任边界（既有，非 R3）**：硬链接无法靠 `_resolve_project_path` 路径检测识别（symlink/junction 已被 `resolve()`+`_is_within` 挡）；若项目文件被预先 hardlink 到项目外，写白名单文件可能改到外部目标。属既有本地文件系统信任边界（需恶意本地进程预构造），不在 R3。
 
 ## 10. 风险与缓解
 
@@ -252,6 +255,7 @@ R3 不动阶段按钮逻辑（S5 两按钮 / 导出按钮阶段化，批 1 已�
 | 改正文后交付未审草稿 | §5.4 `review_stale` advisory 提示（硬门禁记后续 D6） |
 | `mtime_ns` 转 Number 失精 | 全程 opaque str（§6.1）+ 后端拒 number（§6.2）+ §8.1 断言 |
 | 跨源写接口滥用 | §9 白名单限面 + 既有债后续收紧 |
+| 长聊天轮持锁时保存排队等待 | 不死锁；用户点保存可能等到流式回复结束才得 409/成功。实现可加短超时或「AI 写入中，请稍后保存」提示（实现注意，非 blocker） |
 
 ## 11. 未决 / 后续
 
