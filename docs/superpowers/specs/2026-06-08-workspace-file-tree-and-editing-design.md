@@ -56,7 +56,7 @@ R3 解决这两点：文件栏改**分层 + 中文名 + 当前阶段置顶高亮
 数据流：
 ```
 GET /files          → [{path, group, stage, editable, mtime_ns}]      （列表，渲染文件树）
-点某文件 / 点编辑   → GET /files/{path} → {content, mtime_ns, editable}（持锁内一次读 + stat，编辑态以此 mtime 为 base）
+点某文件 / 点编辑   → GET /files/{path} → {content, mtime_ns, editable}（不持锁，stat-before-read；编辑态以此 mtime 为 base，见 §6.1 修订）
 点保存              → POST /files/{path} {content, base_mtime_ns}
                     → 持 _get_project_request_lock：validate_user_write → stat CAS → 写 temp → os.replace → re-stat
                     → 返回 {status, mtime_ns}；前端回预览态、刷新 mtime
@@ -137,7 +137,7 @@ stage 是**文件级**属性（用于置顶，§7.1）；group 是视觉分组�
 
 | 用户改了什么 | 处理 |
 |---|---|
-| `content/report_draft_v1.md` | `get_workspace_summary` 增 `review_stale=true` flag，UI 提示「正文已改动，建议重新审查」。**不**强制清 checkpoint、**不**硬阻 S6/S7（advisory）。**判定不依赖 `review_passed_at`**：两份审查报告都存在且 `draft_mtime_ns > min(independent_review_mtime_ns, lint_report_mtime_ns)` 即 stale——这覆盖最危险窗口『报告已生成、用户改了正文、**但还没点审查通过**』（此时 `review_passed_at` 未置，若 gate 在它上会漏报；而 `record_stage_checkpoint(review_passed_at)` 只校验报告结构完整、不校验是否覆盖当前正文，stale 报告会照常通过）。仅一份/无报告则不置 stale。AI 下次动笔由现有 `check_read_before_write_canonical_draft`（mtime）感知，无需新增。 |
+| `content/report_draft_v1.md` | `get_workspace_summary` 增 `review_stale=true` flag，UI 提示「正文已改动，建议重新审查」。**不**强制清 checkpoint、**不**硬阻 S6/S7（advisory）。**判定不依赖 `review_passed_at`**：两份审查报告都**有效**（`_has_effective_review_reports`，即带 anchors + 完成 marker + 实质 body，**非 `create_project` scaffold 的模板**——plan codex R1 BLOCKER 1）且 `draft_mtime_ns > min(independent_review_mtime_ns, lint_report_mtime_ns)` 即 stale——这覆盖最危险窗口『报告已生成、用户改了正文、**但还没点审查通过**』（此时 `review_passed_at` 未置，若 gate 在它上会漏报；而 `record_stage_checkpoint(review_passed_at)` 只校验报告结构完整、不校验是否覆盖当前正文，stale 报告会照常通过）。仅一份有效 / 都是模板 / 无报告则不置 stale。AI 下次动笔由现有 `check_read_before_write_canonical_draft`（mtime）感知，无需新增。 |
 | `plan/outline.md`·`research-plan.md`·`data-log.md`·`analysis-notes.md`·`notes.md`·`references.md` | 维持 D4：不动任何 checkpoint。这些是过程文件，用户随时修订；要重走某阶段用聊天「调整大纲」或 `advance_stage` 回退。 |
 | `plan/presentation-plan.md` | 不动 checkpoint。 |
 
@@ -160,7 +160,9 @@ stage 是**文件级**属性（用于置顶，§7.1）；group 是视觉分组�
 - `mtime_ns`：`str(stat().st_mtime_ns)` —— **opaque 字符串，禁转 Number/int**（避 JS 2^53 失精）。
 - group→stage 不再写死成区间；stage 来自 `FILE_SEMANTICS` 的文件级值。
 
-**单文件 `GET /files/{path}`**：返回从 `{content}` 扩为 `{content, mtime_ns, editable}`——编辑态以此 `mtime_ns` 为 `base_mtime_ns`（**不**用列表里可能更旧的 mtime，避免误 409）。该读取在 `_get_project_request_lock` 内做「读内容 + stat」一次完成，保证 content 与返回 mtime 一致。
+**单文件 `GET /files/{path}`**：返回从 `{content}` 扩为 `{content, mtime_ns, editable}`——编辑态以此 `mtime_ns` 为 `base_mtime_ns`（**不**用列表里可能更旧的 mtime，避免误 409）。
+
+> **修订（plan codex R1）**：原设计写「该读取在 `_get_project_request_lock` 内」，但 `chat_stream`（`chat.py:3217`）**整轮持有该锁**，GET 进锁会冻结预览整轮。改为 **GET 不持锁**，`read_file_with_mtime` **先 `stat` 再 `read`**（返回 mtime 永不晚于返回字节）。配套把 `SkillEngine.write_file` 改为**原子写**（同目录 temp + `os.replace`；所有 AI 写正式文件都经 `_execute_plan_write → write_file` 落盘，单点覆盖）——无锁 GET 因此既不会读到半截文件，也绝不会让用户保存静默覆盖 AI 更新（最坏=安全 409 提示重载）。POST 仍持锁（§6.2）。
 
 ### 6.2 `POST /files/{path}` 写接口
 
@@ -200,7 +202,7 @@ body: {"content": "<str>", "base_mtime_ns": "<str, 后端拒绝 number 类型>"}
 
 - 默认**预览态**（现 `ReactMarkdown`）。`editable===true` 文件显「编辑」按钮 → **编辑态**：重新 `GET /files/{path}` 取最新 `{content, mtime_ns}`，`textarea` 载入 content、记 `base_mtime_ns`。
 - 编辑态：「保存」（POST 带 `base_mtime_ns`）/「取消」（弃改回预览）。保存成功 → 刷新 `mtime_ns`、回预览、`onProjectMutated`。保存 409 → 提示 + 「重新加载」（丢弃本地改动重取）。
-- **dirty 守卫覆盖所有离开路径**（不止 workspace refresh）：当某文件处于编辑态且有未保存改动（dirty）时，以下动作都要先提示「保存 / 放弃 / 取消」：
+- **dirty 守卫覆盖所有离开路径**（不止 workspace refresh）：当某文件处于编辑态且有未保存改动（dirty）时，以下动作都要先经统一脏离开守卫确认（**v1：二选一「放弃修改并离开 / 取消（留下）」**，文案点明取消＝留下不丢工作、可返回继续编辑或先点保存；三按钮「保存 / 放弃 / 取消」留 v2 —— plan codex R1 BLOCKER 4）：
   - workspace `refreshToken`/`loadFiles` 刷新（不得覆盖编辑态 content）；
   - **切换到另一文件**（现 `WorkspacePanel.loadFile` 会直接覆盖 `content/currentFile`）；
   - **切换项目**（`projectId` 变）、**切 tab**（阶段/文件/材料）、关闭编辑；
@@ -223,7 +225,7 @@ R3 不动阶段按钮逻辑（S5 两按钮 / 导出按钮阶段化，批 1 已�
 | `test_main_api.py` | `GET /files/{path}` 返回 `{content, mtime_ns, editable}` |
 | `test_main_api.py` | `POST /files`：白名单写成功+返回新 mtime；deny 403；穿越 400；项目/文件不存在 404；mtime CAS mismatch 409；`base_mtime_ns` 传 number 被拒 |
 | `test_main_api.py` | 锁内 CAS 竞争：持 `_get_project_request_lock` 期间并发写被串行化（覆盖不丢） |
-| `test_main_api.py` / `test_skill_engine.py` | `review_stale`：两份报告存在 + draft 比报告新即 `true`，**不论 `review_passed_at` 是否已置**（覆盖『未点通过』窗口）；改过程文件不置 stale；仅一份/无报告不置 stale |
+| `test_main_api.py` / `test_skill_engine.py` | `review_stale`：两份报告**有效**（`_has_effective_review_reports`，非 scaffold 模板）+ draft 比旧报告新即 `true`，**不论 `review_passed_at` 是否已置**（覆盖『未点通过』窗口）；仅模板/仅一份有效/无报告不置 stale；draft 介于两报告之间也置 stale |
 | `test_main_api.py` | `mtime_ns` 大整数全程 str（沿用 R1 `test_mtime_ns_large_int_string_preserved` 同款断言） |
 
 ### 8.2 前端（无 jsdom）
