@@ -1,8 +1,8 @@
 # Current Worklist
 
-最后更新：2026-06-08（**批 2 = R3 spec 已定稿**：`docs/superpowers/specs/2026-06-08-workspace-file-tree-and-editing-design.md`，codex review **4 轮 APPROVED**[R1 REJECT→R2 NOTES→对抗式红队 REJECT→APPROVED]，红队挖出真 BLOCKER[`review_stale` 误 gate 在 `review_passed_at` → 漏「改完正文没点通过」窗口]；commits `767314d`→`9bb98a9`。用户已接受 D6/D7 取舍。**待 writing-plans**[用户 compact 后写]。详见下方 R3。— 批 1 = R1+R2 已闭环并合入 main `f111f0e`+push origin，唯一剩余＝用户 GUI E2E[非阻塞]，详见 R1。）
+最后更新：2026-06-09（**批 2 = R3 plan 已 APPROVED + committed**：`docs/superpowers/plans/2026-06-08-workspace-file-tree-and-editing.md`，codex plan review **3 轮**[R1 挖 4 BLOCKER→R2 挖 3 BLOCKER→R3 APPROVED] **+ 三按钮增量审 APPROVED**；commits `b49bed7`[plan+spec]→`ebb3eae`[三按钮]。**待用户终审后实施**（subagent-driven 逐 task + 每 commit codex review）。详见下方 R3。— 批 1 = R1+R2 已闭环并合入 main `f111f0e`+push origin，唯一剩余＝用户 GUI E2E[非阻塞]，详见 R1。）
 
-上一次更新：2026-06-05（报奖后领导评审反馈逐条 brainstorm 完成 → 落入下方「领导评审反馈整改」高优先簇（R1–R5）；产品化定位：a 优先 / b 为领导方向先 park / c 不做。）
+上一次更新：2026-06-08（批 2 R3 **spec 定稿**：codex 4 轮 APPROVED[R1 REJECT→R2 NOTES→对抗式红队 REJECT→APPROVED]，红队挖出真 BLOCKER[`review_stale` 误 gate 在 `review_passed_at`]；commits `767314d`→`9bb98a9`；用户接受 D6/D7。）
 
 ## 当前未解决 / 待验证
 
@@ -35,7 +35,7 @@ R2. **S5「AI 味自查」主代理答非所问修复**
 - 涉及文件：`backend/chat.py`(`system_trigger` 分支)。
 
 R3. **工作区文件栏重做 + 预览框可编辑（＝UI 重构第一落地块）**
-- 状态：`spec 已定稿（codex 4 轮 APPROVED），待 writing-plans（用户 compact 后写）` — spec：`docs/superpowers/specs/2026-06-08-workspace-file-tree-and-editing-design.md`（commits `767314d`→`9bb98a9`，4 个）
+- 状态：`plan 已 APPROVED + committed（codex 3 轮 R1 4BLOCKER→R2 3BLOCKER→R3 APPROVED + 三按钮增量审 APPROVED），待用户终审后实施` — plan：`docs/superpowers/plans/2026-06-08-workspace-file-tree-and-editing.md`、spec：`docs/superpowers/specs/2026-06-08-workspace-file-tree-and-editing-design.md`（plan+spec commits `b49bed7`+`ebb3eae`；spec 原始 `767314d`→`9bb98a9`）。9 个 task、TDD、后端先于前端、只读先于可写。
 - **范围（已定稿，brainstorm 4 轮拍板）**：现框架内小切口（D1，**不换肤**——3 套 `design_UI.pdf` 是整体视觉探索、作独立后续项目，仅借鉴稿3「按阶段分组」IA）+ 第一批做 **①+②**（D2）：①文件栏分层中文名+当前阶段置顶高亮 ②预览框可编辑+后端用户写接口。③图片附件分流/新建项目表单整理 → 后置 **R3③**。
 - **关键设计（spec 是真值源，写 plan 前必读 spec 全文）**：
   - **权限边界（硬骨头）**：新增 `validate_user_write` **独立白名单门禁**，**不复用** LLM 的 `validate_plan_write`（后者带 outline `_requires_pre_outline_evidence` gate，且 independent-review/lint-report 的拒写在 chat.py 工具层、HTTP 写接口走不到）。**8 个可编辑**：`content/report_draft_v1.md` + `plan/{outline,research-plan,notes,references,data-log,analysis-notes,presentation-plan}.md`；其余只读（`project-overview`[D3 只读]/审查报告/`stage-gates·progress·tasks`/`delivery-log`/`review.md`）；退役不显示。白名单比对用 `_canonical_user_path` 对整路径 casefold（**不复用**只处理 plan 的 `_canonicalize_plan_markdown_path`）。
@@ -44,7 +44,8 @@ R3. **工作区文件栏重做 + 预览框可编辑（＝UI 重构第一落地�
   - **D7 CSRF**：记既有债（allow_origins=*），R3 不解决全局，白名单限可写面到 8 个用户内容文件。
   - **前端**：文件树分组+中文名(`FILE_DISPLAY_NAMES` 按完整 path)+置顶高亮；预览/编辑双模式 **textarea raw**（富文本 v2）；dirty **`guardLeave`** 覆盖所有离开路径（切文件/项目/tab/刷新/PyWebView 关窗/saving 期间禁离开）。无 jsdom → 新 `utils/{fileTree,fileEditState}` 纯函数测 + source-guard。
 - **实施切分（spec §12，6 步，后端先于前端、只读先于可写）**：① `FILE_SEMANTICS`+`is_user_editable`+`GET /files` 改造(纯只读零风险) ② `validate_user_write`+`POST /files`(锁+CAS+原子写) ③ `review_stale`+workspace flag ④ 前端文件树 ⑤ 前端编辑双模式+`guardLeave` ⑥ 回归+cutover。
-- **用户已接受 D6/D7**。涉及文件：`backend/skill.py`(语义+门禁，`validate_user_write`/`FILE_SEMANTICS`/`_canonical_user_path`)、`backend/main.py`(GET 改造+POST 写接口+锁)、`frontend/src/components/{WorkspacePanel,FilePreviewPanel}.jsx` + 新 `utils/{fileTree,fileEditState}`。
+- **用户已接受 D6/D7**。涉及文件：`backend/skill.py`(语义+门禁+原子 write_file，`validate_user_write`/`FILE_SEMANTICS`/`_canonical_user_path`)、`backend/chat.py`(canonical draft `edit_file` 直写改走 write_file，`:4238`)、`backend/main.py`(GET 改造+POST 写接口+锁)、`frontend/src/components/{WorkspacePanel,FilePreviewPanel}.jsx`+`App.jsx` + 新 `utils/{fileTree,fileEditState}`。
+- **plan codex review 改进（vs 原 spec，已同步进 plan + spec）**：① **GET `/files/{path}` 不持锁 + stat-before-read**（实测 `chat_stream` `chat.py:3217` 整轮持锁，GET 进锁会冻结预览整轮）；② **`write_file` 原子化**（temp+os.replace；含 canonical draft `edit_file` 直写 `chat.py:4238` 改走 write_file——append/edit/write 三条 AI 写路径单点原子化，消除 torn read，GET 不持锁才成立）；③ **review_stale gate 在 `_has_effective_review_reports`**（非仅「存在」——避开 create_project scaffold 的 independent-review/lint-report 模板误判）；④ **脏离开 v1 三按钮「保存/放弃修改/取消」**（延后动作模式，应用户要求做进 v1，非 spec 初版二选一；beforeunload 受原生限制仍二选一）；⑤ 守卫接口统一为 `attemptLeave(action)` 贯通 FilePreviewPanel→WorkspacePanel→App。
 - 参考设计稿 `docs/design_UI.pdf`（3 套，借鉴稿3按阶段分组 IA）。
 
 R4. **资料来源可信度：只标注 + 提示（不做白名单硬门禁）**
@@ -393,7 +394,7 @@ R5. **方法论显性化：可见不可选**
 - 状态：`已完成`（2026-04-21 3 路并行派活，全部合 main）
 - 5 个 commit：`cb15e4c` / `7e262cf` / `1e180cc`（task-4 Bug A/B/F）+ `4a6a7da` / `88f10d7` / `7a50bb3`（task-5 Bug D）+ `341de44`（frontend-copy 复制体验）
 - 测试：后端 403 passed（397→403，+6 新测试）；前端 139 passed；`npm run build` 零错
-- 详情见最近已解决 1a；G/H 已移入当前 stage-advance-gates Bug G/H 待复核项。
+- 详情见已解决 1a；G/H 已移入当前 stage-advance-gates Bug G/H 待复核项。
 - 归档说明：二轮 smoke 与重打包后续已完成；新暴露问题已归入 1b / 1d / 当前 stage-advance-gates Bug G/H 待复核项，不再从本历史块发起 smoke。
 
 1. ⭐ **阶段推进门禁重构（stage-advance-gates，Task 1-8 全闭环）**
