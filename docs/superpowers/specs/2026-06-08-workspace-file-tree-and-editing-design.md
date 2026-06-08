@@ -98,10 +98,12 @@ def is_user_editable(normalized_path) -> bool:
 def validate_user_write(project_ref, file_path) -> str:
     # normalize_file_path 内含 _resolve_project_path 路径穿越防护：穿越路径抛 ValueError → endpoint 400
     normalized = normalize_file_path(project_ref, file_path)
-    if not is_user_editable(normalized):
+    canonical = _canonical_user_path(normalized)
+    if canonical not in USER_EDITABLE_FILES:
         # 不在白名单（含 canonicalize 后逃逸的穿越路径）→ PermissionError → endpoint 403
         raise PermissionError(f"`{normalized}` 不可由用户手动编辑")
-    return normalized
+    # 返回白名单 canonical：content/Report_Draft_V1.MD 也落到 content/report_draft_v1.md，写入路径稳定
+    return canonical
 ```
 
 白名单制（而非黑名单）：默认 deny，将来新增任何后端自动维护文件都不会意外可写。`USER_EDITABLE_FILES` 是判定 `editable`（GET）与写接口（POST）的**唯一真值源**——显示与实际允许严格一致。
@@ -135,7 +137,7 @@ stage 是**文件级**属性（用于置顶，§7.1）；group 是视觉分组�
 
 | 用户改了什么 | 处理 |
 |---|---|
-| `content/report_draft_v1.md` | 若 `review_passed_at` 已置：`get_workspace_summary` 增 `review_stale=true` flag，UI 提示「正文已改动，建议重新审查」。**不**强制清 checkpoint、**不**硬阻 S6/S7 推进（advisory）。判定靠正文 mtime 晚于 `review_passed_at` 时间戳（或晚于两份报告 mtime）。AI 下次动笔由现有 `check_read_before_write_canonical_draft`（基于 mtime）感知，无需新增。 |
+| `content/report_draft_v1.md` | 若 `review_passed_at` 已置：`get_workspace_summary` 增 `review_stale=true` flag，UI 提示「正文已改动，建议重新审查」。**不**强制清 checkpoint、**不**硬阻 S6/S7 推进（advisory）。判定：两份审查报告都存在时，`draft_mtime_ns > min(independent_review_mtime_ns, lint_report_mtime_ns)` 即 stale（报告写于审查那一刻，正文 mtime 晚于它＝审查后又改了正文）。**不**单比 `review_passed_at`——正常路径『报告生成→改正文→点确认通过』会让 checkpoint 时间晚于正文修改，单比 `review_passed_at` 会漏报。AI 下次动笔由现有 `check_read_before_write_canonical_draft`（基于 mtime）感知，无需新增。 |
 | `plan/outline.md`·`research-plan.md`·`data-log.md`·`analysis-notes.md`·`notes.md`·`references.md` | 维持 D4：不动任何 checkpoint。这些是过程文件，用户随时修订；要重走某阶段用聊天「调整大纲」或 `advance_stage` 回退。 |
 | `plan/presentation-plan.md` | 不动 checkpoint。 |
 
@@ -145,7 +147,7 @@ stage 是**文件级**属性（用于置顶，§7.1）；group 是视觉分组�
 
 ### 6.1 `GET /files` 与 `GET /files/{path}` 改造
 
-**列表 `GET /files`**：仍 `rglob("*.md")`，跳过退役（`project-info.md`、`review-checklist.md`）。每文件经 `FILE_SEMANTICS`（新常量：`{basename → (group, stage)}`，覆盖 §5.3 全部）+ `is_user_editable` 映射为：
+**列表 `GET /files`**：仍 `rglob("*.md")`，跳过退役（`project-info.md`、`review-checklist.md`）**和 `materials/` 目录下文件**（用户上传材料，非正式工作文件）。每文件经 `FILE_SEMANTICS`（新常量：键为**完整相对 posix 路径**如 `plan/outline.md`，**非 basename**——否则 `materials/imported/outline.md` 会被误判为 S1 正式大纲）+ `is_user_editable` 映射为：
 
 ```json
 {"files": [
@@ -215,7 +217,7 @@ R3 不动阶段按钮逻辑（S5 两按钮 / 导出按钮阶段化，批 1 已�
 | 文件 | 用例 |
 |---|---|
 | `test_skill_engine.py` | `is_user_editable` 权限矩阵：8 白名单 True（含 `content/report_draft_v1.md` 大写变体经 casefold 仍 True）/ 各只读文件 False / 未知 .md False / 退役 False；`validate_user_write` allow + deny `PermissionError` + 穿越 `ValueError` |
-| `test_skill_engine.py` | `GET /files` 语义：`FILE_SEMANTICS` 全 15 文件 group/stage/editable 正确（**重点 S1 outline / S2 data-log / S3 analysis-notes / S6 presentation-plan / S7 delivery-log**）；退役跳过；未知→other/null/false |
+| `test_skill_engine.py` | `GET /files` 语义：`FILE_SEMANTICS` 全 15 文件 group/stage/editable 正确（**重点 S1 outline / S2 data-log / S3 analysis-notes / S6 presentation-plan / S7 delivery-log**）；退役跳过；`materials/` 跳过、同名材料（`materials/imported/outline.md`）**不**误判为 S1（按完整路径映射）；未知→other/null/false |
 | `test_main_api.py` | `GET /files/{path}` 返回 `{content, mtime_ns, editable}` |
 | `test_main_api.py` | `POST /files`：白名单写成功+返回新 mtime；deny 403；穿越 400；项目/文件不存在 404；mtime CAS mismatch 409；`base_mtime_ns` 传 number 被拒 |
 | `test_main_api.py` | 锁内 CAS 竞争：持 `_get_project_request_lock` 期间并发写被串行化（覆盖不丢） |
@@ -234,7 +236,7 @@ R3 不动阶段按钮逻辑（S5 两按钮 / 导出按钮阶段化，批 1 已�
 
 - **既有现状**：FastAPI `allow_origins=["*"]`（main.py:57）+ 后端绑 `127.0.0.1:8080`。读接口、`materials/upload`、`checkpoints` 等写接口早已在此暴露面下。
 - **R3 增量**：`POST /files` 新增「写白名单文件任意内容」能力。理论攻击：用户浏览器访问的恶意网页跨源 `fetch` 本地 `127.0.0.1:8080`，枚举 `/api/projects` 后写白名单文件（如往正文塞内容）。
-- **缓解（本批）**：白名单制把可写面限到 8 个用户内容文件，**不含**任何阶段/审查/checkpoint 文件——即使被 CSRF，也只能改用户自己的草稿内容，不能推进阶段、不能伪造审查、不能越权读写其他文件；路径穿越已挡。
+- **缓解（本批）**：白名单制把可写面限到 8 个用户内容文件，**不含阶段追踪文件（stage-gates/progress/tasks）、checkpoint 文件、审查报告文件（independent-review/lint-report）**——即使被 CSRF，也只能改用户自己的内容文件（草稿/笔记/大纲/演示计划），不能推进阶段、不能伪造审查、不能改 checkpoint、不能越权读写其他文件；路径穿越已挡。
 - **后续（记既有债，D7）**：全局收紧 `allow_origins` 到具体 localhost origin，或加 PyWebView 注入的本地 session token 校验所有写接口。不在 R3 独扛（应统一覆盖所有既有写接口）。
 
 ## 10. 风险与缓解
