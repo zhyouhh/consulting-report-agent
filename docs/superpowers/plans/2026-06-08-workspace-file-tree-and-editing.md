@@ -64,8 +64,8 @@ spec §6.1 写「GET `/files/{path}` 读取在 per-project 锁内做」。但已
 **前端：**
 - 新建 `frontend/src/utils/fileTree.js` — 纯函数：分组、当前阶段置顶、path→中文名。
 - 新建 `frontend/src/utils/fileEditState.js` — 纯函数：预览↔编辑状态机 + `guardLeave` 决策。
-- 重写 `frontend/src/components/FilePreviewPanel.jsx` — 分组文件树 + 双模式 + dirty 守卫 + 暴露 `confirmDiscardIfDirty`。
-- 修改 `frontend/src/components/WorkspacePanel.jsx` — 结构化 files、`handleSaveFile` / `reloadFile`、tab 切换守卫、`forwardRef` 暴露 `confirmDiscardIfDirty`、传 `review_stale`。
+- 重写 `frontend/src/components/FilePreviewPanel.jsx` — 分组文件树 + 双模式 + 脏离开三按钮守卫 + 暴露 `attemptLeave`。
+- 修改 `frontend/src/components/WorkspacePanel.jsx` — 结构化 files、`handleSaveFile` / `reloadFile`、tab 切换守卫、`forwardRef` 暴露 `attemptLeave`、传 `review_stale`。
 - 修改 `frontend/src/App.jsx` — `workspacePanelRef` + `handleSelectProject` 切项目前守卫。
 
 **测试：**
@@ -1319,7 +1319,7 @@ git commit -m "feat(r3): fileEditState util (preview/edit state machine + guardL
 - Rewrite: `frontend/src/components/FilePreviewPanel.jsx`
 - Test: `frontend/tests/filePreviewPanel.source.test.mjs`
 
-无 jsdom → source-guard 测试。组件 `forwardRef`，对外暴露 `confirmDiscardIfDirty`（供 WorkspacePanel/App 切 tab/切项目前调用）。
+无 jsdom → source-guard 测试。组件 `forwardRef`，对外暴露 `attemptLeave(action)`（延后动作模式，供 WorkspacePanel/App 切 tab / 切项目 / 收起面板前调用）。
 
 - [ ] **Step 1: 写 source-guard 失败测试**
 
@@ -1367,19 +1367,34 @@ test("save posts draft with base_mtime_ns and handles 409 reload", () => {
   assert.match(s, /reloadAfterConflict/);
 });
 
-test("leave paths go through guardLeave + window.confirm; saving blocks", () => {
+test("attemptLeave decides via guardLeave; saving blocks; dirty defers to dialog", () => {
   const s = src();
+  assert.match(s, /const attemptLeave = useCallback/);
   assert.match(s, /guardLeave\(editRef\.current\)/);
-  assert.match(s, /window\.confirm/);
-  assert.match(s, /正在保存/);
+  assert.match(s, /正在保存/);                        // block path
+  assert.match(s, /setLeaveDialog\(\{ action \}\)/);  // confirm path 挂起 action
 });
 
-test("exposes confirmDiscardIfDirty + isEditing on the imperative handle", () => {
+test("v1 leave dialog has three buttons 保存/放弃修改/取消 (deferred-action)", () => {
+  const s = src();
+  assert.match(s, /role="dialog"/);
+  assert.match(s, /handleLeaveSave/);
+  assert.match(s, /handleLeaveDiscard/);
+  assert.match(s, /放弃修改/);
+  // 保存按钮：存成功后才执行挂起的离开动作
+  assert.match(s, /const handleLeaveSave = useCallback/);
+  assert.match(s, /await doSave\(\)/);
+  assert.match(s, /dialog\.action\?\.\(\)/);
+});
+
+test("exposes attemptLeave + isEditing on the imperative handle", () => {
   const s = src();
   assert.match(s, /useImperativeHandle/);
-  assert.match(s, /confirmDiscardIfDirty/);
+  assert.match(s, /attemptLeave: \(action\) => attemptLeave\(action\)/);
   // isEditing lets WorkspacePanel.loadFiles skip content reload mid-edit (BLOCKER 3)
   assert.match(s, /isEditing:/);
+  // 旧的同步 confirmDiscardIfDirty 接口不得回潜（已统一到延后动作 attemptLeave）
+  assert.doesNotMatch(s, /confirmDiscardIfDirty/);
 });
 
 test("edit textarea binds edit.draft, not the content prop (refresh can't clobber edits)", () => {
@@ -1393,10 +1408,10 @@ test("registers best-effort beforeunload while dirty/saving", () => {
   assert.match(s, /beforeunload/);
 });
 
-test("switching file is guarded before discarding edits", () => {
+test("switching file is guarded via attemptLeave", () => {
   const s = src();
   assert.match(s, /handleSelectFile/);
-  assert.match(s, /if \(!confirmLeave\(\)\) return/);
+  assert.match(s, /attemptLeave\(\(\) => onSelectFile\?\.\(path\)\)/);
 });
 
 test("shows review_stale advisory on the draft", () => {
@@ -1486,6 +1501,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
 }, ref) {
   const [edit, setEdit] = useState(initialEditState)
   const [collapsed, setCollapsed] = useState({})
+  const [leaveDialog, setLeaveDialog] = useState(null) // null | { action }
   const editRef = useRef(edit)
   editRef.current = edit
 
@@ -1497,29 +1513,33 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
   const inEdit = edit.mode === 'edit'
   const isDraft = currentFile === DRAFT_PATH
 
-  // 统一离开守卫：返回 true 表示可安全离开（清空编辑态由调用方处理）。
-  const confirmLeave = useCallback(() => {
+  // 统一离开守卫（延后动作模式）：调用方传入「离开动作」action。
+  //   allow（预览 / 未改）→ 重置编辑态 + 立即执行 action，返回 true
+  //   block（保存中）     → 提示，返回 false（不离开）
+  //   confirm（有未保存改动）→ 弹三按钮对话框、把 action 挂起，返回 false；
+  //                          用户点「保存」/「放弃修改」后再执行 action（见 handleLeaveSave/Discard）
+  const attemptLeave = useCallback((action) => {
     const decision = guardLeave(editRef.current)
-    if (decision === 'allow') return true
+    if (decision === 'allow') {
+      setEdit(initialEditState())
+      action?.()
+      return true
+    }
     if (decision === 'block') {
       showError('正在保存，请稍候')
       return false
     }
-    // v1 二选一确认（spec §7.2 v1：放弃/取消；三按钮「保存/放弃/取消」留 v2）。
-    // 文案点明「取消＝留下」，保证不丢工作：用户可返回继续编辑或先点保存。
-    return window.confirm('当前文件有未保存的修改。确定放弃修改并离开？\n（点「取消」可返回继续编辑，或先点「保存」）')
+    setLeaveDialog({ action })
+    return false
   }, [])
 
   useImperativeHandle(ref, () => ({
-    // WorkspacePanel/App 切 tab / 切项目前调用；false 中止切换。
-    confirmDiscardIfDirty: () => {
-      const ok = confirmLeave()
-      if (ok) setEdit(initialEditState())
-      return ok
-    },
+    // WorkspacePanel/App 切 tab / 切项目 / 收起面板前调用：传入离开动作；
+    // allow 立即执行、dirty 弹三按钮后再执行。返回是否已同步放行。
+    attemptLeave: (action) => attemptLeave(action),
     // WorkspacePanel.loadFiles 用：编辑态下 refreshToken 刷新只更新文件列表元数据、不重载当前文件 content。
     isEditing: () => editRef.current.mode === 'edit',
-  }), [confirmLeave])
+  }), [attemptLeave])
 
   // best-effort：整页刷新 / PyWebView 关窗时，dirty 或 saving 则拦截。
   useEffect(() => {
@@ -1533,39 +1553,25 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
   }, [])
 
-  // 切换预览文件本身是一条离开路径：先守卫再丢弃编辑态。
-  const handleSelectFile = useCallback((path) => {
-    if (path === currentFile) return
-    if (!confirmLeave()) return
-    setEdit(initialEditState())
-    onSelectFile?.(path)
-  }, [currentFile, confirmLeave, onSelectFile])
-
-  const handleEnterEdit = useCallback(async () => {
-    try {
-      const fresh = await onReloadFile(currentFile) // 重新取最新 {content, mtimeNs} 作 base
-      setEdit((prev) => enterEdit(prev, { content: fresh.content, mtimeNs: fresh.mtimeNs }))
-    } catch (error) {
-      showError('无法进入编辑：' + (error?.message || '读取失败'))
-    }
-  }, [currentFile, onReloadFile])
-
-  const handleCancel = useCallback(() => {
-    if (!confirmLeave()) return
-    setEdit(initialEditState())
-  }, [confirmLeave])
-
-  const handleSave = useCallback(async () => {
+  // 实际保存：POST 当前草稿，按结果更新编辑态，返回 result 供工具栏 / 离开弹窗分别处理。
+  const doSave = useCallback(async () => {
     const snapshot = editRef.current
-    if (snapshot.mode !== 'edit' || snapshot.saving) return
+    if (snapshot.mode !== 'edit' || snapshot.saving) return { ok: false }
     setEdit((prev) => startSaving(prev))
     const result = await onSaveFile(currentFile, snapshot.draft, snapshot.baseMtimeNs)
     if (result?.ok) {
       setEdit((prev) => saveSucceeded(prev, { mtimeNs: result.mtimeNs }))
-      return
-    }
-    if (result?.conflict) {
+    } else {
       setEdit((prev) => saveFailed(prev))
+    }
+    return result || { ok: false }
+  }, [currentFile, onSaveFile])
+
+  // 工具栏「保存」：存成功留在当前文件；撞 409 给「重新加载 / 不动」二选一（reload 决策，非离开决策）。
+  const handleSave = useCallback(async () => {
+    const result = await doSave()
+    if (result?.ok) return
+    if (result?.conflict) {
       const reload = window.confirm('文件已被更新（可能是 AI 刚写过），加载最新内容？本地修改将丢弃。')
       if (reload) {
         try {
@@ -1577,12 +1583,60 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
       }
       return
     }
-    setEdit((prev) => saveFailed(prev))
     showError('保存失败：' + (result?.error || '请重试'))
-  }, [currentFile, onSaveFile, onReloadFile])
+  }, [doSave, currentFile, onReloadFile])
+
+  const handleEnterEdit = useCallback(async () => {
+    try {
+      const fresh = await onReloadFile(currentFile) // 重新取最新 {content, mtimeNs} 作 base
+      setEdit((prev) => enterEdit(prev, { content: fresh.content, mtimeNs: fresh.mtimeNs }))
+    } catch (error) {
+      showError('无法进入编辑：' + (error?.message || '读取失败'))
+    }
+  }, [currentFile, onReloadFile])
+
+  // 切换预览文件本身是一条离开路径：经统一守卫（dirty 弹三按钮）。
+  const handleSelectFile = useCallback((path) => {
+    if (path === currentFile) return
+    attemptLeave(() => onSelectFile?.(path))
+  }, [currentFile, attemptLeave, onSelectFile])
+
+  // 工具栏「取消」：放弃编辑回预览；dirty 时也经守卫确认。
+  const handleCancel = useCallback(() => {
+    attemptLeave(() => {})
+  }, [attemptLeave])
+
+  // 离开弹窗「保存」：存成功后再执行挂起的离开动作；失败（含 409）则不离开、留在编辑态。
+  const handleLeaveSave = useCallback(async () => {
+    const dialog = leaveDialog
+    if (!dialog) return
+    const result = await doSave()
+    if (result?.ok) {
+      setLeaveDialog(null)
+      dialog.action?.()
+      return
+    }
+    setLeaveDialog(null)
+    if (result?.conflict) {
+      showError('文件已更新（可能是 AI 刚写过），请重新加载后再编辑')
+    } else {
+      showError('保存失败：' + (result?.error || '请重试'))
+    }
+  }, [leaveDialog, doSave])
+
+  // 离开弹窗「放弃修改」：弃改后执行挂起的离开动作。
+  const handleLeaveDiscard = useCallback(() => {
+    const dialog = leaveDialog
+    setLeaveDialog(null)
+    setEdit(initialEditState())
+    dialog?.action?.()
+  }, [leaveDialog])
+
+  // 离开弹窗「取消」：关窗、留在当前继续编辑。
+  const closeLeaveDialog = useCallback(() => setLeaveDialog(null), [])
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="flex-1 flex flex-col min-h-0 relative">
       {/* 文件树（分组 + 当前阶段置顶 + 中文名） */}
       <div className="border-b border-[#2a2a4a] max-h-64 overflow-y-auto text-sm">
         {groups.map((group) => {
@@ -1659,6 +1713,27 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
           </div>
         )}
       </div>
+
+      {/* 脏离开三按钮对话框（保存 / 放弃修改 / 取消）——延后动作模式（spec §7.2 v1）。
+          beforeunload（整页刷新/关窗）受原生限制仍走二选一，无法升级为三按钮。 */}
+      {leaveDialog && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50" role="dialog" aria-modal="true" aria-label="未保存的修改">
+          <div className="w-80 rounded-lg border border-[#2a2a4a] bg-[#1a1a2e] p-5 shadow-xl">
+            <div className="mb-4 text-sm text-[#e2e2f0]">当前文件有未保存的修改，如何处理？</div>
+            <div className="flex flex-col gap-2">
+              <button onClick={handleLeaveSave} disabled={edit.saving} className="px-3 py-2 rounded text-sm bg-[#2f7d52] text-white disabled:opacity-50">
+                {edit.saving ? '保存中…' : '保存'}
+              </button>
+              <button onClick={handleLeaveDiscard} disabled={edit.saving} className="px-3 py-2 rounded text-sm bg-[#5a2a2a] text-[#f0c8c8] disabled:opacity-50">
+                放弃修改
+              </button>
+              <button onClick={closeLeaveDialog} disabled={edit.saving} className="px-3 py-2 rounded text-sm bg-[#15162d] text-[#8f93c9] disabled:opacity-50">
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 })
@@ -1736,17 +1811,19 @@ test("WorkspacePanel loadFiles skips content reload while editing (BLOCKER 3)", 
   assert.match(s, /filePreviewRef\.current\?\.isEditing\?\.\(\)/);
 });
 
-test("WorkspacePanel guards tab switch via filePreviewRef.confirmDiscardIfDirty", () => {
+test("WorkspacePanel guards tab switch via filePreviewRef.attemptLeave", () => {
   const s = wsSrc();
-  assert.match(s, /filePreviewRef/);
-  assert.match(s, /confirmDiscardIfDirty/);
   assert.match(s, /const handleTabClick/);
+  assert.match(s, /filePreviewRef\.current\.attemptLeave\(\(\) => setActiveTab\(next\)\)/);
 });
 
-test("WorkspacePanel is forwardRef exposing confirmDiscardIfDirty", () => {
+test("WorkspacePanel is forwardRef exposing attemptLeave (forwards to FilePreviewPanel)", () => {
   const s = wsSrc();
   assert.match(s, /forwardRef/);
   assert.match(s, /useImperativeHandle/);
+  assert.match(s, /attemptLeave:\s*\(action\)\s*=>/);
+  assert.match(s, /fp\.attemptLeave\(action\)/);
+  assert.doesNotMatch(s, /confirmDiscardIfDirty/);
 });
 
 test("WorkspacePanel passes review_stale + currentStage to FilePreviewPanel", () => {
@@ -1757,19 +1834,19 @@ test("WorkspacePanel passes review_stale + currentStage to FilePreviewPanel", ()
   assert.match(s, /onReloadFile=\{reloadFile\}/);
 });
 
-test("App guards project switch via workspacePanelRef before switching", () => {
+test("App guards project switch via workspacePanelRef.attemptLeave (deferred proceed)", () => {
   const s = appSrc();
   assert.match(s, /workspacePanelRef/);
-  assert.match(s, /confirmDiscardIfDirty/);
   assert.match(s, /ref=\{workspacePanelRef\}/);
+  assert.match(s, /wp\.attemptLeave\(proceed\)/);
 });
 
 test("App guards workspace-panel toggle (hide unmounts editor) before hiding (R2 BLOCKER)", () => {
   const s = appSrc();
   assert.match(s, /handleToggleWorkspacePanel/);
   assert.match(s, /onToggleWorkspacePanel=\{handleToggleWorkspacePanel\}/);
-  // 守卫只在「当前显示且要隐藏」时拦截
-  assert.match(s, /showWorkspacePanel && !\(workspacePanelRef\.current\?\.confirmDiscardIfDirty/);
+  // 守卫只在「当前显示且要隐藏」时拦截，dirty 则把隐藏挂起到三按钮弹窗
+  assert.match(s, /showWorkspacePanel && wp\?\.attemptLeave/);
 });
 ```
 
@@ -1839,14 +1916,21 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   const filePreviewRef = useRef(null)
 
   useImperativeHandle(ref, () => ({
-    // App 切项目前调用；委派给 FilePreviewPanel 的 dirty 守卫。false → 中止切项目。
-    confirmDiscardIfDirty: () => filePreviewRef.current?.confirmDiscardIfDirty?.() ?? true,
+    // App 切项目 / 收起面板前调用：把离开动作转交 FilePreviewPanel 的 attemptLeave
+    //（allow 立即执行、dirty 弹三按钮后执行）。面板未挂载（非 files tab）则无编辑态，直接执行。
+    attemptLeave: (action) => {
+      const fp = filePreviewRef.current
+      if (fp?.attemptLeave) return fp.attemptLeave(action)
+      action?.()
+      return true
+    },
   }), [])
 
   const handleTabClick = useCallback((next) => {
-    // 离开「文件」tab 是一条离开路径：dirty 时先守卫。
-    if (activeTab === 'files' && next !== 'files') {
-      if (!(filePreviewRef.current?.confirmDiscardIfDirty?.() ?? true)) return
+    // 离开「文件」tab 是一条离开路径：经统一守卫（dirty 弹三按钮后再切）。
+    if (activeTab === 'files' && next !== 'files' && filePreviewRef.current?.attemptLeave) {
+      filePreviewRef.current.attemptLeave(() => setActiveTab(next))
+      return
     }
     setActiveTab(next)
   }, [activeTab])
@@ -1991,13 +2075,15 @@ export default WorkspacePanel
     if (isSameProjectSelection(currentProjectId, project?.id || null)) {
       return
     }
-    if (!(workspacePanelRef.current?.confirmDiscardIfDirty?.() ?? true)) {
-      return // 当前文件有未保存修改且用户取消离开 → 不切项目
+    const proceed = () => {
+      setWorkspace(null)
+      setMaterials([])
+      setCurrentProjectId(project?.id || null)
+      setCurrentProject(project || null)
     }
-    setWorkspace(null)
-    setMaterials([])
-    setCurrentProjectId(project?.id || null)
-    setCurrentProject(project || null)
+    // dirty 时弹三按钮、把切项目挂起（保存/放弃后再切）；allow 立即切；保存中则拦下。
+    const wp = workspacePanelRef.current
+    if (wp?.attemptLeave) { wp.attemptLeave(proceed) } else { proceed() }
   }
 ```
 
@@ -2013,11 +2099,11 @@ export default WorkspacePanel
 
 ```jsx
   const handleToggleWorkspacePanel = () => {
-    // 当前显示 + 编辑态脏 + 用户取消 → 不隐藏（隐藏会 unmount 编辑器丢改动）
-    if (showWorkspacePanel && !(workspacePanelRef.current?.confirmDiscardIfDirty?.() ?? true)) {
-      return
-    }
-    setShowWorkspacePanel(!showWorkspacePanel)
+    const proceed = () => setShowWorkspacePanel((v) => !v)
+    const wp = workspacePanelRef.current
+    // 仅「当前显示 → 隐藏」是离开路径（隐藏会 unmount 编辑器）；dirty 弹三按钮、把隐藏挂起。
+    if (showWorkspacePanel && wp?.attemptLeave) { wp.attemptLeave(proceed); return }
+    proceed()
   }
 ```
 
@@ -2106,7 +2192,7 @@ Expected: 构建成功，无新 error（既有 chunk warning 属已知小债，�
 - §6.1「GET 读在锁内」→ 实测 `chat_stream` 整轮持锁，GET 进锁会冻结预览整轮；改为 **GET 不持锁 + stat-before-read**（最坏=保存时安全 409），POST 仍持锁。
 - **`write_file` 原子化 + canonical draft 直写归一**：`write_file` 改 temp + `os.replace`；canonical draft `edit_file`（`chat.py:4238`）原本直接 `draft_path.write_text` 绕过它，改为走 `write_file`——所有 AI 写路径单点原子化、消除 torn read，使 GET 不持锁成立（顺带 crash-safety）。
 - §5.4 review_stale **gate 在有效报告**（`_has_effective_review_reports`），不只判存在——避开 create_project scaffold 的 independent-review/lint-report 模板误判。
-- §7.2 脏离开确认 **v1 降级为二选一**（放弃/取消，文案点明取消＝留下不丢工作）；三按钮「保存/放弃/取消」留 v2。
+- §7.2 脏离开确认 **v1 三按钮「保存/放弃修改/取消」**（应用户要求做进 v1）：延后动作模式——把离开动作挂起，「保存」存成功后再离开（撞 409 不离开+提示）、「放弃修改」弃改后离开、「取消」留下。`beforeunload`（整页刷新/关窗）受原生限制仍二选一。
 
 ## 测试
 - 后端：test_skill_engine（语义/白名单/validate_user_write/review_stale）、test_main_api（R3FileApiTests：GET/POST 全状态码 + 锁串行化 + mtime_ns str + 拒 number）。
@@ -2136,7 +2222,7 @@ Expected: 构建成功，无新 error（既有 chunk warning 属已知小债，�
 - 写接口 `POST /api/projects/{id}/files/{path}` `{content, base_mtime_ns}`：全段持 `_get_project_request_lock`（与聊天同锁）→ mtime CAS（不匹配 `StaleFileError`→409）→ 同目录 temp + `os.replace` 原子写；`base_mtime_ns` 全程 opaque str（pydantic 拒 number→422）。
 - 读接口 `GET /files/{path}` 返回 `{content, mtime_ns, editable}`，**不持锁**（chat_stream 整轮持锁，读进锁会冻结预览）：`read_file_with_mtime` 先 stat 再 read。AI 写**可编辑**正式文件（plan 内容文件 + canonical draft `edit_file`）全部经原子 `write_file`（temp + `os.replace`），故无锁读可编辑文件不会读到半截、最坏=保存安全 409（只读追踪文件后端直写，极端下预览瞬时错乱、刷新自愈，不可编辑不入 CAS）。
 - `get_workspace_summary().flags.review_stale`（D6 advisory）：两份审查报告**有效**（`_has_effective_review_reports`，非 scaffold 模板）且 `draft_mtime > min(report mtimes)` 即标，**不** gate 在 `review_passed_at`；不硬阻 S6/S7。
-- 前端：`utils/fileTree.js`（分组/置顶/中文名）、`utils/fileEditState.js`（双模式状态机 + guardLeave）、`FilePreviewPanel.jsx`（forwardRef 暴露 `confirmDiscardIfDirty`）、`WorkspacePanel.jsx`/`App.jsx`（切 tab/切项目 dirty 守卫）。
+- 前端：`utils/fileTree.js`（分组/置顶/中文名）、`utils/fileEditState.js`（双模式状态机 + guardLeave）、`FilePreviewPanel.jsx`（forwardRef 暴露 `attemptLeave`，脏离开三按钮「保存/放弃修改/取消」延后动作弹窗）、`WorkspacePanel.jsx`/`App.jsx`（切 tab/切项目/收起面板 dirty 守卫）。
 - 回归：`tests/test_skill_engine.py`、`tests/test_main_api.py::R3FileApiTests`；前端 `fileTree`/`fileEditState`/`filePreviewPanel.source`/`workspacePanel.source`。
 ```
 
@@ -2166,9 +2252,9 @@ git commit -m "docs(r3): cutover report + worklist + CLAUDE.md sync (file tree &
 ## Self-Review（撰写者已核对）
 
 - **codex plan review R2 已闭环**（对抗式复审 3 BLOCKER + 3 doc-NIT 全采纳）：① canonical draft `edit_file` 直写（`chat.py:4238`）改走原子 `write_file`——这是 R1 原子化漏掉的最高频文件，补后 GET 不持锁才真成立（Task 2 + 源码守卫测试）；② `handleSaveFile` 成功后 `setContent(nextContent)`，修「loadFiles 编辑态 early-return 跳过 content 刷新 → 回预览显示旧正文」竞态（Task 8）；③ 工作区面板 toggle 隐藏会 unmount 编辑器丢改动 → App `handleToggleWorkspacePanel` 加 dirty 守卫（Task 8）；doc-NIT：spec §4/§8.1 + cutover/CLAUDE 措辞同步「有效报告 / GET 不持锁」、`os.replace` 失败走 500 兜底已注明。
-- **codex plan review R1 已闭环**（4 BLOCKER + 3 NIT 全采纳，均经现实闸门 + 事实核验）：① review_stale gate 在 `_has_effective_review_reports`（避开 scaffold 模板误判，Task 4）；② `write_file` 原子化（temp + os.replace，单点覆盖全部 AI 写路径，使 GET 不持锁的 torn-read 论证成立，Task 2）；③ `loadFiles` 编辑态跳过 content 重载 + `isEditing()`（Task 7/8）；④ 脏离开确认 v1 二选一文案点明「取消＝留下」+ spec §7.2 降级（3 按钮留 v2）；NIT：deny 矩阵扩全（Task 1）、draft 介于两报告之间用例（Task 4）、`reloadFile` stale 响应守卫（Task 8）。
+- **codex plan review R1 已闭环**（4 BLOCKER + 3 NIT 全采纳，均经现实闸门 + 事实核验）：① review_stale gate 在 `_has_effective_review_reports`（避开 scaffold 模板误判，Task 4）；② `write_file` 原子化（temp + os.replace，单点覆盖全部 AI 写路径，使 GET 不持锁的 torn-read 论证成立，Task 2）；③ `loadFiles` 编辑态跳过 content 重载 + `isEditing()`（Task 7/8）；④ 脏离开确认 **v1 三按钮「保存/放弃修改/取消」**（延后动作模式，应用户要求做进 v1）+ spec §7.2 同步；NIT：deny 矩阵扩全（Task 1）、draft 介于两报告之间用例（Task 4）、`reloadFile` stale 响应守卫（Task 8）。
 - **Spec 覆盖**：§5.1/5.2 权限边界→Task 1/3；§5.3 语义表→Task 1（FILE_SEMANTICS 全 16 行）；§5.4/D6 review_stale→Task 4；§6.1 GET 改造→Task 2（GET 不持锁的偏离已显式记录）；§6.2 POST→Task 3；§7.1 文件树→Task 5/7；§7.2 双模式+guardLeave 全离开路径→Task 6/7/8；§8 测试矩阵→各 Task 测试步；§9 threat model→白名单限面（Task 1/3）。
 - **无占位符**：所有 step 含真实代码/命令/预期输出。
-- **类型/签名一致**：`mtime_ns` 全程 str；`validate_user_write` 返回 canonical；`guardLeave` 返回 `'allow'|'confirm'|'block'` 在 util 与组件一致；`confirmDiscardIfDirty` 在 FilePreviewPanel→WorkspacePanel→App 三层同名贯通；`onSaveFile`/`onReloadFile` 入参签名前后端一致。
+- **类型/签名一致**：`mtime_ns` 全程 str；`validate_user_write` 返回 canonical；`guardLeave` 返回 `'allow'|'confirm'|'block'` 在 util 与组件一致；`attemptLeave(action)` 在 FilePreviewPanel→WorkspacePanel→App 三层同名贯通（延后动作）；`onSaveFile`/`onReloadFile` 入参签名前后端一致。
 - **顺序**：后端先于前端、只读（Task 1/2）先于可写（Task 3）、纯函数（5/6）先于组件（7/8），每步独立可测可 commit。
 ```

@@ -202,7 +202,7 @@ body: {"content": "<str>", "base_mtime_ns": "<str, 后端拒绝 number 类型>"}
 
 - 默认**预览态**（现 `ReactMarkdown`）。`editable===true` 文件显「编辑」按钮 → **编辑态**：重新 `GET /files/{path}` 取最新 `{content, mtime_ns}`，`textarea` 载入 content、记 `base_mtime_ns`。
 - 编辑态：「保存」（POST 带 `base_mtime_ns`）/「取消」（弃改回预览）。保存成功 → 刷新 `mtime_ns`、回预览、`onProjectMutated`。保存 409 → 提示 + 「重新加载」（丢弃本地改动重取）。
-- **dirty 守卫覆盖所有离开路径**（不止 workspace refresh）：当某文件处于编辑态且有未保存改动（dirty）时，以下动作都要先经统一脏离开守卫确认（**v1：二选一「放弃修改并离开 / 取消（留下）」**，文案点明取消＝留下不丢工作、可返回继续编辑或先点保存；三按钮「保存 / 放弃 / 取消」留 v2 —— plan codex R1 BLOCKER 4）：
+- **dirty 守卫覆盖所有离开路径**（不止 workspace refresh）：当某文件处于编辑态且有未保存改动（dirty）时，以下动作都要先经统一脏离开守卫确认（**v1：三按钮「保存 / 放弃修改 / 取消」**——「保存」存成功后再离开、撞 409 不离开并提示重载；「放弃修改」弃改后离开；「取消」留下继续编辑。守卫用『把离开动作挂起、待用户选择后再执行』的**延后动作模式**；`beforeunload`（整页刷新 / PyWebView 关窗）受原生能力限制仍只能二选一）：
   - workspace `refreshToken`/`loadFiles` 刷新（不得覆盖编辑态 content）；
   - **切换到另一文件**（现 `WorkspacePanel.loadFile` 会直接覆盖 `content/currentFile`）；
   - **切换项目**（`projectId` 变）、**切 tab**（阶段/文件/材料）、关闭编辑；
