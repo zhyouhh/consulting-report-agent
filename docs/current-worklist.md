@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-06-08（批 1 = R1+R2 **✅ 已实施闭环**：C1-C6 全绿；C5 用户可见 cutover 过 codex 三轨 review[spec/quality/红队]APPROVED——红队挖出并修复 3 个真 BLOCKER[切项目孤儿 / stale pending / Starlette pre-stream disconnect 致 review lock 永久泄漏]；spec §6 测试矩阵零缺口；cutover report 已落。**feat 分支已 merge 进 main（`f111f0e`）并 push origin（`origin/main`==`main`），已合并的本地 feat 分支已删**。唯一剩余＝真实 GUI 手工 E2E[用户·非阻塞]。详见下方 R1。）
+最后更新：2026-06-08（**批 2 = R3 spec 已定稿**：`docs/superpowers/specs/2026-06-08-workspace-file-tree-and-editing-design.md`，codex review **4 轮 APPROVED**[R1 REJECT→R2 NOTES→对抗式红队 REJECT→APPROVED]，红队挖出真 BLOCKER[`review_stale` 误 gate 在 `review_passed_at` → 漏「改完正文没点通过」窗口]；commits `767314d`→`9bb98a9`。用户已接受 D6/D7 取舍。**待 writing-plans**[用户 compact 后写]。详见下方 R3。— 批 1 = R1+R2 已闭环并合入 main `f111f0e`+push origin，唯一剩余＝用户 GUI E2E[非阻塞]，详见 R1。）
 
 上一次更新：2026-06-05（报奖后领导评审反馈逐条 brainstorm 完成 → 落入下方「领导评审反馈整改」高优先簇（R1–R5）；产品化定位：a 优先 / b 为领导方向先 park / c 不做。）
 
@@ -35,12 +35,17 @@ R2. **S5「AI 味自查」主代理答非所问修复**
 - 涉及文件：`backend/chat.py`(`system_trigger` 分支)。
 
 R3. **工作区文件栏重做 + 预览框可编辑（＝UI 重构第一落地块）**
-- 状态：`待实施（高优先）`
-- 现状痛点：左侧文件栏是一堆**英文文件名平铺**，普通同事找不到对应文件；预览框**只读**，不懂 Markdown 的同事没法改 AI 写的文档。
-- 目标：① 文件栏改**分层文件夹形式**（Reference / 草稿 / 过程文件…对应真实目录），用友好中文名替代裸英文名；② **当前阶段对应文件置顶 + 高亮**；③ 文件栏改窄、下方**预览框上移占更多空间并改为可编辑**（预览↔编辑双模式 + 保存）；④ 全部文件可编辑。
-- 技术要点：前端工作区面板重构；后端加**保存写入接口**（现仅有读接口）；正文草稿复用已有 mtime 改动检测（AI 下次动笔自动知道被用户改过），"一轮限改 3 次"只约束聊天轮、不约束手动编辑。
-- 关联：**这就是「UI 重构」的第一个落地块**；建议把原挂在 UI 重构下的债（图片附件分流、新建项目表单与废 UI 整理）并进来一起做；参考已有设计稿 `docs/design_UI.pdf`（3 套初步稿）。
-- 涉及文件：`frontend/src/components/WorkspacePanel.jsx`、`FilePreviewPanel.jsx`、`StagePanel.jsx`；`backend/main.py`(新增写接口)、`backend/report_writing.py`(invariant 复用)。
+- 状态：`spec 已定稿（codex 4 轮 APPROVED），待 writing-plans（用户 compact 后写）` — spec：`docs/superpowers/specs/2026-06-08-workspace-file-tree-and-editing-design.md`（commits `767314d`→`9bb98a9`，4 个）
+- **范围（已定稿，brainstorm 4 轮拍板）**：现框架内小切口（D1，**不换肤**——3 套 `design_UI.pdf` 是整体视觉探索、作独立后续项目，仅借鉴稿3「按阶段分组」IA）+ 第一批做 **①+②**（D2）：①文件栏分层中文名+当前阶段置顶高亮 ②预览框可编辑+后端用户写接口。③图片附件分流/新建项目表单整理 → 后置 **R3③**。
+- **关键设计（spec 是真值源，写 plan 前必读 spec 全文）**：
+  - **权限边界（硬骨头）**：新增 `validate_user_write` **独立白名单门禁**，**不复用** LLM 的 `validate_plan_write`（后者带 outline `_requires_pre_outline_evidence` gate，且 independent-review/lint-report 的拒写在 chat.py 工具层、HTTP 写接口走不到）。**8 个可编辑**：`content/report_draft_v1.md` + `plan/{outline,research-plan,notes,references,data-log,analysis-notes,presentation-plan}.md`；其余只读（`project-overview`[D3 只读]/审查报告/`stage-gates·progress·tasks`/`delivery-log`/`review.md`）；退役不显示。白名单比对用 `_canonical_user_path` 对整路径 casefold（**不复用**只处理 plan 的 `_canonicalize_plan_markdown_path`）。
+  - **后端**：`GET /files` 返结构化 `[{path,group,stage,editable,mtime_ns}]`（`FILE_SEMANTICS` 键=**完整相对路径**[非 basename，否则 materials/imported/outline.md 误判 S1]、stage 文件级[S1 outline/S2 data-log/S3 analysis-notes/S6 presentation-plan/S7 delivery-log]、跳过 `materials/`）；`GET /files/{path}` 增返 `{content,mtime_ns,editable}`；`POST /files/{path}` **全段持 `_get_project_request_lock`**（与 chat.py:3216 同锁，防 TOCTOU）+ mtime CAS(409) + 原子写 os.replace；mtime_ns 全程 **opaque str**；异常 PermissionError→403/ValueError→400·404。
+  - **D6 review_stale**（红队 BLOCKER 修正）：改正文后两份报告存在且 `draft_mtime>min(报告mtime)` 即标 `review_stale` advisory（**不 gate 在 `review_passed_at`**[覆盖「报告生成→改正文→还没点通过」窗口]、不强制清 checkpoint、不硬阻 S6/S7）。
+  - **D7 CSRF**：记既有债（allow_origins=*），R3 不解决全局，白名单限可写面到 8 个用户内容文件。
+  - **前端**：文件树分组+中文名(`FILE_DISPLAY_NAMES` 按完整 path)+置顶高亮；预览/编辑双模式 **textarea raw**（富文本 v2）；dirty **`guardLeave`** 覆盖所有离开路径（切文件/项目/tab/刷新/PyWebView 关窗/saving 期间禁离开）。无 jsdom → 新 `utils/{fileTree,fileEditState}` 纯函数测 + source-guard。
+- **实施切分（spec §12，6 步，后端先于前端、只读先于可写）**：① `FILE_SEMANTICS`+`is_user_editable`+`GET /files` 改造(纯只读零风险) ② `validate_user_write`+`POST /files`(锁+CAS+原子写) ③ `review_stale`+workspace flag ④ 前端文件树 ⑤ 前端编辑双模式+`guardLeave` ⑥ 回归+cutover。
+- **用户已接受 D6/D7**。涉及文件：`backend/skill.py`(语义+门禁，`validate_user_write`/`FILE_SEMANTICS`/`_canonical_user_path`)、`backend/main.py`(GET 改造+POST 写接口+锁)、`frontend/src/components/{WorkspacePanel,FilePreviewPanel}.jsx` + 新 `utils/{fileTree,fileEditState}`。
+- 参考设计稿 `docs/design_UI.pdf`（3 套，借鉴稿3按阶段分组 IA）。
 
 R4. **资料来源可信度：只标注 + 提示（不做白名单硬门禁）**
 - 状态：`待实施（中优先 · 轻）`
