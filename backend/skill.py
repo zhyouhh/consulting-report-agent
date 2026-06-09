@@ -1416,7 +1416,10 @@ class SkillEngine:
             "length_targets": length_targets,
             "length_fallback_used": length_targets.get("fallback_used", False),
             "quality_progress": self._build_quality_progress(project_path, stage_state),
-            "flags": stage_state.get("flags", {}),
+            "flags": {
+                **stage_state.get("flags", {}),
+                "review_stale": self._is_report_review_stale(project_path),
+            },
             "next_stage_hint": next_stage_hint,
             "stalled_since": stalled_since,
             "word_count": self._current_report_word_count(project_path),
@@ -2207,6 +2210,25 @@ class SkillEngine:
             self._has_effective_independent_review(project_path)
             and self._has_effective_lint_report(project_path)
         )
+
+    def _is_report_review_stale(self, project_path: Path) -> bool:
+        """R3 D6 advisory: both review reports are EFFECTIVE (substantive, not the scaffolded
+        template — BLOCKER 1) AND the draft is newer than the OLDER report. NOT gated on
+        review_passed_at — covers the window where reports exist, the draft was edited, but the
+        user hasn't clicked 审查通过 yet (review_passed_at unset; record_stage_checkpoint only
+        checks report structure, not whether they cover the current draft)."""
+        draft_path = project_path / self.REPORT_DRAFT_PATH
+        if not draft_path.exists():
+            return False
+        # Templates only (new-project scaffold of independent-review.md / lint-report.md) don't
+        # count — both must be effective reports, reusing the production gate.
+        if not self._has_effective_review_reports(project_path):
+            return False
+        ir_path = project_path / "plan" / "independent-review.md"
+        lint_path = project_path / "plan" / "lint-report.md"
+        draft_mtime = draft_path.stat().st_mtime_ns
+        oldest_report_mtime = min(ir_path.stat().st_mtime_ns, lint_path.stat().st_mtime_ns)
+        return draft_mtime > oldest_report_mtime
 
     def _has_effective_review_notes(self, project_path: Path) -> bool:
         review_text = self._read_plan_file(project_path, "review.md")

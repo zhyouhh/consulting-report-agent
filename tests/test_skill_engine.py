@@ -1423,6 +1423,85 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertTrue(self.engine._has_effective_review_reports(project_dir))
 
+    # ── R3 D6: review_stale advisory ────────────────────────────────────────
+
+    def _set_mtime_ns(self, path, ns):
+        os.utime(path, ns=(ns, ns))
+
+    def test_review_stale_true_when_draft_newer_than_oldest_report(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("正文", encoding="utf-8")
+        self._write_independent_review(project_dir)
+        self._write_lint_report(project_dir)
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 1_500)
+        self._set_mtime_ns(draft, 2_000)  # newer than both
+        self.assertTrue(engine._is_report_review_stale(project_dir))
+
+    def test_review_stale_true_when_draft_between_two_reports(self):
+        # NIT 2: spec判定是 draft > min(report mtimes)，不要求比两份都新。
+        project_dir = self._make_project()
+        engine = self.engine
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("正文", encoding="utf-8")
+        self._write_independent_review(project_dir)
+        self._write_lint_report(project_dir)
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(draft, 1_500)  # between the two reports
+        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 2_000)
+        self.assertTrue(engine._is_report_review_stale(project_dir))
+
+    def test_review_stale_false_when_draft_older_than_both(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("正文", encoding="utf-8")
+        self._write_independent_review(project_dir)
+        self._write_lint_report(project_dir)
+        self._set_mtime_ns(draft, 500)
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 1_500)
+        self.assertFalse(engine._is_report_review_stale(project_dir))
+
+    def test_review_stale_false_when_reports_are_only_templates(self):
+        # BLOCKER 1: create_project scaffolds independent-review.md / lint-report.md templates;
+        # template-only (non-effective) + draft update must NOT set stale.
+        project_dir = self._make_project()
+        engine = self.engine
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("正文", encoding="utf-8")
+        # Do NOT write effective reports — keep the scaffolded templates as-is
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 1_000)
+        self._set_mtime_ns(draft, 2_000)
+        self.assertFalse(engine._is_report_review_stale(project_dir))
+
+    def test_review_stale_false_when_only_one_effective_report(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("正文", encoding="utf-8")
+        self._write_independent_review(project_dir)  # only one effective, lint still template
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(draft, 2_000)
+        self.assertFalse(engine._is_report_review_stale(project_dir))
+
+    def test_workspace_summary_exposes_review_stale_flag(self):
+        self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        summary = engine.get_workspace_summary(pid)
+        self.assertIn("review_stale", summary["flags"])
+
+    # ────────────────────────────────────────────────────────────────────────
+
     def test_has_effective_review_checklist_backwards_compat(self):
         project_dir = self._make_project()
         self._write_review_checklist(project_dir)

@@ -1930,3 +1930,33 @@ class R3FileApiTests(unittest.TestCase):
             (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8"),
             "锁释放后才落盘",
         )
+
+    def _write_effective_reports(self):
+        # review_stale gate is _has_effective_review_reports; write reports with
+        # anchors + completion marker + substantive body.
+        eng = self.engine
+        ir_lines = ["# Independent review", ""]
+        for anchor in eng.INDEPENDENT_REVIEW_ANCHORS:
+            ir_lines += [anchor, "审查结论: 已完成实质复核。", "证据说明: 对照正文与资料核验。", ""]
+        ir_lines.append(eng.INDEPENDENT_REVIEW_COMPLETION_MARKER)
+        (self.project_dir / "plan" / "independent-review.md").write_text(
+            "\n".join(ir_lines).strip() + "\n", encoding="utf-8")
+        lint_lines = [
+            "# AI 味自查", "", "## 总览", "结论: 已完成全文表达检查。", "预计修改时间: 30 分钟。",
+            "", "## 按章节排列", "- 执行摘要: 删除空泛形容词。", "- 建议章节: 改为可执行动作。",
+            eng.LINT_REPORT_COMPLETION_MARKER,
+        ]
+        (self.project_dir / "plan" / "lint-report.md").write_text(
+            "\n".join(lint_lines).strip() + "\n", encoding="utf-8")
+
+    def test_workspace_review_stale_after_draft_edit(self):
+        self._write_effective_reports()
+        ir = self.project_dir / "plan" / "independent-review.md"
+        lint = self.project_dir / "plan" / "lint-report.md"
+        draft = self.project_dir / "content" / "report_draft_v1.md"
+        os.utime(ir, ns=(1000, 1000))
+        os.utime(lint, ns=(1500, 1500))
+        os.utime(draft, ns=(2000, 2000))
+        r = self.client.get(f"/api/projects/{self.pid}/workspace")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["flags"]["review_stale"])
