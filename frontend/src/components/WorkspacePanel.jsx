@@ -53,26 +53,29 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   const [lintRunning, setLintRunning] = useState(false)
   const previousProjectRef = useRef(projectId)
   const activeProjectRef = useRef(projectId)
+  // 最新文件请求标记：丢弃乱序返回的旧 GET，防它覆盖更新的预览内容（codex 前端 quality NIT）。
+  const latestFileRequestRef = useRef(null)
 
   const loadFile = useCallback(async (path, requestProject = projectId) => {
     if (!requestProject || !path) return
     // 同步提交选择：currentFile 立即反映点击，消除「导航已发起、currentFile 还没异步 commit」的窗口——
     // 否则用户在内容 GET 返回前点「编辑」会锁定到错误文件（codex 前端 quality 审 BLOCKER）。内容仍异步加载。
     setCurrentFile(path)
+    latestFileRequestRef.current = path
     try {
       const res = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/files/${path}`)
       if (!shouldApplyProjectResponse({
         requestProject,
         activeProject: activeProjectRef.current,
-      })) {
-        return
+      }) || latestFileRequestRef.current !== path) {
+        return // 项目切了，或又点了别的文件——丢弃这个过期/乱序响应
       }
       setContent(res.data.content)
     } catch (error) {
       if (!shouldApplyProjectResponse({
         requestProject,
         activeProject: activeProjectRef.current,
-      })) {
+      }) || latestFileRequestRef.current !== path) {
         return
       }
       setContent('文件不存在或无法读取')

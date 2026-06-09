@@ -1966,6 +1966,15 @@ class R3FileApiTests(unittest.TestCase):
         # 用户的旧内容没有覆盖 AI 的写入
         self.assertEqual(full.read_text(encoding="utf-8"), "AI 在用户保存排队期间写入的新内容")
 
+    def test_user_write_runs_on_dedicated_executor_not_anyio_pool(self):
+        # codex 后端 quality NIT：锁死「保存临界区跑专用线程池」。回退到 run_in_threadpool 默认 anyio 池
+        # 会让保存可能复用 chat_stream 的 RLock owner 线程、重入绕过 CAS——而行为测试 catch 不到（旧版
+        # 也能过串行化测试），故用 source 断言守。
+        main_src = (Path(__file__).resolve().parents[1] / "backend" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("_USER_WRITE_EXECUTOR", main_src)
+        self.assertIn("run_in_executor(", main_src)
+        self.assertNotIn("run_in_threadpool(_write_under_lock)", main_src)
+
     def _write_effective_reports(self):
         # review_stale gate is _has_effective_review_reports; write reports with
         # anchors + completion marker + substantive body.

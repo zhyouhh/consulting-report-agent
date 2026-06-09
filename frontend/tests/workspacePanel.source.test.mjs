@@ -93,3 +93,10 @@ test("loadFile commits selection synchronously before the content GET (codex qua
   // setCurrentFile(path) 必须在 await axios.get 之前——消除 pending-navigation 窗口，进入编辑/保存不会锁错文件
   assert.match(s, /const loadFile = useCallback\(async \(path[\s\S]*?setCurrentFile\(path\)[\s\S]*?await axios\.get\(/);
 });
+
+test("loadFile discards out-of-order content responses via latest-request ref (codex quality NIT)", () => {
+  const s = wsSrc();
+  assert.match(s, /latestFileRequestRef/);
+  // 写 content 前比对最新请求 path
+  assert.match(s, /latestFileRequestRef\.current !== path/);
+});
