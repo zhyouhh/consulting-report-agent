@@ -92,12 +92,15 @@ test("shows review_stale advisory on the draft", () => {
   assert.match(s, /建议重新审查/);
 });
 
-test("enter-edit guards against file switch during async reload (codex BLOCKER 2)", () => {
+test("enter-edit invalidated by any allowed leave during async reload via selection epoch (codex BLOCKER 2)", () => {
   const s = src();
-  assert.match(s, /const currentFileRef = useRef/);
+  assert.match(s, /const selectionSeqRef = useRef/);
   assert.match(s, /const targetPath = currentFile/);
-  // GET 期间切走就放弃，绝不把旧内容塞进新文件的编辑器
-  assert.match(s, /currentFileRef\.current !== targetPath/);
+  // attemptLeave 的 allow 分支自增序号（含尚未 commit 的异步切换）；进入编辑 await 后比序号
+  assert.match(s, /selectionSeqRef\.current \+= 1/);
+  assert.match(s, /selectionSeqRef\.current !== seq/);
+  // 不能再退回比 currentFile（看不到 pending navigation）
+  assert.doesNotMatch(s, /currentFileRef/);
 });
 
 test("toolbar save and leave-dialog save share confirmReloadCurrent on 409 (codex NIT 3)", () => {

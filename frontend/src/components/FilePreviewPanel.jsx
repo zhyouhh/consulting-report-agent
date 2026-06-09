@@ -71,9 +71,10 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
   const [leaveDialog, setLeaveDialog] = useState(null) // null | { action }
   const editRef = useRef(edit)
   editRef.current = edit
-  // 跟踪「实时」当前文件：异步回调里闭包捕获的 currentFile 会过期，需用 ref 判断 await 期间是否切了文件。
-  const currentFileRef = useRef(currentFile)
-  currentFileRef.current = currentFile
+  // 选择序号：每次「放行的离开」（切文件 / 切项目 / 切 tab）自增。进入编辑是异步的（先 GET 取 base），
+  // 期间的离开可能尚未 commit 到 currentFile（WorkspacePanel.loadFile 也是异步），故不能比 currentFile，
+  // 改比这个同步自增的序号——序号变了即说明已切走（codex 前端审 BLOCKER 2 二轮）。
+  const selectionSeqRef = useRef(0)
 
   const currentEditable = useMemo(
     () => Boolean(files.find((f) => f.path === currentFile)?.editable),
@@ -91,6 +92,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
   const attemptLeave = useCallback((action) => {
     const decision = guardLeave(editRef.current)
     if (decision === 'allow') {
+      selectionSeqRef.current += 1 // 放行离开 → 作废任何 pending 的进入编辑（async 竞态防护）
       setEdit(initialEditState())
       action?.()
       return true
@@ -162,14 +164,16 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
 
   const handleEnterEdit = useCallback(async () => {
     const targetPath = currentFile
+    const seq = selectionSeqRef.current
     try {
       const fresh = await onReloadFile(targetPath) // 重新取最新 {content, mtimeNs} 作 base
-      // 防竞态（codex 前端审 BLOCKER 2）：GET 期间用户可能切了文件（彼时仍预览态、attemptLeave 放行）。
-      // 若已切走，绝不把旧文件内容塞进新文件的编辑器——否则保存会用旧 base 打到新文件、永久 409。
-      if (currentFileRef.current !== targetPath) return
+      // 防竞态（codex 前端审 BLOCKER 2）：GET 期间任何「放行的离开」（切文件/项目/tab，含尚未 commit 到
+      // currentFile 的异步 loadFile）都会自增 selectionSeq。序号变了即已切走——绝不把旧内容塞进编辑器、
+      // 用旧 base 打错文件。序号没变则保证仍是 targetPath，doSave 用 currentFile 即正确。
+      if (selectionSeqRef.current !== seq) return
       setEdit((prev) => enterEdit(prev, { content: fresh.content, mtimeNs: fresh.mtimeNs }))
     } catch (error) {
-      if (currentFileRef.current !== targetPath) return // 已切走，别为过期文件弹错误
+      if (selectionSeqRef.current !== seq) return // 已切走，别为过期文件弹错误
       showError('无法进入编辑：' + (error?.message || '读取失败'))
     }
   }, [currentFile, onReloadFile])
