@@ -42,7 +42,7 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 
 ## 打包态 QA 接续（2026-05-19）
 
-正式待办仍以 `docs/current-worklist.md` 为唯一真值源；最近一次打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-19-stage-conductor-packaged-qa.md`。
+正式待办仍以 `docs/current-worklist.md` 为唯一真值源；2026-05-19 的打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-19-stage-conductor-packaged-qa.md`。
 
 已修复并打包验证：
 
