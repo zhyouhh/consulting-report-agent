@@ -37,6 +37,7 @@ function App() {
   const [injectedPrompt, setInjectedPrompt] = useState(null)
   const activeProjectRef = useRef(currentProjectId)
   const chatPanelRef = useRef(null)
+  const workspacePanelRef = useRef(null)
 
   useEffect(() => {
     initializeApp()
@@ -179,10 +180,23 @@ function App() {
     if (isSameProjectSelection(currentProjectId, project?.id || null)) {
       return
     }
-    setWorkspace(null)
-    setMaterials([])
-    setCurrentProjectId(project?.id || null)
-    setCurrentProject(project || null)
+    const proceed = () => {
+      setWorkspace(null)
+      setMaterials([])
+      setCurrentProjectId(project?.id || null)
+      setCurrentProject(project || null)
+    }
+    // dirty 时弹三按钮、把切项目挂起（保存/放弃后再切）；allow 立即切；保存中则拦下。
+    const wp = workspacePanelRef.current
+    if (wp?.attemptLeave) { wp.attemptLeave(proceed) } else { proceed() }
+  }
+
+  const handleToggleWorkspacePanel = () => {
+    const proceed = () => setShowWorkspacePanel((v) => !v)
+    const wp = workspacePanelRef.current
+    // 仅「当前显示 → 隐藏」是离开路径（隐藏会 unmount 编辑器）；dirty 弹三按钮、把隐藏挂起。
+    if (showWorkspacePanel && wp?.attemptLeave) { wp.attemptLeave(proceed); return }
+    proceed()
   }
 
   const handleMaterialsMerged = (incomingMaterials) => {
@@ -237,12 +251,13 @@ function App() {
           materials={materials}
           onMaterialsMerged={handleMaterialsMerged}
           onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
-          onToggleWorkspacePanel={() => setShowWorkspacePanel(!showWorkspacePanel)}
+          onToggleWorkspacePanel={handleToggleWorkspacePanel}
           injectedPrompt={injectedPrompt}
           onInjectedPromptConsumed={() => setInjectedPrompt(null)}
         />
         {showWorkspacePanel && (
           <WorkspacePanel
+            ref={workspacePanelRef}
             projectId={currentProjectId}
             project={currentProject}
             workspace={workspace}

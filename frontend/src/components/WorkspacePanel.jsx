@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import axios from 'axios'
 import StagePanel from './StagePanel'
 import FilePreviewPanel from './FilePreviewPanel'
@@ -6,10 +6,10 @@ import IndependentReviewDrawer from './IndependentReviewDrawer'
 import { showError, showSuccess } from '../utils/toast'
 import { getNextQualityResult } from '../utils/workspacePanelState'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
-import { getDefaultPreviewFile, orderPreviewFiles } from '../utils/workspaceFiles'
+import { getDefaultPreviewFile } from '../utils/workspaceFiles'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 
-export default function WorkspacePanel({
+const WorkspacePanel = forwardRef(function WorkspacePanel({
   projectId,
   project,
   workspace,
@@ -21,8 +21,29 @@ export default function WorkspacePanel({
   onInsertPrompt,
   onTriggerSystemTurn,
   onDropPendingReviewTriggers,
-}) {
+}, ref) {
   const [activeTab, setActiveTab] = useState('stage')
+  const filePreviewRef = useRef(null)
+
+  useImperativeHandle(ref, () => ({
+    // App 切项目 / 收起面板前调用：把离开动作转交 FilePreviewPanel 的 attemptLeave
+    //（allow 立即执行、dirty 弹三按钮后执行）。面板未挂载（非 files tab）则无编辑态，直接执行。
+    attemptLeave: (action) => {
+      const fp = filePreviewRef.current
+      if (fp?.attemptLeave) return fp.attemptLeave(action)
+      action?.()
+      return true
+    },
+  }), [])
+
+  const handleTabClick = useCallback((next) => {
+    // 离开「文件」tab 是一条离开路径：经统一守卫（dirty 弹三按钮后再切）。
+    if (activeTab === 'files' && next !== 'files' && filePreviewRef.current?.attemptLeave) {
+      filePreviewRef.current.attemptLeave(() => setActiveTab(next))
+      return
+    }
+    setActiveTab(next)
+  }, [activeTab])
   const [files, setFiles] = useState([])
   const [currentFile, setCurrentFile] = useState('plan/project-overview.md')
   const [content, setContent] = useState('')
@@ -71,15 +92,19 @@ export default function WorkspacePanel({
       })) {
         return
       }
-      const orderedPaths = orderPreviewFiles(res.data.files)
-      const fileList = orderedPaths.map(path => ({
-        name: path.split('/').pop().replace('.md', ''),
-        path,
-      }))
-      setFiles(fileList)
+      // 结构化直传：{path, group, stage, editable, mtime_ns}；中文名/分组归 fileTree util
+      setFiles(res.data.files)
 
-      const nextDefault = fileList.find(file => file.path === currentFile)?.path
-        || getDefaultPreviewFile(orderedPaths)
+      // BLOCKER 3：编辑态下只刷新上面的文件列表元数据，绝不重载当前文件 content
+      //（否则覆盖编辑器底下的 preview，且 currentFile 变更会与编辑态 desync）。
+      if (filePreviewRef.current?.isEditing?.()) {
+        return
+      }
+
+      const paths = res.data.files.map(file => file.path)
+      const nextDefault = paths.includes(currentFile)
+        ? currentFile
+        : getDefaultPreviewFile(paths)
 
       if (nextDefault) {
         await loadFile(nextDefault, requestProject)
@@ -220,6 +245,46 @@ export default function WorkspacePanel({
     }
   }
 
+  const handleSaveFile = useCallback(async (filePath, nextContent, baseMtimeNs) => {
+    const requestProject = projectId
+    if (!requestProject) return { ok: false, error: '无项目' }
+    try {
+      const res = await axios.post(
+        `/api/projects/${encodeURIComponent(requestProject)}/files/${filePath}`,
+        { content: nextContent, base_mtime_ns: baseMtimeNs },
+      )
+      if (shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        // R2 BLOCKER：成功后立即把预览 content 设为刚保存的内容——不能依赖 loadFiles 刷新，
+        // 因为保存瞬间 FilePreviewPanel 仍在编辑态，loadFiles 的 isEditing early-return 会跳过 content 重载，
+        // 导致回预览态后显示旧正文。
+        setContent(nextContent)
+        onProjectMutated?.() // 触发 workspace 刷新（review_stale 可能翻转）
+      }
+      return { ok: true, mtimeNs: res.data.mtime_ns }
+    } catch (error) {
+      if (error.response?.status === 409) return { ok: false, conflict: true }
+      return { ok: false, error: error.response?.data?.detail || error.message }
+    }
+  }, [projectId, onProjectMutated])
+
+  const reloadFile = useCallback(async (filePath) => {
+    const requestProject = projectId
+    const res = await axios.get(
+      `/api/projects/${encodeURIComponent(requestProject)}/files/${filePath}`,
+    )
+    // NIT 3：点「编辑」后立刻切项目时，旧项目 GET 不得回填到新项目面板。
+    if (!shouldApplyProjectResponse({
+      requestProject,
+      activeProject: activeProjectRef.current,
+    })) {
+      throw new Error('project switched') // FilePreviewPanel catch → 不进入编辑态
+    }
+    return { content: res.data.content, mtimeNs: res.data.mtime_ns }
+  }, [projectId])
+
   const exportDraft = async () => {
     if (!projectId) return
     try {
@@ -250,19 +315,19 @@ export default function WorkspacePanel({
       <div className="p-4 border-b border-[#2a2a4a]">
         <div className="flex gap-2">
           <button
-            onClick={() => setActiveTab('stage')}
+            onClick={() => handleTabClick('stage')}
             className={`px-3 py-2 rounded-lg text-sm ${activeTab === 'stage' ? 'bg-[#28366b] text-white' : 'bg-[#15162d] text-[#8f93c9]'}`}
           >
             阶段
           </button>
           <button
-            onClick={() => setActiveTab('files')}
+            onClick={() => handleTabClick('files')}
             className={`px-3 py-2 rounded-lg text-sm ${activeTab === 'files' ? 'bg-[#28366b] text-white' : 'bg-[#15162d] text-[#8f93c9]'}`}
           >
             文件
           </button>
           <button
-            onClick={() => setActiveTab('materials')}
+            onClick={() => handleTabClick('materials')}
             className={`px-3 py-2 rounded-lg text-sm ${activeTab === 'materials' ? 'bg-[#28366b] text-white' : 'bg-[#15162d] text-[#8f93c9]'}`}
           >
             材料
@@ -295,10 +360,15 @@ export default function WorkspacePanel({
         />
       ) : activeTab === 'files' ? (
         <FilePreviewPanel
+          ref={filePreviewRef}
           files={files}
           currentFile={currentFile}
           content={content}
+          currentStage={workspace?.stage_code}
+          reviewStale={Boolean(workspace?.flags?.review_stale)}
           onSelectFile={loadFile}
+          onSaveFile={handleSaveFile}
+          onReloadFile={reloadFile}
         />
       ) : (
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
@@ -340,4 +410,6 @@ export default function WorkspacePanel({
       />
     </div>
   )
-}
+})
+
+export default WorkspacePanel
