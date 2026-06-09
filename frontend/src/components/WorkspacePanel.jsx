@@ -56,6 +56,9 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
 
   const loadFile = useCallback(async (path, requestProject = projectId) => {
     if (!requestProject || !path) return
+    // 同步提交选择：currentFile 立即反映点击，消除「导航已发起、currentFile 还没异步 commit」的窗口——
+    // 否则用户在内容 GET 返回前点「编辑」会锁定到错误文件（codex 前端 quality 审 BLOCKER）。内容仍异步加载。
+    setCurrentFile(path)
     try {
       const res = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/files/${path}`)
       if (!shouldApplyProjectResponse({
@@ -65,7 +68,6 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
         return
       }
       setContent(res.data.content)
-      setCurrentFile(path)
     } catch (error) {
       if (!shouldApplyProjectResponse({
         requestProject,

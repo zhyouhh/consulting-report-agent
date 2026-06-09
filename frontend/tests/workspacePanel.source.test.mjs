@@ -87,3 +87,9 @@ test("App createProject switches to the new project through attemptLeave guard (
   assert.match(s, /const proceed = async \(\) => \{[\s\S]*?loadProjects\(createdProject\.id\)[\s\S]*?\}/);
   assert.match(s, /wp\.attemptLeave\(proceed\)/);
 });
+
+test("loadFile commits selection synchronously before the content GET (codex quality BLOCKER)", () => {
+  const s = wsSrc();
+  // setCurrentFile(path) 必须在 await axios.get 之前——消除 pending-navigation 窗口，进入编辑/保存不会锁错文件
+  assert.match(s, /const loadFile = useCallback\(async \(path[\s\S]*?setCurrentFile\(path\)[\s\S]*?await axios\.get\(/);
+});
