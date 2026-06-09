@@ -1783,3 +1783,49 @@ class GetConversationSanitizeTests(unittest.TestCase):
         self.mock_get_project_path.return_value = None
         resp = self.client.get("/api/projects/missing/conversation")
         self.assertEqual(resp.status_code, 404)
+
+
+class R3FileApiTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(main_module.app)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        from backend.skill import SkillEngine
+        repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+        self.engine = SkillEngine(Path(self._tmp.name) / "projects", repo_skill_dir)
+        project = self.engine.create_project({
+            "name": "demo", "workspace_dir": str(Path(self._tmp.name) / "ws"),
+            "project_type": "strategy-consulting", "theme": "t",
+            "target_audience": "a", "deadline": "2026-04-01",
+            "expected_length": "3000 words", "notes": "n",
+        })
+        self.pid = project["id"]
+        self.project_dir = Path(project["project_dir"])
+        (self.project_dir / "content").mkdir(parents=True, exist_ok=True)
+        (self.project_dir / "content" / "report_draft_v1.md").write_text("初稿", encoding="utf-8")
+        self._patch = mock.patch.object(main_module, "skill_engine", self.engine)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def test_list_files_returns_structured_array(self):
+        r = self.client.get(f"/api/projects/{self.pid}/files")
+        self.assertEqual(r.status_code, 200)
+        files = r.json()["files"]
+        self.assertTrue(all({"path", "group", "stage", "editable", "mtime_ns"} <= set(f) for f in files))
+        draft = next(f for f in files if f["path"] == "content/report_draft_v1.md")
+        self.assertTrue(draft["editable"])
+        self.assertIsInstance(draft["mtime_ns"], str)
+
+    def test_read_file_returns_content_mtime_editable(self):
+        r = self.client.get(f"/api/projects/{self.pid}/files/content/report_draft_v1.md")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["content"], "初稿")
+        self.assertTrue(body["editable"])
+        self.assertIsInstance(body["mtime_ns"], str)
+
+    def test_read_readonly_file_editable_false(self):
+        (self.project_dir / "plan" / "independent-review.md").write_text("审查", encoding="utf-8")
+        r = self.client.get(f"/api/projects/{self.pid}/files/plan/independent-review.md")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["editable"])

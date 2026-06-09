@@ -295,25 +295,19 @@ async def chat(request: Request, chat_request: ChatRequest):
 
 @app.get("/api/projects/{project_id}/files")
 async def list_files(project_id: str):
-    project_path = skill_engine.get_project_path(project_id)
-    if not project_path:
-        raise HTTPException(status_code=404, detail="项目不存在")
-
-    files = []
-    for md_file in project_path.rglob("*.md"):
-        rel_path = md_file.relative_to(project_path)
-        normalized_path = str(rel_path).replace("\\", "/")
-        if normalized_path == "plan/project-info.md":
-            continue
-        files.append(normalized_path)
-    return {"files": files}
+    try:
+        return {"files": skill_engine.list_workspace_files(project_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/api/projects/{project_id}/files/{file_path:path}")
 async def read_file(project_id: str, file_path: str):
     try:
-        content = skill_engine.read_file(project_id, file_path)
-        return {"content": content}
+        normalized = skill_engine.normalize_file_path(project_id, file_path)
+        data = skill_engine.read_file_with_mtime(project_id, file_path)
+        data["editable"] = skill_engine.is_user_editable(normalized)
+        return data
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

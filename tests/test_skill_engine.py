@@ -2062,6 +2062,72 @@ class SkillEngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             engine.validate_user_write(pid, "../../../etc/passwd")
 
+    def test_list_workspace_files_semantics_and_skips(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        # 准备文件：正文 + 一份退役 + 一个 materials 同名干扰
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        (project_dir / "content" / "report_draft_v1.md").write_text("正文", encoding="utf-8")
+        (project_dir / "plan" / "project-info.md").write_text("退役", encoding="utf-8")
+        (project_dir / "materials" / "imported").mkdir(parents=True, exist_ok=True)
+        (project_dir / "materials" / "imported" / "outline.md").write_text("材料里的同名文件", encoding="utf-8")
+
+        files = engine.list_workspace_files(pid)
+        by_path = {f["path"]: f for f in files}
+
+        # 退役 / materials 跳过
+        self.assertNotIn("plan/project-info.md", by_path)
+        self.assertNotIn("materials/imported/outline.md", by_path)
+
+        # 正文：draft/S4/可编辑/mtime 是 str
+        draft = by_path["content/report_draft_v1.md"]
+        self.assertEqual(draft["group"], "draft")
+        self.assertEqual(draft["stage"], "S4")
+        self.assertTrue(draft["editable"])
+        self.assertIsInstance(draft["mtime_ns"], str)
+
+        # 重点阶段映射（create_project 已 scaffold 这些 plan 文件）
+        self.assertEqual(by_path["plan/outline.md"]["stage"], "S1")
+        self.assertEqual(by_path["plan/data-log.md"]["stage"], "S2")
+        self.assertEqual(by_path["plan/analysis-notes.md"]["stage"], "S3")
+        self.assertEqual(by_path["plan/presentation-plan.md"]["stage"], "S6")
+        self.assertEqual(by_path["plan/delivery-log.md"]["stage"], "S7")
+        # 审查报告只读
+        self.assertFalse(by_path["plan/independent-review.md"]["editable"])
+        self.assertEqual(by_path["plan/independent-review.md"]["group"], "review")
+        # 后端自动维护文件只读
+        self.assertFalse(by_path["plan/stage-gates.md"]["editable"])
+        self.assertEqual(by_path["plan/stage-gates.md"]["group"], "tracking")
+
+    def test_read_file_with_mtime_returns_str_mtime(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        (project_dir / "content" / "report_draft_v1.md").write_text("正文内容", encoding="utf-8")
+        data = engine.read_file_with_mtime(pid, "content/report_draft_v1.md")
+        self.assertEqual(data["content"], "正文内容")
+        self.assertIsInstance(data["mtime_ns"], str)
+        self.assertTrue(data["mtime_ns"].isdigit())
+
+    def test_write_file_atomic_writes_content_no_temp_residue(self):
+        # BLOCKER 2 回归守卫：write_file 改原子（temp + os.replace）后仍正确写入、且成功路径不留 .tmp。
+        # （torn read 本身竞态难确定性测试；此处守 happy-path 行为 + 清理。）
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        engine.write_file(pid, "plan/notes.md", "原子写入的内容")
+        self.assertEqual((project_dir / "plan" / "notes.md").read_text(encoding="utf-8"),
+                         "原子写入的内容")
+        self.assertEqual(list((project_dir / "plan").glob("*.tmp")), [])
+
+    def test_canonical_draft_edit_no_direct_write_text_in_chat(self):
+        # R2 BLOCKER：canonical draft edit_file 不得再绕过原子 write_file 直接 draft_path.write_text。
+        # 源码守卫——fail-first（改前 chat.py:4238 仍有该直写），3b-2 路由到 write_file 后转绿。
+        chat_src = (Path(__file__).resolve().parents[1] / "backend" / "chat.py").read_text(encoding="utf-8")
+        self.assertNotIn("draft_path.write_text(", chat_src)
+
 
 class S0CheckpointInfrastructureTests(unittest.TestCase):
     def test_s0_in_stage_checkpoint_keys(self):

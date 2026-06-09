@@ -3,8 +3,10 @@ from pathlib import Path
 import json
 import math
 import mimetypes
+import os
 import re
 import shutil
+import tempfile
 import uuid
 from typing import Iterable, Optional
 
@@ -1070,7 +1072,7 @@ class SkillEngine:
         return full_path.read_text(encoding="utf-8")
 
     def write_file(self, project_ref: str, file_path: str, content: str):
-        """鍐欏叆椤圭洰鏂囦欢"""
+        """写入项目文件（原子：同目录 temp + os.replace，避免并发读到写入中间态）"""
         project_path = self.get_project_path(project_ref)
         if not project_path:
             raise ValueError(f"项目 {project_ref} 不存在")
@@ -1078,7 +1080,62 @@ class SkillEngine:
         normalized_path = self.validate_plan_write(project_ref, file_path)
         full_path = self._resolve_project_path(project_path.resolve(), normalized_path)
         full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_text(content, encoding="utf-8")
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=str(full_path.parent), suffix=".tmp")
+        os.close(tmp_fd)
+        try:
+            Path(tmp_name).write_text(content, encoding="utf-8")  # 与原 write_text 同 newline 行为
+            os.replace(tmp_name, full_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+
+    def list_workspace_files(self, project_ref: str) -> list[dict]:
+        """R3: structured workspace file list for the front-end file tree.
+        Skips retired files and everything under materials/. Each .md → {path, group,
+        stage, editable, mtime_ns}. mtime_ns is a str (opaque — never coerce to Number;
+        JS loses precision past 2^53)."""
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            raise ValueError(f"项目 {project_ref} 不存在")
+
+        files = []
+        for md_file in project_path.rglob("*.md"):
+            rel_path = self._to_posix(md_file.relative_to(project_path)).lstrip("/")
+            if rel_path in self.RETIRED_WORKSPACE_FILES:
+                continue
+            if rel_path.startswith("materials/"):
+                continue
+            semantics = self.get_file_semantics(rel_path)
+            files.append({
+                "path": rel_path,
+                "group": semantics["group"],
+                "stage": semantics["stage"],
+                "editable": semantics["editable"],
+                "mtime_ns": str(md_file.stat().st_mtime_ns),
+            })
+        return files
+
+    def read_file_with_mtime(self, project_ref: str, file_path: str) -> dict:
+        """R3: content + mtime_ns for the edit base. NO lock here (the per-project request
+        lock is held by chat_stream for a full turn — locking reads would freeze preview).
+        stat BEFORE read so the returned base_mtime is never NEWER than the bytes returned:
+        if an AI write interleaves, the worst case is a safe 409 on save (user reloads),
+        never a silent overwrite. The AI writes EDITABLE files only via the atomic write_file
+        (os.replace), so a no-lock read of an editable file never sees a half-written one.
+        (Read-only tracking files are still direct-written; a rare torn preview self-heals on
+        reload — they are never editable nor in the save/CAS path.)"""
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            raise ValueError(f"项目 {project_ref} 不存在")
+        full_path = self._resolve_project_path(project_path, file_path)
+        if not full_path.exists():
+            raise ValueError(f"文件 {file_path} 不存在")
+        mtime_ns = str(full_path.stat().st_mtime_ns)
+        content = full_path.read_text(encoding="utf-8")
+        return {"content": content, "mtime_ns": mtime_ns}
 
     def normalize_file_path(self, project_ref: str, file_path: str) -> str:
         project_path = self.get_project_path(project_ref)
