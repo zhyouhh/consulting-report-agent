@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
@@ -318,6 +319,15 @@ class UserFileWrite(BaseModel):
     base_mtime_ns: str  # opaque string; pydantic rejects a raw JSON number → 422
 
 
+# R3: 用户保存的临界区跑在这个**专用**线程池，而不是 Starlette 的默认 anyio 线程池。
+# 关键正确性约束（codex 后端 quality 审 BLOCKER）：chat_stream 是同步 generator，Starlette 用
+# anyio 默认池 iterate_in_threadpool 逐 chunk 迭代它，而 `with request_lock:`（threading.RLock）
+# 跨 yield 持有、owner 是某个 anyio worker 线程。若保存也用默认池（run_in_threadpool），可能复用到
+# 那个 owner 线程 → RLock 重入放行 → 保存绕过锁、CAS 形同虚设。专用池线程绝不会是 chat 的 worker，
+# 故保存线程 ≠ RLock owner，acquire 必真正阻塞到 chat 释放——互斥才成立。不要改回 run_in_threadpool。
+_USER_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="user-write")
+
+
 @app.post("/api/projects/{project_id}/files/{file_path:path}")
 async def write_user_file(project_id: str, file_path: str, payload: UserFileWrite):
     # 项目不存在前置判 404（避免靠脆弱字符串匹配区分 404/400）
@@ -329,7 +339,8 @@ async def write_user_file(project_id: str, file_path: str, payload: UserFileWrit
 
     def _write_under_lock():
         # 全段持与聊天同一把锁：CAS(stat) → os.replace 必须对 AI 写入原子互斥。
-        # run_in_threadpool 包裹，锁阻塞落在线程池线程、不阻塞事件循环。
+        # 跑在专用池线程（见 _USER_WRITE_EXECUTOR 注释）：锁阻塞落在该线程、不阻塞事件循环，
+        # 且该线程绝不是 chat_stream 的 anyio worker，杜绝 RLock 重入绕过。
         with request_lock:
             new_mtime = skill_engine.user_write_file(
                 project_id, file_path, payload.content, payload.base_mtime_ns
@@ -337,7 +348,9 @@ async def write_user_file(project_id: str, file_path: str, payload: UserFileWrit
             return {"status": "ok", "mtime_ns": new_mtime}
 
     try:
-        return await run_in_threadpool(_write_under_lock)
+        return await asyncio.get_running_loop().run_in_executor(
+            _USER_WRITE_EXECUTOR, _write_under_lock
+        )
     except UserWriteForbiddenError:
         raise HTTPException(status_code=403, detail="该文件不可编辑")
     except StaleFileError:
