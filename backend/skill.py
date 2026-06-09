@@ -11,6 +11,15 @@ import uuid
 from typing import Iterable, Optional
 
 
+class StaleFileError(Exception):
+    """Raised when a user write's base_mtime_ns no longer matches the file on disk (an AI
+    write or another save landed in between). Carries the current mtime_ns (str) for 409."""
+
+    def __init__(self, current_mtime_ns: str):
+        super().__init__("文件已被更新")
+        self.current_mtime_ns = current_mtime_ns
+
+
 class SkillEngine:
     """咨询技能工作流引擎"""
 
@@ -1136,6 +1145,40 @@ class SkillEngine:
         mtime_ns = str(full_path.stat().st_mtime_ns)
         content = full_path.read_text(encoding="utf-8")
         return {"content": content, "mtime_ns": mtime_ns}
+
+    def user_write_file(self, project_ref: str, file_path: str, content: str,
+                        base_mtime_ns: str) -> str:
+        """R3: atomic user write with mtime CAS. Caller MUST hold the per-project request
+        lock (shared with chat writes) so the stat→replace window is not racing an AI write.
+        Returns new mtime_ns (str). Raises:
+          - ValueError('非法的文件路径') on traversal       → endpoint 400
+          - PermissionError on non-whitelisted file         → endpoint 403
+          - FileNotFoundError on missing file               → endpoint 404
+          - StaleFileError on mtime mismatch                → endpoint 409
+        """
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            raise ValueError(f"项目 {project_ref} 不存在")
+        canonical = self.validate_user_write(project_ref, file_path)  # PermissionError / ValueError
+        full_path = self._resolve_project_path(project_path.resolve(), canonical)
+        if not full_path.exists():
+            raise FileNotFoundError(f"文件 {canonical} 不存在")
+        current_mtime_ns = str(full_path.stat().st_mtime_ns)
+        if current_mtime_ns != base_mtime_ns:
+            raise StaleFileError(current_mtime_ns)
+        # 原子写：同目录 temp + os.replace（与 write_file 同款，newline 行为一致）
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=str(full_path.parent), suffix=".tmp")
+        os.close(tmp_fd)
+        try:
+            Path(tmp_name).write_text(content, encoding="utf-8")
+            os.replace(tmp_name, full_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+        return str(full_path.stat().st_mtime_ns)
 
     def normalize_file_path(self, project_ref: str, file_path: str) -> str:
         project_path = self.get_project_path(project_ref)

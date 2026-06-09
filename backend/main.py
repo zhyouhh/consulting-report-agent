@@ -10,6 +10,7 @@ from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -38,7 +39,7 @@ from .report_tools import (
     run_lint_report,
     run_quality_check,
 )
-from .skill import SkillEngine
+from .skill import SkillEngine, StaleFileError
 
 
 logging.basicConfig(
@@ -310,6 +311,45 @@ async def read_file(project_id: str, file_path: str):
         return data
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+class UserFileWrite(BaseModel):
+    content: str
+    base_mtime_ns: str  # opaque string; pydantic rejects a raw JSON number → 422
+
+
+@app.post("/api/projects/{project_id}/files/{file_path:path}")
+async def write_user_file(project_id: str, file_path: str, payload: UserFileWrite):
+    # 项目不存在前置判 404（避免靠脆弱字符串匹配区分 404/400）
+    if not skill_engine.get_project_path(project_id):
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    handler = get_chat_handler(project_id)
+    request_lock = handler._get_project_request_lock(project_id)
+
+    def _write_under_lock():
+        # 全段持与聊天同一把锁：CAS(stat) → os.replace 必须对 AI 写入原子互斥。
+        # run_in_threadpool 包裹，锁阻塞落在线程池线程、不阻塞事件循环。
+        with request_lock:
+            new_mtime = skill_engine.user_write_file(
+                project_id, file_path, payload.content, payload.base_mtime_ns
+            )
+            return {"status": "ok", "mtime_ns": new_mtime}
+
+    try:
+        return await run_in_threadpool(_write_under_lock)
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="该文件不可编辑")
+    except StaleFileError:
+        raise HTTPException(
+            status_code=409,
+            detail="文件已被更新（可能是 AI 刚写过），请重新加载后再编辑",
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    except ValueError:
+        # 剩余 ValueError = 路径穿越（非法的文件路径）
+        raise HTTPException(status_code=400, detail="非法的文件路径")
 
 
 @app.get("/api/projects/{project_id}/workspace")

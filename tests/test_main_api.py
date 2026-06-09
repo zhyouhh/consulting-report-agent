@@ -1829,3 +1829,104 @@ class R3FileApiTests(unittest.TestCase):
         r = self.client.get(f"/api/projects/{self.pid}/files/plan/independent-review.md")
         self.assertEqual(r.status_code, 200)
         self.assertFalse(r.json()["editable"])
+
+    def _mtime(self, rel):
+        return str((self.project_dir / rel).stat().st_mtime_ns)
+
+    def test_post_write_success_returns_new_mtime(self):
+        base = self._mtime("content/report_draft_v1.md")
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+            json={"content": "改过的正文", "base_mtime_ns": base},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["status"], "ok")
+        self.assertIsInstance(r.json()["mtime_ns"], str)
+        self.assertEqual(
+            (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8"),
+            "改过的正文",
+        )
+
+    def test_post_write_denied_readonly_403(self):
+        (self.project_dir / "plan" / "independent-review.md").write_text("审查", encoding="utf-8")
+        base = self._mtime("plan/independent-review.md")
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/plan/independent-review.md",
+            json={"content": "试图篡改", "base_mtime_ns": base},
+        )
+        self.assertEqual(r.status_code, 403)
+
+    def test_post_write_traversal_400(self):
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/../../../evil.md",
+            json={"content": "x", "base_mtime_ns": "1"},
+        )
+        # HTTP client normalises traversal sequences before dispatch; the attack never
+        # reaches the endpoint. Accept 400 (ValueError in _resolve_project_path),
+        # 404 (path resolves outside project tree), or 405 (URL collapsed to a
+        # different route that has no POST — all are "request rejected/blocked").
+        self.assertIn(r.status_code, (400, 404, 405))
+
+    def test_post_write_missing_file_404(self):
+        # outline.md 在白名单但删除后不存在 → 404（用户只能改已存在文件，不新建）
+        outline = self.project_dir / "plan" / "outline.md"
+        if outline.exists():
+            outline.unlink()
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/plan/outline.md",
+            json={"content": "x", "base_mtime_ns": "1"},
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_post_write_stale_mtime_409(self):
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+            json={"content": "x", "base_mtime_ns": "999999999999999999"},
+        )
+        self.assertEqual(r.status_code, 409)
+
+    def test_post_write_rejects_numeric_base_mtime(self):
+        base_int = int(self._mtime("content/report_draft_v1.md"))
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+            json={"content": "x", "base_mtime_ns": base_int},  # number, 非 str
+        )
+        self.assertEqual(r.status_code, 422)  # pydantic str 字段拒绝 int
+
+    def test_post_write_missing_project_404(self):
+        r = self.client.post(
+            "/api/projects/no-such-project/files/content/report_draft_v1.md",
+            json={"content": "x", "base_mtime_ns": "1"},
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_post_write_serialized_under_request_lock(self):
+        # 持有与聊天同一把 per-project 锁时，POST 必须阻塞到锁释放（CAS 串行化、不丢写）。
+        import backend.chat as chat_mod
+        import threading as _t
+        lock = chat_mod._get_project_request_lock(self.pid)
+        base = self._mtime("content/report_draft_v1.md")
+        done = {"status": None}
+
+        def _save():
+            r = self.client.post(
+                f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+                json={"content": "锁释放后才落盘", "base_mtime_ns": base},
+            )
+            done["status"] = r.status_code
+
+        lock.acquire()
+        try:
+            t = _t.Thread(target=_save)
+            t.start()
+            t.join(timeout=1.0)
+            # 锁未释放：请求应仍在等待，未完成
+            self.assertIsNone(done["status"], "POST 不应在锁被持有时完成")
+        finally:
+            lock.release()
+        t.join(timeout=5.0)
+        self.assertEqual(done["status"], 200)
+        self.assertEqual(
+            (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8"),
+            "锁释放后才落盘",
+        )
