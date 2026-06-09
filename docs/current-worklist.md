@@ -1,8 +1,8 @@
 # Current Worklist
 
-最后更新：2026-06-09（**批 2 = R3 plan 已 APPROVED + committed**：`docs/superpowers/plans/2026-06-08-workspace-file-tree-and-editing.md`，codex plan review **3 轮**[R1 挖 4 BLOCKER→R2 挖 3 BLOCKER→R3 APPROVED] **+ 三按钮增量审 APPROVED**；commits `b49bed7`[plan+spec]→`ebb3eae`[三按钮]。**待用户终审后实施**（subagent-driven 逐 task + 每 commit codex review）。详见下方 R3。— 批 1 = R1+R2 已闭环并合入 main `f111f0e`+push origin，唯一剩余＝用户 GUI E2E[非阻塞]，详见 R1。）
+最后更新：2026-06-09（**批 2 = R3 已实施 + 双轨独立 review APPROVED**：9 task subagent-driven 落地（后端 T1-T4 + 前端 T5-T8）；codex **spec 轨**[后端/前端均 SPEC-COMPLIANT] **+ quality 轨**[后端/前端均 APPROVED]**独立**审（不再合并，应用户要求纠正）。quality 轨挖出合并审漏掉的 2 真 BLOCKER：①后端 `chat_stream` 同步 generator 跨 anyio 线程持 RLock，保存 `run_in_threadpool` 复用 owner 线程→重入绕过 CAS→保存改专用 `ThreadPoolExecutor`（`8f06c81`）；②前端进入编辑的异步竞态（切文件本身异步、currentFile 滞后）→`loadFile` 同步提交选择消除 pending 窗口（`d420dff`）。后端 R3 **281 passed**、前端 **296 pass**、build 绿。commits `336504a`→`ec42369`（14 个）。cutover：`docs/superpowers/cutover_report_2026-06-09_r3-file-tree-editing.md`。**唯一剩余＝用户 GUI E2E[非阻塞]**；分支 `feat/workspace-file-tree-and-editing` 未 push、未合 main，等用户。详见下方 R3。— 批 1 = R1+R2 已闭环合入 main `f111f0e`+push origin。）
 
-上一次更新：2026-06-08（批 2 R3 **spec 定稿**：codex 4 轮 APPROVED[R1 REJECT→R2 NOTES→对抗式红队 REJECT→APPROVED]，红队挖出真 BLOCKER[`review_stale` 误 gate 在 `review_passed_at`]；commits `767314d`→`9bb98a9`；用户接受 D6/D7。）
+上一次更新：2026-06-08（批 2 R3 **plan 已 APPROVED + committed**：codex plan review 3 轮[R1 4BLOCKER→R2 3BLOCKER→R3 APPROVED]+三按钮增量审 APPROVED；commits `b49bed7`→`ebb3eae`。spec 定稿更早 `767314d`→`9bb98a9`[D6/D7]。）
 
 ## 当前未解决 / 待验证
 
@@ -35,7 +35,7 @@ R2. **S5「AI 味自查」主代理答非所问修复**
 - 涉及文件：`backend/chat.py`(`system_trigger` 分支)。
 
 R3. **工作区文件栏重做 + 预览框可编辑（＝UI 重构第一落地块）**
-- 状态：`plan 已 APPROVED + committed（codex 3 轮 R1 4BLOCKER→R2 3BLOCKER→R3 APPROVED + 三按钮增量审 APPROVED），待用户终审后实施` — plan：`docs/superpowers/plans/2026-06-08-workspace-file-tree-and-editing.md`、spec：`docs/superpowers/specs/2026-06-08-workspace-file-tree-and-editing-design.md`（plan+spec commits `b49bed7`+`ebb3eae`；spec 原始 `767314d`→`9bb98a9`）。9 个 task、TDD、后端先于前端、只读先于可写。
+- 状态：`已实施 + codex 双轨独立 review 全 APPROVED，待用户 GUI E2E（非阻塞）` — 9 task subagent-driven 落地（后端 T1-T4 + 前端 T5-T8），commits `336504a`→`ec42369`（14 个，分支 `feat/workspace-file-tree-and-editing`，**未 push / 未合 main**，等用户）。**双轨独立 review**（应用户要求 spec/quality 分开做、不合并）：spec 轨后端+前端均 `SPEC-COMPLIANT`；quality 轨后端+前端均 `APPROVED`，挖出合并审漏掉的 2 真 BLOCKER——①后端 `chat_stream` 同步 generator 跨 anyio 线程持 RLock、保存 `run_in_threadpool` 复用 owner 线程→重入绕 CAS→保存改专用 `ThreadPoolExecutor`（`8f06c81`）；②前端进入编辑异步竞态（切文件本身异步、currentFile 滞后，epoch 仍漏）→`loadFile` 同步提交选择消除 pending 窗口（`d420dff`）。cutover：`docs/superpowers/cutover_report_2026-06-09_r3-file-tree-editing.md`。plan：`docs/superpowers/plans/2026-06-08-workspace-file-tree-and-editing.md`、spec：`docs/superpowers/specs/2026-06-08-workspace-file-tree-and-editing-design.md`。9 task、TDD、后端先于前端、只读先于可写。
 - **范围（已定稿，brainstorm 4 轮拍板）**：现框架内小切口（D1，**不换肤**——3 套 `design_UI.pdf` 是整体视觉探索、作独立后续项目，仅借鉴稿3「按阶段分组」IA）+ 第一批做 **①+②**（D2）：①文件栏分层中文名+当前阶段置顶高亮 ②预览框可编辑+后端用户写接口。③图片附件分流/新建项目表单整理 → 后置 **R3③**。
 - **关键设计（spec 是真值源，写 plan 前必读 spec 全文）**：
   - **权限边界（硬骨头）**：新增 `validate_user_write` **独立白名单门禁**，**不复用** LLM 的 `validate_plan_write`（后者带 outline `_requires_pre_outline_evidence` gate，且 independent-review/lint-report 的拒写在 chat.py 工具层、HTTP 写接口走不到）。**8 个可编辑**：`content/report_draft_v1.md` + `plan/{outline,research-plan,notes,references,data-log,analysis-notes,presentation-plan}.md`；其余只读（`project-overview`[D3 只读]/审查报告/`stage-gates·progress·tasks`/`delivery-log`/`review.md`）；退役不显示。白名单比对用 `_canonical_user_path` 对整路径 casefold（**不复用**只处理 plan 的 `_canonicalize_plan_markdown_path`）。
