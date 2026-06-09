@@ -4234,8 +4234,8 @@ class ChatHandler:
                 }
 
         new_draft = draft_text.replace(actual_old, new_string, 1)
-        draft_path.parent.mkdir(parents=True, exist_ok=True)
-        draft_path.write_text(new_draft, encoding="utf-8")
+        # 走原子 write_file（content/ 路径在 validate_plan_write 内提前 return、无 gating），消除 torn read
+        self.skill_engine.write_file(project_id, self.skill_engine.REPORT_DRAFT_PATH, new_draft)
         mtime_after = draft_path.stat().st_mtime
 
         mutation = {

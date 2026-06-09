@@ -5,11 +5,13 @@ import shutil
 import tempfile
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -38,7 +40,7 @@ from .report_tools import (
     run_lint_report,
     run_quality_check,
 )
-from .skill import SkillEngine
+from .skill import SkillEngine, StaleFileError, UserWriteForbiddenError
 
 
 logging.basicConfig(
@@ -295,27 +297,80 @@ async def chat(request: Request, chat_request: ChatRequest):
 
 @app.get("/api/projects/{project_id}/files")
 async def list_files(project_id: str):
-    project_path = skill_engine.get_project_path(project_id)
-    if not project_path:
-        raise HTTPException(status_code=404, detail="项目不存在")
-
-    files = []
-    for md_file in project_path.rglob("*.md"):
-        rel_path = md_file.relative_to(project_path)
-        normalized_path = str(rel_path).replace("\\", "/")
-        if normalized_path == "plan/project-info.md":
-            continue
-        files.append(normalized_path)
-    return {"files": files}
+    try:
+        return {"files": skill_engine.list_workspace_files(project_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/api/projects/{project_id}/files/{file_path:path}")
 async def read_file(project_id: str, file_path: str):
     try:
-        content = skill_engine.read_file(project_id, file_path)
-        return {"content": content}
+        normalized = skill_engine.normalize_file_path(project_id, file_path)
+        data = skill_engine.read_file_with_mtime(project_id, file_path)
+        data["editable"] = skill_engine.is_user_editable(normalized)
+        return data
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+class UserFileWrite(BaseModel):
+    content: str
+    base_mtime_ns: str  # opaque string; pydantic rejects a raw JSON number → 422
+
+
+# R3: 用户保存的临界区跑在这个**专用**线程池，而不是 Starlette 的默认 anyio 线程池。
+# 关键正确性约束（codex 后端 quality 审 BLOCKER）：chat_stream 是同步 generator，Starlette 用
+# anyio 默认池 iterate_in_threadpool 逐 chunk 迭代它，而 `with request_lock:`（threading.RLock）
+# 跨 yield 持有、owner 是某个 anyio worker 线程。若保存也用默认池（run_in_threadpool），可能复用到
+# 那个 owner 线程 → RLock 重入放行 → 保存绕过锁、CAS 形同虚设。专用池线程绝不会是 chat 的 worker，
+# 故保存线程 ≠ RLock owner，acquire 必真正阻塞到 chat 释放——互斥才成立。不要改回 run_in_threadpool。
+_USER_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="user-write")
+
+
+@app.post("/api/projects/{project_id}/files/{file_path:path}")
+async def write_user_file(project_id: str, file_path: str, payload: UserFileWrite):
+    # 项目不存在前置判 404（避免靠脆弱字符串匹配区分 404/400）
+    if not skill_engine.get_project_path(project_id):
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    handler = get_chat_handler(project_id)
+    request_lock = handler._get_project_request_lock(project_id)
+
+    def _write_under_lock():
+        # 全段持与聊天同一把锁：CAS(stat) → os.replace 必须对 AI 写入原子互斥。
+        # 跑在专用池线程（见 _USER_WRITE_EXECUTOR 注释）：锁阻塞落在该线程、不阻塞事件循环，
+        # 且该线程绝不是 chat_stream 的 anyio worker，杜绝 RLock 重入绕过。
+        with request_lock:
+            new_mtime = skill_engine.user_write_file(
+                project_id, file_path, payload.content, payload.base_mtime_ns
+            )
+            return {"status": "ok", "mtime_ns": new_mtime}
+
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            _USER_WRITE_EXECUTOR, _write_under_lock
+        )
+    except UserWriteForbiddenError:
+        raise HTTPException(status_code=403, detail="该文件不可编辑")
+    except StaleFileError:
+        raise HTTPException(
+            status_code=409,
+            detail="文件已被更新（可能是 AI 刚写过），请重新加载后再编辑",
+        )
+    except FileNotFoundError:
+        # OSError 子类，必须排在下面 except OSError 之前
+        raise HTTPException(status_code=404, detail="文件不存在")
+    except ValueError:
+        # 剩余 ValueError = 路径穿越（非法的文件路径）
+        raise HTTPException(status_code=400, detail="非法的文件路径")
+    except OSError:
+        # os.replace/write_text 失败（Windows 上文件被外部编辑器/同步盘/杀毒占用等）——
+        # 该文件可编辑、只是临时写不进，给可重试提示，别误报成 403「不可编辑」。
+        raise HTTPException(
+            status_code=500,
+            detail="文件写入失败（可能被外部程序占用），请关闭后重试",
+        )
 
 
 @app.get("/api/projects/{project_id}/workspace")

@@ -42,7 +42,7 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 
 ## 打包态 QA 接续（2026-05-19）
 
-正式待办仍以 `docs/current-worklist.md` 为唯一真值源；最近一次打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-19-stage-conductor-packaged-qa.md`。
+正式待办仍以 `docs/current-worklist.md` 为唯一真值源；2026-05-19 的打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-19-stage-conductor-packaged-qa.md`。
 
 已修复并打包验证：
 
@@ -136,6 +136,18 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 **回归测试**：`tests/test_independent_review.py`（流式/staging/自修/CAS/run_id 防护/`os.replace` 失败/thinking 剥离）、`tests/test_lint_report.py`、`tests/test_main_api.py`（POST/resume/discard/lock 全路径/B3 generator-未消费 lock 释放/completion 时序）、`tests/test_chat_runtime.py`（system_trigger 注入/run-bound/`mtime` 大整数 str/主代理拒写）、`tests/test_skill_engine.py`、前端 `reviewChatWindow.test.mjs` + `independentReviewDrawer.source.test.mjs`。
 
 详见 `docs/superpowers/cutover_report_2026-05-22_s5-redesign.md`（baseline）+ `docs/superpowers/cutover_report_2026-06-07_s5-review-mini-chat.md`（R1+R2）。
+
+## 工作区文件栏 + 可编辑预览（R3，2026-06-09）
+
+文件「语义」由 `backend/skill.py` 单一真值源给出，前端只做中文文案 + 渲染。改文件树 / 用户写接口前必读：
+
+- `SkillEngine.FILE_SEMANTICS`（**完整 posix 路径**→group/stage，非 basename——否则 `materials/imported/outline.md` 误判 S1）、`USER_EDITABLE_FILES`（8 文件白名单，默认 deny）、`RETIRED_WORKSPACE_FILES`（不显示）；`is_user_editable` / `get_file_semantics` / `list_workspace_files`。白名单比对用 `_canonical_user_path`（整路径 casefold，**不复用**只处理 plan/*.md 的 `_canonicalize_plan_markdown_path`）。
+- `validate_user_write` 是**独立于** `validate_plan_write` 的用户写门禁（白名单制，天然拒审查报告/追踪文件/退役/checkpoint）：穿越→`ValueError`(400)、非白名单→**`UserWriteForbiddenError`**(403)。**用专属异常而非内建 `PermissionError`**——`os.replace` 文件被外部程序占用时也抛 `PermissionError`，端点要把「领域拒写 403」与「OS 写失败 500（可重试提示）」分开（异常顺序：`UserWriteForbiddenError`→`StaleFileError`→`FileNotFoundError`→`ValueError`→`OSError`，`FileNotFoundError` 必排 `OSError` 前）。
+- 写接口 `POST /api/projects/{id}/files/{path}` `{content, base_mtime_ns}`：mtime CAS（不匹配 `StaleFileError`→409）+ 同目录 temp + `os.replace` 原子写；`base_mtime_ns` 全程 **opaque str**（pydantic 拒 number→422）。**临界区跑专用 `_USER_WRITE_EXECUTOR`，不是 `run_in_threadpool`**——硬约束：`chat_stream` 是同步 generator、被 anyio 默认池迭代、`with request_lock:`（RLock）owner 是 anyio worker；保存若用默认池可能复用 owner 线程→RLock 重入放行→绕过 CAS。专用池线程绝非 chat worker，`acquire` 真阻塞到 chat 释放。**别改回 `run_in_threadpool`**（`test_main_api.py` 有 source-guard 守）。
+- 读接口 `GET /files/{path}` 返回 `{content, mtime_ns, editable}`，**不持锁**（chat_stream 整轮持锁，读进锁会冻预览）：`read_file_with_mtime` 先 stat 再 read。AI 写**可编辑**文件（plan 内容文件 + canonical draft `edit_file`）全经原子 `write_file`（temp+`os.replace`），故无锁读不会读到半截、最坏=保存安全 409（只读追踪文件后端直写，极端下预览瞬时错乱、刷新自愈，不可编辑不入 CAS）。`GET /files` 给结构化 `[{path,group,stage,editable,mtime_ns}]`。
+- `get_workspace_summary().flags.review_stale`（D6 advisory）：两份审查报告**有效**（`_has_effective_review_reports`，非 scaffold 模板）且 `draft_mtime > min(report mtimes)` 即标，**不** gate 在 `review_passed_at`；不硬阻 S6/S7。
+- 前端：`utils/fileTree.js`（分组/置顶/中文名）、`utils/fileEditState.js`（双模式状态机 + `guardLeave` 返 `allow/confirm/block`）、`FilePreviewPanel.jsx`（forwardRef 暴露 `attemptLeave(action)`/`isEditing()`，脏离开**三按钮「保存/放弃修改/取消」延后动作**弹窗 + Esc=取消 + 进入编辑 `selectionSeqRef` 防竞态）、`WorkspacePanel.jsx`/`App.jsx`（切 tab/切项目/新建项目/收面板 dirty 守卫，ref 链 App→WorkspacePanel→FilePreviewPanel）。**`WorkspacePanel.loadFile` 同步 `setCurrentFile(path)` 再异步 GET 内容**——消除「导航已发起、currentFile 未 commit」窗口（否则进入编辑/保存会锁错文件）；`latestFileRequestRef` 丢弃乱序 content 响应。
+- 回归：`tests/test_skill_engine.py`、`tests/test_main_api.py::R3FileApiTests`；前端 `fileTree`/`fileEditState`/`filePreviewPanel.source`/`workspacePanel.source`。详见 `docs/superpowers/cutover_report_2026-06-09_r3-file-tree-editing.md`。
 
 ## 管理型搜索池
 

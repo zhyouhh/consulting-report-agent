@@ -37,6 +37,7 @@ function App() {
   const [injectedPrompt, setInjectedPrompt] = useState(null)
   const activeProjectRef = useRef(currentProjectId)
   const chatPanelRef = useRef(null)
+  const workspacePanelRef = useRef(null)
 
   useEffect(() => {
     initializeApp()
@@ -147,8 +148,14 @@ function App() {
       const res = await axios.post('/api/projects', info)
       const createdProject = res.data.project
 
-      await loadProjects(createdProject.id)
-      setWorkspaceRefreshToken(prev => prev + 1)
+      // 切到新项目也是一条「离开当前编辑」的路径，必须过 dirty guard（与 handleSelectProject 同）——
+      // 否则编辑态下点「新建报告」会让旧草稿悬挂、之后保存打到新项目（codex 前端审 BLOCKER 1）。
+      const proceed = async () => {
+        await loadProjects(createdProject.id)
+        setWorkspaceRefreshToken(prev => prev + 1)
+      }
+      const wp = workspacePanelRef.current
+      if (wp?.attemptLeave) { wp.attemptLeave(proceed) } else { await proceed() }
       return true
     } catch (error) {
       console.error('创建项目失败:', error)
@@ -179,10 +186,23 @@ function App() {
     if (isSameProjectSelection(currentProjectId, project?.id || null)) {
       return
     }
-    setWorkspace(null)
-    setMaterials([])
-    setCurrentProjectId(project?.id || null)
-    setCurrentProject(project || null)
+    const proceed = () => {
+      setWorkspace(null)
+      setMaterials([])
+      setCurrentProjectId(project?.id || null)
+      setCurrentProject(project || null)
+    }
+    // dirty 时弹三按钮、把切项目挂起（保存/放弃后再切）；allow 立即切；保存中则拦下。
+    const wp = workspacePanelRef.current
+    if (wp?.attemptLeave) { wp.attemptLeave(proceed) } else { proceed() }
+  }
+
+  const handleToggleWorkspacePanel = () => {
+    const proceed = () => setShowWorkspacePanel((v) => !v)
+    const wp = workspacePanelRef.current
+    // 仅「当前显示 → 隐藏」是离开路径（隐藏会 unmount 编辑器）；dirty 弹三按钮、把隐藏挂起。
+    if (showWorkspacePanel && wp?.attemptLeave) { wp.attemptLeave(proceed); return }
+    proceed()
   }
 
   const handleMaterialsMerged = (incomingMaterials) => {
@@ -237,12 +257,13 @@ function App() {
           materials={materials}
           onMaterialsMerged={handleMaterialsMerged}
           onProjectMutated={() => setWorkspaceRefreshToken(prev => prev + 1)}
-          onToggleWorkspacePanel={() => setShowWorkspacePanel(!showWorkspacePanel)}
+          onToggleWorkspacePanel={handleToggleWorkspacePanel}
           injectedPrompt={injectedPrompt}
           onInjectedPromptConsumed={() => setInjectedPrompt(null)}
         />
         {showWorkspacePanel && (
           <WorkspacePanel
+            ref={workspacePanelRef}
             projectId={currentProjectId}
             project={currentProject}
             workspace={workspace}

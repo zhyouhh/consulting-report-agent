@@ -1783,3 +1783,224 @@ class GetConversationSanitizeTests(unittest.TestCase):
         self.mock_get_project_path.return_value = None
         resp = self.client.get("/api/projects/missing/conversation")
         self.assertEqual(resp.status_code, 404)
+
+
+class R3FileApiTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(main_module.app)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        from backend.skill import SkillEngine
+        repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+        self.engine = SkillEngine(Path(self._tmp.name) / "projects", repo_skill_dir)
+        project = self.engine.create_project({
+            "name": "demo", "workspace_dir": str(Path(self._tmp.name) / "ws"),
+            "project_type": "strategy-consulting", "theme": "t",
+            "target_audience": "a", "deadline": "2026-04-01",
+            "expected_length": "3000 words", "notes": "n",
+        })
+        self.pid = project["id"]
+        self.project_dir = Path(project["project_dir"])
+        (self.project_dir / "content").mkdir(parents=True, exist_ok=True)
+        (self.project_dir / "content" / "report_draft_v1.md").write_text("初稿", encoding="utf-8")
+        self._patch = mock.patch.object(main_module, "skill_engine", self.engine)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def test_list_files_returns_structured_array(self):
+        r = self.client.get(f"/api/projects/{self.pid}/files")
+        self.assertEqual(r.status_code, 200)
+        files = r.json()["files"]
+        self.assertTrue(all({"path", "group", "stage", "editable", "mtime_ns"} <= set(f) for f in files))
+        draft = next(f for f in files if f["path"] == "content/report_draft_v1.md")
+        self.assertTrue(draft["editable"])
+        self.assertIsInstance(draft["mtime_ns"], str)
+
+    def test_read_file_returns_content_mtime_editable(self):
+        r = self.client.get(f"/api/projects/{self.pid}/files/content/report_draft_v1.md")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["content"], "初稿")
+        self.assertTrue(body["editable"])
+        self.assertIsInstance(body["mtime_ns"], str)
+
+    def test_read_readonly_file_editable_false(self):
+        (self.project_dir / "plan" / "independent-review.md").write_text("审查", encoding="utf-8")
+        r = self.client.get(f"/api/projects/{self.pid}/files/plan/independent-review.md")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["editable"])
+
+    def _mtime(self, rel):
+        return str((self.project_dir / rel).stat().st_mtime_ns)
+
+    def test_post_write_success_returns_new_mtime(self):
+        base = self._mtime("content/report_draft_v1.md")
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+            json={"content": "改过的正文", "base_mtime_ns": base},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["status"], "ok")
+        self.assertIsInstance(r.json()["mtime_ns"], str)
+        self.assertEqual(
+            (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8"),
+            "改过的正文",
+        )
+
+    def test_post_write_denied_readonly_403(self):
+        (self.project_dir / "plan" / "independent-review.md").write_text("审查", encoding="utf-8")
+        base = self._mtime("plan/independent-review.md")
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/plan/independent-review.md",
+            json={"content": "试图篡改", "base_mtime_ns": base},
+        )
+        self.assertEqual(r.status_code, 403)
+
+    def test_post_write_traversal_400(self):
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/../../../evil.md",
+            json={"content": "x", "base_mtime_ns": "1"},
+        )
+        # HTTP client normalises traversal sequences before dispatch; the attack never
+        # reaches the endpoint. Accept 400 (ValueError in _resolve_project_path),
+        # 404 (path resolves outside project tree), or 405 (URL collapsed to a
+        # different route that has no POST — all are "request rejected/blocked").
+        self.assertIn(r.status_code, (400, 404, 405))
+
+    def test_post_write_missing_file_404(self):
+        # outline.md 在白名单但删除后不存在 → 404（用户只能改已存在文件，不新建）
+        outline = self.project_dir / "plan" / "outline.md"
+        if outline.exists():
+            outline.unlink()
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/plan/outline.md",
+            json={"content": "x", "base_mtime_ns": "1"},
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_post_write_stale_mtime_409(self):
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+            json={"content": "x", "base_mtime_ns": "999999999999999999"},
+        )
+        self.assertEqual(r.status_code, 409)
+
+    def test_post_write_rejects_numeric_base_mtime(self):
+        base_int = int(self._mtime("content/report_draft_v1.md"))
+        r = self.client.post(
+            f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+            json={"content": "x", "base_mtime_ns": base_int},  # number, 非 str
+        )
+        self.assertEqual(r.status_code, 422)  # pydantic str 字段拒绝 int
+
+    def test_post_write_missing_project_404(self):
+        r = self.client.post(
+            "/api/projects/no-such-project/files/content/report_draft_v1.md",
+            json={"content": "x", "base_mtime_ns": "1"},
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_post_write_serialized_under_request_lock(self):
+        # 持有与聊天同一把 per-project 锁时，POST 必须阻塞到锁释放（CAS 串行化、不丢写）。
+        import backend.chat as chat_mod
+        import threading as _t
+        lock = chat_mod._get_project_request_lock(self.pid)
+        base = self._mtime("content/report_draft_v1.md")
+        done = {"status": None}
+
+        def _save():
+            r = self.client.post(
+                f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+                json={"content": "锁释放后才落盘", "base_mtime_ns": base},
+            )
+            done["status"] = r.status_code
+
+        lock.acquire()
+        try:
+            t = _t.Thread(target=_save)
+            t.start()
+            t.join(timeout=1.0)
+            # 锁未释放：请求应仍在等待，未完成
+            self.assertIsNone(done["status"], "POST 不应在锁被持有时完成")
+        finally:
+            lock.release()
+        t.join(timeout=5.0)
+        self.assertEqual(done["status"], 200)
+        self.assertEqual(
+            (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8"),
+            "锁释放后才落盘",
+        )
+
+    def test_post_write_409_when_file_changed_during_lock_wait(self):
+        # codex 后端审 NIT 1：CAS 核心路径——POST 持锁等待期间，另一路（AI）写了同一文件、
+        # mtime 前移；POST 拿到锁后 stat 复校应检出 stale → 409，绝不用旧 base 覆盖 AI 的写入。
+        import backend.chat as chat_mod
+        import threading as _t
+        rel = "content/report_draft_v1.md"
+        full = self.project_dir / "content" / "report_draft_v1.md"
+        base = self._mtime(rel)
+        lock = chat_mod._get_project_request_lock(self.pid)
+        done = {"status": None}
+
+        def _save():
+            r = self.client.post(
+                f"/api/projects/{self.pid}/files/{rel}",
+                json={"content": "想用旧 base 覆盖", "base_mtime_ns": base},
+            )
+            done["status"] = r.status_code
+
+        lock.acquire()
+        try:
+            t = _t.Thread(target=_save)
+            t.start()
+            t.join(timeout=1.0)
+            self.assertIsNone(done["status"], "POST 不应在锁被持有时完成")
+            # 持锁期间另一路写入同文件并前移 mtime（模拟 AI 在用户保存排队时落盘）
+            full.write_text("AI 在用户保存排队期间写入的新内容", encoding="utf-8")
+            newer = int(base) + 10_000
+            os.utime(full, ns=(newer, newer))
+        finally:
+            lock.release()
+        t.join(timeout=5.0)
+        self.assertEqual(done["status"], 409)
+        # 用户的旧内容没有覆盖 AI 的写入
+        self.assertEqual(full.read_text(encoding="utf-8"), "AI 在用户保存排队期间写入的新内容")
+
+    def test_user_write_runs_on_dedicated_executor_not_anyio_pool(self):
+        # codex 后端 quality NIT：锁死「保存临界区跑专用线程池」。回退到 run_in_threadpool 默认 anyio 池
+        # 会让保存可能复用 chat_stream 的 RLock owner 线程、重入绕过 CAS——而行为测试 catch 不到（旧版
+        # 也能过串行化测试），故用 source 断言守。
+        main_src = (Path(__file__).resolve().parents[1] / "backend" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("_USER_WRITE_EXECUTOR", main_src)
+        self.assertIn("run_in_executor(", main_src)
+        self.assertNotIn("run_in_threadpool(_write_under_lock)", main_src)
+
+    def _write_effective_reports(self):
+        # review_stale gate is _has_effective_review_reports; write reports with
+        # anchors + completion marker + substantive body.
+        eng = self.engine
+        ir_lines = ["# Independent review", ""]
+        for anchor in eng.INDEPENDENT_REVIEW_ANCHORS:
+            ir_lines += [anchor, "审查结论: 已完成实质复核。", "证据说明: 对照正文与资料核验。", ""]
+        ir_lines.append(eng.INDEPENDENT_REVIEW_COMPLETION_MARKER)
+        (self.project_dir / "plan" / "independent-review.md").write_text(
+            "\n".join(ir_lines).strip() + "\n", encoding="utf-8")
+        lint_lines = [
+            "# AI 味自查", "", "## 总览", "结论: 已完成全文表达检查。", "预计修改时间: 30 分钟。",
+            "", "## 按章节排列", "- 执行摘要: 删除空泛形容词。", "- 建议章节: 改为可执行动作。",
+            eng.LINT_REPORT_COMPLETION_MARKER,
+        ]
+        (self.project_dir / "plan" / "lint-report.md").write_text(
+            "\n".join(lint_lines).strip() + "\n", encoding="utf-8")
+
+    def test_workspace_review_stale_after_draft_edit(self):
+        self._write_effective_reports()
+        ir = self.project_dir / "plan" / "independent-review.md"
+        lint = self.project_dir / "plan" / "lint-report.md"
+        draft = self.project_dir / "content" / "report_draft_v1.md"
+        os.utime(ir, ns=(1000, 1000))
+        os.utime(lint, ns=(1500, 1500))
+        os.utime(draft, ns=(2000, 2000))
+        r = self.client.get(f"/api/projects/{self.pid}/workspace")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["flags"]["review_stale"])

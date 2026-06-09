@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from backend.skill import SkillEngine
+from backend.skill import SkillEngine, UserWriteForbiddenError
 
 
 class SkillEngineTests(unittest.TestCase):
@@ -1423,6 +1423,85 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertTrue(self.engine._has_effective_review_reports(project_dir))
 
+    # ── R3 D6: review_stale advisory ────────────────────────────────────────
+
+    def _set_mtime_ns(self, path, ns):
+        os.utime(path, ns=(ns, ns))
+
+    def test_review_stale_true_when_draft_newer_than_oldest_report(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("正文", encoding="utf-8")
+        self._write_independent_review(project_dir)
+        self._write_lint_report(project_dir)
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 1_500)
+        self._set_mtime_ns(draft, 2_000)  # newer than both
+        self.assertTrue(engine._is_report_review_stale(project_dir))
+
+    def test_review_stale_true_when_draft_between_two_reports(self):
+        # NIT 2: spec判定是 draft > min(report mtimes)，不要求比两份都新。
+        project_dir = self._make_project()
+        engine = self.engine
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("正文", encoding="utf-8")
+        self._write_independent_review(project_dir)
+        self._write_lint_report(project_dir)
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(draft, 1_500)  # between the two reports
+        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 2_000)
+        self.assertTrue(engine._is_report_review_stale(project_dir))
+
+    def test_review_stale_false_when_draft_older_than_both(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("正文", encoding="utf-8")
+        self._write_independent_review(project_dir)
+        self._write_lint_report(project_dir)
+        self._set_mtime_ns(draft, 500)
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 1_500)
+        self.assertFalse(engine._is_report_review_stale(project_dir))
+
+    def test_review_stale_false_when_reports_are_only_templates(self):
+        # BLOCKER 1: create_project scaffolds independent-review.md / lint-report.md templates;
+        # template-only (non-effective) + draft update must NOT set stale.
+        project_dir = self._make_project()
+        engine = self.engine
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("正文", encoding="utf-8")
+        # Do NOT write effective reports — keep the scaffolded templates as-is
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 1_000)
+        self._set_mtime_ns(draft, 2_000)
+        self.assertFalse(engine._is_report_review_stale(project_dir))
+
+    def test_review_stale_false_when_only_one_effective_report(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("正文", encoding="utf-8")
+        self._write_independent_review(project_dir)  # only one effective, lint still template
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(draft, 2_000)
+        self.assertFalse(engine._is_report_review_stale(project_dir))
+
+    def test_workspace_summary_exposes_review_stale_flag(self):
+        self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        summary = engine.get_workspace_summary(pid)
+        self.assertIn("review_stale", summary["flags"])
+
+    # ────────────────────────────────────────────────────────────────────────
+
     def test_has_effective_review_checklist_backwards_compat(self):
         project_dir = self._make_project()
         self._write_review_checklist(project_dir)
@@ -2001,6 +2080,133 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("delivery_archived_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_is_user_editable_whitelist_matrix(self):
+        self._make_project()
+        engine = self.engine
+        # 8 个白名单文件可编辑
+        for path in [
+            "content/report_draft_v1.md", "plan/outline.md", "plan/research-plan.md",
+            "plan/notes.md", "plan/references.md", "plan/data-log.md",
+            "plan/analysis-notes.md", "plan/presentation-plan.md",
+        ]:
+            self.assertTrue(engine.is_user_editable(path), f"{path} 应可编辑")
+        # 只读 / 退役 / 未知
+        for path in [
+            "plan/project-overview.md", "plan/independent-review.md", "plan/lint-report.md",
+            "plan/delivery-log.md", "plan/stage-gates.md", "plan/progress.md",
+            "plan/tasks.md", "plan/review.md", "plan/project-info.md",
+            "plan/review-checklist.md", "plan/something-unknown.md", "stage_checkpoints.json",
+        ]:
+            self.assertFalse(engine.is_user_editable(path), f"{path} 应只读")
+
+    def test_is_user_editable_casefolds_full_path(self):
+        # Windows 大小写不敏感：大写变体（含 content/）必须仍判为可编辑（白名单整路径 casefold）
+        self._make_project()
+        self.assertTrue(self.engine.is_user_editable("content/Report_Draft_V1.MD"))
+        self.assertTrue(self.engine.is_user_editable("PLAN/OUTLINE.MD"))
+
+    def test_get_file_semantics_known_and_unknown(self):
+        self._make_project()
+        engine = self.engine
+        self.assertEqual(engine.get_file_semantics("plan/data-log.md"),
+                         {"group": "research", "stage": "S2", "editable": True})
+        self.assertEqual(engine.get_file_semantics("plan/independent-review.md"),
+                         {"group": "review", "stage": "S5", "editable": False})
+        self.assertEqual(engine.get_file_semantics("content/report_draft_v1.md"),
+                         {"group": "draft", "stage": "S4", "editable": True})
+        # 未知 .md → other/None/False
+        self.assertEqual(engine.get_file_semantics("notes/random.md"),
+                         {"group": "other", "stage": None, "editable": False})
+
+    def test_validate_user_write_allow_deny_traversal(self):
+        self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        # allow：返回白名单 canonical（第一参数是 project_ref，会解析真实项目）
+        self.assertEqual(engine.validate_user_write(pid, "plan/outline.md"), "plan/outline.md")
+        self.assertEqual(engine.validate_user_write(pid, "content/report_draft_v1.md"),
+                         "content/report_draft_v1.md")
+        # deny：非白名单 → UserWriteForbiddenError（审查报告 / 后端追踪 / 退役 / checkpoint / 未知）
+        # 用专属异常而非内建 PermissionError，免与 os.replace 的文件占用 PermissionError 混淆。
+        for path in [
+            "plan/independent-review.md", "plan/lint-report.md",
+            "plan/stage-gates.md", "plan/progress.md", "plan/tasks.md",
+            "plan/delivery-log.md", "plan/review.md",
+            "plan/project-overview.md", "plan/project-info.md",
+            "stage_checkpoints.json", "plan/whatever-unknown.md",
+        ]:
+            with self.assertRaises(UserWriteForbiddenError, msg=f"{path} 应拒写"):
+                engine.validate_user_write(pid, path)
+        # 路径穿越 → ValueError
+        with self.assertRaises(ValueError):
+            engine.validate_user_write(pid, "../../../etc/passwd")
+
+    def test_list_workspace_files_semantics_and_skips(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        # 准备文件：正文 + 一份退役 + 一个 materials 同名干扰
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        (project_dir / "content" / "report_draft_v1.md").write_text("正文", encoding="utf-8")
+        (project_dir / "plan" / "project-info.md").write_text("退役", encoding="utf-8")
+        (project_dir / "materials" / "imported").mkdir(parents=True, exist_ok=True)
+        (project_dir / "materials" / "imported" / "outline.md").write_text("材料里的同名文件", encoding="utf-8")
+
+        files = engine.list_workspace_files(pid)
+        by_path = {f["path"]: f for f in files}
+
+        # 退役 / materials 跳过
+        self.assertNotIn("plan/project-info.md", by_path)
+        self.assertNotIn("materials/imported/outline.md", by_path)
+
+        # 正文：draft/S4/可编辑/mtime 是 str
+        draft = by_path["content/report_draft_v1.md"]
+        self.assertEqual(draft["group"], "draft")
+        self.assertEqual(draft["stage"], "S4")
+        self.assertTrue(draft["editable"])
+        self.assertIsInstance(draft["mtime_ns"], str)
+
+        # 重点阶段映射（create_project 已 scaffold 这些 plan 文件）
+        self.assertEqual(by_path["plan/outline.md"]["stage"], "S1")
+        self.assertEqual(by_path["plan/data-log.md"]["stage"], "S2")
+        self.assertEqual(by_path["plan/analysis-notes.md"]["stage"], "S3")
+        self.assertEqual(by_path["plan/presentation-plan.md"]["stage"], "S6")
+        self.assertEqual(by_path["plan/delivery-log.md"]["stage"], "S7")
+        # 审查报告只读
+        self.assertFalse(by_path["plan/independent-review.md"]["editable"])
+        self.assertEqual(by_path["plan/independent-review.md"]["group"], "review")
+        # 后端自动维护文件只读
+        self.assertFalse(by_path["plan/stage-gates.md"]["editable"])
+        self.assertEqual(by_path["plan/stage-gates.md"]["group"], "tracking")
+
+    def test_read_file_with_mtime_returns_str_mtime(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        (project_dir / "content").mkdir(parents=True, exist_ok=True)
+        (project_dir / "content" / "report_draft_v1.md").write_text("正文内容", encoding="utf-8")
+        data = engine.read_file_with_mtime(pid, "content/report_draft_v1.md")
+        self.assertEqual(data["content"], "正文内容")
+        self.assertIsInstance(data["mtime_ns"], str)
+        self.assertTrue(data["mtime_ns"].isdigit())
+
+    def test_write_file_atomic_writes_content_no_temp_residue(self):
+        # BLOCKER 2 回归守卫：write_file 改原子（temp + os.replace）后仍正确写入、且成功路径不留 .tmp。
+        # （torn read 本身竞态难确定性测试；此处守 happy-path 行为 + 清理。）
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        engine.write_file(pid, "plan/notes.md", "原子写入的内容")
+        self.assertEqual((project_dir / "plan" / "notes.md").read_text(encoding="utf-8"),
+                         "原子写入的内容")
+        self.assertEqual(list((project_dir / "plan").glob("*.tmp")), [])
+
+    def test_canonical_draft_edit_no_direct_write_text_in_chat(self):
+        # R2 BLOCKER：canonical draft edit_file 不得再绕过原子 write_file 直接 draft_path.write_text。
+        # 源码守卫——fail-first（改前 chat.py:4238 仍有该直写），3b-2 路由到 write_file 后转绿。
+        chat_src = (Path(__file__).resolve().parents[1] / "backend" / "chat.py").read_text(encoding="utf-8")
+        self.assertNotIn("draft_path.write_text(", chat_src)
 
 
 class S0CheckpointInfrastructureTests(unittest.TestCase):

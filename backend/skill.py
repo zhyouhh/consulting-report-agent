@@ -3,10 +3,29 @@ from pathlib import Path
 import json
 import math
 import mimetypes
+import os
 import re
 import shutil
+import tempfile
 import uuid
 from typing import Iterable, Optional
+
+
+class StaleFileError(Exception):
+    """Raised when a user write's base_mtime_ns no longer matches the file on disk (an AI
+    write or another save landed in between). Carries the current mtime_ns (str) for 409."""
+
+    def __init__(self, current_mtime_ns: str):
+        super().__init__("文件已被更新")
+        self.current_mtime_ns = current_mtime_ns
+
+
+class UserWriteForbiddenError(Exception):
+    """Raised when a user write targets a file outside the editable whitelist — a DOMAIN
+    decision, deliberately NOT the built-in PermissionError. os.replace()/write_text() also
+    raise PermissionError when the target is locked by an external program (Word/OneDrive/AV
+    on Windows); the endpoint must tell that retryable OS failure (→ 500) apart from
+    'this file is not user-editable' (→ 403). (codex backend review BLOCKER)"""
 
 
 class SkillEngine:
@@ -36,6 +55,47 @@ class SkillEngine:
         "presentation-plan.md",
         "delivery-log.md",
     }
+
+    # R3: 文件语义单一真值源。键为「完整相对 posix 路径」（非 basename）——否则
+    # materials/imported/outline.md 会被误判为 S1 正式大纲。stage 是文件级属性（用于置顶）。
+    FILE_SEMANTICS = {
+        "plan/project-overview.md": {"group": "overview", "stage": "S0"},
+        "plan/notes.md": {"group": "research", "stage": "S1"},
+        "plan/references.md": {"group": "research", "stage": "S1"},
+        "plan/data-log.md": {"group": "research", "stage": "S2"},
+        "plan/outline.md": {"group": "analysis", "stage": "S1"},
+        "plan/research-plan.md": {"group": "analysis", "stage": "S1"},
+        "plan/analysis-notes.md": {"group": "analysis", "stage": "S3"},
+        "content/report_draft_v1.md": {"group": "draft", "stage": "S4"},
+        "plan/independent-review.md": {"group": "review", "stage": "S5"},
+        "plan/lint-report.md": {"group": "review", "stage": "S5"},
+        "plan/presentation-plan.md": {"group": "delivery", "stage": "S6"},
+        "plan/delivery-log.md": {"group": "delivery", "stage": "S7"},
+        "plan/stage-gates.md": {"group": "tracking", "stage": None},
+        "plan/progress.md": {"group": "tracking", "stage": None},
+        "plan/tasks.md": {"group": "tracking", "stage": None},
+        "plan/review.md": {"group": "other", "stage": None},
+    }
+
+    # R3: 用户可手动编辑白名单（canonical = casefold 后的完整 posix 相对路径）。默认 deny——
+    # 任何不在此集合的文件（后端自动维护 / 审查报告 / 退役 / checkpoint）都只读。
+    USER_EDITABLE_FILES = {
+        "content/report_draft_v1.md",
+        "plan/outline.md",
+        "plan/research-plan.md",
+        "plan/notes.md",
+        "plan/references.md",
+        "plan/data-log.md",
+        "plan/analysis-notes.md",
+        "plan/presentation-plan.md",
+    }
+
+    # R3: GET /files 跳过的退役文件（不显示）。
+    RETIRED_WORKSPACE_FILES = {
+        "plan/project-info.md",
+        "plan/review-checklist.md",
+    }
+
     STAGE_CHECKPOINTS_FILENAME = "stage_checkpoints.json"
     STAGE_CHECKPOINT_KEYS = {
         "s0_interview_done_at",
@@ -1029,7 +1089,7 @@ class SkillEngine:
         return full_path.read_text(encoding="utf-8")
 
     def write_file(self, project_ref: str, file_path: str, content: str):
-        """鍐欏叆椤圭洰鏂囦欢"""
+        """写入项目文件（原子：同目录 temp + os.replace，避免并发读到写入中间态）"""
         project_path = self.get_project_path(project_ref)
         if not project_path:
             raise ValueError(f"项目 {project_ref} 不存在")
@@ -1037,7 +1097,103 @@ class SkillEngine:
         normalized_path = self.validate_plan_write(project_ref, file_path)
         full_path = self._resolve_project_path(project_path.resolve(), normalized_path)
         full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_text(content, encoding="utf-8")
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=str(full_path.parent), suffix=".tmp")
+        os.close(tmp_fd)
+        try:
+            Path(tmp_name).write_text(content, encoding="utf-8")  # 与原 write_text 同 newline 行为
+            os.replace(tmp_name, full_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+
+    def list_workspace_files(self, project_ref: str) -> list[dict]:
+        """R3: structured workspace file list for the front-end file tree.
+        Skips retired files and everything under materials/. Each .md → {path, group,
+        stage, editable, mtime_ns}. mtime_ns is a str (opaque — never coerce to Number;
+        JS loses precision past 2^53)."""
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            raise ValueError(f"项目 {project_ref} 不存在")
+
+        files = []
+        for md_file in project_path.rglob("*.md"):
+            rel_path = self._to_posix(md_file.relative_to(project_path)).lstrip("/")
+            if rel_path in self.RETIRED_WORKSPACE_FILES:
+                continue
+            if rel_path.startswith("materials/"):
+                continue
+            try:
+                mtime_ns = str(md_file.stat().st_mtime_ns)
+            except OSError:
+                # 文件在 rglob 枚举后、stat 前被并发删除/改名（AI 改写期间）——跳过，
+                # 不让整个列表 500；刷新自愈。
+                continue
+            semantics = self.get_file_semantics(rel_path)
+            files.append({
+                "path": rel_path,
+                "group": semantics["group"],
+                "stage": semantics["stage"],
+                "editable": semantics["editable"],
+                "mtime_ns": mtime_ns,
+            })
+        return files
+
+    def read_file_with_mtime(self, project_ref: str, file_path: str) -> dict:
+        """R3: content + mtime_ns for the edit base. NO lock here (the per-project request
+        lock is held by chat_stream for a full turn — locking reads would freeze preview).
+        stat BEFORE read so the returned base_mtime is never NEWER than the bytes returned:
+        if an AI write interleaves, the worst case is a safe 409 on save (user reloads),
+        never a silent overwrite. The AI writes EDITABLE files only via the atomic write_file
+        (os.replace), so a no-lock read of an editable file never sees a half-written one.
+        (Read-only tracking files are still direct-written; a rare torn preview self-heals on
+        reload — they are never editable nor in the save/CAS path.)"""
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            raise ValueError(f"项目 {project_ref} 不存在")
+        full_path = self._resolve_project_path(project_path, file_path)
+        if not full_path.exists():
+            raise ValueError(f"文件 {file_path} 不存在")
+        mtime_ns = str(full_path.stat().st_mtime_ns)
+        content = full_path.read_text(encoding="utf-8")
+        return {"content": content, "mtime_ns": mtime_ns}
+
+    def user_write_file(self, project_ref: str, file_path: str, content: str,
+                        base_mtime_ns: str) -> str:
+        """R3: atomic user write with mtime CAS. Caller MUST hold the per-project request
+        lock (shared with chat writes) so the stat→replace window is not racing an AI write.
+        Returns new mtime_ns (str). Raises:
+          - ValueError('非法的文件路径') on traversal           → endpoint 400
+          - UserWriteForbiddenError on non-whitelisted file     → endpoint 403
+          - FileNotFoundError on missing file                   → endpoint 404
+          - StaleFileError on mtime mismatch                    → endpoint 409
+          - OSError on the atomic write itself (target locked)  → endpoint 500
+        """
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            raise ValueError(f"项目 {project_ref} 不存在")
+        canonical = self.validate_user_write(project_ref, file_path)  # UserWriteForbiddenError / ValueError
+        full_path = self._resolve_project_path(project_path.resolve(), canonical)
+        if not full_path.exists():
+            raise FileNotFoundError(f"文件 {canonical} 不存在")
+        current_mtime_ns = str(full_path.stat().st_mtime_ns)
+        if current_mtime_ns != base_mtime_ns:
+            raise StaleFileError(current_mtime_ns)
+        # 原子写：同目录 temp + os.replace（与 write_file 同款，newline 行为一致）
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=str(full_path.parent), suffix=".tmp")
+        os.close(tmp_fd)
+        try:
+            Path(tmp_name).write_text(content, encoding="utf-8")
+            os.replace(tmp_name, full_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+        return str(full_path.stat().st_mtime_ns)
 
     def normalize_file_path(self, project_ref: str, file_path: str) -> str:
         project_path = self.get_project_path(project_ref)
@@ -1083,6 +1239,41 @@ class SkillEngine:
             )
 
         return normalized_path
+
+    def _canonical_user_path(self, normalized_path: str) -> str:
+        # 注意：不复用 _canonicalize_plan_markdown_path（它只 lower plan/*.md，content/ 不动）。
+        # 这里对整条 posix 相对路径统一 casefold——Windows 文件系统大小写不敏感，
+        # content/Report_Draft_V1.MD 必须与 content/report_draft_v1.md 判为同一文件。
+        return self._to_posix(normalized_path).lstrip("/").casefold()
+
+    def is_user_editable(self, normalized_path: str) -> bool:
+        return self._canonical_user_path(normalized_path) in self.USER_EDITABLE_FILES
+
+    def get_file_semantics(self, normalized_path: str) -> dict:
+        """Map a normalized relative path to {group, stage, editable}.
+        Unknown .md → group='other', stage=None, editable=False."""
+        canonical = self._canonical_user_path(normalized_path)
+        semantics = self.FILE_SEMANTICS.get(canonical, {"group": "other", "stage": None})
+        return {
+            "group": semantics["group"],
+            "stage": semantics["stage"],
+            "editable": canonical in self.USER_EDITABLE_FILES,
+        }
+
+    def validate_user_write(self, project_ref: str, file_path: str) -> str:
+        """R3: independent whitelist gate for USER (HTTP) writes — NOT validate_plan_write
+        (that carries the LLM-only pre-outline evidence gate and does not itself deny
+        independent-review/lint-report; those live in the chat tool layer the HTTP endpoint
+        never reaches). Whitelist = default-deny.
+        Path traversal → ValueError (endpoint 400). Not whitelisted → UserWriteForbiddenError
+        (403) — a distinct type, NOT PermissionError, so a filesystem PermissionError from the
+        actual write is not misread as a whitelist denial.
+        Returns the whitelist canonical path so the write target is stable across casing."""
+        normalized = self.normalize_file_path(project_ref, file_path)  # 穿越路径在此抛 ValueError
+        canonical = self._canonical_user_path(normalized)
+        if canonical not in self.USER_EDITABLE_FILES:
+            raise UserWriteForbiddenError(f"`{normalized}` 不可由用户手动编辑")
+        return canonical
 
     def _delivery_log_has_placeholder_feedback(self, content: str) -> bool:
         if self._DELIVERY_PLACEHOLDER_INLINE.search(content):
@@ -1242,7 +1433,10 @@ class SkillEngine:
             "length_targets": length_targets,
             "length_fallback_used": length_targets.get("fallback_used", False),
             "quality_progress": self._build_quality_progress(project_path, stage_state),
-            "flags": stage_state.get("flags", {}),
+            "flags": {
+                **stage_state.get("flags", {}),
+                "review_stale": self._is_report_review_stale(project_path),
+            },
             "next_stage_hint": next_stage_hint,
             "stalled_since": stalled_since,
             "word_count": self._current_report_word_count(project_path),
@@ -2033,6 +2227,25 @@ class SkillEngine:
             self._has_effective_independent_review(project_path)
             and self._has_effective_lint_report(project_path)
         )
+
+    def _is_report_review_stale(self, project_path: Path) -> bool:
+        """R3 D6 advisory: both review reports are EFFECTIVE (substantive, not the scaffolded
+        template — BLOCKER 1) AND the draft is newer than the OLDER report. NOT gated on
+        review_passed_at — covers the window where reports exist, the draft was edited, but the
+        user hasn't clicked 审查通过 yet (review_passed_at unset; record_stage_checkpoint only
+        checks report structure, not whether they cover the current draft)."""
+        draft_path = project_path / self.REPORT_DRAFT_PATH
+        if not draft_path.exists():
+            return False
+        # Templates only (new-project scaffold of independent-review.md / lint-report.md) don't
+        # count — both must be effective reports, reusing the production gate.
+        if not self._has_effective_review_reports(project_path):
+            return False
+        ir_path = project_path / "plan" / "independent-review.md"
+        lint_path = project_path / "plan" / "lint-report.md"
+        draft_mtime = draft_path.stat().st_mtime_ns
+        oldest_report_mtime = min(ir_path.stat().st_mtime_ns, lint_path.stat().st_mtime_ns)
+        return draft_mtime > oldest_report_mtime
 
     def _has_effective_review_notes(self, project_path: Path) -> bool:
         review_text = self._read_plan_file(project_path, "review.md")
