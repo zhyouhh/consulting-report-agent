@@ -20,6 +20,14 @@ class StaleFileError(Exception):
         self.current_mtime_ns = current_mtime_ns
 
 
+class UserWriteForbiddenError(Exception):
+    """Raised when a user write targets a file outside the editable whitelist — a DOMAIN
+    decision, deliberately NOT the built-in PermissionError. os.replace()/write_text() also
+    raise PermissionError when the target is locked by an external program (Word/OneDrive/AV
+    on Windows); the endpoint must tell that retryable OS failure (→ 500) apart from
+    'this file is not user-editable' (→ 403). (codex backend review BLOCKER)"""
+
+
 class SkillEngine:
     """咨询技能工作流引擎"""
 
@@ -1117,13 +1125,19 @@ class SkillEngine:
                 continue
             if rel_path.startswith("materials/"):
                 continue
+            try:
+                mtime_ns = str(md_file.stat().st_mtime_ns)
+            except OSError:
+                # 文件在 rglob 枚举后、stat 前被并发删除/改名（AI 改写期间）——跳过，
+                # 不让整个列表 500；刷新自愈。
+                continue
             semantics = self.get_file_semantics(rel_path)
             files.append({
                 "path": rel_path,
                 "group": semantics["group"],
                 "stage": semantics["stage"],
                 "editable": semantics["editable"],
-                "mtime_ns": str(md_file.stat().st_mtime_ns),
+                "mtime_ns": mtime_ns,
             })
         return files
 
@@ -1151,15 +1165,16 @@ class SkillEngine:
         """R3: atomic user write with mtime CAS. Caller MUST hold the per-project request
         lock (shared with chat writes) so the stat→replace window is not racing an AI write.
         Returns new mtime_ns (str). Raises:
-          - ValueError('非法的文件路径') on traversal       → endpoint 400
-          - PermissionError on non-whitelisted file         → endpoint 403
-          - FileNotFoundError on missing file               → endpoint 404
-          - StaleFileError on mtime mismatch                → endpoint 409
+          - ValueError('非法的文件路径') on traversal           → endpoint 400
+          - UserWriteForbiddenError on non-whitelisted file     → endpoint 403
+          - FileNotFoundError on missing file                   → endpoint 404
+          - StaleFileError on mtime mismatch                    → endpoint 409
+          - OSError on the atomic write itself (target locked)  → endpoint 500
         """
         project_path = self.get_project_path(project_ref)
         if not project_path:
             raise ValueError(f"项目 {project_ref} 不存在")
-        canonical = self.validate_user_write(project_ref, file_path)  # PermissionError / ValueError
+        canonical = self.validate_user_write(project_ref, file_path)  # UserWriteForbiddenError / ValueError
         full_path = self._resolve_project_path(project_path.resolve(), canonical)
         if not full_path.exists():
             raise FileNotFoundError(f"文件 {canonical} 不存在")
@@ -1250,12 +1265,14 @@ class SkillEngine:
         (that carries the LLM-only pre-outline evidence gate and does not itself deny
         independent-review/lint-report; those live in the chat tool layer the HTTP endpoint
         never reaches). Whitelist = default-deny.
-        Path traversal → ValueError (endpoint 400). Not whitelisted → PermissionError (403).
+        Path traversal → ValueError (endpoint 400). Not whitelisted → UserWriteForbiddenError
+        (403) — a distinct type, NOT PermissionError, so a filesystem PermissionError from the
+        actual write is not misread as a whitelist denial.
         Returns the whitelist canonical path so the write target is stable across casing."""
         normalized = self.normalize_file_path(project_ref, file_path)  # 穿越路径在此抛 ValueError
         canonical = self._canonical_user_path(normalized)
         if canonical not in self.USER_EDITABLE_FILES:
-            raise PermissionError(f"`{normalized}` 不可由用户手动编辑")
+            raise UserWriteForbiddenError(f"`{normalized}` 不可由用户手动编辑")
         return canonical
 
     def _delivery_log_has_placeholder_feedback(self, content: str) -> bool:

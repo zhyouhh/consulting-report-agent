@@ -1931,6 +1931,41 @@ class R3FileApiTests(unittest.TestCase):
             "锁释放后才落盘",
         )
 
+    def test_post_write_409_when_file_changed_during_lock_wait(self):
+        # codex 后端审 NIT 1：CAS 核心路径——POST 持锁等待期间，另一路（AI）写了同一文件、
+        # mtime 前移；POST 拿到锁后 stat 复校应检出 stale → 409，绝不用旧 base 覆盖 AI 的写入。
+        import backend.chat as chat_mod
+        import threading as _t
+        rel = "content/report_draft_v1.md"
+        full = self.project_dir / "content" / "report_draft_v1.md"
+        base = self._mtime(rel)
+        lock = chat_mod._get_project_request_lock(self.pid)
+        done = {"status": None}
+
+        def _save():
+            r = self.client.post(
+                f"/api/projects/{self.pid}/files/{rel}",
+                json={"content": "想用旧 base 覆盖", "base_mtime_ns": base},
+            )
+            done["status"] = r.status_code
+
+        lock.acquire()
+        try:
+            t = _t.Thread(target=_save)
+            t.start()
+            t.join(timeout=1.0)
+            self.assertIsNone(done["status"], "POST 不应在锁被持有时完成")
+            # 持锁期间另一路写入同文件并前移 mtime（模拟 AI 在用户保存排队时落盘）
+            full.write_text("AI 在用户保存排队期间写入的新内容", encoding="utf-8")
+            newer = int(base) + 10_000
+            os.utime(full, ns=(newer, newer))
+        finally:
+            lock.release()
+        t.join(timeout=5.0)
+        self.assertEqual(done["status"], 409)
+        # 用户的旧内容没有覆盖 AI 的写入
+        self.assertEqual(full.read_text(encoding="utf-8"), "AI 在用户保存排队期间写入的新内容")
+
     def _write_effective_reports(self):
         # review_stale gate is _has_effective_review_reports; write reports with
         # anchors + completion marker + substantive body.

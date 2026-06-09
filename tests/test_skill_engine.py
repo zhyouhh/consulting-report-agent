@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from backend.skill import SkillEngine
+from backend.skill import SkillEngine, UserWriteForbiddenError
 
 
 class SkillEngineTests(unittest.TestCase):
@@ -2127,7 +2127,8 @@ class SkillEngineTests(unittest.TestCase):
         self.assertEqual(engine.validate_user_write(pid, "plan/outline.md"), "plan/outline.md")
         self.assertEqual(engine.validate_user_write(pid, "content/report_draft_v1.md"),
                          "content/report_draft_v1.md")
-        # deny：非白名单 → PermissionError（审查报告 / 后端追踪 / 退役 / checkpoint / 未知）
+        # deny：非白名单 → UserWriteForbiddenError（审查报告 / 后端追踪 / 退役 / checkpoint / 未知）
+        # 用专属异常而非内建 PermissionError，免与 os.replace 的文件占用 PermissionError 混淆。
         for path in [
             "plan/independent-review.md", "plan/lint-report.md",
             "plan/stage-gates.md", "plan/progress.md", "plan/tasks.md",
@@ -2135,7 +2136,7 @@ class SkillEngineTests(unittest.TestCase):
             "plan/project-overview.md", "plan/project-info.md",
             "stage_checkpoints.json", "plan/whatever-unknown.md",
         ]:
-            with self.assertRaises(PermissionError, msg=f"{path} 应拒写"):
+            with self.assertRaises(UserWriteForbiddenError, msg=f"{path} 应拒写"):
                 engine.validate_user_write(pid, path)
         # 路径穿越 → ValueError
         with self.assertRaises(ValueError):

@@ -39,7 +39,7 @@ from .report_tools import (
     run_lint_report,
     run_quality_check,
 )
-from .skill import SkillEngine, StaleFileError
+from .skill import SkillEngine, StaleFileError, UserWriteForbiddenError
 
 
 logging.basicConfig(
@@ -338,7 +338,7 @@ async def write_user_file(project_id: str, file_path: str, payload: UserFileWrit
 
     try:
         return await run_in_threadpool(_write_under_lock)
-    except PermissionError:
+    except UserWriteForbiddenError:
         raise HTTPException(status_code=403, detail="该文件不可编辑")
     except StaleFileError:
         raise HTTPException(
@@ -346,10 +346,18 @@ async def write_user_file(project_id: str, file_path: str, payload: UserFileWrit
             detail="文件已被更新（可能是 AI 刚写过），请重新加载后再编辑",
         )
     except FileNotFoundError:
+        # OSError 子类，必须排在下面 except OSError 之前
         raise HTTPException(status_code=404, detail="文件不存在")
     except ValueError:
         # 剩余 ValueError = 路径穿越（非法的文件路径）
         raise HTTPException(status_code=400, detail="非法的文件路径")
+    except OSError:
+        # os.replace/write_text 失败（Windows 上文件被外部编辑器/同步盘/杀毒占用等）——
+        # 该文件可编辑、只是临时写不进，给可重试提示，别误报成 403「不可编辑」。
+        raise HTTPException(
+            status_code=500,
+            detail="文件写入失败（可能被外部程序占用），请关闭后重试",
+        )
 
 
 @app.get("/api/projects/{project_id}/workspace")
