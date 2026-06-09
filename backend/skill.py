@@ -36,6 +36,47 @@ class SkillEngine:
         "presentation-plan.md",
         "delivery-log.md",
     }
+
+    # R3: 文件语义单一真值源。键为「完整相对 posix 路径」（非 basename）——否则
+    # materials/imported/outline.md 会被误判为 S1 正式大纲。stage 是文件级属性（用于置顶）。
+    FILE_SEMANTICS = {
+        "plan/project-overview.md": {"group": "overview", "stage": "S0"},
+        "plan/notes.md": {"group": "research", "stage": "S1"},
+        "plan/references.md": {"group": "research", "stage": "S1"},
+        "plan/data-log.md": {"group": "research", "stage": "S2"},
+        "plan/outline.md": {"group": "analysis", "stage": "S1"},
+        "plan/research-plan.md": {"group": "analysis", "stage": "S1"},
+        "plan/analysis-notes.md": {"group": "analysis", "stage": "S3"},
+        "content/report_draft_v1.md": {"group": "draft", "stage": "S4"},
+        "plan/independent-review.md": {"group": "review", "stage": "S5"},
+        "plan/lint-report.md": {"group": "review", "stage": "S5"},
+        "plan/presentation-plan.md": {"group": "delivery", "stage": "S6"},
+        "plan/delivery-log.md": {"group": "delivery", "stage": "S7"},
+        "plan/stage-gates.md": {"group": "tracking", "stage": None},
+        "plan/progress.md": {"group": "tracking", "stage": None},
+        "plan/tasks.md": {"group": "tracking", "stage": None},
+        "plan/review.md": {"group": "other", "stage": None},
+    }
+
+    # R3: 用户可手动编辑白名单（canonical = casefold 后的完整 posix 相对路径）。默认 deny——
+    # 任何不在此集合的文件（后端自动维护 / 审查报告 / 退役 / checkpoint）都只读。
+    USER_EDITABLE_FILES = {
+        "content/report_draft_v1.md",
+        "plan/outline.md",
+        "plan/research-plan.md",
+        "plan/notes.md",
+        "plan/references.md",
+        "plan/data-log.md",
+        "plan/analysis-notes.md",
+        "plan/presentation-plan.md",
+    }
+
+    # R3: GET /files 跳过的退役文件（不显示）。
+    RETIRED_WORKSPACE_FILES = {
+        "plan/project-info.md",
+        "plan/review-checklist.md",
+    }
+
     STAGE_CHECKPOINTS_FILENAME = "stage_checkpoints.json"
     STAGE_CHECKPOINT_KEYS = {
         "s0_interview_done_at",
@@ -1083,6 +1124,39 @@ class SkillEngine:
             )
 
         return normalized_path
+
+    def _canonical_user_path(self, normalized_path: str) -> str:
+        # 注意：不复用 _canonicalize_plan_markdown_path（它只 lower plan/*.md，content/ 不动）。
+        # 这里对整条 posix 相对路径统一 casefold——Windows 文件系统大小写不敏感，
+        # content/Report_Draft_V1.MD 必须与 content/report_draft_v1.md 判为同一文件。
+        return self._to_posix(normalized_path).lstrip("/").casefold()
+
+    def is_user_editable(self, normalized_path: str) -> bool:
+        return self._canonical_user_path(normalized_path) in self.USER_EDITABLE_FILES
+
+    def get_file_semantics(self, normalized_path: str) -> dict:
+        """Map a normalized relative path to {group, stage, editable}.
+        Unknown .md → group='other', stage=None, editable=False."""
+        canonical = self._canonical_user_path(normalized_path)
+        semantics = self.FILE_SEMANTICS.get(canonical, {"group": "other", "stage": None})
+        return {
+            "group": semantics["group"],
+            "stage": semantics["stage"],
+            "editable": canonical in self.USER_EDITABLE_FILES,
+        }
+
+    def validate_user_write(self, project_ref: str, file_path: str) -> str:
+        """R3: independent whitelist gate for USER (HTTP) writes — NOT validate_plan_write
+        (that carries the LLM-only pre-outline evidence gate and does not itself deny
+        independent-review/lint-report; those live in the chat tool layer the HTTP endpoint
+        never reaches). Whitelist = default-deny.
+        Path traversal → ValueError (endpoint 400). Not whitelisted → PermissionError (403).
+        Returns the whitelist canonical path so the write target is stable across casing."""
+        normalized = self.normalize_file_path(project_ref, file_path)  # 穿越路径在此抛 ValueError
+        canonical = self._canonical_user_path(normalized)
+        if canonical not in self.USER_EDITABLE_FILES:
+            raise PermissionError(f"`{normalized}` 不可由用户手动编辑")
+        return canonical
 
     def _delivery_log_has_placeholder_feedback(self, content: str) -> bool:
         if self._DELIVERY_PLACEHOLDER_INLINE.search(content):

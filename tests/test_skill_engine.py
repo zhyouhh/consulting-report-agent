@@ -2002,6 +2002,66 @@ class SkillEngineTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn("delivery_archived_at", self.engine._load_stage_checkpoints(project_dir))
 
+    def test_is_user_editable_whitelist_matrix(self):
+        self._make_project()
+        engine = self.engine
+        # 8 个白名单文件可编辑
+        for path in [
+            "content/report_draft_v1.md", "plan/outline.md", "plan/research-plan.md",
+            "plan/notes.md", "plan/references.md", "plan/data-log.md",
+            "plan/analysis-notes.md", "plan/presentation-plan.md",
+        ]:
+            self.assertTrue(engine.is_user_editable(path), f"{path} 应可编辑")
+        # 只读 / 退役 / 未知
+        for path in [
+            "plan/project-overview.md", "plan/independent-review.md", "plan/lint-report.md",
+            "plan/delivery-log.md", "plan/stage-gates.md", "plan/progress.md",
+            "plan/tasks.md", "plan/review.md", "plan/project-info.md",
+            "plan/review-checklist.md", "plan/something-unknown.md", "stage_checkpoints.json",
+        ]:
+            self.assertFalse(engine.is_user_editable(path), f"{path} 应只读")
+
+    def test_is_user_editable_casefolds_full_path(self):
+        # Windows 大小写不敏感：大写变体（含 content/）必须仍判为可编辑（白名单整路径 casefold）
+        self._make_project()
+        self.assertTrue(self.engine.is_user_editable("content/Report_Draft_V1.MD"))
+        self.assertTrue(self.engine.is_user_editable("PLAN/OUTLINE.MD"))
+
+    def test_get_file_semantics_known_and_unknown(self):
+        self._make_project()
+        engine = self.engine
+        self.assertEqual(engine.get_file_semantics("plan/data-log.md"),
+                         {"group": "research", "stage": "S2", "editable": True})
+        self.assertEqual(engine.get_file_semantics("plan/independent-review.md"),
+                         {"group": "review", "stage": "S5", "editable": False})
+        self.assertEqual(engine.get_file_semantics("content/report_draft_v1.md"),
+                         {"group": "draft", "stage": "S4", "editable": True})
+        # 未知 .md → other/None/False
+        self.assertEqual(engine.get_file_semantics("notes/random.md"),
+                         {"group": "other", "stage": None, "editable": False})
+
+    def test_validate_user_write_allow_deny_traversal(self):
+        self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        # allow：返回白名单 canonical（第一参数是 project_ref，会解析真实项目）
+        self.assertEqual(engine.validate_user_write(pid, "plan/outline.md"), "plan/outline.md")
+        self.assertEqual(engine.validate_user_write(pid, "content/report_draft_v1.md"),
+                         "content/report_draft_v1.md")
+        # deny：非白名单 → PermissionError（审查报告 / 后端追踪 / 退役 / checkpoint / 未知）
+        for path in [
+            "plan/independent-review.md", "plan/lint-report.md",
+            "plan/stage-gates.md", "plan/progress.md", "plan/tasks.md",
+            "plan/delivery-log.md", "plan/review.md",
+            "plan/project-overview.md", "plan/project-info.md",
+            "stage_checkpoints.json", "plan/whatever-unknown.md",
+        ]:
+            with self.assertRaises(PermissionError, msg=f"{path} 应拒写"):
+                engine.validate_user_write(pid, path)
+        # 路径穿越 → ValueError
+        with self.assertRaises(ValueError):
+            engine.validate_user_write(pid, "../../../etc/passwd")
+
 
 class S0CheckpointInfrastructureTests(unittest.TestCase):
     def test_s0_in_stage_checkpoint_keys(self):
