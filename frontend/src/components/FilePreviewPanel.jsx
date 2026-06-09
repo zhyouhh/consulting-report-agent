@@ -71,6 +71,9 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
   const [leaveDialog, setLeaveDialog] = useState(null) // null | { action }
   const editRef = useRef(edit)
   editRef.current = edit
+  // 跟踪「实时」当前文件：异步回调里闭包捕获的 currentFile 会过期，需用 ref 判断 await 期间是否切了文件。
+  const currentFileRef = useRef(currentFile)
+  currentFileRef.current = currentFile
 
   const currentEditable = useMemo(
     () => Boolean(files.find((f) => f.path === currentFile)?.editable),
@@ -134,30 +137,39 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
     return result || { ok: false }
   }, [currentFile, onSaveFile])
 
+  // 撞 409 后「重新加载 / 不动」二选一（reload 决策）——工具栏保存与离开弹窗保存共用，避免重复。
+  const confirmReloadCurrent = useCallback(async () => {
+    const reload = window.confirm('文件已被更新（可能是 AI 刚写过），加载最新内容？本地修改将丢弃。')
+    if (!reload) return
+    try {
+      const fresh = await onReloadFile(currentFile)
+      setEdit((prev) => reloadAfterConflict(prev, { content: fresh.content, mtimeNs: fresh.mtimeNs }))
+    } catch (error) {
+      showError('重新加载失败：' + (error?.message || ''))
+    }
+  }, [currentFile, onReloadFile])
+
   // 工具栏「保存」：存成功留在当前文件；撞 409 给「重新加载 / 不动」二选一（reload 决策，非离开决策）。
   const handleSave = useCallback(async () => {
     const result = await doSave()
     if (result?.ok) return
     if (result?.conflict) {
-      const reload = window.confirm('文件已被更新（可能是 AI 刚写过），加载最新内容？本地修改将丢弃。')
-      if (reload) {
-        try {
-          const fresh = await onReloadFile(currentFile)
-          setEdit((prev) => reloadAfterConflict(prev, { content: fresh.content, mtimeNs: fresh.mtimeNs }))
-        } catch (error) {
-          showError('重新加载失败：' + (error?.message || ''))
-        }
-      }
+      await confirmReloadCurrent()
       return
     }
     showError('保存失败：' + (result?.error || '请重试'))
-  }, [doSave, currentFile, onReloadFile])
+  }, [doSave, confirmReloadCurrent])
 
   const handleEnterEdit = useCallback(async () => {
+    const targetPath = currentFile
     try {
-      const fresh = await onReloadFile(currentFile) // 重新取最新 {content, mtimeNs} 作 base
+      const fresh = await onReloadFile(targetPath) // 重新取最新 {content, mtimeNs} 作 base
+      // 防竞态（codex 前端审 BLOCKER 2）：GET 期间用户可能切了文件（彼时仍预览态、attemptLeave 放行）。
+      // 若已切走，绝不把旧文件内容塞进新文件的编辑器——否则保存会用旧 base 打到新文件、永久 409。
+      if (currentFileRef.current !== targetPath) return
       setEdit((prev) => enterEdit(prev, { content: fresh.content, mtimeNs: fresh.mtimeNs }))
     } catch (error) {
+      if (currentFileRef.current !== targetPath) return // 已切走，别为过期文件弹错误
       showError('无法进入编辑：' + (error?.message || '读取失败'))
     }
   }, [currentFile, onReloadFile])
@@ -183,13 +195,13 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
       dialog.action?.()
       return
     }
-    setLeaveDialog(null)
+    setLeaveDialog(null) // 保存没成 → 不离开，留在编辑态
     if (result?.conflict) {
-      showError('文件已更新（可能是 AI 刚写过），请重新加载后再编辑')
+      await confirmReloadCurrent() // 直接给重载入口（spec §7.2：409 不离开并提示重载）
     } else {
       showError('保存失败：' + (result?.error || '请重试'))
     }
-  }, [leaveDialog, doSave])
+  }, [leaveDialog, doSave, confirmReloadCurrent])
 
   // 离开弹窗「放弃修改」：弃改后执行挂起的离开动作。
   const handleLeaveDiscard = useCallback(() => {
@@ -201,6 +213,16 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
 
   // 离开弹窗「取消」：关窗、留在当前继续编辑。
   const closeLeaveDialog = useCallback(() => setLeaveDialog(null), [])
+
+  // 三按钮弹窗：Esc 等同「取消」（保存中除外）——用户会自然按 Esc 关弹窗（codex 前端审 NIT 1）。
+  useEffect(() => {
+    if (!leaveDialog) return undefined
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !editRef.current.saving) closeLeaveDialog()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [leaveDialog, closeLeaveDialog])
 
   return (
     <div className="flex-1 flex flex-col min-h-0 relative">

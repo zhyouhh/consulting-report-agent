@@ -91,3 +91,24 @@ test("shows review_stale advisory on the draft", () => {
   assert.match(s, /reviewStale/);
   assert.match(s, /建议重新审查/);
 });
+
+test("enter-edit guards against file switch during async reload (codex BLOCKER 2)", () => {
+  const s = src();
+  assert.match(s, /const currentFileRef = useRef/);
+  assert.match(s, /const targetPath = currentFile/);
+  // GET 期间切走就放弃，绝不把旧内容塞进新文件的编辑器
+  assert.match(s, /currentFileRef\.current !== targetPath/);
+});
+
+test("toolbar save and leave-dialog save share confirmReloadCurrent on 409 (codex NIT 3)", () => {
+  const s = src();
+  assert.match(s, /const confirmReloadCurrent = useCallback/);
+  // 两处 409 分支都复用同一 reload 决策
+  assert.match(s, /await confirmReloadCurrent\(\)/);
+});
+
+test("three-button dialog closes on Escape = 取消 (codex NIT 1)", () => {
+  const s = src();
+  assert.match(s, /['"]Escape['"]/);
+  assert.match(s, /closeLeaveDialog\(\)/);
+});

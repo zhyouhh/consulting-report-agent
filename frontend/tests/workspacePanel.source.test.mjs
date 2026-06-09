@@ -79,3 +79,11 @@ test("App guards workspace-panel toggle (hide unmounts editor) before hiding (R2
   // 守卫只在「当前显示且要隐藏」时拦截，dirty 则把隐藏挂起到三按钮弹窗
   assert.match(s, /showWorkspacePanel && wp\?\.attemptLeave/);
 });
+
+test("App createProject switches to the new project through attemptLeave guard (codex BLOCKER 1)", () => {
+  const s = appSrc();
+  assert.match(s, /const createProject = async/);
+  // 创建成功后切到新项目必须经 dirty guard：loadProjects(createdProject.id) 包在 proceed 里、由 attemptLeave 决定执行时机
+  assert.match(s, /const proceed = async \(\) => \{[\s\S]*?loadProjects\(createdProject\.id\)[\s\S]*?\}/);
+  assert.match(s, /wp\.attemptLeave\(proceed\)/);
+});

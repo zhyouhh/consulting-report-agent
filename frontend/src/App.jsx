@@ -148,8 +148,14 @@ function App() {
       const res = await axios.post('/api/projects', info)
       const createdProject = res.data.project
 
-      await loadProjects(createdProject.id)
-      setWorkspaceRefreshToken(prev => prev + 1)
+      // 切到新项目也是一条「离开当前编辑」的路径，必须过 dirty guard（与 handleSelectProject 同）——
+      // 否则编辑态下点「新建报告」会让旧草稿悬挂、之后保存打到新项目（codex 前端审 BLOCKER 1）。
+      const proceed = async () => {
+        await loadProjects(createdProject.id)
+        setWorkspaceRefreshToken(prev => prev + 1)
+      }
+      const wp = workspacePanelRef.current
+      if (wp?.attemptLeave) { wp.attemptLeave(proceed) } else { await proceed() }
       return true
     } catch (error) {
       console.error('创建项目失败:', error)
