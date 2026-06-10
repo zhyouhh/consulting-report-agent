@@ -110,6 +110,15 @@ class SkillEngine:
         "delivery_archived_at",
     }
     MIGRATION_MARKER_KEY = "__migrated_at"
+    METHODOLOGY_SNAPSHOT_KEY = "__methodology_snapshot"
+    # 非 checkpoint 的受保护内部 string 键集合（确认时快照的方法论 + migration marker）。
+    # 绝不加进 STAGE_CHECKPOINT_KEYS——那个有 `set(_CASCADE_ORDER) == STAGE_CHECKPOINT_KEYS`
+    # 的 invariant assert（:117），加了即炸（红队 R3）。_load_stage_checkpoints 只返回
+    # STAGE_CHECKPOINT_KEYS 的 str，故这些键天然不经 get_workspace_summary 暴露给前端。
+    PRESERVED_STAGE_CHECKPOINT_STRING_KEYS = {MIGRATION_MARKER_KEY, METHODOLOGY_SNAPSHOT_KEY}
+    assert not (PRESERVED_STAGE_CHECKPOINT_STRING_KEYS & STAGE_CHECKPOINT_KEYS), (
+        "preserved string keys must never overlap STAGE_CHECKPOINT_KEYS"
+    )
     _CASCADE_ORDER = [
         "s0_interview_done_at",
         "outline_confirmed_at",
@@ -387,10 +396,21 @@ class SkillEngine:
 
     def _write_raw_stage_checkpoints(self, project_path, data):
         checkpoints_path = self._stage_checkpoints_path(project_path)
-        checkpoints_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        checkpoints_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        # 原子写：同目录唯一 temp（mkstemp，避免固定 temp 名被并发 writer 抢占，对齐
+        # user_write_file 模式）+ os.replace；异常清理自己的 temp（codex B4 quality/红队）。
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=str(checkpoints_path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            os.replace(tmp_name, checkpoints_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def _backfill_stage_checkpoints_if_missing(self, project_path):
         """Schema-incremental migration for stage_checkpoints.json.
@@ -450,6 +470,13 @@ class SkillEngine:
                 pass
 
         if changed:
+            # 写回前重读 PRESERVED 键合并，避免覆盖并发写入的 snapshot/marker（红队 B4 BLOCKER 3
+            # 纵深防御；注：确认大纲那刻 backfill 通常 changed=False[s0 已在、stage<S2 不补 outline]，
+            # 实际并发窗口窄）。backfill 不改 PRESERVED 键，重读最新值合并即可。
+            latest = self._read_raw_stage_checkpoints(project_path)
+            for preserved_key in self.PRESERVED_STAGE_CHECKPOINT_STRING_KEYS:
+                if preserved_key in latest:
+                    raw[preserved_key] = latest[preserved_key]
             self._write_raw_stage_checkpoints(project_path, raw)
 
     def _clear_stage_checkpoint_cascade(self, project_path, key):
@@ -470,6 +497,15 @@ class SkillEngine:
             payload = dict(checkpoints)
             if marker:
                 payload[self.MIGRATION_MARKER_KEY] = marker
+            # R5: 方法论快照仅当被清范围**不含** outline_confirmed_at 时保留（红队 R2）。
+            # 清 outline_confirmed_at 本身（或上游 s0）→ 删快照；清 review_*/下游 → 保留，
+            # 否则用户 S5「回去改」会丢快照、S2–S4 退回 default。
+            snapshot = raw.get(self.METHODOLOGY_SNAPSHOT_KEY)
+            if (
+                isinstance(snapshot, str)
+                and "outline_confirmed_at" not in self._CASCADE_ORDER[start:]
+            ):
+                payload[self.METHODOLOGY_SNAPSHOT_KEY] = snapshot
             self._write_raw_stage_checkpoints(project_path, payload)
 
     def _save_stage_checkpoint(self, project_path, key):
@@ -1747,6 +1783,14 @@ class SkillEngine:
             if action == "set":
                 self._validate_stage_checkpoint_transition(project_path, key)
                 timestamp = self._save_stage_checkpoint(project_path, key)
+                # R5: 确认大纲时若当前无有效方法论快照（首次确认 / 上次快照写入失败留下的半提交）
+                # → 写/补快照；已有有效快照则不重写（防确认后改 outline 声明行静默换方法论，红队
+                # BLOCKER 2）。用「当前快照状态」而非「是否首次确认」判定，使快照写入失败后下次确认
+                # 可自愈补写，消除两阶段写的永久半提交不一致（codex B4 红队 BLOCKER）。
+                if key == "outline_confirmed_at":
+                    snap_state, _ = self.read_confirmed_methodology_snapshot(project_path)
+                    if snap_state != "parsed":
+                        self._snapshot_methodology_on_confirm(project_path)
                 self._sync_stage_tracking_files(project_path)
                 return {"status": "ok", "key": key, "timestamp": timestamp}
             self._clear_stage_checkpoint_cascade(project_path, key)
@@ -2522,6 +2566,52 @@ class SkillEngine:
                 seen.add(key)
                 deduped.append(name)
         return ("parsed", deduped)
+
+    def _get_project_type_for_path(self, project_path: Path) -> Optional[str]:
+        """按 project_dir 反查 project_type（registry 字段）。build_methodology_block 有
+        project_id 直接取；确认门/快照只有 project_path，用本 helper 反查（门禁/注入同源口径）。"""
+        try:
+            target = Path(project_path).resolve()
+        except OSError:
+            target = Path(project_path)
+        for project in self._load_registry()["projects"]:
+            project_dir = project.get("project_dir")
+            if not project_dir:
+                continue
+            try:
+                if Path(project_dir).resolve() == target:
+                    return project.get("project_type")
+            except OSError:
+                continue
+        return None
+
+    def read_confirmed_methodology_snapshot(self, project_path) -> tuple[str, list[str]]:
+        """读「确认大纲那刻」冻结的方法论快照（非活 outline，跨轮/跨压缩稳定）。
+        返回 (parsed/missing, frameworks)。快照仅在 _snapshot_methodology_on_confirm 解析为
+        parsed 时写入（malformed/missing 不写），故读取只有 parsed/missing 两态。"""
+        raw = self._read_raw_stage_checkpoints(project_path)
+        snapshot = raw.get(self.METHODOLOGY_SNAPSHOT_KEY)
+        if not isinstance(snapshot, str) or not snapshot.strip():
+            return ("missing", [])
+        frameworks = [token.strip() for token in snapshot.split("、") if token.strip()]
+        if not frameworks:
+            return ("missing", [])
+        return ("parsed", frameworks)
+
+    def _snapshot_methodology_on_confirm(self, project_path: Path) -> None:
+        """确认大纲那刻：解析+净化 outline 声明，冻结进 __methodology_snapshot 保留键。
+        未知 type / 无有效声明 → 不写（S2–S4 注入靠 read_confirmed_methodology_snapshot 的
+        missing 兜底）。后端写、非模型写、非新 checkpoint key。"""
+        project_type = self._get_project_type_for_path(project_path)
+        if project_type not in self.TYPE_SKELETON_MAP:
+            return
+        outline_text = self._read_plan_file(project_path, "outline.md") or ""
+        state, selected = self.parse_and_sanitize_methodology(outline_text)
+        if state != "parsed" or not selected:
+            return
+        raw = self._read_raw_stage_checkpoints(project_path)
+        raw[self.METHODOLOGY_SNAPSHOT_KEY] = "、".join(selected)
+        self._write_raw_stage_checkpoints(project_path, raw)
 
     def get_skill_prompt(self) -> str:
         """鑾峰彇Skill瀹氫箟"""

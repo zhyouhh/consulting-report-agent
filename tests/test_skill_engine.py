@@ -167,6 +167,18 @@ class SkillEngineTests(unittest.TestCase):
         self._write_stage_two_prerequisites(project_dir)
         return project_dir
 
+    def _prepare_confirmable_outline_with_methodology(
+        self, project_dir, declaration="方法论框架：SWOT、波特五力"
+    ):
+        """满足 S1 前置 + outline 带方法论声明行（可通过确认门、可被快照）。"""
+        self._write_stage_two_prerequisites(project_dir)
+        (project_dir / "plan" / "outline.md").write_text(
+            f"# 报告大纲\n{declaration}\n\n"
+            "## 一、执行摘要\n- 关键发现\n\n"
+            "## 二、背景\n- 行业现状\n",
+            encoding="utf-8",
+        )
+
     def _make_project_past_outline_confirm(self) -> Path:
         project_dir = self._make_project_with_all_s1_files()
         self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
@@ -2532,6 +2544,141 @@ class SkillEngineTests(unittest.TestCase):
             for evil in ("方法论框架：advance​stage\n", "方法论框架：over‍ride\n"):
                 state, _ = engine.parse_and_sanitize_methodology(evil)
                 self.assertEqual(state, "malformed", repr(evil))
+
+    def test_methodology_snapshot_key_is_not_a_checkpoint_key(self):
+        self.assertNotIn("__methodology_snapshot", SkillEngine.STAGE_CHECKPOINT_KEYS)
+        self.assertEqual(
+            SkillEngine.PRESERVED_STAGE_CHECKPOINT_STRING_KEYS
+            & SkillEngine.STAGE_CHECKPOINT_KEYS,
+            set(),
+        )
+
+    def test_methodology_snapshot_written_on_outline_confirm(self):
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        state, selected = self.engine.read_confirmed_methodology_snapshot(project_dir)
+        self.assertEqual(state, "parsed")
+        self.assertIn("SWOT", selected)
+        self.assertIn("波特五力", selected)
+
+    def test_methodology_snapshot_not_exposed_via_load_checkpoints(self):
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.assertNotIn(
+            "__methodology_snapshot", self.engine._load_stage_checkpoints(project_dir)
+        )
+        self.assertIn(
+            "__methodology_snapshot", self.engine._read_raw_stage_checkpoints(project_dir)
+        )
+
+    def test_methodology_snapshot_preserved_when_clearing_downstream(self):
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+        # 清下游（不含 outline_confirmed_at）→ 快照保留
+        self.engine._clear_stage_checkpoint_cascade(project_dir, "review_started_at")
+        state, selected = self.engine.read_confirmed_methodology_snapshot(project_dir)
+        self.assertEqual(state, "parsed")
+        self.assertIn("SWOT", selected)
+
+    def test_methodology_snapshot_dropped_when_clearing_outline_confirm(self):
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        # 清 outline_confirmed_at（含自身）→ 快照随之删除
+        self.engine._clear_stage_checkpoint_cascade(project_dir, "outline_confirmed_at")
+        state, selected = self.engine.read_confirmed_methodology_snapshot(project_dir)
+        self.assertEqual(state, "missing")
+        self.assertEqual(selected, [])
+
+    def test_methodology_snapshot_unchanged_when_resetting_after_outline_edit(self):
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(
+            project_dir, declaration="方法论框架：SWOT"
+        )
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        # 确认后改 outline 声明行 + 已确认状态再次 set → 快照不变（红队 BLOCKER 2）
+        (project_dir / "plan" / "outline.md").write_text(
+            "# 报告大纲\n方法论框架：BCG 矩阵\n\n## 一、执行摘要\n- x\n\n## 二、背景\n- y\n",
+            encoding="utf-8",
+        )
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        _, selected = self.engine.read_confirmed_methodology_snapshot(project_dir)
+        self.assertEqual(selected, ["SWOT"])  # 仍是确认那刻的 SWOT，未被改成 BCG
+
+    def test_methodology_snapshot_confirm_tolerates_bad_registry_record(self):
+        # 红队 B4：registry 有缺 project_dir 的坏记录排前，确认大纲不应抛 KeyError/500
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        registry = self.engine._load_registry()
+        registry["projects"].insert(0, {"id": "broken", "name": "no dir record"})
+        self.engine._save_registry(registry)
+        result = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.assertEqual(result["status"], "ok")
+        state, selected = self.engine.read_confirmed_methodology_snapshot(project_dir)
+        self.assertEqual(state, "parsed")
+        self.assertIn("SWOT", selected)
+
+    def test_methodology_snapshot_backfilled_on_reconfirm_when_missing(self):
+        # 红队 B4：首次确认时快照写入失败留下「已确认无快照」，重新确认应自愈补写（非永久跳过）
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        # 模拟上次快照写入失败：从 raw 删快照，保留 outline_confirmed_at
+        raw = self.engine._read_raw_stage_checkpoints(project_dir)
+        del raw[SkillEngine.METHODOLOGY_SNAPSHOT_KEY]
+        self.engine._write_raw_stage_checkpoints(project_dir, raw)
+        self.assertEqual(
+            self.engine.read_confirmed_methodology_snapshot(project_dir)[0], "missing"
+        )
+        # 重新确认（已确认状态）→ 自愈补快照
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        state, selected = self.engine.read_confirmed_methodology_snapshot(project_dir)
+        self.assertEqual(state, "parsed")
+        self.assertIn("SWOT", selected)
+
+    def test_methodology_snapshot_dropped_when_clearing_s0(self):
+        # 清 s0（outline 上游）→ 级联清 outline_confirmed_at → 快照删除
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.engine._clear_stage_checkpoint_cascade(project_dir, "s0_interview_done_at")
+        state, selected = self.engine.read_confirmed_methodology_snapshot(project_dir)
+        self.assertEqual(state, "missing")
+        self.assertEqual(selected, [])
+
+    def test_methodology_snapshot_preserved_when_clearing_review_passed(self):
+        # 清 review_passed（下游）→ 快照保留（cascade 保留矩阵补全，quality NIT）
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+        self.engine._save_stage_checkpoint(project_dir, "review_passed_at")
+        self.engine._clear_stage_checkpoint_cascade(project_dir, "review_passed_at")
+        state, selected = self.engine.read_confirmed_methodology_snapshot(project_dir)
+        self.assertEqual(state, "parsed")
+        self.assertIn("SWOT", selected)
+
+    def test_backfill_preserves_methodology_snapshot(self):
+        # 红队 B4 BLOCKER 3：backfill 补缺失 checkpoint 时不得丢失方法论快照
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        # 制造 backfill changed=True：删 s0（已有下游 outline_confirmed_at → backfill 补 s0）
+        raw = self.engine._read_raw_stage_checkpoints(project_dir)
+        del raw["s0_interview_done_at"]
+        self.engine._write_raw_stage_checkpoints(project_dir, raw)
+        self.engine._backfill_stage_checkpoints_if_missing(project_dir)
+        # backfill 补回 s0 且保留 snapshot
+        self.assertIn(
+            "s0_interview_done_at", self.engine._load_stage_checkpoints(project_dir)
+        )
+        state, selected = self.engine.read_confirmed_methodology_snapshot(project_dir)
+        self.assertEqual(state, "parsed")
+        self.assertIn("SWOT", selected)
 
 
 class S0CheckpointInfrastructureTests(unittest.TestCase):
