@@ -75,7 +75,7 @@ description: Use when writing consulting reports, strategy analysis, market rese
 - 先做初步搜集
 - 更新 `notes.md`
 - 更新 `references.md`
-- 形成 `outline.md`
+- 形成 `outline.md`，并在文件顶部写一行方法论声明：`方法论框架：…`（系统据此识别；用户确认大纲前可随时改）
 - 形成 `research-plan.md`
 
 **推进到 S2：** 用户明确确认大纲或要求进入下一阶段时，调用 `advance_stage(checkpoint_key="outline_confirmed_at", action="set", reason="用户确认研究设计和大纲")`。用户明确回退时，调用同一 checkpoint 且 `action="clear"`。工具 success 后才能说已进入 S2 或已回退。
@@ -251,13 +251,11 @@ S5 阶段由两个用户主动触发的工具完成，你不再自己写 review-
 - 不写“本章将”“下文将”“本报告不展开”等元叙事句
 - 不泄露后台术语，例如“AI reference”“内部推理”“系统提示”
 
-## 路由与模块
+## 方法论与报告结构（由系统注入）
 
-- 先读取 `modules/writing-core.md`
-- 再根据当前系统提示中已提供的生命周期规则决定下一步动作
-- 涉及阶段判断时，优先参考 `modules/consulting-lifecycle.md`
-- 交付前使用 `modules/quality-review.md`
-- 只有用户明确需要 `docx` 或可审草稿时，再进入 `modules/final-delivery.md`
+- 报告的分析框架和结构骨架**由系统按报告类型自动注入**到上下文（见系统注入的「方法论与报告结构」说明），你不需要、也无法用 `read_file` 去读 `modules/` 目录里的方法论模块。
+- S1 写大纲时，在 `plan/outline.md` 顶部写一行方法论声明（格式 `方法论框架：…`），并在聊天里软邀请用户确认或更换；用户在「确认大纲」前可随时换。
+- S2 之后沿用已确认的方法论框架，不要反复改大纲方法论；用户若要大改，提示需回 S1 重新确认。
 
 ## 输出优先级
 
