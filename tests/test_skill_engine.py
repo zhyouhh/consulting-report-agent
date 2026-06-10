@@ -2537,3 +2537,42 @@ class ProgressMarkdownQualityProgressTests(unittest.TestCase):
                 stage_state={"stage_code": "S2"},
             )
             self.assertNotIn("**质量进度**", md)
+
+
+class DeadMethodologyTemplateGuardTests(unittest.TestCase):
+    """G7: get_template() + skill/templates/ 是死代码（零调用、文件名与 slug 不符），
+    R5 走 modules「标准结构」段，不依赖 templates。repo-wide guard 防回流。"""
+
+    def setUp(self):
+        self.repo_root = Path(__file__).resolve().parents[1]
+
+    def test_get_template_method_removed(self):
+        from backend.skill import SkillEngine
+        self.assertFalse(hasattr(SkillEngine, "get_template"))
+
+    def test_templates_dir_removed(self):
+        self.assertFalse(
+            (self.repo_root / "skill" / "templates").exists(),
+            "skill/templates/ 应已删除",
+        )
+
+    def test_no_get_template_references_in_production_source(self):
+        # repo-wide（backend/frontend/skill，不止 backend）；跳过 tests/ 避免本测试自噬，
+        # 跳过 __pycache__ / .pyc（codex R2 NIT）。
+        roots = [
+            self.repo_root / "backend",
+            self.repo_root / "frontend" / "src",
+            self.repo_root / "skill",
+        ]
+        offenders = []
+        for root in roots:
+            if not root.exists():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix not in {".py", ".js", ".jsx", ".mjs", ".md"}:
+                    continue
+                if "__pycache__" in path.parts:
+                    continue
+                if "get_template" in path.read_text(encoding="utf-8", errors="ignore"):
+                    offenders.append(str(path.relative_to(self.repo_root)))
+        self.assertEqual(offenders, [], f"残留 get_template 引用: {offenders}")

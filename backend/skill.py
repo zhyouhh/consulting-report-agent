@@ -2323,13 +2323,6 @@ class SkillEngine:
 
         return "\n\n".join(sections)
 
-    def get_template(self, project_type: str) -> str:
-        """鑾峰彇鎶ュ憡妯℃澘"""
-        template_file = self.skill_dir / "templates" / f"{project_type}.md"
-        if template_file.exists():
-            return template_file.read_text(encoding="utf-8")
-        return ""
-
     def _normalize_create_payload(self, project_info_or_name, **kwargs) -> dict:
         if hasattr(project_info_or_name, "model_dump"):
             payload = project_info_or_name.model_dump()
