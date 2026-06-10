@@ -1083,6 +1083,40 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertEqual(count, 0)
 
+    def test_skill_md_datalog_examples_all_recognized_as_valid_sources(self):
+        """R4 硬约束：SKILL.md S2 段的每条 data-log 示例都必须被 _EVIDENCE_MARKERS
+        识别为有效来源（访谈/调研须行首独立成行）。用与生产相同的切分 + marker 逻辑，
+        防止有人把访谈/调研写回 **URL** 行括号里导致纯访谈/调研来源不计数。"""
+        skill_md = (self.repo_skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        entries = list(SkillEngine._DL_ENTRY_PATTERN.finditer(skill_md))
+        self.assertGreaterEqual(
+            len(entries), 6,
+            "SKILL.md S2 示例应覆盖至少 6 类来源（URL/material/访谈/调研/企业官网/低质）",
+        )
+        failures = []
+        for idx, match in enumerate(entries):
+            start = match.end()
+            end = entries[idx + 1].start() if idx + 1 < len(entries) else len(skill_md)
+            body = skill_md[start:end]
+            if not any(pattern.search(body) for pattern in SkillEngine._EVIDENCE_MARKERS):
+                failures.append(match.group(1))
+        self.assertEqual(
+            failures, [],
+            f"这些 SKILL.md data-log 示例不被后端有效来源识别（检查访谈/调研是否行首成行）: {failures}",
+        )
+        # 显式锁「示例集必须含纯访谈/调研块」：否则有人用 6 个 URL 示例替换掉访谈/调研块时，
+        # 上面的「每块都被识别」会全绿、本守护测试空转，而真正要锁的「访谈/调研行首计数」失守。
+        # startswith 行首匹配与生产 marker `^(访谈|调研)[:：]` 同语义（行首无缩进，半/全角冒号都算）。
+        lines = skill_md.splitlines()
+        self.assertTrue(
+            any(line.startswith(("访谈:", "访谈：")) for line in lines),
+            "SKILL.md S2 示例缺少行首『访谈:』来源块——守护测试需要它来锁访谈来源计数",
+        )
+        self.assertTrue(
+            any(line.startswith(("调研:", "调研：")) for line in lines),
+            "SKILL.md S2 示例缺少行首『调研:』来源块——守护测试需要它来锁调研来源计数",
+        )
+
     def test_workspace_summary_keeps_stage_at_s2_when_data_log_only_contains_placeholder_rows_after_small_edit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
