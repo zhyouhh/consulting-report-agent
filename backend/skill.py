@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 import json
+import logging
 import math
 import mimetypes
 import os
@@ -9,6 +10,8 @@ import shutil
 import tempfile
 import uuid
 from typing import Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class StaleFileError(Exception):
@@ -224,6 +227,53 @@ class SkillEngine:
         "S6": "演示准备",
         "S7": "交付归档",
     }
+
+    # R5: project_type(slug) → modules 文件名。management-document 的 slug 与文件名不一致
+    # （文件是 management-system.md），其余 5 个同名。load_type_skeleton 用它定位骨架模块。
+    TYPE_SKELETON_MAP = {
+        "strategy-consulting": "strategy-consulting.md",
+        "market-research": "market-research.md",
+        "specialized-research": "specialized-research.md",
+        "management-document": "management-system.md",
+        "implementation-plan": "implementation-plan.md",
+        "due-diligence": "due-diligence.md",
+    }
+
+    # R5: 类型→声明腔调（§7.3）。analytical=招牌框架；structural=结构纪律；specialized=按子题。
+    METHODOLOGY_TONE = {
+        "strategy-consulting": "analytical",
+        "market-research": "analytical",
+        "due-diligence": "analytical",
+        "management-document": "structural",
+        "implementation-plan": "structural",
+        "specialized-research": "specialized",
+    }
+
+    # R5: 共享分析框架菜单（横向对所有类型可用，v1 仅菜单一行；细节全文留 v2）。
+    # 常驻 S1–S4 注入。token 由 test_build_methodology_block_token_budget 实测 ≤2k/轮。
+    FRAMEWORK_MENU = (
+        "## 可选分析框架菜单（按报告实际需要挑，不被类型锁死；也可用你自己知道的其他框架）\n"
+        "- SWOT：内外部优劣势/机会/威胁（广谱）\n"
+        "- PEST：政治/经济/社会/技术宏观环境（广谱·战略）\n"
+        "- 波特五力：行业竞争强度五维（战略/市场/尽调）\n"
+        "- 价值链：主要+支持活动定位优势环节（战略）\n"
+        "- 金字塔原理/MECE：结论先行、不重不漏分组（广谱）\n"
+        "- 对标分析：选可比对象横向比（广谱）\n"
+        "- 根因分析：问题溯源不停表面（专项研究）\n"
+        "- 成熟度模型：五级阶梯定位现状/目标（评估类）\n"
+        "- BCG/GE 矩阵：业务组合定位（战略）\n"
+        "- 安索夫矩阵：增长路径四象限（战略）\n"
+        "- TAM-SAM-SOM：市场规模自上而下（市场）\n"
+        "- CR4/HHI：市场集中度（市场）\n"
+        "- SMART：目标设定五要素（实施方案）\n"
+        "- RACI：责任分配四角色（实施方案）\n"
+        "- 甘特/里程碑：进度与关键节点（实施方案）\n"
+        "- 财务尽调三维：收入真实性/成本/资产质量（尽调）\n"
+        "- 红旗识别：异常/诉讼/关联交易（尽调）\n"
+        "- 影响-可行矩阵：建议优先级排序（广谱·建议）\n"
+        "- DAMA-DMBOK / ISO 8000：数据治理组织/质量/成熟度（数据专项）\n"
+    )
+
     REPORT_DRAFT_PATH = "content/report_draft_v1.md"
     REPORT_DRAFT_CANDIDATES = (REPORT_DRAFT_PATH,)
     INDEPENDENT_REVIEW_ANCHORS = (
@@ -2311,6 +2361,42 @@ class SkillEngine:
 
     def _delivery_mode_requires_presentation(self, project_path: Path) -> bool:
         return self._extract_delivery_mode(project_path) == "报告+演示"
+
+    def load_type_skeleton(self, project_type: str) -> str:
+        """取类型模块的「## 二、标准结构」段作为报告骨架。caller 保证 project_type ∈
+        TYPE_SKELETON_MAP（未知 type 在 build_methodology_block 已 graceful 返空）。
+        已知 type 但模块缺锚点 / 段为空 → fail-closed 抛 ValueError（代码/资产回归立刻暴露）。
+        逐行扫描并跳过 ``` 代码块，避免被骨架代码块内的 `## 执行摘要` 等行提前截断。"""
+        filename = self.TYPE_SKELETON_MAP[project_type]
+        module_path = self.skill_dir / "modules" / filename
+        try:
+            text = module_path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise ValueError(f"模块 {filename} 不存在（已知 type 但骨架资产缺失）") from exc
+        lines = text.splitlines()
+        anchor_idx = None
+        for idx, line in enumerate(lines):
+            if re.match(r"^##\s*二、标准结构\s*$", line):
+                anchor_idx = idx
+                break
+        if anchor_idx is None:
+            raise ValueError(f"模块 {filename} 缺少「## 二、标准结构」锚点")
+        body_lines = []
+        in_fence = False
+        for line in lines[anchor_idx + 1:]:
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                body_lines.append(line)
+                continue
+            if not in_fence and re.match(r"^##\s", line):
+                break
+            body_lines.append(line)
+        if in_fence:
+            raise ValueError(f"模块 {filename}「## 二、标准结构」段有未闭合代码块（``` 不成对）")
+        body = "\n".join(body_lines).strip()
+        if not body:
+            raise ValueError(f"模块 {filename}「## 二、标准结构」段为空")
+        return body
 
     def get_skill_prompt(self) -> str:
         """鑾峰彇Skill瀹氫箟"""

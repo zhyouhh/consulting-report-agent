@@ -2242,6 +2242,70 @@ class SkillEngineTests(unittest.TestCase):
         chat_src = (Path(__file__).resolve().parents[1] / "backend" / "chat.py").read_text(encoding="utf-8")
         self.assertNotIn("draft_path.write_text(", chat_src)
 
+    # ------------------------------------------------------------------ R5 B2
+    def _bare_engine(self, tmp):
+        return SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+
+    def test_type_skeleton_map_covers_six_slugs(self):
+        self.assertEqual(
+            set(SkillEngine.TYPE_SKELETON_MAP),
+            {
+                "strategy-consulting", "market-research", "specialized-research",
+                "management-document", "implementation-plan", "due-diligence",
+            },
+        )
+        # management-document slug 映射到 management-system.md（slug≠文件名）
+        self.assertEqual(SkillEngine.TYPE_SKELETON_MAP["management-document"], "management-system.md")
+        self.assertEqual(
+            set(SkillEngine.TYPE_SKELETON_MAP), set(SkillEngine.METHODOLOGY_TONE),
+            "TYPE_SKELETON_MAP 与 METHODOLOGY_TONE 的 slug 集必须一致（B6 用 TONE.get fallback，漂移会静默错腔调）",
+        )
+
+    def test_load_type_skeleton_extracts_nonempty_structure_for_all_types(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for slug in SkillEngine.TYPE_SKELETON_MAP:
+                skeleton = engine.load_type_skeleton(slug)
+                self.assertTrue(skeleton.strip(), f"{slug} 骨架为空")
+                # 骨架来自「## 二、标准结构」段，不应把下一节「## 三、」吃进来
+                self.assertNotIn("核心分析框架", skeleton)
+
+    def test_load_type_skeleton_fail_closed_on_missing_anchor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "skill"
+            (skill_dir / "modules").mkdir(parents=True)
+            (skill_dir / "modules" / "strategy-consulting.md").write_text(
+                "# 战略\n\n## 一、概述\n无标准结构段\n", encoding="utf-8"
+            )
+            engine = SkillEngine(Path(tmp) / "projects", skill_dir)
+            with self.assertRaises(ValueError):
+                engine.load_type_skeleton("strategy-consulting")
+
+    def test_load_type_skeleton_fail_closed_on_unclosed_fence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "skill"
+            (skill_dir / "modules").mkdir(parents=True)
+            (skill_dir / "modules" / "strategy-consulting.md").write_text(
+                "# 战略\n\n## 二、标准结构\n```\n未闭合代码块\n\n## 三、核心分析框架\n内容\n",
+                encoding="utf-8",
+            )
+            engine = SkillEngine(Path(tmp) / "projects", skill_dir)
+            with self.assertRaises(ValueError):
+                engine.load_type_skeleton("strategy-consulting")
+
+    def test_load_type_skeleton_fail_closed_on_missing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "skill"
+            (skill_dir / "modules").mkdir(parents=True)  # 不建 strategy-consulting.md
+            engine = SkillEngine(Path(tmp) / "projects", skill_dir)
+            with self.assertRaises(ValueError):
+                engine.load_type_skeleton("strategy-consulting")
+
+    def test_framework_menu_lists_core_frameworks(self):
+        menu = SkillEngine.FRAMEWORK_MENU
+        for name in ("SWOT", "波特五力", "金字塔", "TAM-SAM-SOM", "SMART", "RACI"):
+            self.assertIn(name, menu)
+
 
 class S0CheckpointInfrastructureTests(unittest.TestCase):
     def test_s0_in_stage_checkpoint_keys(self):
@@ -2537,6 +2601,7 @@ class ProgressMarkdownQualityProgressTests(unittest.TestCase):
                 stage_state={"stage_code": "S2"},
             )
             self.assertNotIn("**质量进度**", md)
+
 
 
 class DeadMethodologyTemplateGuardTests(unittest.TestCase):
