@@ -2274,6 +2274,88 @@ class SkillEngineTests(unittest.TestCase):
             "TYPE_SKELETON_MAP 与 METHODOLOGY_TONE 的 slug 集必须一致（B6 用 TONE.get fallback，漂移会静默错腔调）",
         )
 
+    def test_build_methodology_block_s1_has_declaration_and_invite(self):
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)  # S1（未确认）
+        block = self.engine.build_methodology_block("demo")
+        self.assertEqual(self.engine._infer_stage_state(project_dir)["stage_code"], "S1")
+        self.assertIn("方法论声明", block)
+        self.assertIn("确认大纲", block)
+        self.assertIn("SWOT", block)  # 菜单常驻
+
+    def test_build_methodology_block_s1_declares_dunhao_format(self):
+        # quality/spec NIT：S1 声明指令须保留「方法论框架：…、…」顿号格式（B3 parser 敏感，
+        # 文案若改成 + / 空格 / 斜杠连接会被判 malformed 卡确认门）。
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        block = self.engine.build_methodology_block("demo")
+        self.assertIn("方法论框架：", block)
+        self.assertIn("〕、〔", block)  # 顿号分隔的声明格式占位示例
+
+    def test_build_methodology_block_empty_outside_writing_stages(self):
+        self._make_project()  # 新项目停在 S0
+        self.assertEqual(self.engine.build_methodology_block("demo"), "")
+
+    def test_build_methodology_block_empty_for_unknown_type(self):
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        registry = self.engine._load_registry()
+        registry["projects"][0]["project_type"] = "custom-unknown"
+        self.engine._save_registry(registry)
+        self.assertEqual(self.engine.build_methodology_block("demo"), "")
+
+    def test_build_methodology_block_s2_uses_confirmed_snapshot(self):
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(
+            project_dir, declaration="方法论框架：BCG 矩阵"
+        )
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.assertEqual(self.engine._infer_stage_state(project_dir)["stage_code"], "S2")
+        block = self.engine.build_methodology_block("demo")
+        self.assertIn("已选", block)
+        self.assertIn("BCG 矩阵", block)
+        self.assertNotIn("方法论声明（S1）", block)  # S2–S4 不再邀请
+
+    def test_build_methodology_block_s2_missing_snapshot_fallback(self):
+        # quality NIT：S2–S4 无快照（如 legacy 已确认项目）→ _adhere_instruction missing 分支，
+        # 提示「未记录已确认的方法论框架」且不冒充「已选」。
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        # 直落 outline_confirmed_at（_save 绕确认门，不写快照）模拟 legacy 已确认无快照
+        self.engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+        self.assertEqual(self.engine._infer_stage_state(project_dir)["stage_code"], "S2")
+        block = self.engine.build_methodology_block("demo")
+        self.assertIn("未记录已确认的方法论框架", block)
+        self.assertNotIn("## 方法论（已选）", block)
+
+    def test_declare_instruction_structural_tone_for_management_document(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            instr = engine._declare_and_invite_instruction("management-document")
+        self.assertIn("章-条-款-项", instr)
+
+    def test_declare_instruction_specialized_tone_for_specialized_research(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            instr = engine._declare_and_invite_instruction("specialized-research")
+        self.assertIn("根因", instr)
+
+    def test_build_methodology_block_token_budget(self):
+        try:
+            import tiktoken
+        except ImportError:
+            self.skipTest("tiktoken not installed")
+        enc = tiktoken.get_encoding("cl100k_base")
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            worst = 0
+            for slug in SkillEngine.TYPE_SKELETON_MAP:
+                skeleton = engine.load_type_skeleton(slug)
+                instr = engine._declare_and_invite_instruction(slug)  # S1 块（含菜单，最大）
+                block = engine._render_methodology_block(skeleton, SkillEngine.FRAMEWORK_MENU, instr)
+                worst = max(worst, len(enc.encode(block)))
+            self.assertLessEqual(worst, 2000, f"方法论注入块 token={worst} 超 2k 预算（spec §4.3）")
+
     def test_load_type_skeleton_extracts_nonempty_structure_for_all_types(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self._bare_engine(tmp)

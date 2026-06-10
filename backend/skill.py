@@ -2626,6 +2626,85 @@ class SkillEngine:
         raw[self.METHODOLOGY_SNAPSHOT_KEY] = "、".join(selected)
         self._write_raw_stage_checkpoints(project_path, raw)
 
+    def get_project_type(self, project_ref: str) -> Optional[str]:
+        record = self.get_project_record(project_ref)
+        return record.get("project_type") if record else None
+
+    def _declare_and_invite_instruction(self, project_type: str) -> str:
+        """S1 注入：让模型在 outline 顶部写方法论声明行 + 聊天里软邀请（按类型分腔调，§7.3）。"""
+        tone = self.METHODOLOGY_TONE.get(project_type, "analytical")
+        # 注意：腔调举例里框架之间一律用「顿号」分隔，与声明行格式（顿号分隔）一致——
+        # 否则模型照提示用 + / 空格连接，会被 B3 parser 判 malformed、卡住确认门（codex R1 BLOCKER 4）。
+        if tone == "structural":
+            tone_line = (
+                "本报告的「方法论」是结构纪律：管理制度用「章-条-款-项」规范结构；"
+                "实施方案用 SMART、RACI、里程碑。按本报告类型选，不要硬贴 SWOT 之类分析框架。"
+            )
+        elif tone == "specialized":
+            tone_line = (
+                "按本专项研究的子题目选方法：数据治理题用 DAMA-DMBOK、ISO 8000、成熟度模型；"
+                "非数据题用根因分析、对标分析，不要硬套招牌框架。"
+            )
+        else:  # analytical
+            tone_line = (
+                "从下方框架菜单挑本报告真正需要的招牌框架（如 SWOT、波特五力、BCG 矩阵），"
+                "也可以用你自己知道的其他框架。"
+            )
+        return (
+            "## 方法论声明（S1）\n"
+            f"{tone_line}\n"
+            "在 `plan/outline.md` 顶部写一行可见声明（格式固定，供系统识别）：\n"
+            "`方法论框架：〔框架1〕、〔框架2〕`（顿号分隔，可加粗 `**方法论框架**：…`）。\n"
+            "写完声明后，在聊天里顺口告诉用户本报告将采用〔所选框架〕；若用户想换方法论，"
+            "告诉你即可，否则按这个继续，可随时在工作区点「确认大纲」。"
+        )
+
+    def _adhere_instruction(self, state: str, selected: list[str]) -> str:
+        """S2–S4 注入：沿用确认时快照的已选框架，不再邀请重选。malformed 不入快照，故只两态。"""
+        if state == "parsed" and selected:
+            joined = "、".join(selected)
+            return (
+                "## 方法论（已选）\n"
+                f"本报告已选方法论框架：{joined}。正文须沿用，不要重新征求或反复改大纲方法论。"
+                "如用户要大改方法论，提示需回 S1 调整大纲并重新确认。"
+            )
+        return (
+            "## 方法论\n"
+            "本报告未记录已确认的方法论框架。按报告类型与框架菜单选合适框架展开分析，"
+            "保持结论先行、结构清晰；不要凭空声称某框架是「已确认」的。"
+        )
+
+    def _render_methodology_block(self, skeleton: str, menu: str, instr: str) -> str:
+        return (
+            "# 方法论与报告结构（系统按报告类型注入）\n\n"
+            "## 报告结构骨架（按类型）\n"
+            f"{skeleton}\n\n"
+            f"{menu}\n"
+            f"{instr}"
+        )
+
+    def build_methodology_block(self, project_id: str) -> str:
+        """按 project_type 注入「类型骨架 + 框架菜单 + 阶段化指令」到 system prompt（S1–S4）。
+        装配期只读，不写任何文件。未知 type / 非写作期 → graceful 空块（绝不抛进 chat 链路，
+        codex R2 BLOCKER 5）；已知 type 但模块缺锚点 → load_type_skeleton fail-closed 抛（§4.1）。"""
+        project_path = self.get_project_path(project_id)
+        if project_path is None:
+            return ""
+        stage = self._infer_stage_state(project_path)["stage_code"]
+        if stage not in ("S1", "S2", "S3", "S4"):
+            return ""
+        project_type = self.get_project_type(project_id)
+        if project_type not in self.TYPE_SKELETON_MAP:
+            logger.info("unknown project_type %r, skip methodology block", project_type)
+            return ""
+        skeleton = self.load_type_skeleton(project_type)
+        if stage == "S1":
+            instr = self._declare_and_invite_instruction(project_type)
+        else:
+            state, selected = self.read_confirmed_methodology_snapshot(project_path)
+            instr = self._adhere_instruction(state, selected)
+        return self._render_methodology_block(skeleton, self.FRAMEWORK_MENU, instr)
+
     def get_skill_prompt(self) -> str:
         """鑾峰彇Skill瀹氫箟"""
         skill_file = self.skill_dir / "SKILL.md"
