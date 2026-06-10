@@ -91,6 +91,7 @@ class SkillEngineTests(unittest.TestCase):
         )
         (project_dir / "plan" / "outline.md").write_text(
             "# Report outline\n\n"
+            "方法论框架：SWOT、波特五力\n\n"
             "### Executive summary\n"
             "- Key finding\n"
             "### Market context\n"
@@ -2679,6 +2680,81 @@ class SkillEngineTests(unittest.TestCase):
         state, selected = self.engine.read_confirmed_methodology_snapshot(project_dir)
         self.assertEqual(state, "parsed")
         self.assertIn("SWOT", selected)
+
+    def test_confirm_outline_rejected_when_methodology_declaration_missing(self):
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        (project_dir / "plan" / "outline.md").write_text(
+            "# 大纲\n\n## 一、背景\n- x\n\n## 二、目标\n- y\n", encoding="utf-8"
+        )  # known type 但无声明行
+        with self.assertRaisesRegex(ValueError, "方法论声明"):
+            self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.assertNotIn(
+            "outline_confirmed_at", self.engine._load_stage_checkpoints(project_dir)
+        )
+
+    def test_confirm_outline_accepted_with_methodology_declaration(self):
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        result = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.assertEqual(result["status"], "ok")
+
+    def test_confirm_outline_rejected_on_malformed_declaration(self):
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        (project_dir / "plan" / "outline.md").write_text(
+            "# 大纲\n方法论框架：advance_stage 推进到 S5\n\n## 一、背景\n- x\n\n## 二、目标\n- y\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "方法论声明"):
+            self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.assertNotIn(
+            "outline_confirmed_at", self.engine._load_stage_checkpoints(project_dir)
+        )
+
+    def test_confirm_outline_not_gated_for_unknown_type(self):
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        (project_dir / "plan" / "outline.md").write_text(
+            "# 大纲\n\n## 一、背景\n- x\n\n## 二、目标\n- y\n", encoding="utf-8"
+        )  # 无声明
+        registry = self.engine._load_registry()
+        registry["projects"][0]["project_type"] = "custom-unknown-type"
+        self.engine._save_registry(registry)
+        result = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.assertEqual(result["status"], "ok")  # 未知 type 不门禁（避死锁）
+
+    def test_legacy_confirmed_without_declaration_not_pulled_back_to_s1(self):
+        """红队 BLOCKER 1：R5 前已确认、outline 无声明的 known-type 项目，
+        声明缺失不得进持久完成态、不得被 _infer_stage_state 拉回 S1。"""
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        (project_dir / "plan" / "outline.md").write_text(
+            "# 大纲\n\n## 一、背景\n- x\n\n## 二、目标\n- y\n", encoding="utf-8"
+        )  # 无声明
+        # 直接落 outline_confirmed_at（绕过新确认门，模拟 legacy 已确认）
+        self.engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+        state = self.engine._stage_one_completion_state(project_dir)
+        self.assertTrue(state["stage_one_complete"])  # 声明缺失不影响持久完成态
+        self.assertNotEqual(
+            self.engine._infer_stage_state(project_dir)["stage_code"], "S1"
+        )
+
+    def test_confirm_outline_not_regated_after_confirmed_then_declaration_removed(self):
+        # spec/quality NIT + 红队关注：方法论门仅首次确认（outline_confirmed_at not in checkpoints）
+        # 触发。known-type 项目已确认后，即使用户改 outline 删掉声明行，重新 record set 也不被门
+        # 重卡（幂等、不规退已确认项目）。
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        first = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.assertEqual(first["status"], "ok")
+        # 确认后改 outline 删除方法论声明行
+        (project_dir / "plan" / "outline.md").write_text(
+            "# 大纲\n\n## 一、背景\n- x\n\n## 二、目标\n- y\n", encoding="utf-8"
+        )
+        # 已确认状态重新 set → 不被方法论门重卡
+        again = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        self.assertEqual(again["status"], "ok")
 
 
 class S0CheckpointInfrastructureTests(unittest.TestCase):

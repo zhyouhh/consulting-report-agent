@@ -81,6 +81,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self._write_evidence_gate_prerequisites(project_dir)
         (project_dir / "plan" / "outline.md").write_text(
             "# Report outline\n\n"
+            "方法论框架：SWOT、波特五力\n\n"
             "## Executive summary\n"
             "- Summarize the AI strategy recommendation.\n"
             "## Market context\n"

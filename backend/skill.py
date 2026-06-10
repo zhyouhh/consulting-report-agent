@@ -769,6 +769,19 @@ class SkillEngine:
         if key == "outline_confirmed_at":
             missing = stage_one_state["missing_prerequisites"]
             require(not missing, f"需要先补齐 {', '.join(missing)}，才能确认大纲。")
+            # R5: 方法论声明前置——仅首次确认（outline_confirmed_at 未 set）+ 已知 6-slug 时校验。
+            # 不进 _stage_one_completion_state 持久完成态（否则 legacy 已确认无声明项目被拉回 S1，
+            # 红队 BLOCKER 1）；未知 type 不卡（避死锁）。
+            if "outline_confirmed_at" not in checkpoints:
+                project_type = self._get_project_type_for_path(project_path)
+                if project_type in self.TYPE_SKELETON_MAP:
+                    outline_text = self._read_plan_file(project_path, "outline.md") or ""
+                    state, _ = self.parse_and_sanitize_methodology(outline_text)
+                    require(
+                        state == "parsed",
+                        "大纲缺少有效方法论声明行（如「方法论框架：SWOT、波特五力」），"
+                        "请在大纲顶部补一行后再确认。",
+                    )
             return
 
         if key == "review_started_at":
