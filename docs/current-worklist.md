@@ -58,13 +58,14 @@ R4. **资料来源可信度：内置三档 + data-log 色点标注 + S2 阶段�
 - v2/后路：后端按域名**确定性盖章**（骑 `_count_valid_data_log_sources` 解析）+ 精确分布、一手/二手维度、HTML badge（预览 rehypeRaw 已支持）、常驻证据统计条。
 
 R5. **方法论路由接回 + 显性化 + S1 软确认/可换**（原"可见不可选"，2026-06-10 摸清现状后重定范围）
-- 状态：`实施中（2026-06-11）——plan codex 三轮 APPROVED，subagent-driven 起跑：B1 ✅(2f47a4d 删死码) / B2 ✅(5e26607 骨架加载，codex 双轨) / B3-B10 待做；分支 feat/batch3-source-credibility-and-methodology，HEAD 5e26607；交接 docs/superpowers/handoffs/2026-06-11-batch3-r4-r5-impl-handoff.md`
+- 状态：`实施中（2026-06-11）——subagent-driven + codex 双轨/红队逐 task 审：A1 ✅(584abb6 R4) / B1 ✅(2f47a4d 删死码) / B2 ✅(5e26607 骨架) / B3 ✅(e6b4d8a 净化三态，三轨 APPROVED，红队 5 轮挖分隔符/checkpoint 拆词绕过) / B4 ✅(681a085 快照持久化，三轨 APPROVED，红队挖 KeyError半提交/固定temp竞态) / B5 ✅(996137b 确认门前置+legacy不规退，spec/quality xhigh + 红队 high APPROVED) / B6-B10 待做；分支 feat/batch3-source-credibility-and-methodology，HEAD 996137b；交接 docs/superpowers/handoffs/2026-06-11-batch3-r4-r5-impl-handoff.md`
 - spec：`docs/superpowers/specs/2026-06-10-r5-methodology-routing-and-visibility-design.md`
 - **重大现状发现（2026-06-10 摸清，源码实锤）**：方法论路由在 canonical skill（`D:\MyProject\CodeProject\consulting-report-skill`）里**本来设计过**（`docs/module-routing.md` + `evals/capability-map.json`，机制是模型 read_file 自取），但嵌进 app 后**断了**——`get_skill_prompt`(`skill.py:2315`) 只注入 SKILL.md + consulting-lifecycle.md（无类型分支）、`read_file`(`skill.py:1079`) 锁工作区够不到 skill 目录、`get_template`(`skill.py:2326`) 死代码；**17 模块里 16 个从不加载**（用户那份"很完美"的真实报告对话记录里全程零 `modules/`）。即领导"没让用户选方法论"的真问题不是"选不选"，是**根本没按类型用方法论**。
 - **重定设计（spec）**：① 代码注入（push）替失效的模型自取：后端按 `project_type` 注入"类型骨架"（仅 S1–S4）；② 框架（SWOT/BCG/金字塔…）拆出做**共享菜单**（横向不绑类型，菜单一行 + 模型自有知识，~300-400 token）；③ 显性化＝S1 大纲声明所用框架，**按类型三腔调**（分析型 SWOT/BCG / 文体方案型 SMART·RACI·章-条-款-项 / 专项研究条件）；④ S1 软确认/可换骑现有"确认大纲"门，**确认时快照**框架（`stage_checkpoints.json` 保留键 `__methodology_snapshot` + cascade 保留）跨轮稳、legacy 不规退；⑤ **不新增模型工具**（图表维持脚本交付，自动渲染 out-of-scope）；删 `get_template`/`templates`。
 - 涉及文件：`backend/skill.py`(`build_methodology_block`/`load_type_skeleton`/快照读写/`FRAMEWORK_MENU`)、`backend/chat.py`(`_build_system_prompt` 装配)、`skill/SKILL.md`、前端近零改(`methodology_declared` flag + S1 确认按钮)。
 - **A/B 验证（诚实声明，非阻塞）**：模块内容质量从未被验证（连 canonical evals 也只验路由格式不验质量、`run_evals` 是 schema 校验）；落地后建议同选题"裸跑 vs 注入"比一版，几乎无差则缩为"仅声明 + 删死模块"。
 - 历史背景（原决策已被现状发现部分推翻）：原拟"不做让用户选 + S1 点明框架"；摸清后发现框架根本没注入，遂升级为"先接回路由再谈可见"。涉及文件原列的"4~6 套模板"= `skill/templates/`（死代码，spec 决定删）。
+- **R5 实施期红队挖的 follow-up（非阻塞，B4/B5 红队 APPROVED 前提，记此防遗忘；合并为"stage_checkpoints 写事务性强化"，桌面单用户低优先级）**：① **checkpoint 写事务化**——`record_stage_checkpoint` set 的 `outline_confirmed_at` + `__methodology_snapshot` 两阶段写改一次原子 raw 写（消除崩溃半提交：crash 落两写之间 + 用户随后改坏 outline 声明 → 原确认快照永久丢失；危害仅退 missing 兜底、非 BLOCKER）；② **backfill 窄粒度锁/CAS**——`_backfill_stage_checkpoints_if_missing` 无锁与 record 并发理论 TOCTOU（pre-existing，已加"写前重读 PRESERVED 合并"纵深防御，不用 request_lock 避卡 summary）；③ backfill PRESERVED 合并"有则覆盖"不 pop（latest 已删 snapshot 时不复活，仅损坏 raw 边界）。
 
 ### 既有待办（原 P1–P10，优先级低于上方整改簇）
 
