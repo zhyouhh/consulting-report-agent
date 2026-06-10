@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import tempfile
+import unicodedata
 import uuid
 from typing import Iterable, Optional
 
@@ -272,6 +273,47 @@ class SkillEngine:
         "- 红旗识别：异常/诉讼/关联交易（尽调）\n"
         "- 影响-可行矩阵：建议优先级排序（广谱·建议）\n"
         "- DAMA-DMBOK / ISO 8000：数据治理组织/质量/成熟度（数据专项）\n"
+    )
+
+    # R5: 声明行格式（行首关键词 + 顿号/逗号分隔；既给人看又可解析，不用隐藏 marker）。
+    _METHODOLOGY_DECLARATION_RE = re.compile(
+        r"^[^\S\n]*\*{0,2}方法论框架\*{0,2}[^\S\n]*[:：][^\S\n]*(.+?)[^\S\n]*$",
+        re.MULTILINE,
+    )
+    # 精确匹配放行的已知框架名（**无空格 casefold**，比对时把 token 也去空格归一化，
+    # 让「BCG 矩阵」「ISO 8000」带空格写法也命中）。与 FRAMEWORK_MENU 并行维护：菜单是给
+    # 模型看的一句话清单，这里是给净化用的精确名集。
+    KNOWN_FRAMEWORK_NAMES = {
+        "swot", "pest", "波特五力", "五力", "价值链", "金字塔原理", "金字塔原理/mece",
+        "mece", "金字塔", "对标分析", "根因分析", "成熟度模型", "bcg", "bcg矩阵",
+        "bcg/ge矩阵", "ge矩阵", "安索夫矩阵", "tam-sam-som", "cr4", "hhi", "cr4/hhi",
+        "smart", "raci", "甘特", "里程碑", "甘特/里程碑", "财务尽调三维", "红旗识别",
+        "影响-可行矩阵", "dama-dmbok", "iso8000", "dama-dmbok/iso8000", "章-条-款-项",
+    }
+    # 原样 casefold 子串命中即整条 malformed：注入符号 / 中文操控·控制语义词。
+    # 工具名 + checkpoint + 英文操作词移到 _METHODOLOGY_DANGER_NORMALIZED（归一化匹配，防分隔符/拆词绕过）。
+    _METHODOLOGY_DANGER_SUBSTRINGS = (
+        "__", "<stage", "stage-ack", "ignore",
+        "系统提示", "系統提示", "忽略", "覆写", "覆寫", "覆盖",
+        # 中文阶段操控 / 注入指令 / 控制语义词（不含框架·业务常用词：分析/模型/矩阵/交付/阶段）
+        "推进", "回退", "归档", "无视", "跳过", "停止", "立即", "删除",
+        "设为", "标记为", "指令", "请你", "门禁", "检查点",
+    )
+    # 归一化（NFKC+casefold+删 Cf 格式字符+去空白/分隔符）后子串命中即 malformed：工具名 +
+    # 全部 6 个 STAGE_CHECKPOINT_KEYS 的去分隔符形态 + 英文操作词。防 "advance stage" /
+    # "advance-stage" / "s0 interview done at" / "over ride" 等变体绕过（红队 v2/v3、quality NIT）。
+    # 零误杀（真框架名不会等于这些 API 标识符）。守护测试 test_*_all_checkpoint_key_variants 锁
+    # checkpoint 全覆盖，防未来加 key 漏项。
+    _METHODOLOGY_DANGER_NORMALIZED = (
+        # 工具名
+        "writefile", "editfile", "appendreportdraft", "readfile", "readmaterialfile",
+        "websearch", "fetchurl",
+        # 阶段机 + 全部 6 个 checkpoint 的去分隔符形态（含 v3 漏掉的 s0interviewdone）
+        "advancestage", "checkpoint", "stageack", "s0interviewdone",
+        "outlineconfirmed", "reviewstarted", "reviewpassed", "presentationready",
+        "deliveryarchived",
+        # 英文操作词（归一化防 "over ride" 拆词，quality NIT）
+        "override", "prompt",
     )
 
     REPORT_DRAFT_PATH = "content/report_draft_v1.md"
@@ -2397,6 +2439,89 @@ class SkillEngine:
         if not body:
             raise ValueError(f"模块 {filename}「## 二、标准结构」段为空")
         return body
+
+    @staticmethod
+    def _normalize_for_danger(text: str) -> str:
+        """归一化用于危险词比对：NFKC + casefold + 删 Unicode 格式字符（Cf：零宽空格 U+200B/
+        BOM U+FEFF/零宽连接符等）+ 去所有空白与常见分隔符。
+        不变式（防拆词绕过，红队 v2/v4）：去除集合必须 ⊇ parse 的 split 分隔符（、,，）∪ off-menu
+        白名单允许的非字母数字字符（- / 空格 全角空格）——这样任何被允许字符拆开的 API 名（如
+        「write、file」「advance stage」「s0-interview-done-at」）归一化后都还原成连续串、命中
+        denylist。改 off-menu 白名单或 split 分隔符时必须同步本集合。"""
+        folded = unicodedata.normalize("NFKC", text or "").casefold()
+        folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Cf")
+        return re.sub(r"[\s\-_/.·、,，]", "", folded)
+
+    def _canonical_framework_name(self, token: str) -> Optional[str]:
+        """token 去空格 casefold 后命中已知框架名 → 返回去空白原文；否则 None。
+        归一化让「BCG 矩阵」「ISO 8000」「DAMA-DMBOK / ISO 8000」等带空格写法也命中。"""
+        normalized = token.casefold().replace(" ", "").replace("　", "")
+        if normalized in self.KNOWN_FRAMEWORK_NAMES:
+            return token.strip()
+        return None
+
+    def parse_and_sanitize_methodology(self, outline_text: str) -> tuple[str, list[str]]:
+        """解析 outline 顶部「方法论框架：…」声明行，净化为可信框架名列表。
+        返回 (state, frameworks)：
+          - parsed   : 至少一个合法框架（已知名精确匹配，或菜单外严格短标签）
+          - missing  : 顶部无声明行（legacy / 漏写）
+          - malformed: 顶部有声明行但含工具名/checkpoint/注入词/阶段操控词，或全是非法标签
+        净化是 trust boundary（outline 用户可编辑，spec §4.2/§11）：危险词在完整 raw_value 上
+        先行检测（原样子串 + 归一化子串双查，挡分隔符绕过）、命中即整条 malformed（不剥括号、
+        不截断绕过）；净化结果以「数据」注入，绝不当指令。"""
+        text = outline_text or ""
+        # 仅解析「顶部」声明（spec §7.1）：首个二级及以上标题（## ~ ######，允许 ≤3 前导空格）
+        # 之前、且不超过前 30 行。H1（# 报告大纲）不截断（声明在 H1 之后）；缩进 H2 也截断（防把
+        # 真声明挤出顶部，红队 v2）。避免正文/示例/代码块里的「方法论框架：」被误解析。
+        head_lines: list[str] = []
+        for line in text.splitlines()[:30]:
+            if re.match(r"^[^\S\n]{0,3}#{2,6}[^\S\n]", line):
+                break
+            head_lines.append(line)
+        head = "\n".join(head_lines)
+        match = self._METHODOLOGY_DECLARATION_RE.search(head)
+        if not match:
+            return ("missing", [])
+        raw_value = match.group(1).strip()
+        # 危险词先行（完整 raw_value，未剥括号、未截断）——spec §11「含危险词→malformed，不剥」。
+        # 原样 casefold 子串挡注入符号/中文操控词；归一化（去空白+分隔符）子串挡工具名/checkpoint
+        # 的「advance stage」「advance-stage」等分隔符变体（红队 v2）。
+        lowered_raw = raw_value.casefold()
+        normalized_raw = self._normalize_for_danger(raw_value)
+        if any(bad in lowered_raw for bad in self._METHODOLOGY_DANGER_SUBSTRINGS) or any(
+            bad in normalized_raw for bad in self._METHODOLOGY_DANGER_NORMALIZED
+        ):
+            return ("malformed", [])
+        # 仅顿号/中英逗号分隔；不用 "/"（TAM-SAM-SOM、BCG/GE、金字塔原理/MECE 内部含 "/"）。
+        tokens = [t.strip() for t in re.split(r"[、,，]+", raw_value) if t.strip()]
+        if not tokens:
+            return ("malformed", [])
+        cleaned: list[str] = []
+        for token in tokens[:8]:  # 条数上限（危险词已在 raw_value 层全量检测，截断不漏检）
+            bare = re.sub(r"[（(].*?[)）]", "", token).strip()  # 剥括号（仅展示清洗，危险词已先拦）
+            if not bare:
+                continue
+            canonical = self._canonical_framework_name(bare)
+            if canonical:  # 已知框架名精确放行
+                cleaned.append(canonical)
+                continue
+            # 菜单外：严格短标签（中英文/数字/连字符/斜杠/空格，≤24 字；工具名/checkpoint/注入词
+            # 已被 raw_value 层双查拦截）。允许空格让「麦肯锡 7S」等带空格框架不被误杀。
+            if re.fullmatch(r"[A-Za-z0-9一-鿿\-/ 　]{1,24}", bare):
+                cleaned.append(bare)
+                continue
+            return ("malformed", [])
+        if not cleaned:
+            return ("malformed", [])
+        # 归一化去重（去空白+分隔符）：「TAM-SAM-SOM」与「TAM SAM SOM」合并，保留首个 display。
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for name in cleaned:
+            key = self._normalize_for_danger(name)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(name)
+        return ("parsed", deduped)
 
     def get_skill_prompt(self) -> str:
         """鑾峰彇Skill瀹氫箟"""
