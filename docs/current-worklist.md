@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-06-10（**批 2 = R3 完成并合并 main**：用户 E2E 通过（直接跑通一份真实报告）→ `feat/workspace-file-tree-and-editing` 合并入 main（merge `53c52fd`，--no-ff）+ 重打干净包。**批 2 R3 收口**；剩 push origin。下一步＝批 3 R4+R5 重新 brainstorm（用户已偏离初版决策，见各条补充思路）。— 批 1 R1+R2 已闭环 main `f111f0e`+push origin。）
+最后更新：2026-06-10（**批 3 R4 + R5 两 spec 均 codex APPROVED，下一步＝writing-plans 写批 3 合并 plan**。R5（方法论路由接回+显性化）：迭代审 R1→R4 + 红队 R1→R3，spec `docs/superpowers/specs/2026-06-10-r5-methodology-routing-and-visibility-design.md`。R4（来源可信度标注）：codex R1[改 3 BLOCKER+4 NIT]→R2 APPROVED，spec `docs/superpowers/specs/2026-06-10-r4-source-credibility-annotation-design.md`。**合并 plan 走法（已定）**：一个 plan 文档、**R4 段在前**（纯 prompt 改 SKILL.md、快、先验先上）+ **R5 段在后**（重：后端 `build_methodology_block`/快照 + 前端 + 删死代码），两者都改 SKILL.md 但段落正交（R4=S2 采集 / R5=S1 方法论）、plan 里统一协调改动顺序，**commit 分开**。两 spec 文件 + 本 worklist/memory 改动 untracked·未提交。— 批 2 R3 已 merge main `53c52fd`+push origin；批 1 R1+R2 已闭环 main `f111f0e`+push origin。）
 
 上一次更新：2026-06-09（批 2 R3 已实施 + codex **双轨独立** review 全 APPROVED[spec 轨后端/前端 SPEC-COMPLIANT + quality 轨后端/前端 APPROVED]；**应用户纠正：spec/quality 别合并塞一个 prompt**——quality 轨独立审挖出合并审漏的 2 真 BLOCKER[后端 `chat_stream` 同步 generator 跨 anyio 线程重入绕 CAS→专用 executor `8f06c81` / 前端进入编辑异步竞态→`loadFile` 同步提交选择 `d420dff`]；后端 281 passed、前端 296 pass。commits `336504a`→`ec42369`，cutover `cutover_report_2026-06-09_r3-file-tree-editing.md`。）
 
@@ -48,22 +48,23 @@ R3. **工作区文件栏重做 + 预览框可编辑（＝UI 重构第一落地�
 - **plan codex review 改进（vs 原 spec，已同步进 plan + spec）**：① **GET `/files/{path}` 不持锁 + stat-before-read**（实测 `chat_stream` `chat.py:3217` 整轮持锁，GET 进锁会冻结预览整轮）；② **`write_file` 原子化**（temp+os.replace；含 canonical draft `edit_file` 直写 `chat.py:4238` 改走 write_file——append/edit/write 三条 AI 写路径单点原子化，消除 torn read，GET 不持锁才成立）；③ **review_stale gate 在 `_has_effective_review_reports`**（非仅「存在」——避开 create_project scaffold 的 independent-review/lint-report 模板误判）；④ **脏离开 v1 三按钮「保存/放弃修改/取消」**（延后动作模式，应用户要求做进 v1，非 spec 初版二选一；beforeunload 受原生限制仍二选一）；⑤ 守卫接口统一为 `attemptLeave(action)` 贯通 FilePreviewPanel→WorkspacePanel→App。
 - 参考设计稿 `docs/design_UI.pdf`（3 套，借鉴稿3按阶段分组 IA）。
 
-R4. **资料来源可信度：只标注 + 提示（不做白名单硬门禁）**
-- 状态：`待实施（中优先 · 轻）`
-- 背景：领导担心 AI 找的资料可信度不高；现状只校验"有没有来源"，不校验"可不可信"。
-- 做法（决策＝轻版）：来源域名/可信档位**标注**在 references.md / UI（系统识别、人判断），并提示模型"关键结论别只压在低可信源上、只有低档来源时主动标注"——**advisory，不硬过滤**。
-- 不做：领导设想的"维护域名白名单 + 分级硬门禁"（永久维护成本 + 会误杀好的一手源）；如确有刚需再单议。
-- 技术现状：搜索结果已自带 domain（四家源 urlparse）、URL 已结构化写进 references.md，数据基础现成。
-- 涉及文件：`backend/search_pool.py`、`backend/search_providers.py`、references.md 写入路径、`backend/chat.py`(fetch_url metadata)。
-- 📌 补充思路（2026-06-06，待批 3 阶段再定，与上方「不做白名单」决策有偏移）：用户倾向再进一步——初步做一个**软白名单**：名单内的源 AI 搜到可直接用、写进文件；**不在名单内的，先跟用户确认一句**再用。仍**不做硬门禁**，主要应答领导。批 3 时重新评估（白名单由谁维护、初始名单怎么来、"确认一句"如何不打断流程）。
+R4. **资料来源可信度：内置三档 + data-log 色点标注 + S2 阶段小结（advisory，不门禁）**
+- 状态：`spec APPROVED（codex R1 改 3 BLOCKER+4 NIT → R2 APPROVED），待 writing-plans`
+- spec：`docs/superpowers/specs/2026-06-10-r4-source-credibility-annotation-design.md`
+- 背景：领导担心 AI 找的资料可信度不高；现状只校验"有没有来源"（data-log 有效来源计数放行 S2→S3），不校验"可不可信"。
+- 2026-06-09 数据论证（否掉软白名单）：两份真实报告每份仅 3-4 域名、7 源 6 高可信 → 软白名单"确认一句"打断≈0 但价值也弱 → **回归纯标注**。
+- 决策（v1，纯 prompt 改 `skill/SKILL.md`，不动 backend）：① 内置**三档**（按机构性质非域名——data-log 来源含 material/访谈/调研，一半无域名）：🟢 高=政府/官方统计/国家级权威机构、🟡 中高=有公信力媒体与研究机构、⚪ **其他**=兜底（中性≠差，含企业官网/财报等可靠一手）；② 模型在 **data-log 每条 `**来源**` 行**标色点，references 顺带、analysis/正文靠 `[DL-id]` 继承不重标；③ **S2 采集告一段落报分布小结**（🟢X/🟡Y/⚪Z + 低质点名 + 补源建议）；④ 全程 advisory。
+- 风险提醒口径：挂**低质特征**（个人博客/营销软文/内容农场/来源不明），**不挂"档位低"**（防误报一手官方源）；"其他"配 ⚪ 非 🔴。
+- v2/后路：后端按域名**确定性盖章**（骑 `_count_valid_data_log_sources` 解析）+ 精确分布、一手/二手维度、HTML badge（预览 rehypeRaw 已支持）、常驻证据统计条。
 
-R5. **方法论显性化：可见不可选**
-- 状态：`待实施（中优先 · 轻）`
-- 背景：领导提"没让用户选方法论（BCG/金字塔等）"。
-- 决策：**不做"让用户选"**（违反"不让用户思考"，且方法论已按报告类型内建）；改成让正在用的方法论**可见**——S1 出大纲时点明"本报告采用 X 框架、为什么"，高级用户留可调口子。
-- 技术现状：方法论内容厚（15+ 模块 + 4~6 套模板）全是内部喂模型；唯一用户可见入口是建项目时"报告类型"下拉。本条主要是"显示 + 提示词"，非造新能力。
-- 涉及文件：`skill/SKILL.md`(S1 大纲段)、`skill/modules/*`、前端大纲/overview 展示。
-- 📌 补充思路（2026-06-06，待批 3 阶段再定，与上方「不让用户选」决策有偏移）：批 3 先**摸清现有方法论路由**（按报告类型怎么内建 / 选框架的实际逻辑）再定怎么更透明；并考虑**在需求确认（S0 / 建项目）时也问一下用户**方法论偏好。需平衡「不让用户思考」原则，批 3 重新 brainstorm。
+R5. **方法论路由接回 + 显性化 + S1 软确认/可换**（原"可见不可选"，2026-06-10 摸清现状后重定范围）
+- 状态：`spec APPROVED（codex 迭代审 R1→R4 + 对抗式红队 R1→R3 双 APPROVED），待用户过目 → writing-plans`
+- spec：`docs/superpowers/specs/2026-06-10-r5-methodology-routing-and-visibility-design.md`
+- **重大现状发现（2026-06-10 摸清，源码实锤）**：方法论路由在 canonical skill（`D:\MyProject\CodeProject\consulting-report-skill`）里**本来设计过**（`docs/module-routing.md` + `evals/capability-map.json`，机制是模型 read_file 自取），但嵌进 app 后**断了**——`get_skill_prompt`(`skill.py:2315`) 只注入 SKILL.md + consulting-lifecycle.md（无类型分支）、`read_file`(`skill.py:1079`) 锁工作区够不到 skill 目录、`get_template`(`skill.py:2326`) 死代码；**17 模块里 16 个从不加载**（用户那份"很完美"的真实报告对话记录里全程零 `modules/`）。即领导"没让用户选方法论"的真问题不是"选不选"，是**根本没按类型用方法论**。
+- **重定设计（spec）**：① 代码注入（push）替失效的模型自取：后端按 `project_type` 注入"类型骨架"（仅 S1–S4）；② 框架（SWOT/BCG/金字塔…）拆出做**共享菜单**（横向不绑类型，菜单一行 + 模型自有知识，~300-400 token）；③ 显性化＝S1 大纲声明所用框架，**按类型三腔调**（分析型 SWOT/BCG / 文体方案型 SMART·RACI·章-条-款-项 / 专项研究条件）；④ S1 软确认/可换骑现有"确认大纲"门，**确认时快照**框架（`stage_checkpoints.json` 保留键 `__methodology_snapshot` + cascade 保留）跨轮稳、legacy 不规退；⑤ **不新增模型工具**（图表维持脚本交付，自动渲染 out-of-scope）；删 `get_template`/`templates`。
+- 涉及文件：`backend/skill.py`(`build_methodology_block`/`load_type_skeleton`/快照读写/`FRAMEWORK_MENU`)、`backend/chat.py`(`_build_system_prompt` 装配)、`skill/SKILL.md`、前端近零改(`methodology_declared` flag + S1 确认按钮)。
+- **A/B 验证（诚实声明，非阻塞）**：模块内容质量从未被验证（连 canonical evals 也只验路由格式不验质量、`run_evals` 是 schema 校验）；落地后建议同选题"裸跑 vs 注入"比一版，几乎无差则缩为"仅声明 + 删死模块"。
+- 历史背景（原决策已被现状发现部分推翻）：原拟"不做让用户选 + S1 点明框架"；摸清后发现框架根本没注入，遂升级为"先接回路由再谈可见"。涉及文件原列的"4~6 套模板"= `skill/templates/`（死代码，spec 决定删）。
 
 ### 既有待办（原 P1–P10，优先级低于上方整改簇）
 
