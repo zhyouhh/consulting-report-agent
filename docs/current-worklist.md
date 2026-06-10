@@ -49,7 +49,7 @@ R3. **工作区文件栏重做 + 预览框可编辑（＝UI 重构第一落地�
 - 参考设计稿 `docs/design_UI.pdf`（3 套，借鉴稿3按阶段分组 IA）。
 
 R4. **资料来源可信度：内置三档 + data-log 色点标注 + S2 阶段小结（advisory，不门禁）**
-- 状态：`spec APPROVED（codex R1 改 3 BLOCKER+4 NIT → R2 APPROVED），待 writing-plans`
+- 状态：`✅ 实施完成（2026-06-11）——R4 全在 A1 一个 commit 584abb6（三档+色点+S2 小结+守护测试，纯 prompt 改 SKILL.md，codex 单轨 APPROVED，守护测试 NIT 已修），剩 B10 统一 cutover 归档`
 - spec：`docs/superpowers/specs/2026-06-10-r4-source-credibility-annotation-design.md`
 - 背景：领导担心 AI 找的资料可信度不高；现状只校验"有没有来源"（data-log 有效来源计数放行 S2→S3），不校验"可不可信"。
 - 2026-06-09 数据论证（否掉软白名单）：两份真实报告每份仅 3-4 域名、7 源 6 高可信 → 软白名单"确认一句"打断≈0 但价值也弱 → **回归纯标注**。
@@ -58,7 +58,7 @@ R4. **资料来源可信度：内置三档 + data-log 色点标注 + S2 阶段�
 - v2/后路：后端按域名**确定性盖章**（骑 `_count_valid_data_log_sources` 解析）+ 精确分布、一手/二手维度、HTML badge（预览 rehypeRaw 已支持）、常驻证据统计条。
 
 R5. **方法论路由接回 + 显性化 + S1 软确认/可换**（原"可见不可选"，2026-06-10 摸清现状后重定范围）
-- 状态：`spec APPROVED（codex 迭代审 R1→R4 + 对抗式红队 R1→R3 双 APPROVED），待用户过目 → writing-plans`
+- 状态：`实施中（2026-06-11）——plan codex 三轮 APPROVED，subagent-driven 起跑：B1 ✅(2f47a4d 删死码) / B2 ✅(5e26607 骨架加载，codex 双轨) / B3-B10 待做；分支 feat/batch3-source-credibility-and-methodology，HEAD 5e26607；交接 docs/superpowers/handoffs/2026-06-11-batch3-r4-r5-impl-handoff.md`
 - spec：`docs/superpowers/specs/2026-06-10-r5-methodology-routing-and-visibility-design.md`
 - **重大现状发现（2026-06-10 摸清，源码实锤）**：方法论路由在 canonical skill（`D:\MyProject\CodeProject\consulting-report-skill`）里**本来设计过**（`docs/module-routing.md` + `evals/capability-map.json`，机制是模型 read_file 自取），但嵌进 app 后**断了**——`get_skill_prompt`(`skill.py:2315`) 只注入 SKILL.md + consulting-lifecycle.md（无类型分支）、`read_file`(`skill.py:1079`) 锁工作区够不到 skill 目录、`get_template`(`skill.py:2326`) 死代码；**17 模块里 16 个从不加载**（用户那份"很完美"的真实报告对话记录里全程零 `modules/`）。即领导"没让用户选方法论"的真问题不是"选不选"，是**根本没按类型用方法论**。
 - **重定设计（spec）**：① 代码注入（push）替失效的模型自取：后端按 `project_type` 注入"类型骨架"（仅 S1–S4）；② 框架（SWOT/BCG/金字塔…）拆出做**共享菜单**（横向不绑类型，菜单一行 + 模型自有知识，~300-400 token）；③ 显性化＝S1 大纲声明所用框架，**按类型三腔调**（分析型 SWOT/BCG / 文体方案型 SMART·RACI·章-条-款-项 / 专项研究条件）；④ S1 软确认/可换骑现有"确认大纲"门，**确认时快照**框架（`stage_checkpoints.json` 保留键 `__methodology_snapshot` + cascade 保留）跨轮稳、legacy 不规退；⑤ **不新增模型工具**（图表维持脚本交付，自动渲染 out-of-scope）；删 `get_template`/`templates`。
