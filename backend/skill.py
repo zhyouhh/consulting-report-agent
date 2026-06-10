@@ -2021,6 +2021,7 @@ class SkillEngine:
             "review_passed": review_passed,
             "presentation_done": presentation_done,
             "delivery_archived": delivery_archived,
+            "methodology_declared": self._methodology_declared_flag(project_path),
         }
         return {
             "stage_code": stage_code,
@@ -2055,7 +2056,8 @@ class SkillEngine:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][0])
             if flags["references_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][1])
-            if flags["outline_ready"] or flags["research_plan_ready"]:
+            # R5: 「分析框架确定」镜像方法论声明 parsed（display-only，不驱动阶段回归）
+            if flags.get("methodology_declared") and flags["outline_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][2])
             if flags["outline_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][3])
@@ -2704,6 +2706,19 @@ class SkillEngine:
             state, selected = self.read_confirmed_methodology_snapshot(project_path)
             instr = self._adhere_instruction(state, selected)
         return self._render_methodology_block(skeleton, self.FRAMEWORK_MENU, instr)
+
+    def _methodology_declared_flag(self, project_path: Path) -> bool:
+        """前端确认按钮用：known type + 未确认时，要求 outline 有 parsed 声明才 True；
+        unknown type / 已确认 → True（不门禁 / 不再卡）。仅 known+未确认时有约束意义。"""
+        project_type = self._get_project_type_for_path(project_path)
+        if project_type not in self.TYPE_SKELETON_MAP:
+            return True
+        checkpoints = self._load_stage_checkpoints(project_path)
+        if "outline_confirmed_at" in checkpoints:
+            return True
+        outline_text = self._read_plan_file(project_path, "outline.md") or ""
+        state, _ = self.parse_and_sanitize_methodology(outline_text)
+        return state == "parsed"
 
     def get_skill_prompt(self) -> str:
         """鑾峰彇Skill瀹氫箟"""

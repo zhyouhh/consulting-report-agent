@@ -2328,6 +2328,66 @@ class SkillEngineTests(unittest.TestCase):
         self.assertIn("未记录已确认的方法论框架", block)
         self.assertNotIn("## 方法论（已选）", block)
 
+    def test_methodology_declared_flag_known_type_requires_declaration(self):
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        (project_dir / "plan" / "outline.md").write_text(
+            "# 大纲\n\n## 一、背景\n- x\n\n## 二、目标\n- y\n", encoding="utf-8"
+        )  # known type, 未确认, 无声明
+        summary = self.engine.get_workspace_summary("demo")
+        self.assertFalse(summary["flags"]["methodology_declared"])
+
+    def test_methodology_declared_flag_true_with_declaration(self):
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        summary = self.engine.get_workspace_summary("demo")
+        self.assertTrue(summary["flags"]["methodology_declared"])
+
+    def test_methodology_declared_flag_true_for_unknown_type(self):
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)
+        (project_dir / "plan" / "outline.md").write_text(
+            "# 大纲\n\n## 一、背景\n- x\n\n## 二、目标\n- y\n", encoding="utf-8"
+        )
+        registry = self.engine._load_registry()
+        registry["projects"][0]["project_type"] = "custom-unknown"
+        self.engine._save_registry(registry)
+        summary = self.engine.get_workspace_summary("demo")
+        self.assertTrue(summary["flags"]["methodology_declared"])
+
+    def test_s1_analysis_framework_completed_mirrors_declaration(self):
+        project_dir = self._make_project()
+        self._write_stage_two_prerequisites(project_dir)  # helper outline 已带声明（B5）
+        summary = self.engine.get_workspace_summary("demo")
+        self.assertEqual(summary["stage_code"], "S1")
+        framework_item = SkillEngine.STAGE_CHECKLIST_ITEMS["S1"][2]
+        self.assertIn(framework_item, summary["completed_items"])
+        (project_dir / "plan" / "outline.md").write_text(
+            "# 大纲\n\n## 一、背景\n- x\n\n## 二、目标\n- y\n", encoding="utf-8"
+        )  # 去声明
+        summary2 = self.engine.get_workspace_summary("demo")
+        self.assertNotIn(framework_item, summary2["completed_items"])
+
+    def test_build_methodology_block_stage_gate_full_matrix(self):
+        # spec §11/§4.1：S1–S4 注入、S0 与 S5+ 不注入（补 S3/S4 注入 + S0/S5/S6/S7/done 空）
+        project_dir = self._make_project()
+        self._prepare_confirmable_outline_with_methodology(project_dir)
+        self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
+        for stage in ("S1", "S2", "S3", "S4"):
+            with mock.patch.object(
+                self.engine, "_infer_stage_state", return_value={"stage_code": stage}
+            ):
+                self.assertTrue(
+                    self.engine.build_methodology_block("demo"), f"{stage} 应注入方法论块"
+                )
+        for stage in ("S0", "S5", "S6", "S7", "done"):
+            with mock.patch.object(
+                self.engine, "_infer_stage_state", return_value={"stage_code": stage}
+            ):
+                self.assertEqual(
+                    self.engine.build_methodology_block("demo"), "", f"{stage} 不应注入方法论块"
+                )
+
     def test_declare_instruction_structural_tone_for_management_document(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self._bare_engine(tmp)
