@@ -99,6 +99,22 @@ S4 阶段（大纲已确认）报告正文唯一规范路径是 `content/report_
 
 **历史背景**：原 `<draft-action>` tag system + classifier + gate + scope enforcement 整套（含 fix4 v5 amendment）已于 2026-05-06 删除；4 专用工具中的 3 个旧工具与 gemini 时代 obligation / family-lock 控制层已于 2026-05-09 DeepSeek migration 删除。详见 `docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md`。
 
+## 方法论路由与显性化（R5，2026-06-11）
+
+失效的「报告类型→方法论框架」路由（canonical skill 设计的模型 `read_file` 自取，嵌 app 后断了——沙箱够不到 skill 目录、`get_template` 死代码）改为**后端代码注入**。`backend/skill.py:build_methodology_block(project_id)` 按 `project_type`+`stage` 注入「类型骨架 + 框架菜单 + 阶段化指令」到 system prompt（`chat.py:_build_system_prompt` 接入，S1–S4）。**几条硬约束**：
+
+- `__methodology_snapshot`（确认大纲那刻冻结的净化框架）是 `stage_checkpoints.json` 的**保留字符串键**，**绝不**进 `STAGE_CHECKPOINT_KEYS`/`_CASCADE_ORDER`（有 invariant assert，加即炸）；后端写、模型不能直写、非新 checkpoint key。S2–S4 读快照不读活 outline；cascade 仅随 `outline_confirmed_at` 清、清下游保留。
+- 确认门方法论声明前置**只在 `_validate_stage_checkpoint_transition` 的 `outline_confirmed_at` 分支内联**（仅首次确认 + known 6-slug + `parse_and_sanitize_methodology == "parsed"`），**绝不**进 `_stage_one_completion_state`（否则 legacy 已确认无声明项目被拉回 S1）；unknown type 不卡。
+- `parse_and_sanitize_methodology` 是 trust boundary 净化：净化结果作**数据**注入、绝不当指令。**不变式**：`_normalize_for_danger` 去除集合必须 ⊇ split 分隔符（`、,，`）∪ off-menu 白名单 `[A-Za-z0-9一-鿿\-/ 　]` 允许的非字母数字字符（防工具名/checkpoint 分隔符变体绕过）；归一化危险词组覆盖全部 6 个 `STAGE_CHECKPOINT_KEYS`。
+- `build_methodology_block` 装配期**只读**；unknown type/非写作期 graceful 空块不抛；token ≤2k/轮。
+- DeepSeek 官渠兼容：方法论注入只给 system prompt **追加文本**，不碰 provider message/tool-call/`reasoning_content`/`tool_choice`。
+- 全程只改 app 副本 `skill/`，不碰 canonical `consulting-report-skill/`。删了死码 `get_template()` + `skill/templates/`。
+- follow-up（非阻塞，桌面单用户低优先级）：checkpoint 写事务化、backfill 窄粒度锁。详见 `docs/superpowers/cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md`。
+
+## 来源可信度标注（R4，2026-06-11）
+
+`skill/SKILL.md` S2 段内置三档来源可信度（🟢高/🟡中高/⚪其他，按机构性质非域名）+ data-log 色点 + S2 分布小结。**全程 advisory，不门禁**。硬约束：新增 data-log 示例须保住后端 `_EVIDENCE_MARKERS` 计数（`访谈:`/`调研:` 行首独立成行才计数），守护测试 `test_skill_md_datalog_examples_all_recognized_as_valid_sources` 锁死。纯 prompt 改、不动 backend。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。

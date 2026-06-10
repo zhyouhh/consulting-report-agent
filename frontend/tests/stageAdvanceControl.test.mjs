@@ -95,4 +95,6 @@ test("StageAdvanceControl S1 hint uses s1ConfirmDisabledReason (source guard)", 
     "utf8",
   );
   assert.match(src, /s1ConfirmDisabledReason/);
+  // disabledReason 必须被条件渲染用到，不只 import（防止 import 后从不使用）
+  assert.match(src, /\{disabledReason\}/);
 });

@@ -149,6 +149,24 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 - 前端：`utils/fileTree.js`（分组/置顶/中文名）、`utils/fileEditState.js`（双模式状态机 + `guardLeave` 返 `allow/confirm/block`）、`FilePreviewPanel.jsx`（forwardRef 暴露 `attemptLeave(action)`/`isEditing()`，脏离开**三按钮「保存/放弃修改/取消」延后动作**弹窗 + Esc=取消 + 进入编辑 `selectionSeqRef` 防竞态）、`WorkspacePanel.jsx`/`App.jsx`（切 tab/切项目/新建项目/收面板 dirty 守卫，ref 链 App→WorkspacePanel→FilePreviewPanel）。**`WorkspacePanel.loadFile` 同步 `setCurrentFile(path)` 再异步 GET 内容**——消除「导航已发起、currentFile 未 commit」窗口（否则进入编辑/保存会锁错文件）；`latestFileRequestRef` 丢弃乱序 content 响应。
 - 回归：`tests/test_skill_engine.py`、`tests/test_main_api.py::R3FileApiTests`；前端 `fileTree`/`fileEditState`/`filePreviewPanel.source`/`workspacePanel.source`。详见 `docs/superpowers/cutover_report_2026-06-09_r3-file-tree-editing.md`。
 
+## 来源可信度标注（R4，2026-06-11）
+
+`skill/SKILL.md` S2 段内置三档来源可信度（🟢高/🟡中高/⚪其他，**按机构性质非域名**——data-log 来源含 material/访谈/调研，一半无域名），模型在 `data-log.md` 每条 `**来源**` 行标色点 + S2 采集告一段落报一句分布小结。**全程 advisory，不门禁**。硬约束：新增 data-log 示例必须保住后端 `_EVIDENCE_MARKERS` 计数——`访谈:`/`调研:` 必须**行首独立成行**才计数（别塞进 **URL** 行括号），`tests/test_skill_engine.py::test_skill_md_datalog_examples_all_recognized_as_valid_sources` 锁死。纯 prompt 改、不动 backend。详见 `docs/superpowers/cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md`。
+
+## 方法论路由与显性化（R5，2026-06-11）
+
+失效的「报告类型→方法论框架」路由（canonical skill 设计的模型 `read_file` 自取，嵌 app 后断了——沙箱够不到 skill 目录、`get_template` 死代码、17 模块 16 死）改为**后端代码注入**。`backend/skill.py:build_methodology_block(project_id)` 按 `project_type`+`stage` 注入「类型骨架 + 框架菜单 + 阶段化指令」到 system prompt（`chat.py:_build_system_prompt` 接入，S1–S4）。**几条硬约束**：
+
+- `__methodology_snapshot`（确认大纲那刻冻结的净化框架）是 `stage_checkpoints.json` 的**保留字符串键**，**绝不**进 `STAGE_CHECKPOINT_KEYS`/`_CASCADE_ORDER`（有 invariant assert，加即炸）；后端写、模型不能直写、非新 checkpoint key；`_load_stage_checkpoints` 不返回它 → 不外泄前端 checkpoint 字段（值非机密）。S2–S4 读快照（`read_confirmed_methodology_snapshot`）不读活 outline；cascade 仅随 `outline_confirmed_at` 清、清下游（S5 回退）保留。
+- 确认门方法论声明前置**只在 `_validate_stage_checkpoint_transition` 的 `outline_confirmed_at` 分支内联**（仅首次确认 `not in checkpoints` + known 6-slug + `parse_and_sanitize_methodology == "parsed"`），**绝不**进 `_stage_one_completion_state`（否则 R5 前已确认无声明的 legacy known-type 项目被拉回 S1）；unknown type 不卡（避死锁）。
+- `parse_and_sanitize_methodology` 是 trust boundary 净化（outline 用户可编辑）：净化结果作**数据**注入、绝不当指令。**不变式**：`_normalize_for_danger` 去除集合必须 ⊇ `parse` 的 split 分隔符（`、,，`）∪ off-menu 白名单 `[A-Za-z0-9一-鿿\-/ 　]` 允许的非字母数字字符——改 off-menu 白名单或 split 分隔符须同步（防工具名/checkpoint 的空格/连字符/顿号变体绕过）。归一化危险词组覆盖全部 6 个 `STAGE_CHECKPOINT_KEYS`（`test_*_all_checkpoint_key_variants` 遍历防漏）。
+- `build_methodology_block` 装配期**只读**（不写文件）；unknown type / 非写作期（S0、S5+）graceful 空块、**不抛进 chat 链路**；token ≤2k/轮（tiktoken 实测断言）。
+- DeepSeek 官渠兼容：方法论注入只给 system prompt **追加文本**，不碰 provider message / tool-call / `reasoning_content` / `tool_choice`；`chat_runtime` DeepSeek 用例不回归。
+- 前端 `methodology_declared` flag（`_infer_stage_state` flags）驱动 S1 确认按钮 + 禁用理由，后端未透则向后兼容不阻塞（`?? true`）。
+- 全程只改 app 副本 `skill/`，不碰 canonical `consulting-report-skill/`。删了死码 `get_template()` + `skill/templates/`。
+- **follow-up**（非阻塞，桌面单用户低优先级，记 `docs/current-worklist.md`）：checkpoint 写事务化（record set 两阶段写 `outline_confirmed_at`+snapshot → 一次原子 raw 写，消除 crash 半提交，危害仅退 missing 兜底）、backfill 窄粒度锁/CAS。
+- 回归：`tests/test_skill_engine.py`（净化/快照/确认门/装配/flag）、`tests/test_chat_runtime.py`（装配 + DeepSeek targeted）、`tests/test_packaging_docs.py`、前端 `workspaceSummary`/`stageAdvanceControl`。详见 `docs/superpowers/cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md`。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。

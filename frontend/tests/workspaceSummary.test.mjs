@@ -344,4 +344,6 @@ test("s1ConfirmDisabledReason distinguishes missing outline vs missing methodolo
     s1ConfirmDisabledReason({ flags: { outline_ready: true, methodology_declared: true } }),
     null,
   );
+  // 向后兼容关键路径：outline_ready=true 且未透出 methodology_declared → 不阻塞（返回 null）
+  assert.equal(s1ConfirmDisabledReason({ flags: { outline_ready: true } }), null);
 });
