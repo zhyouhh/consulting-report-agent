@@ -5,6 +5,7 @@ import {
   summarizeWorkspace,
   isS4ReviewButtonVisible,
   isS1ConfirmOutlineEnabled,
+  s1ConfirmDisabledReason,
   shouldShowPresentationStage,
   getStageName,
   STAGE_NAMES,
@@ -313,4 +314,34 @@ test("summarizeWorkspace preserves raw flags (outline_ready, etc.)", () => {
 test("summarizeWorkspace with no flags field returns empty-ish flags", () => {
   const summary = summarizeWorkspace({ stage_code: "S0" });
   assert.equal(summary.flags.s0InterviewDone, false);
+});
+
+// ── R5: isS1ConfirmOutlineEnabled + methodology_declared ─────────────────────
+
+test("isS1ConfirmOutlineEnabled requires methodology_declared when backend provides it", () => {
+  assert.equal(
+    isS1ConfirmOutlineEnabled({ flags: { outline_ready: true, methodology_declared: false } }),
+    false,
+  );
+  assert.equal(
+    isS1ConfirmOutlineEnabled({ flags: { outline_ready: true, methodology_declared: true } }),
+    true,
+  );
+  // 后端未透出 flag（旧 schema / unknown type）→ 不阻塞，向后兼容
+  assert.equal(isS1ConfirmOutlineEnabled({ flags: { outline_ready: true } }), true);
+});
+
+test("s1ConfirmDisabledReason distinguishes missing outline vs missing methodology", () => {
+  assert.equal(
+    s1ConfirmDisabledReason({ flags: { outline_ready: false } }),
+    "需要先生成大纲才能继续",
+  );
+  assert.match(
+    s1ConfirmDisabledReason({ flags: { outline_ready: true, methodology_declared: false } }),
+    /方法论声明/,
+  );
+  assert.equal(
+    s1ConfirmDisabledReason({ flags: { outline_ready: true, methodology_declared: true } }),
+    null,
+  );
 });
