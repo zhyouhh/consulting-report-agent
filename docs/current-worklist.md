@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-06-10（**批 3 R4 + R5 两 spec 均 codex APPROVED，下一步＝writing-plans 写批 3 合并 plan**。R5（方法论路由接回+显性化）：迭代审 R1→R4 + 红队 R1→R3，spec `docs/superpowers/specs/2026-06-10-r5-methodology-routing-and-visibility-design.md`。R4（来源可信度标注）：codex R1[改 3 BLOCKER+4 NIT]→R2 APPROVED，spec `docs/superpowers/specs/2026-06-10-r4-source-credibility-annotation-design.md`。**合并 plan 走法（已定）**：一个 plan 文档、**R4 段在前**（纯 prompt 改 SKILL.md、快、先验先上）+ **R5 段在后**（重：后端 `build_methodology_block`/快照 + 前端 + 删死代码），两者都改 SKILL.md 但段落正交（R4=S2 采集 / R5=S1 方法论）、plan 里统一协调改动顺序，**commit 分开**。两 spec 文件 + 本 worklist/memory 改动 untracked·未提交。— 批 2 R3 已 merge main `53c52fd`+push origin；批 1 R1+R2 已闭环 main `f111f0e`+push origin。）
+最后更新：2026-06-11（**批 3 R4+R5 ✅ 全实施完成**——subagent-driven 11 task[A1+B1-B10] + codex 双轨/红队逐 task APPROVED，commit `584abb6`→`86b6b24`，skill_engine 210/packaging 14/前端 299/build 绿；红队审实现挖出 plan 文档级没暴露的 trust boundary/并发真洞[B3 5轮分隔符绕过→归一化根治、B4 半提交→自愈+temp竞态、B7 DeepSeek 5攻击面守住]；cutover `cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md`、CLAUDE.md/AGENTS.md 已同步 R4/R5 硬约束段；剩用户 GUI E2E+重打包+push[非阻塞] + follow-up[checkpoint 写事务化/backfill 窄锁，桌面单用户低优先级]。— 批 2 R3 已 merge main `53c52fd`+push；批 1 R1+R2 已闭环 main `f111f0e`+push。整个 R1-R5 整改簇至此全部实施闭环。）
 
 上一次更新：2026-06-09（批 2 R3 已实施 + codex **双轨独立** review 全 APPROVED[spec 轨后端/前端 SPEC-COMPLIANT + quality 轨后端/前端 APPROVED]；**应用户纠正：spec/quality 别合并塞一个 prompt**——quality 轨独立审挖出合并审漏的 2 真 BLOCKER[后端 `chat_stream` 同步 generator 跨 anyio 线程重入绕 CAS→专用 executor `8f06c81` / 前端进入编辑异步竞态→`loadFile` 同步提交选择 `d420dff`]；后端 281 passed、前端 296 pass。commits `336504a`→`ec42369`，cutover `cutover_report_2026-06-09_r3-file-tree-editing.md`。）
 
@@ -49,7 +49,7 @@ R3. **工作区文件栏重做 + 预览框可编辑（＝UI 重构第一落地�
 - 参考设计稿 `docs/design_UI.pdf`（3 套，借鉴稿3按阶段分组 IA）。
 
 R4. **资料来源可信度：内置三档 + data-log 色点标注 + S2 阶段小结（advisory，不门禁）**
-- 状态：`spec APPROVED（codex R1 改 3 BLOCKER+4 NIT → R2 APPROVED），待 writing-plans`
+- 状态：`✅ 完成（2026-06-11）——R4 全在 A1 一个 commit 584abb6（三档+色点+S2 小结+守护测试，纯 prompt 改 SKILL.md，codex 单轨 APPROVED）；cutover docs/superpowers/cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md；剩用户手工验收（spec §8 七类来源色点矩阵，非阻塞）`
 - spec：`docs/superpowers/specs/2026-06-10-r4-source-credibility-annotation-design.md`
 - 背景：领导担心 AI 找的资料可信度不高；现状只校验"有没有来源"（data-log 有效来源计数放行 S2→S3），不校验"可不可信"。
 - 2026-06-09 数据论证（否掉软白名单）：两份真实报告每份仅 3-4 域名、7 源 6 高可信 → 软白名单"确认一句"打断≈0 但价值也弱 → **回归纯标注**。
@@ -58,13 +58,14 @@ R4. **资料来源可信度：内置三档 + data-log 色点标注 + S2 阶段�
 - v2/后路：后端按域名**确定性盖章**（骑 `_count_valid_data_log_sources` 解析）+ 精确分布、一手/二手维度、HTML badge（预览 rehypeRaw 已支持）、常驻证据统计条。
 
 R5. **方法论路由接回 + 显性化 + S1 软确认/可换**（原"可见不可选"，2026-06-10 摸清现状后重定范围）
-- 状态：`spec APPROVED（codex 迭代审 R1→R4 + 对抗式红队 R1→R3 双 APPROVED），待用户过目 → writing-plans`
+- 状态：`✅ 完成（2026-06-11）——subagent-driven + codex 双轨/红队逐 task 审到 APPROVED：A1✅(584abb6) / B1✅(2f47a4d 删死码) / B2✅(5e26607 骨架) / B3✅(e6b4d8a 净化三态，红队 5 轮挖分隔符/checkpoint 拆词/零宽绕过→归一化根治) / B4✅(681a085 快照持久化，红队挖 KeyError半提交→自愈/固定temp→mkstemp) / B5✅(996137b 确认门前置+legacy不规退) / B6✅(facdb44 build_methodology_block 装配+三腔调+token≤2k) / B7✅(e0b4ae8 chat 接入+methodology_declared flag，DeepSeek 兼容守住) / B8✅(09a01f5 SKILL.md 路由改写) / B9✅(b3467a5 前端确认按钮) / B10✅(回归+cutover)；测试基线 skill_engine 210 / packaging_docs 14 / chat_runtime targeted 12(含 DeepSeek) / 前端 299 / build✅；cutover docs/superpowers/cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md；剩用户手工 GUI E2E（spec §11 八项，非阻塞）+ 上方 follow-up（checkpoint 写事务化/backfill 窄锁，桌面单用户低优先级）`
 - spec：`docs/superpowers/specs/2026-06-10-r5-methodology-routing-and-visibility-design.md`
 - **重大现状发现（2026-06-10 摸清，源码实锤）**：方法论路由在 canonical skill（`D:\MyProject\CodeProject\consulting-report-skill`）里**本来设计过**（`docs/module-routing.md` + `evals/capability-map.json`，机制是模型 read_file 自取），但嵌进 app 后**断了**——`get_skill_prompt`(`skill.py:2315`) 只注入 SKILL.md + consulting-lifecycle.md（无类型分支）、`read_file`(`skill.py:1079`) 锁工作区够不到 skill 目录、`get_template`(`skill.py:2326`) 死代码；**17 模块里 16 个从不加载**（用户那份"很完美"的真实报告对话记录里全程零 `modules/`）。即领导"没让用户选方法论"的真问题不是"选不选"，是**根本没按类型用方法论**。
 - **重定设计（spec）**：① 代码注入（push）替失效的模型自取：后端按 `project_type` 注入"类型骨架"（仅 S1–S4）；② 框架（SWOT/BCG/金字塔…）拆出做**共享菜单**（横向不绑类型，菜单一行 + 模型自有知识，~300-400 token）；③ 显性化＝S1 大纲声明所用框架，**按类型三腔调**（分析型 SWOT/BCG / 文体方案型 SMART·RACI·章-条-款-项 / 专项研究条件）；④ S1 软确认/可换骑现有"确认大纲"门，**确认时快照**框架（`stage_checkpoints.json` 保留键 `__methodology_snapshot` + cascade 保留）跨轮稳、legacy 不规退；⑤ **不新增模型工具**（图表维持脚本交付，自动渲染 out-of-scope）；删 `get_template`/`templates`。
 - 涉及文件：`backend/skill.py`(`build_methodology_block`/`load_type_skeleton`/快照读写/`FRAMEWORK_MENU`)、`backend/chat.py`(`_build_system_prompt` 装配)、`skill/SKILL.md`、前端近零改(`methodology_declared` flag + S1 确认按钮)。
 - **A/B 验证（诚实声明，非阻塞）**：模块内容质量从未被验证（连 canonical evals 也只验路由格式不验质量、`run_evals` 是 schema 校验）；落地后建议同选题"裸跑 vs 注入"比一版，几乎无差则缩为"仅声明 + 删死模块"。
 - 历史背景（原决策已被现状发现部分推翻）：原拟"不做让用户选 + S1 点明框架"；摸清后发现框架根本没注入，遂升级为"先接回路由再谈可见"。涉及文件原列的"4~6 套模板"= `skill/templates/`（死代码，spec 决定删）。
+- **R5 实施期红队挖的 follow-up（非阻塞，B4/B5 红队 APPROVED 前提，记此防遗忘；合并为"stage_checkpoints 写事务性强化"，桌面单用户低优先级）**：① **checkpoint 写事务化**——`record_stage_checkpoint` set 的 `outline_confirmed_at` + `__methodology_snapshot` 两阶段写改一次原子 raw 写（消除崩溃半提交：crash 落两写之间 + 用户随后改坏 outline 声明 → 原确认快照永久丢失；危害仅退 missing 兜底、非 BLOCKER）；② **backfill 窄粒度锁/CAS**——`_backfill_stage_checkpoints_if_missing` 无锁与 record 并发理论 TOCTOU（pre-existing，已加"写前重读 PRESERVED 合并"纵深防御，不用 request_lock 避卡 summary）；③ backfill PRESERVED 合并"有则覆盖"不 pop（latest 已删 snapshot 时不复活，仅损坏 raw 边界）。
 
 ### 既有待办（原 P1–P10，优先级低于上方整改簇）
 

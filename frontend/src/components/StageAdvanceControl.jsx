@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import axios from 'axios'
 import ConfirmDialog from './ConfirmDialog'
-import { isS4ReviewButtonVisible, isS1ConfirmOutlineEnabled } from '../utils/workspaceSummary'
+import { isS4ReviewButtonVisible, isS1ConfirmOutlineEnabled, s1ConfirmDisabledReason } from '../utils/workspaceSummary'
 import { showError } from '../utils/toast'
 
 /**
@@ -48,6 +48,7 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
   // ── S1 ──────────────────────────────────────────────────────────────────
   if (stageCode === 'S1') {
     const outlineExists = isS1ConfirmOutlineEnabled(summary)
+    const disabledReason = s1ConfirmDisabledReason(summary)
     return (
       <div className="mt-4">
         <button
@@ -61,8 +62,8 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
         >
           {pending ? '处理中…' : '确认大纲，进入资料采集'}
         </button>
-        {!outlineExists && !pending && (
-          <p className="mt-2 text-xs text-[#5a5e80] text-center">需要先生成大纲才能继续</p>
+        {!outlineExists && !pending && disabledReason && (
+          <p className="mt-2 text-xs text-[#5a5e80] text-center">{disabledReason}</p>
         )}
       </div>
     )

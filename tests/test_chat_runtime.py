@@ -81,6 +81,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self._write_evidence_gate_prerequisites(project_dir)
         (project_dir / "plan" / "outline.md").write_text(
             "# Report outline\n\n"
+            "方法论框架：SWOT、波特五力\n\n"
             "## Executive summary\n"
             "- Summarize the AI strategy recommendation.\n"
             "## Market context\n"
@@ -243,6 +244,45 @@ class ChatRuntimeTests(unittest.TestCase):
         response.iter_content = mock.Mock(return_value=[body])
         response.close = mock.Mock()
         return response
+
+    def test_build_system_prompt_injects_methodology_block_by_stage(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = getattr(handler, "_turn_context", {}) or {}
+        # 用注入块专有标题判断「是否注入」——不要用「方法论与报告结构」这种 SKILL.md 路由段（B8）
+        # 也会出现的泛化标题，否则 S0 会被 SKILL.md 同名段污染误判（codex R2 BLOCKER 1）。
+        # S0：新项目无前置 → 不注入
+        self.assertNotIn("## 报告结构骨架（按类型）", handler._build_system_prompt(self.project_id))
+        # S1：写齐前置（_write_stage_one_prerequisites 的 outline 已带声明，见 B5）→ 注入骨架+菜单+声明邀请
+        self._write_stage_one_prerequisites(self.project_dir)
+        prompt_s1 = handler._build_system_prompt(self.project_id)
+        self.assertIn("## 报告结构骨架（按类型）", prompt_s1)
+        self.assertIn("## 可选分析框架菜单", prompt_s1)
+        self.assertIn("## 方法论声明（S1）", prompt_s1)
+        self.assertIn("SWOT", prompt_s1)
+        # S2：确认大纲 → 注入已选快照，不再邀请
+        handler.skill_engine.record_stage_checkpoint(self.project_id, "outline_confirmed_at", "set")
+        prompt_s2 = handler._build_system_prompt(self.project_id)
+        self.assertIn("## 方法论（已选）", prompt_s2)
+        self.assertNotIn("## 方法论声明（S1）", prompt_s2)
+
+    def test_build_system_prompt_methodology_block_position_and_empty(self):
+        # quality NIT：注入位置（skill_prompt 后、轮次约束前）+ 空块不引多余分隔
+        handler = self._make_handler_with_project()
+        handler._turn_context = getattr(handler, "_turn_context", {}) or {}
+        with mock.patch.object(
+            handler.skill_engine, "build_methodology_block", return_value="METHODOLOGY_MARKER_XYZ"
+        ):
+            prompt = handler._build_system_prompt(self.project_id)
+        self.assertIn("METHODOLOGY_MARKER_XYZ", prompt)
+        self.assertLess(
+            prompt.index("METHODOLOGY_MARKER_XYZ"), prompt.index("## 当前轮次约束")
+        )
+        with mock.patch.object(
+            handler.skill_engine, "build_methodology_block", return_value=""
+        ):
+            prompt_empty = handler._build_system_prompt(self.project_id)
+        self.assertNotIn("METHODOLOGY_MARKER_XYZ", prompt_empty)
+        self.assertIn("\n\n## 当前轮次约束", prompt_empty)  # 空块时不引入额外空行
 
     @mock.patch("backend.chat.OpenAI")
     def test_get_active_model_name_prefers_mode_specific_field(self, mock_openai):

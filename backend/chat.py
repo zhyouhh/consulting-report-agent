@@ -5962,6 +5962,7 @@ class ChatHandler:
     def _build_system_prompt(self, project_id: str) -> str:
         """构建系统提示"""
         skill_prompt = self.skill_engine.get_skill_prompt()
+        methodology_block = self.skill_engine.build_methodology_block(project_id)
         project_context = self.skill_engine.build_project_context(project_id)
         if self._turn_context.get("can_write_non_plan", True):
             turn_rule = (
@@ -5994,8 +5995,9 @@ class ChatHandler:
             "每轮消息只发一个 tool_call，等该工具返回结果后再发下一个；"
             "不要在一条消息里并行发起多个工具调用。"
         )
+        methodology_section = f"\n\n{methodology_block}" if methodology_block else ""
         return (
-            f"{skill_prompt}\n\n## 当前轮次约束\n{turn_rule}\n{draft_rule_block}\n"
+            f"{skill_prompt}{methodology_section}\n\n## 当前轮次约束\n{turn_rule}\n{draft_rule_block}\n"
             f"{evidence_rule}\n{concurrency_rule}\n\n{project_context}"
         )
 

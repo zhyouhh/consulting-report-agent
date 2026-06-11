@@ -1,14 +1,18 @@
 from datetime import datetime
 from pathlib import Path
 import json
+import logging
 import math
 import mimetypes
 import os
 import re
 import shutil
 import tempfile
+import unicodedata
 import uuid
 from typing import Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class StaleFileError(Exception):
@@ -106,6 +110,15 @@ class SkillEngine:
         "delivery_archived_at",
     }
     MIGRATION_MARKER_KEY = "__migrated_at"
+    METHODOLOGY_SNAPSHOT_KEY = "__methodology_snapshot"
+    # 非 checkpoint 的受保护内部 string 键集合（确认时快照的方法论 + migration marker）。
+    # 绝不加进 STAGE_CHECKPOINT_KEYS——那个有 `set(_CASCADE_ORDER) == STAGE_CHECKPOINT_KEYS`
+    # 的 invariant assert（:117），加了即炸（红队 R3）。_load_stage_checkpoints 只返回
+    # STAGE_CHECKPOINT_KEYS 的 str，故这些键天然不经 get_workspace_summary 暴露给前端。
+    PRESERVED_STAGE_CHECKPOINT_STRING_KEYS = {MIGRATION_MARKER_KEY, METHODOLOGY_SNAPSHOT_KEY}
+    assert not (PRESERVED_STAGE_CHECKPOINT_STRING_KEYS & STAGE_CHECKPOINT_KEYS), (
+        "preserved string keys must never overlap STAGE_CHECKPOINT_KEYS"
+    )
     _CASCADE_ORDER = [
         "s0_interview_done_at",
         "outline_confirmed_at",
@@ -224,6 +237,94 @@ class SkillEngine:
         "S6": "演示准备",
         "S7": "交付归档",
     }
+
+    # R5: project_type(slug) → modules 文件名。management-document 的 slug 与文件名不一致
+    # （文件是 management-system.md），其余 5 个同名。load_type_skeleton 用它定位骨架模块。
+    TYPE_SKELETON_MAP = {
+        "strategy-consulting": "strategy-consulting.md",
+        "market-research": "market-research.md",
+        "specialized-research": "specialized-research.md",
+        "management-document": "management-system.md",
+        "implementation-plan": "implementation-plan.md",
+        "due-diligence": "due-diligence.md",
+    }
+
+    # R5: 类型→声明腔调（§7.3）。analytical=招牌框架；structural=结构纪律；specialized=按子题。
+    METHODOLOGY_TONE = {
+        "strategy-consulting": "analytical",
+        "market-research": "analytical",
+        "due-diligence": "analytical",
+        "management-document": "structural",
+        "implementation-plan": "structural",
+        "specialized-research": "specialized",
+    }
+
+    # R5: 共享分析框架菜单（横向对所有类型可用，v1 仅菜单一行；细节全文留 v2）。
+    # 常驻 S1–S4 注入。token 由 test_build_methodology_block_token_budget 实测 ≤2k/轮。
+    FRAMEWORK_MENU = (
+        "## 可选分析框架菜单（按报告实际需要挑，不被类型锁死；也可用你自己知道的其他框架）\n"
+        "- SWOT：内外部优劣势/机会/威胁（广谱）\n"
+        "- PEST：政治/经济/社会/技术宏观环境（广谱·战略）\n"
+        "- 波特五力：行业竞争强度五维（战略/市场/尽调）\n"
+        "- 价值链：主要+支持活动定位优势环节（战略）\n"
+        "- 金字塔原理/MECE：结论先行、不重不漏分组（广谱）\n"
+        "- 对标分析：选可比对象横向比（广谱）\n"
+        "- 根因分析：问题溯源不停表面（专项研究）\n"
+        "- 成熟度模型：五级阶梯定位现状/目标（评估类）\n"
+        "- BCG/GE 矩阵：业务组合定位（战略）\n"
+        "- 安索夫矩阵：增长路径四象限（战略）\n"
+        "- TAM-SAM-SOM：市场规模自上而下（市场）\n"
+        "- CR4/HHI：市场集中度（市场）\n"
+        "- SMART：目标设定五要素（实施方案）\n"
+        "- RACI：责任分配四角色（实施方案）\n"
+        "- 甘特/里程碑：进度与关键节点（实施方案）\n"
+        "- 财务尽调三维：收入真实性/成本/资产质量（尽调）\n"
+        "- 红旗识别：异常/诉讼/关联交易（尽调）\n"
+        "- 影响-可行矩阵：建议优先级排序（广谱·建议）\n"
+        "- DAMA-DMBOK / ISO 8000：数据治理组织/质量/成熟度（数据专项）\n"
+    )
+
+    # R5: 声明行格式（行首关键词 + 顿号/逗号分隔；既给人看又可解析，不用隐藏 marker）。
+    _METHODOLOGY_DECLARATION_RE = re.compile(
+        r"^[^\S\n]*\*{0,2}方法论框架\*{0,2}[^\S\n]*[:：][^\S\n]*(.+?)[^\S\n]*$",
+        re.MULTILINE,
+    )
+    # 精确匹配放行的已知框架名（**无空格 casefold**，比对时把 token 也去空格归一化，
+    # 让「BCG 矩阵」「ISO 8000」带空格写法也命中）。与 FRAMEWORK_MENU 并行维护：菜单是给
+    # 模型看的一句话清单，这里是给净化用的精确名集。
+    KNOWN_FRAMEWORK_NAMES = {
+        "swot", "pest", "波特五力", "五力", "价值链", "金字塔原理", "金字塔原理/mece",
+        "mece", "金字塔", "对标分析", "根因分析", "成熟度模型", "bcg", "bcg矩阵",
+        "bcg/ge矩阵", "ge矩阵", "安索夫矩阵", "tam-sam-som", "cr4", "hhi", "cr4/hhi",
+        "smart", "raci", "甘特", "里程碑", "甘特/里程碑", "财务尽调三维", "红旗识别",
+        "影响-可行矩阵", "dama-dmbok", "iso8000", "dama-dmbok/iso8000", "章-条-款-项",
+    }
+    # 原样 casefold 子串命中即整条 malformed：注入符号 / 中文操控·控制语义词。
+    # 工具名 + checkpoint + 英文操作词移到 _METHODOLOGY_DANGER_NORMALIZED（归一化匹配，防分隔符/拆词绕过）。
+    _METHODOLOGY_DANGER_SUBSTRINGS = (
+        "__", "<stage", "stage-ack", "ignore",
+        "系统提示", "系統提示", "忽略", "覆写", "覆寫", "覆盖",
+        # 中文阶段操控 / 注入指令 / 控制语义词（不含框架·业务常用词：分析/模型/矩阵/交付/阶段）
+        "推进", "回退", "归档", "无视", "跳过", "停止", "立即", "删除",
+        "设为", "标记为", "指令", "请你", "门禁", "检查点",
+    )
+    # 归一化（NFKC+casefold+删 Cf 格式字符+去空白/分隔符）后子串命中即 malformed：工具名 +
+    # 全部 6 个 STAGE_CHECKPOINT_KEYS 的去分隔符形态 + 英文操作词。防 "advance stage" /
+    # "advance-stage" / "s0 interview done at" / "over ride" 等变体绕过（红队 v2/v3、quality NIT）。
+    # 零误杀（真框架名不会等于这些 API 标识符）。守护测试 test_*_all_checkpoint_key_variants 锁
+    # checkpoint 全覆盖，防未来加 key 漏项。
+    _METHODOLOGY_DANGER_NORMALIZED = (
+        # 工具名
+        "writefile", "editfile", "appendreportdraft", "readfile", "readmaterialfile",
+        "websearch", "fetchurl",
+        # 阶段机 + 全部 6 个 checkpoint 的去分隔符形态（含 v3 漏掉的 s0interviewdone）
+        "advancestage", "checkpoint", "stageack", "s0interviewdone",
+        "outlineconfirmed", "reviewstarted", "reviewpassed", "presentationready",
+        "deliveryarchived",
+        # 英文操作词（归一化防 "over ride" 拆词，quality NIT）
+        "override", "prompt",
+    )
+
     REPORT_DRAFT_PATH = "content/report_draft_v1.md"
     REPORT_DRAFT_CANDIDATES = (REPORT_DRAFT_PATH,)
     INDEPENDENT_REVIEW_ANCHORS = (
@@ -295,10 +396,21 @@ class SkillEngine:
 
     def _write_raw_stage_checkpoints(self, project_path, data):
         checkpoints_path = self._stage_checkpoints_path(project_path)
-        checkpoints_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        checkpoints_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        # 原子写：同目录唯一 temp（mkstemp，避免固定 temp 名被并发 writer 抢占，对齐
+        # user_write_file 模式）+ os.replace；异常清理自己的 temp（codex B4 quality/红队）。
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=str(checkpoints_path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            os.replace(tmp_name, checkpoints_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def _backfill_stage_checkpoints_if_missing(self, project_path):
         """Schema-incremental migration for stage_checkpoints.json.
@@ -358,6 +470,13 @@ class SkillEngine:
                 pass
 
         if changed:
+            # 写回前重读 PRESERVED 键合并，避免覆盖并发写入的 snapshot/marker（红队 B4 BLOCKER 3
+            # 纵深防御；注：确认大纲那刻 backfill 通常 changed=False[s0 已在、stage<S2 不补 outline]，
+            # 实际并发窗口窄）。backfill 不改 PRESERVED 键，重读最新值合并即可。
+            latest = self._read_raw_stage_checkpoints(project_path)
+            for preserved_key in self.PRESERVED_STAGE_CHECKPOINT_STRING_KEYS:
+                if preserved_key in latest:
+                    raw[preserved_key] = latest[preserved_key]
             self._write_raw_stage_checkpoints(project_path, raw)
 
     def _clear_stage_checkpoint_cascade(self, project_path, key):
@@ -378,6 +497,15 @@ class SkillEngine:
             payload = dict(checkpoints)
             if marker:
                 payload[self.MIGRATION_MARKER_KEY] = marker
+            # R5: 方法论快照仅当被清范围**不含** outline_confirmed_at 时保留（红队 R2）。
+            # 清 outline_confirmed_at 本身（或上游 s0）→ 删快照；清 review_*/下游 → 保留，
+            # 否则用户 S5「回去改」会丢快照、S2–S4 退回 default。
+            snapshot = raw.get(self.METHODOLOGY_SNAPSHOT_KEY)
+            if (
+                isinstance(snapshot, str)
+                and "outline_confirmed_at" not in self._CASCADE_ORDER[start:]
+            ):
+                payload[self.METHODOLOGY_SNAPSHOT_KEY] = snapshot
             self._write_raw_stage_checkpoints(project_path, payload)
 
     def _save_stage_checkpoint(self, project_path, key):
@@ -641,6 +769,19 @@ class SkillEngine:
         if key == "outline_confirmed_at":
             missing = stage_one_state["missing_prerequisites"]
             require(not missing, f"需要先补齐 {', '.join(missing)}，才能确认大纲。")
+            # R5: 方法论声明前置——仅首次确认（outline_confirmed_at 未 set）+ 已知 6-slug 时校验。
+            # 不进 _stage_one_completion_state 持久完成态（否则 legacy 已确认无声明项目被拉回 S1，
+            # 红队 BLOCKER 1）；未知 type 不卡（避死锁）。
+            if "outline_confirmed_at" not in checkpoints:
+                project_type = self._get_project_type_for_path(project_path)
+                if project_type in self.TYPE_SKELETON_MAP:
+                    outline_text = self._read_plan_file(project_path, "outline.md") or ""
+                    state, _ = self.parse_and_sanitize_methodology(outline_text)
+                    require(
+                        state == "parsed",
+                        "大纲缺少有效方法论声明行（如「方法论框架：SWOT、波特五力」），"
+                        "请在大纲顶部补一行后再确认。",
+                    )
             return
 
         if key == "review_started_at":
@@ -1655,6 +1796,14 @@ class SkillEngine:
             if action == "set":
                 self._validate_stage_checkpoint_transition(project_path, key)
                 timestamp = self._save_stage_checkpoint(project_path, key)
+                # R5: 确认大纲时若当前无有效方法论快照（首次确认 / 上次快照写入失败留下的半提交）
+                # → 写/补快照；已有有效快照则不重写（防确认后改 outline 声明行静默换方法论，红队
+                # BLOCKER 2）。用「当前快照状态」而非「是否首次确认」判定，使快照写入失败后下次确认
+                # 可自愈补写，消除两阶段写的永久半提交不一致（codex B4 红队 BLOCKER）。
+                if key == "outline_confirmed_at":
+                    snap_state, _ = self.read_confirmed_methodology_snapshot(project_path)
+                    if snap_state != "parsed":
+                        self._snapshot_methodology_on_confirm(project_path)
                 self._sync_stage_tracking_files(project_path)
                 return {"status": "ok", "key": key, "timestamp": timestamp}
             self._clear_stage_checkpoint_cascade(project_path, key)
@@ -1872,6 +2021,7 @@ class SkillEngine:
             "review_passed": review_passed,
             "presentation_done": presentation_done,
             "delivery_archived": delivery_archived,
+            "methodology_declared": self._methodology_declared_flag(project_path),
         }
         return {
             "stage_code": stage_code,
@@ -1906,7 +2056,8 @@ class SkillEngine:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][0])
             if flags["references_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][1])
-            if flags["outline_ready"] or flags["research_plan_ready"]:
+            # R5: 「分析框架确定」镜像方法论声明 parsed（display-only，不驱动阶段回归）
+            if flags.get("methodology_declared") and flags["outline_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][2])
             if flags["outline_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S1"][3])
@@ -2312,6 +2463,263 @@ class SkillEngine:
     def _delivery_mode_requires_presentation(self, project_path: Path) -> bool:
         return self._extract_delivery_mode(project_path) == "报告+演示"
 
+    def load_type_skeleton(self, project_type: str) -> str:
+        """取类型模块的「## 二、标准结构」段作为报告骨架。caller 保证 project_type ∈
+        TYPE_SKELETON_MAP（未知 type 在 build_methodology_block 已 graceful 返空）。
+        已知 type 但模块缺锚点 / 段为空 → fail-closed 抛 ValueError（代码/资产回归立刻暴露）。
+        逐行扫描并跳过 ``` 代码块，避免被骨架代码块内的 `## 执行摘要` 等行提前截断。"""
+        filename = self.TYPE_SKELETON_MAP[project_type]
+        module_path = self.skill_dir / "modules" / filename
+        try:
+            text = module_path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise ValueError(f"模块 {filename} 不存在（已知 type 但骨架资产缺失）") from exc
+        lines = text.splitlines()
+        anchor_idx = None
+        for idx, line in enumerate(lines):
+            if re.match(r"^##\s*二、标准结构\s*$", line):
+                anchor_idx = idx
+                break
+        if anchor_idx is None:
+            raise ValueError(f"模块 {filename} 缺少「## 二、标准结构」锚点")
+        body_lines = []
+        in_fence = False
+        for line in lines[anchor_idx + 1:]:
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                body_lines.append(line)
+                continue
+            if not in_fence and re.match(r"^##\s", line):
+                break
+            body_lines.append(line)
+        if in_fence:
+            raise ValueError(f"模块 {filename}「## 二、标准结构」段有未闭合代码块（``` 不成对）")
+        body = "\n".join(body_lines).strip()
+        if not body:
+            raise ValueError(f"模块 {filename}「## 二、标准结构」段为空")
+        return body
+
+    @staticmethod
+    def _normalize_for_danger(text: str) -> str:
+        """归一化用于危险词比对：NFKC + casefold + 删 Unicode 格式字符（Cf：零宽空格 U+200B/
+        BOM U+FEFF/零宽连接符等）+ 去所有空白与常见分隔符。
+        不变式（防拆词绕过，红队 v2/v4）：去除集合必须 ⊇ parse 的 split 分隔符（、,，）∪ off-menu
+        白名单允许的非字母数字字符（- / 空格 全角空格）——这样任何被允许字符拆开的 API 名（如
+        「write、file」「advance stage」「s0-interview-done-at」）归一化后都还原成连续串、命中
+        denylist。改 off-menu 白名单或 split 分隔符时必须同步本集合。"""
+        folded = unicodedata.normalize("NFKC", text or "").casefold()
+        folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Cf")
+        return re.sub(r"[\s\-_/.·、,，]", "", folded)
+
+    def _canonical_framework_name(self, token: str) -> Optional[str]:
+        """token 去空格 casefold 后命中已知框架名 → 返回去空白原文；否则 None。
+        归一化让「BCG 矩阵」「ISO 8000」「DAMA-DMBOK / ISO 8000」等带空格写法也命中。"""
+        normalized = token.casefold().replace(" ", "").replace("　", "")
+        if normalized in self.KNOWN_FRAMEWORK_NAMES:
+            return token.strip()
+        return None
+
+    def parse_and_sanitize_methodology(self, outline_text: str) -> tuple[str, list[str]]:
+        """解析 outline 顶部「方法论框架：…」声明行，净化为可信框架名列表。
+        返回 (state, frameworks)：
+          - parsed   : 至少一个合法框架（已知名精确匹配，或菜单外严格短标签）
+          - missing  : 顶部无声明行（legacy / 漏写）
+          - malformed: 顶部有声明行但含工具名/checkpoint/注入词/阶段操控词，或全是非法标签
+        净化是 trust boundary（outline 用户可编辑，spec §4.2/§11）：危险词在完整 raw_value 上
+        先行检测（原样子串 + 归一化子串双查，挡分隔符绕过）、命中即整条 malformed（不剥括号、
+        不截断绕过）；净化结果以「数据」注入，绝不当指令。"""
+        text = outline_text or ""
+        # 仅解析「顶部」声明（spec §7.1）：首个二级及以上标题（## ~ ######，允许 ≤3 前导空格）
+        # 之前、且不超过前 30 行。H1（# 报告大纲）不截断（声明在 H1 之后）；缩进 H2 也截断（防把
+        # 真声明挤出顶部，红队 v2）。避免正文/示例/代码块里的「方法论框架：」被误解析。
+        head_lines: list[str] = []
+        for line in text.splitlines()[:30]:
+            if re.match(r"^[^\S\n]{0,3}#{2,6}[^\S\n]", line):
+                break
+            head_lines.append(line)
+        head = "\n".join(head_lines)
+        match = self._METHODOLOGY_DECLARATION_RE.search(head)
+        if not match:
+            return ("missing", [])
+        raw_value = match.group(1).strip()
+        # 危险词先行（完整 raw_value，未剥括号、未截断）——spec §11「含危险词→malformed，不剥」。
+        # 原样 casefold 子串挡注入符号/中文操控词；归一化（去空白+分隔符）子串挡工具名/checkpoint
+        # 的「advance stage」「advance-stage」等分隔符变体（红队 v2）。
+        lowered_raw = raw_value.casefold()
+        normalized_raw = self._normalize_for_danger(raw_value)
+        if any(bad in lowered_raw for bad in self._METHODOLOGY_DANGER_SUBSTRINGS) or any(
+            bad in normalized_raw for bad in self._METHODOLOGY_DANGER_NORMALIZED
+        ):
+            return ("malformed", [])
+        # 仅顿号/中英逗号分隔；不用 "/"（TAM-SAM-SOM、BCG/GE、金字塔原理/MECE 内部含 "/"）。
+        tokens = [t.strip() for t in re.split(r"[、,，]+", raw_value) if t.strip()]
+        if not tokens:
+            return ("malformed", [])
+        cleaned: list[str] = []
+        for token in tokens[:8]:  # 条数上限（危险词已在 raw_value 层全量检测，截断不漏检）
+            bare = re.sub(r"[（(].*?[)）]", "", token).strip()  # 剥括号（仅展示清洗，危险词已先拦）
+            if not bare:
+                continue
+            canonical = self._canonical_framework_name(bare)
+            if canonical:  # 已知框架名精确放行
+                cleaned.append(canonical)
+                continue
+            # 菜单外：严格短标签（中英文/数字/连字符/斜杠/空格，≤24 字；工具名/checkpoint/注入词
+            # 已被 raw_value 层双查拦截）。允许空格让「麦肯锡 7S」等带空格框架不被误杀。
+            if re.fullmatch(r"[A-Za-z0-9一-鿿\-/ 　]{1,24}", bare):
+                cleaned.append(bare)
+                continue
+            return ("malformed", [])
+        if not cleaned:
+            return ("malformed", [])
+        # 归一化去重（去空白+分隔符）：「TAM-SAM-SOM」与「TAM SAM SOM」合并，保留首个 display。
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for name in cleaned:
+            key = self._normalize_for_danger(name)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(name)
+        return ("parsed", deduped)
+
+    def _get_project_type_for_path(self, project_path: Path) -> Optional[str]:
+        """按 project_dir 反查 project_type（registry 字段）。build_methodology_block 有
+        project_id 直接取；确认门/快照只有 project_path，用本 helper 反查（门禁/注入同源口径）。"""
+        try:
+            target = Path(project_path).resolve()
+        except OSError:
+            target = Path(project_path)
+        for project in self._load_registry()["projects"]:
+            project_dir = project.get("project_dir")
+            if not project_dir:
+                continue
+            try:
+                if Path(project_dir).resolve() == target:
+                    return project.get("project_type")
+            except OSError:
+                continue
+        return None
+
+    def read_confirmed_methodology_snapshot(self, project_path) -> tuple[str, list[str]]:
+        """读「确认大纲那刻」冻结的方法论快照（非活 outline，跨轮/跨压缩稳定）。
+        返回 (parsed/missing, frameworks)。快照仅在 _snapshot_methodology_on_confirm 解析为
+        parsed 时写入（malformed/missing 不写），故读取只有 parsed/missing 两态。"""
+        raw = self._read_raw_stage_checkpoints(project_path)
+        snapshot = raw.get(self.METHODOLOGY_SNAPSHOT_KEY)
+        if not isinstance(snapshot, str) or not snapshot.strip():
+            return ("missing", [])
+        frameworks = [token.strip() for token in snapshot.split("、") if token.strip()]
+        if not frameworks:
+            return ("missing", [])
+        return ("parsed", frameworks)
+
+    def _snapshot_methodology_on_confirm(self, project_path: Path) -> None:
+        """确认大纲那刻：解析+净化 outline 声明，冻结进 __methodology_snapshot 保留键。
+        未知 type / 无有效声明 → 不写（S2–S4 注入靠 read_confirmed_methodology_snapshot 的
+        missing 兜底）。后端写、非模型写、非新 checkpoint key。"""
+        project_type = self._get_project_type_for_path(project_path)
+        if project_type not in self.TYPE_SKELETON_MAP:
+            return
+        outline_text = self._read_plan_file(project_path, "outline.md") or ""
+        state, selected = self.parse_and_sanitize_methodology(outline_text)
+        if state != "parsed" or not selected:
+            return
+        raw = self._read_raw_stage_checkpoints(project_path)
+        raw[self.METHODOLOGY_SNAPSHOT_KEY] = "、".join(selected)
+        self._write_raw_stage_checkpoints(project_path, raw)
+
+    def get_project_type(self, project_ref: str) -> Optional[str]:
+        record = self.get_project_record(project_ref)
+        return record.get("project_type") if record else None
+
+    def _declare_and_invite_instruction(self, project_type: str) -> str:
+        """S1 注入：让模型在 outline 顶部写方法论声明行 + 聊天里软邀请（按类型分腔调，§7.3）。"""
+        tone = self.METHODOLOGY_TONE.get(project_type, "analytical")
+        # 注意：腔调举例里框架之间一律用「顿号」分隔，与声明行格式（顿号分隔）一致——
+        # 否则模型照提示用 + / 空格连接，会被 B3 parser 判 malformed、卡住确认门（codex R1 BLOCKER 4）。
+        if tone == "structural":
+            tone_line = (
+                "本报告的「方法论」是结构纪律：管理制度用「章-条-款-项」规范结构；"
+                "实施方案用 SMART、RACI、里程碑。按本报告类型选，不要硬贴 SWOT 之类分析框架。"
+            )
+        elif tone == "specialized":
+            tone_line = (
+                "按本专项研究的子题目选方法：数据治理题用 DAMA-DMBOK、ISO 8000、成熟度模型；"
+                "非数据题用根因分析、对标分析，不要硬套招牌框架。"
+            )
+        else:  # analytical
+            tone_line = (
+                "从下方框架菜单挑本报告真正需要的招牌框架（如 SWOT、波特五力、BCG 矩阵），"
+                "也可以用你自己知道的其他框架。"
+            )
+        return (
+            "## 方法论声明（S1）\n"
+            f"{tone_line}\n"
+            "在 `plan/outline.md` 顶部写一行可见声明（格式固定，供系统识别）：\n"
+            "`方法论框架：〔框架1〕、〔框架2〕`（顿号分隔，可加粗 `**方法论框架**：…`）。\n"
+            "写完声明后，在聊天里顺口告诉用户本报告将采用〔所选框架〕；若用户想换方法论，"
+            "告诉你即可，否则按这个继续，可随时在工作区点「确认大纲」。"
+        )
+
+    def _adhere_instruction(self, state: str, selected: list[str]) -> str:
+        """S2–S4 注入：沿用确认时快照的已选框架，不再邀请重选。malformed 不入快照，故只两态。"""
+        if state == "parsed" and selected:
+            joined = "、".join(selected)
+            return (
+                "## 方法论（已选）\n"
+                f"本报告已选方法论框架：{joined}。正文须沿用，不要重新征求或反复改大纲方法论。"
+                "如用户要大改方法论，提示需回 S1 调整大纲并重新确认。"
+            )
+        return (
+            "## 方法论\n"
+            "本报告未记录已确认的方法论框架。按报告类型与框架菜单选合适框架展开分析，"
+            "保持结论先行、结构清晰；不要凭空声称某框架是「已确认」的。"
+        )
+
+    def _render_methodology_block(self, skeleton: str, menu: str, instr: str) -> str:
+        return (
+            "# 方法论与报告结构（系统按报告类型注入）\n\n"
+            "## 报告结构骨架（按类型）\n"
+            f"{skeleton}\n\n"
+            f"{menu}\n"
+            f"{instr}"
+        )
+
+    def build_methodology_block(self, project_id: str) -> str:
+        """按 project_type 注入「类型骨架 + 框架菜单 + 阶段化指令」到 system prompt（S1–S4）。
+        装配期只读，不写任何文件。未知 type / 非写作期 → graceful 空块（绝不抛进 chat 链路，
+        codex R2 BLOCKER 5）；已知 type 但模块缺锚点 → load_type_skeleton fail-closed 抛（§4.1）。"""
+        project_path = self.get_project_path(project_id)
+        if project_path is None:
+            return ""
+        stage = self._infer_stage_state(project_path)["stage_code"]
+        if stage not in ("S1", "S2", "S3", "S4"):
+            return ""
+        project_type = self.get_project_type(project_id)
+        if project_type not in self.TYPE_SKELETON_MAP:
+            logger.info("unknown project_type %r, skip methodology block", project_type)
+            return ""
+        skeleton = self.load_type_skeleton(project_type)
+        if stage == "S1":
+            instr = self._declare_and_invite_instruction(project_type)
+        else:
+            state, selected = self.read_confirmed_methodology_snapshot(project_path)
+            instr = self._adhere_instruction(state, selected)
+        return self._render_methodology_block(skeleton, self.FRAMEWORK_MENU, instr)
+
+    def _methodology_declared_flag(self, project_path: Path) -> bool:
+        """前端确认按钮用：known type + 未确认时，要求 outline 有 parsed 声明才 True；
+        unknown type / 已确认 → True（不门禁 / 不再卡）。仅 known+未确认时有约束意义。"""
+        project_type = self._get_project_type_for_path(project_path)
+        if project_type not in self.TYPE_SKELETON_MAP:
+            return True
+        checkpoints = self._load_stage_checkpoints(project_path)
+        if "outline_confirmed_at" in checkpoints:
+            return True
+        outline_text = self._read_plan_file(project_path, "outline.md") or ""
+        state, _ = self.parse_and_sanitize_methodology(outline_text)
+        return state == "parsed"
+
     def get_skill_prompt(self) -> str:
         """鑾峰彇Skill瀹氫箟"""
         skill_file = self.skill_dir / "SKILL.md"
@@ -2322,13 +2730,6 @@ class SkillEngine:
             sections.append("## Consulting Lifecycle Guidance\n" + lifecycle_file.read_text(encoding="utf-8"))
 
         return "\n\n".join(sections)
-
-    def get_template(self, project_type: str) -> str:
-        """鑾峰彇鎶ュ憡妯℃澘"""
-        template_file = self.skill_dir / "templates" / f"{project_type}.md"
-        if template_file.exists():
-            return template_file.read_text(encoding="utf-8")
-        return ""
 
     def _normalize_create_payload(self, project_info_or_name, **kwargs) -> dict:
         if hasattr(project_info_or_name, "model_dump"):

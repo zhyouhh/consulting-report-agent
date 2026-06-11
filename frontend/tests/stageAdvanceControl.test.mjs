@@ -4,6 +4,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { isS4ReviewButtonVisible } from "../src/utils/workspaceSummary.js";
 
@@ -84,4 +85,16 @@ test("S6 shows single button", () => {
 
 test("S7 shows single button", () => {
   assert.equal(getButtonType("S7"), "single");
+});
+
+// ── R5: StageAdvanceControl S1 hint source-guard ────────────────────────────
+
+test("StageAdvanceControl S1 hint uses s1ConfirmDisabledReason (source guard)", () => {
+  const src = readFileSync(
+    new URL("../src/components/StageAdvanceControl.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(src, /s1ConfirmDisabledReason/);
+  // disabledReason 必须被条件渲染用到，不只 import（防止 import 后从不使用）
+  assert.match(src, /\{disabledReason\}/);
 });

@@ -135,6 +135,19 @@ class SkillMdS0InterviewLockTests(unittest.TestCase):
         self.assertIn('点击工作区"独立审查"按钮', tasks)
         self.assertIn('点击工作区"AI 味自查"按钮', tasks)
 
+    def test_skill_md_routing_section_replaced_with_system_injection(self):
+        # 旧「模型 read_file 自取 modules」指令已删（app 沙箱够不到，已失效）
+        self.assertNotIn("先读取 `modules/writing-core.md`", self.skill_md)
+        # 旧整段路由标题不回流（防 read_file modules 路由指令回流）
+        self.assertNotIn("## 路由与模块", self.skill_md)
+        # 新「系统按报告类型注入方法论」说明在（注意连续子串，不被 markdown ** 打断）
+        self.assertIn("由系统按报告类型自动注入", self.skill_md)
+
+    def test_skill_md_s1_has_methodology_declaration_instruction(self):
+        self.assertIn("方法论框架：", self.skill_md)
+        # S1 段必须包含完整的方法论声明指引句（不只全文搜关键词）
+        self.assertIn("形成 `outline.md`，并在文件顶部写一行方法论声明", self.skill_md)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -84,5 +84,22 @@ export function isS4ReviewButtonVisible(wordCount, lengthTargets) {
 export function isS1ConfirmOutlineEnabled(summary = {}) {
   const checkpoints = summary.checkpoints || {};
   const flags = summary.flags || {};
-  return !!(checkpoints.outline_md_exists ?? flags.outline_ready);
+  const outlineReady = checkpoints.outline_md_exists ?? flags.outline_ready;
+  // R5: 后端透出 methodology_declared 时要求声明就绪；未透出（旧 schema / unknown type）→ 不阻塞。
+  const methodologyDeclared = flags.methodology_declared ?? true;
+  return !!(outlineReady && methodologyDeclared);
+}
+
+/**
+ * R5: S1 确认按钮禁用时的原因文案（null = 不禁用）。区分「缺大纲」与「缺方法论声明」。
+ */
+export function s1ConfirmDisabledReason(summary = {}) {
+  const checkpoints = summary.checkpoints || {};
+  const flags = summary.flags || {};
+  const outlineReady = checkpoints.outline_md_exists ?? flags.outline_ready;
+  if (!outlineReady) return "需要先生成大纲才能继续";
+  if (flags.methodology_declared === false) {
+    return "请在大纲顶部补一行方法论声明（如「方法论框架：SWOT、波特五力」）";
+  }
+  return null;
 }
