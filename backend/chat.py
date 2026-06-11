@@ -2444,7 +2444,7 @@ class ChatHandler:
         user_message: str,
         attached_material_ids: List[str] | None = None,
         transient_attachments: List[Dict] | None = None,
-        max_iterations: int = 20,
+        max_iterations: int = 50,
         system_trigger: str | None = None,
         trigger_metadata: dict | None = None,
     ):
@@ -3209,7 +3209,7 @@ class ChatHandler:
         user_message: str,
         attached_material_ids: List[str] | None = None,
         transient_attachments: List[Dict] | None = None,
-        max_iterations: int = 20,
+        max_iterations: int = 50,
         system_trigger: str | None = None,
         trigger_metadata: dict | None = None,
     ):

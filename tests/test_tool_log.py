@@ -131,7 +131,7 @@ class AppendToolLogTests(unittest.TestCase):
         self.assertNotIn("new section text", result)
 
     def test_max_iterations_tool_log_full_chain(self):
-        """spec §5.5 — 撞 max_iterations=20 时 tool-log 应附加全部 20 条"""
+        """spec §5.5 — 撞 max_iterations 上限时 tool-log 应附加全部条目（此处构造 20 条）"""
         msgs = []
         for i in range(20):
             msgs.append({"role": "assistant", "tool_calls": [
