@@ -1,5 +1,7 @@
 # Batch 3（R4 来源可信度 + R5 方法论路由）实施交接 — 2026-06-11
 
+> **✅ 2026-06-11 收尾：批 3 已全部完成** —— B3-B10 全实施 + codex 双轨/红队逐 task APPROVED（commit `e6b4d8a`→`86b6b24`，HEAD `86b6b24`，skill_engine 210/前端 299/build 绿）。本交接的 B3-B10 待办已落地，**留作实施历史，不再是待办**。cutover：`docs/superpowers/cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md`。
+
 > 上一会话被 harness `[Request interrupted]` 反复腰斩 + agent 幻觉 + 电脑重启搞乱，用户重开会话接手 B3-B10。本文档是**核查过的 ground truth**，不是凭记忆写的。
 
 ## TL;DR
