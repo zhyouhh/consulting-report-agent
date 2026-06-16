@@ -1,14 +1,45 @@
 # Current Worklist
 
-最后更新：2026-06-11（**批 3 R4+R5 ✅ 全完成并合并 main `0162ef1` + 重打干净包**——subagent-driven 11 task[A1+B1-B10] + codex 双轨/红队逐 task APPROVED，commit `584abb6`→`86b6b24`，skill_engine 210/packaging 14/前端 299/build 绿；红队审实现挖出 plan 文档级没暴露的 trust boundary/并发真洞[B3 5轮分隔符绕过→归一化根治、B4 半提交→自愈+temp竞态、B7 DeepSeek 5攻击面守住]；cutover `cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md`、CLAUDE.md/AGENTS.md 已同步 R4/R5 硬约束段；GUI E2E ✅（2026-06-11 fable5 真模型 deepseek-v4-pro 全程：R4 52 条 data-log 色点[赛迪挂 news.cn 仍 🟡/财联社转述 ⚪ 印证按机构性质]+R5 大纲首行声明/章节内化/`__methodology_snapshot` 与 outline_confirmed_at 同刻冻结 全 PASS，14 commit `584abb6`→`deed618`）→ merge main `0162ef1`(--no-ff) + 清 dist/build 重打干净包(build.ps1 exit 0、前端 vite 重构、307MB) + push origin；剩 follow-up[checkpoint 写事务化/backfill 窄锁，桌面单用户低优先级]。— 批 2 R3 已 merge main `53c52fd`+push；批 1 R1+R2 已闭环 main `f111f0e`+push。整个 R1-R5 整改簇至此全部实施闭环。）
+最后更新：2026-06-15（**新方向：服务器化 + 多用户 Web 部署 + 标书模板** —— 2026-06-15 给领导汇报后，领导明确要求「迁服务器 / 做网页给人用 / 加用户系统」，= 上方原记的产品化方向 **b 解 park**。已定：**不拆仓库**（web 作本仓库「运行模式」、引擎共用）、范围＝**公网熟人 + 登录与工作区隔离**、试用机 **kr-web-01**[腾讯云首尔，登记在 VPS-fix 库]、模型**留 `deepseek-v4-pro` 别降级**。标书模板＝引擎级前置特性、建议先做。两者**均待设计**（下一步 brainstorm→plan）。详见下方「🟢 服务器化…」簇。R1–R5 整改簇此前已全部闭环合 main `0162ef1`。）
+
+上一次更新：2026-06-11（**批 3 R4+R5 ✅ 全完成并合并 main `0162ef1` + 重打干净包**——subagent-driven 11 task[A1+B1-B10] + codex 双轨/红队逐 task APPROVED，commit `584abb6`→`86b6b24`，skill_engine 210/packaging 14/前端 299/build 绿；红队审实现挖出 plan 文档级没暴露的 trust boundary/并发真洞[B3 5轮分隔符绕过→归一化根治、B4 半提交→自愈+temp竞态、B7 DeepSeek 5攻击面守住]；cutover `cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md`、CLAUDE.md/AGENTS.md 已同步 R4/R5 硬约束段；GUI E2E ✅（2026-06-11 fable5 真模型 deepseek-v4-pro 全程：R4 52 条 data-log 色点[赛迪挂 news.cn 仍 🟡/财联社转述 ⚪ 印证按机构性质]+R5 大纲首行声明/章节内化/`__methodology_snapshot` 与 outline_confirmed_at 同刻冻结 全 PASS，14 commit `584abb6`→`deed618`）→ merge main `0162ef1`(--no-ff) + 清 dist/build 重打干净包(build.ps1 exit 0、前端 vite 重构、307MB) + push origin；剩 follow-up[checkpoint 写事务化/backfill 窄锁，桌面单用户低优先级]。— 批 2 R3 已 merge main `53c52fd`+push；批 1 R1+R2 已闭环 main `f111f0e`+push。整个 R1-R5 整改簇至此全部实施闭环。）
 
 上一次更新：2026-06-09（批 2 R3 已实施 + codex **双轨独立** review 全 APPROVED[spec 轨后端/前端 SPEC-COMPLIANT + quality 轨后端/前端 APPROVED]；**应用户纠正：spec/quality 别合并塞一个 prompt**——quality 轨独立审挖出合并审漏的 2 真 BLOCKER[后端 `chat_stream` 同步 generator 跨 anyio 线程重入绕 CAS→专用 executor `8f06c81` / 前端进入编辑异步竞态→`loadFile` 同步提交选择 `d420dff`]；后端 281 passed、前端 296 pass。commits `336504a`→`ec42369`，cutover `cutover_report_2026-06-09_r3-file-tree-editing.md`。）
 
 ## 当前未解决 / 待验证
 
+### 🟢 服务器化 + 多用户 Web 部署 + 标书模板（2026-06-15 起 · = 原产品化方向 b 解 park · 新最高优先）
+
+来源：2026-06-15 给领导汇报后，领导明确要求「迁到服务器、做成网页给人用、加用户系统」（动因：同事都用 Mac，桌面版只 Windows 分发、用不了）。即上方原记的产品化方向 **b（部门内部共享部署）**——此前 park，现领导亲自提出，**解 park、定为下一个方向**。
+
+**执行顺序（建议）**：先 W1 标书模板（独立引擎特性、上线前要、风险低），再 W2 web 化（动筋骨、先正经设计）。两者**均尚未设计**，下一步 brainstorm → plan/spec。
+
+**已定决策（避免重新讨论）**：
+- **不拆仓库**：web 是本仓库的「运行模式」（`run_web.py` 已存在 + `app.py` 桌面入口），引擎共用，web 特有的登录/多租户放界限清楚的新模块（`backend/auth/` 等）+ mode 开关隔开。曾一度建过独立仓库 `consulting-report-agent-web` 又删了。**两线都长期活跃才抽共享包 `consulting-report-core`，现在抽是过度设计**。
+- **范围**：公网可访问但**仅限熟人**；用户系统只做**登录 + 各自工作区隔离**——不做开放注册、角色权限、计费。
+- **模型**：试用期默认留 `deepseek-v4-pro`，**不要降级 v4flash**（试用是证明报告质量、降模型本末倒置；成本靠 per-user 日配额控）。
+- **服务器**：试用机 `kr-web-01`（腾讯云轻量首尔 2C2G+swap+40G，Debian 13，SSH 2233，已 fail2ban+ufw+komari），登记在 VPS-fix 库 `notes/kr-web-01.md`（运维不在本项目重复）。渠道商代购、**非自有账号、仅试用、转生产换自有/公司账号正经实例**。Linux 部署、不 PyInstaller、venv 跑 uvicorn。
+- **成本**：先垫钱、推广试用后报销。
+
+**W1. 标书（技术方案）报告类型模板** — 状态：`待设计`
+- 用户想在 web 上线前给引擎加「标书 / 技术方案」类型，属**引擎级特性**（新 `project_type` + 方法论框架，接 R5 `build_methodology_block` 路由），加一次桌面 + web 都吃到——这也是「不 fork」的核心理由。跟 web 化**解耦、建议先做**。
+- 涉及（预估）：`backend/skill.py`（`project_type` 骨架 + `FRAMEWORK_MENU` / 类型腔调）、`skill/SKILL.md`、前端类型选择。brainstorm 要定：标书该长啥样、套哪个框架（SMART / RACI / 章-条-款-项…）、跟现有类型怎么并存。
+
+**W2. 服务器化 + 多用户 Web 化** — 状态：`待设计（大改、先出 spec/plan）`
+- 迁移工作项：
+  - **数据多租户隔离（最大头）**：现全挤在单一 `~/.consulting-report/` → `<data-root>/users/<uid>/projects/...`，所有经 `get_base_path()` 的寻址加 uid 层。
+  - **登录 + 鉴权**：登录页 + 会话（cookie/JWT 待定）；每个项目 / 文件接口**校验调用者归属**；账号邀请制 / 管理员建（非自助注册）。
+  - **进程内单例 / 锁按 uid 键化**：`_SEARCH_ROUTER_SINGLETON`、`ReviewSessionStore`、各 RLock（现为单用户假设）。
+  - **文件导入**：`DesktopBridge` 原生选择器（web 模式本就 503）→ 浏览器上传。
+  - **去 Windows 化**：`quality_check.ps1` / `export_draft.ps1` 改 Python（或 Linux 跑 pwsh），`pandoc.exe` 换 Linux 版。
+  - **账号存储**：元数据 SQLite 起步；**项目工作区仍走文件系统**（按 uid 隔离），不把文件驱动引擎搬进 DB。
+  - **部署**：venv 跑 uvicorn + Cloudflare 域名 / HTTPS。
+- **安全红线（web 新增威胁面，桌面版只绑 127.0.0.1 没有）**：① 每接口校验资源归属（A 不能读 B）；② `custom` 模式自填 API base 堵 SSRF；③ LLM / 搜索 per-user 日配额防滥用；④ 上传文件类型 / 大小 / 内容校验；⑤ 沿用报告内容 trust boundary（数据非指令）。
+- 待设计开放问题：会话方案、数据根布局、归属校验如何织入每个接口、并发键化改造粒度。
+
 ### 🔴 领导评审反馈整改（2026-06-05，高优先簇 · 整体高于下方「UI 重构」一档）
 
-来源：报奖后领导评审反馈 + demo 现场暴露的问题，逐条 brainstorm 后落项。产品化定位决策：**a（更多同事各自在本机用）优先**，但 a 当前无真实痛点、本机桌面即最合适形态，暂不动；**b（部门内部共享部署）是领导真正想要的方向，先 park 不做**；**c（对外产品）不做**。故本簇不含产品化排期。
+来源：报奖后领导评审反馈 + demo 现场暴露的问题，逐条 brainstorm 后落项。产品化定位决策：**a（更多同事各自在本机用）优先**，但 a 当前无真实痛点、本机桌面即最合适形态，暂不动；**b（部门内部共享部署）是领导真正想要的方向**——此前 park，**2026-06-15 领导亲自提出、已解 park 并定为下一个方向，单列于上方「🟢 服务器化 + 多用户 Web 部署」簇**；**c（对外产品）不做**。故本（R1–R5）簇仍不含产品化排期，产品化排在新簇。
 
 **执行策略（2026-06-06 敲定 · 分 3 批，不一次性）**：批 1 = R1+R2（同在 S5 审查/chat 触发链路；R2 注入修法是 R1 触发注入的子集，合一个 plan）→ 批 2 = R3（工作区前端重构 + 后端写接口，独立子系统）→ 批 3 = R4+R5（标注/显示 + 提示词，轻）。**批 1 先走**（最高优先 + 是 demo 现场领导亲见的硬伤，观感边际收益最高）。一次性全做不可取：各批子系统不重叠，且 R1 断点续审有架构不确定性，绑一起会稀释 review。**动机分层**：批 1/批 2 是用户自驱的痛点（自己想改）；批 3 才是领导提的点（主要应答领导），R4/R5 具体形态到批 3 阶段再定（见各条「补充思路」）。
 
