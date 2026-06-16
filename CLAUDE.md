@@ -206,6 +206,29 @@ build.bat                    # 等价于 powershell -File build.ps1
 
 **打包前常被忽略的坑**：PyInstaller 必须用项目 `.venv`，不能在 Anaconda 全局环境里打（会从 1GB+ 膨胀）。`build.ps1` 会强制检查 `.venv` 是否存在。
 
+### macOS 上做开发（web 模式，无需打包）
+
+桌面端只承诺 Windows 分发，但**日常开发可以在 macOS 上跑**——走 web 模式（`run_web.py`），不碰 PyWebView / 原生文件桥 / PyInstaller，全程跨平台。同样需要 Python 3.11/3.12 + Node 20 LTS。
+
+```bash
+# 开发环境初始化（注意路径用正斜杠、venv 在 bin/ 下）
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cd frontend && npm install && npm run build && cd ..   # 必须 build，否则 SPA 404
+
+# 启动 web 模式（浏览器访问，不开原生窗口）
+python run_web.py            # → http://localhost:8888
+
+# 测试（powershell 相关用例会 skipIf 自动跳过，不报错）
+.venv/bin/python -m pytest tests/
+```
+
+**两个 macOS 上需要注意的点**：
+
+1. **私有文件不在 git 里，要从 Windows 机拷过去**：`managed_client_token.txt`、`managed_search_pool.json`（`.gitignore` 忽略）放仓库根，否则 managed 模式认证不了 / 内置搜索不工作。临时方案：设置里切 `custom` 模式自填 OpenAI 兼容 key，无需这两个文件也能跑通对话与写作。
+2. **S5 两个按钮会报错**：「AI 味自查」（`quality_check.ps1`）和「导出可审草稿」（`export_draft.ps1`）经 `backend/report_tools.py` 调硬编码的 `powershell` 命令，macOS 无此命令会失败。属 S5 晚期功能，S0–S4 日常开发碰不到；彻底解决见 worklist「去 Windows 化」（改 Python）。
+
 ## 文档与追踪
 
 - `docs/current-worklist.md` — 当前待解决/待验证事项的唯一真值源
