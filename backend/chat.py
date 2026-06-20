@@ -3939,20 +3939,24 @@ class ChatHandler:
         include_images: bool = True,
         attachment_transcripts: List[Dict] | None = None,
     ) -> List[Dict]:
-        materials = [self.skill_engine.get_material(project_id, material_id) for material_id in attached_material_ids]
-        note_lines = [user_message]
-        if materials:
-            note_lines.extend(["", "[本轮附带材料]"])
-            for material in materials:
-                note_lines.append(
-                    f"- {material['id']} | {material['display_name']} | {material['source_type']} | {material['file_type']}"
-                )
-            note_lines.append("需要读取文本材料时，请调用 read_material_file。")
+        """N6 C5: two-stage assembly — collect ALL text into note_lines first, collect image_url
+        parts separately, THEN build content = [text-block, *image_parts]. NEVER append to an
+        already-built content[0]["text"].
 
-        # N6 C4: append attachment transcripts as DATA blocks. CRITICAL — assemble ALL text first,
-        # THEN build the content list (never append to an already-built content[0]["text"]).
+        Persistent image materials fork on the MAIN model's vision capability:
+        - multimodal main model + current turn (include_images) -> raw image_url part.
+        - text-only main model -> inject a transcript ATTACHMENT_DATA block (NEVER image_url).
+          current turn transcribes (cached); history turn (include_images False) is CACHE-FIRST
+          (peek only, never makes a new vision call on replay).
+        """
+        note_lines = [user_message]
+        image_parts: List[Dict] = []
+        multimodal = self._main_model_supports_vision()
+
+        # 1) attachment transcripts (transient images / docs persisted on the message — C4).
+        # CRITICAL: assemble ALL text into note_lines before building content (no content[0] mutation).
         for transcript in attachment_transcripts or []:
-            if (transcript.get("status") != "parsed"):
+            if transcript.get("status") != "parsed":
                 continue
             text = transcript.get("text") or ""
             if not text:
@@ -3963,24 +3967,68 @@ class ChatHandler:
                 f"{ATTACHMENT_DATA_OPEN}\n[{name}]\n{text}\n{ATTACHMENT_DATA_CLOSE}",
             ])
 
-        content = [{"type": "text", "text": "\n".join(note_lines).strip()}]
-        if include_images:
-            for material in materials:
+        # 2) persistent materials: SAFELY resolve (a stale/deleted id is skipped with a note, never crashes).
+        resolved: List[Dict] = []
+        for material_id in attached_material_ids or []:
+            try:
+                resolved.append(self.skill_engine.get_material(project_id, material_id))
+            except Exception:  # noqa: BLE001 - deleted/stale material id -> skip + note
+                note_lines.append(f"[材料已删除：{material_id}，已跳过]")
+
+        if resolved:
+            note_lines.append("")
+            note_lines.append("[本轮附带材料]")
+            for material in resolved:
+                if material["media_kind"] == "image_like":
+                    continue
+                note_lines.append(
+                    f"- {material['id']} | {material['display_name']} | {material['source_type']} | {material['file_type']}"
+                )
+            note_lines.append("需要读取文本材料时，请调用 read_material_file。")
+
+            # 3) image materials: fork on main-model vision capability.
+            for material in resolved:
                 if material["media_kind"] != "image_like":
                     continue
-                content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": self._build_material_data_url(project_id, material["id"]),
-                    },
-                })
+                if multimodal:
+                    if include_images:
+                        image_parts.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": self._build_material_data_url(project_id, material["id"]),
+                            },
+                        })
+                    continue
+                # text-only main model: inject transcript DATA block, NEVER image_url.
+                path = self.skill_engine.get_material_path(project_id, material["id"])
+                mime = material.get("mime_type") or "image/png"
+                if include_images:
+                    # current turn: transcribe (triggers + caches); any failure -> placeholder.
+                    try:
+                        text = self.material_converter.transcribe_image(path, mime) or "[图片未能解析]"
+                    except Exception:  # noqa: BLE001
+                        text = "[图片未能解析]"
+                else:
+                    # history turn: cache-first; missing cache -> placeholder, NEVER a new vision call.
+                    text = self.material_converter.peek_image_transcript(path, mime) or "[图片未解析]"
+                note_lines.append(
+                    f"{ATTACHMENT_DATA_OPEN}\n[{material['display_name']}]\n{text}\n{ATTACHMENT_DATA_CLOSE}"
+                )
+
+        # 4) transient images: raw image_url only for multimodal main model on the current turn
+        # (text-only transient images are handled via C4 attachment_transcripts above).
+        if multimodal and include_images:
             for attachment in transient_attachments or []:
-                content.append({
+                image_parts.append({
                     "type": "image_url",
                     "image_url": {
                         "url": attachment["data_url"],
                     },
                 })
+
+        # build content LAST: text block first, then image parts.
+        content = [{"type": "text", "text": "\n".join(note_lines).strip()}]
+        content.extend(image_parts)
         return content
 
     def _build_material_data_url(self, project_id: str, material_id: str) -> str:

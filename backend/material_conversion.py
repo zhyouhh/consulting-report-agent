@@ -204,9 +204,21 @@ class MaterialConverter:
             raise MaterialConversionError("这张图没读出来")
         return text
 
+    @property
+    def image_cache_extra(self) -> str:
+        """图片缓存 key 的 extra 段（= 视觉模型/prompt/OCR 版本命名空间）。
+        SkillEngine 据此用 cache_key_from_sha256 算图片 key，避免耦合私有字段。"""
+        return "-img-" + self._image_cache_namespace
+
+    def peek_image_transcript(self, path: Path, mime: str) -> str | None:
+        """只读缓存、不触发转写/不发请求（历史轮用）。命中返回文本，否则 None。"""
+        key = self._cache_key(path, extra=self.image_cache_extra)
+        md_path, _ = self._cache_paths(key)
+        return md_path.read_text(encoding="utf-8") if md_path.exists() else None
+
     def transcribe_image(self, path: Path, mime: str) -> str:
         """持久图片材料：带缓存（key 含 image_cache_namespace = 视觉模型/prompt/OCR 版本）。"""
-        key = self._cache_key(path, extra="-img-" + self._image_cache_namespace)
+        key = self._cache_key(path, extra=self.image_cache_extra)
         md_path, err_path = self._cache_paths(key)
         with self._lock_for(key):
             if md_path.exists():

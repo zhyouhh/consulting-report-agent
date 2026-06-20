@@ -171,6 +171,48 @@ class ChatRuntimeTests(unittest.TestCase):
             choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=[]))],
         )
 
+    def _add_image_material(self, handler, name: str = "chart.png") -> str:
+        """Write a fake PNG and register it as a persistent image material."""
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        img = Path(tmpdir.name) / name
+        img.write_bytes(b"\x89PNG\r\n\x1a\n fake image bytes")
+        materials = handler.skill_engine.add_materials(
+            self.project_id, [str(img)], added_via="chat_upload"
+        )
+        return materials[0]["id"]
+
+    def test_persistent_image_material_textonly_injects_transcript_not_image_url(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro")
+        mid = self._add_image_material(h, "chart.png")
+        with mock.patch.object(h.material_converter, "transcribe_image", return_value="图说X"):
+            content = h._build_user_content(self.project_id, "看材料图", [mid], include_images=True)
+        flat = str(content)
+        self.assertIn("图说X", flat)
+        self.assertNotIn("image_url", flat)
+
+    def test_persistent_image_material_multimodal_uses_image_url(self):
+        h = self._h(mode="managed", managed_model="gemini-3-flash")
+        mid = self._add_image_material(h, "chart.png")
+        content = h._build_user_content(self.project_id, "看图", [mid], include_images=True)
+        self.assertIn("image_url", str(content))
+
+    def test_history_missing_cache_injects_placeholder_not_new_vision_call(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro")
+        mid = self._add_image_material(h, "chart.png")
+        with mock.patch.object(
+            h.material_converter, "transcribe_image", side_effect=AssertionError("不应被调")
+        ):
+            content = h._build_user_content(self.project_id, "x", [mid], include_images=False)
+        self.assertIn("未解析", str(content))
+
+    def test_stale_material_id_skipped_not_crash(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro")
+        content = h._build_user_content(
+            self.project_id, "看图", ["mat-does-not-exist"], include_images=True
+        )
+        self.assertIn("材料已删除", str(content))
+
     def _mark_s0_confirmation_completed(self, handler):
         state = handler._empty_conversation_state()
         state["s0_confirmation_completed"] = True

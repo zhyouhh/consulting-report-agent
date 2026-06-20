@@ -1158,6 +1158,8 @@ class SkillEngine:
                 stored_rel_path = workspace_relative
                 source_type = "workspace"
                 original_path = ""
+                # workspace 材料是 live 文件，按源路径取 add-time hash（已知低危：之后被改写不重算，v1 接受）
+                hashed_path = source_path
             else:
                 duplicate = self._find_existing_imported_material(materials, source_path)
                 if duplicate:
@@ -1170,6 +1172,8 @@ class SkillEngine:
                 stored_rel_path = self._to_posix(destination_rel)
                 source_type = "imported"
                 original_path = str(source_path)
+                # chat_upload（imported）已落盘拷贝，按拷贝后文件取 hash
+                hashed_path = destination_path
 
             mime_type, _ = mimetypes.guess_type(source_path.name)
             material = {
@@ -1183,6 +1187,7 @@ class SkillEngine:
                 "file_type": source_path.suffix.lstrip(".").lower(),
                 "mime_type": mime_type or "application/octet-stream",
                 "size_bytes": (source_path.stat().st_size if source_path.exists() else 0),
+                "content_sha256": self._content_sha256(hashed_path),
                 "created_at": datetime.now().isoformat(timespec="seconds"),
             }
             materials.append(material)
@@ -1201,6 +1206,11 @@ class SkillEngine:
         target = next((item for item in materials if item["id"] == material_id), None)
         if not target:
             raise ValueError("材料不存在")
+
+        # 删源文件前先 release：shared-hash 缓存仅在最后一个引用消失时才真删
+        converter = getattr(self, "_material_converter", None)
+        if converter is not None and target.get("content_sha256"):
+            converter.release(self._cache_key_for_material(target), target["id"])
 
         if target["source_type"] == "imported":
             imported_path = Path(project_record["project_dir"]) / target["stored_rel_path"]
@@ -1520,12 +1530,42 @@ class SkillEngine:
                 )
 
         if material["media_kind"] == "image_like":
-            return self._converter_read_image(project_ref, material_id)
+            text = self._converter_read_image(project_ref, material_id)
+        else:
+            text = self._converter_read_document(project_ref, material_path)
 
-        return self._converter_read_document(project_ref, material_path)
+        self._retain_material_cache(material)
+        return text
 
     def set_material_converter(self, converter):
         self._material_converter = converter
+
+    @staticmethod
+    def _content_sha256(path: Path) -> str:
+        """落盘文件 sha256（与 MaterialConverter._content_hash 同算法、同分块）。"""
+        import hashlib
+
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _cache_key_for_material(self, material: dict) -> str:
+        """用 material metadata（add-time content_sha256）算 converter 缓存 key。
+        文档 extra=""、图片 extra=converter.image_cache_extra；不依赖源文件仍在。"""
+        extra = (
+            self._material_converter.image_cache_extra
+            if material.get("media_kind") == "image_like"
+            else ""
+        )
+        return self._material_converter.cache_key_from_sha256(material["content_sha256"], extra)
+
+    def _retain_material_cache(self, material: dict) -> None:
+        converter = getattr(self, "_material_converter", None)
+        if converter is None or not material.get("content_sha256"):
+            return
+        converter.retain(self._cache_key_for_material(material), material["id"])
 
     def _converter_read_document(self, project_ref, material_path):
         if getattr(self, "_material_converter", None) is None:
@@ -1538,8 +1578,18 @@ class SkillEngine:
             raise ValueError(str(exc)) from exc
 
     def _converter_read_image(self, project_ref, material_id):
-        # A6 占位：图片道由 C5 实现；此处尚不应被生产路径调用
-        raise NotImplementedError("image material read is implemented in task C5")
+        converter = getattr(self, "_material_converter", None)
+        if converter is None:
+            raise ValueError("当前环境无法读取图片材料")
+        from backend.material_conversion import MaterialConversionError
+
+        material_path = self.get_material_path(project_ref, material_id)
+        material = self.get_material(project_ref, material_id)
+        mime = material.get("mime_type") or "image/png"
+        try:
+            return converter.transcribe_image(material_path, mime)
+        except MaterialConversionError as exc:
+            raise ValueError(str(exc)) from exc
 
     def _legacy_read_document(self, material_path: Path) -> str:
         suffix = material_path.suffix.lower()
