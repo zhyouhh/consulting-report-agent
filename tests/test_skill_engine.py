@@ -2482,6 +2482,21 @@ class SkillEngineTests(unittest.TestCase):
             "TYPE_SKELETON_MAP 与 METHODOLOGY_TONE 的 slug 集必须一致（B6 用 TONE.get fallback，漂移会静默错腔调）",
         )
 
+    def test_framework_menu_for_type_skips_menu_for_technical_bid(self):
+        # 技术标按评分点驱动、不靠挑分析框架；通用菜单既误导又挤爆 token 预算（spec §3.2 + 用户拍板）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            self.assertEqual(
+                engine._framework_menu_for_type("strategy-consulting"),
+                SkillEngine.FRAMEWORK_MENU,
+            )
+            self.assertEqual(engine._framework_menu_for_type("technical-bid"), "")
+            # 未知 type 不影响（沿用通用菜单，build_methodology_block 自己挡未知 type）
+            self.assertEqual(
+                engine._framework_menu_for_type("custom-unknown"),
+                SkillEngine.FRAMEWORK_MENU,
+            )
+
     def test_build_methodology_block_s1_has_declaration_and_invite(self):
         project_dir = self._make_project()
         self._write_stage_two_prerequisites(project_dir)  # S1（未确认）

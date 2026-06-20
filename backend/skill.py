@@ -2871,6 +2871,13 @@ class SkillEngine:
             "保持结论先行、结构清晰；不要凭空声称某框架是「已确认」的。"
         )
 
+    def _framework_menu_for_type(self, project_type: str) -> str:
+        """技术标按评分点驱动、逐条响应，不靠「挑分析框架」；通用框架菜单对它既误导又
+        挤爆 token 预算（spec §3.2，2026-06-20 用户拍板）→ bid 不注入菜单。其余类型沿用。"""
+        if project_type == "technical-bid":
+            return ""
+        return self.FRAMEWORK_MENU
+
     def _render_methodology_block(self, skeleton: str, menu: str, instr: str) -> str:
         return (
             "# 方法论与报告结构（系统按报告类型注入）\n\n"
@@ -2900,7 +2907,9 @@ class SkillEngine:
         else:
             state, selected = self.read_confirmed_methodology_snapshot(project_path)
             instr = self._adhere_instruction(state, selected)
-        return self._render_methodology_block(skeleton, self.FRAMEWORK_MENU, instr)
+        return self._render_methodology_block(
+            skeleton, self._framework_menu_for_type(project_type), instr
+        )
 
     def _methodology_declared_flag(self, project_path: Path) -> bool:
         """前端确认按钮用：known type + 未确认时，要求 outline 有 parsed 声明才 True；
