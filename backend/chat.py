@@ -58,6 +58,17 @@ except Exception:
     _encoding = None
 
 
+# 与前端 frontend/src/utils/modelCapabilities.js MULTIMODAL_MODEL_MARKERS 同步
+MULTIMODAL_MODEL_MARKERS = (
+    "gemini",
+    "gpt-4o",
+    "gpt-4.1",
+    "vision",
+    "vl",
+    "claude-3",
+    "claude-sonnet-4",
+)
+
 IMAGE_TOKEN_COST = 1024
 MAX_BUDGET_FIT_ATTEMPTS = 6
 STREAM_CONNECT_TIMEOUT_SECONDS = 15.0
@@ -367,7 +378,10 @@ class ChatHandler:
         return re.sub(r"[^A-Za-z0-9._-]", "_", raw)   # 默认模型名含 '/'，sanitize 防 cache_dir 被拆子目录
 
     def _main_model_supports_vision(self) -> bool:
-        return False   # A6 stub; B3 replaces with real resolver
+        model = (self._get_active_model_name() or "").lower()
+        if not model:
+            return False
+        return any(marker in model for marker in MULTIMODAL_MODEL_MARKERS)
 
     def _vision_transcribe(self, data_url: str, mime: str) -> str:
         raise NotImplementedError("vision transcribe is implemented in task C1")

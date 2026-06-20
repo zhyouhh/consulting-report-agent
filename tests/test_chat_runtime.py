@@ -159,6 +159,12 @@ class ChatRuntimeTests(unittest.TestCase):
         self.project_dir = Path(project["project_dir"])
         return handler
 
+    def _h(self, **overrides):
+        h = self._make_handler_with_project()
+        for k, v in overrides.items():
+            setattr(h.settings, k, v)
+        return h
+
     def _mark_s0_confirmation_completed(self, handler):
         state = handler._empty_conversation_state()
         state["s0_confirmation_completed"] = True
@@ -8448,6 +8454,14 @@ class ChatRuntimeTests(unittest.TestCase):
         handler = self._make_handler_with_project()
 
         self.assertFalse(handler._should_allow_non_plan_write(self.project_id, "开始写"))
+
+    def test_main_model_supports_vision_resolver(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro")
+        self.assertFalse(h._main_model_supports_vision())
+        h2 = self._h(mode="managed", managed_model="gemini-3-flash")   # multimodal marker
+        self.assertTrue(h2._main_model_supports_vision())
+        h3 = self._h(mode="custom", custom_model="unknown-llm")
+        self.assertFalse(h3._main_model_supports_vision())             # unknown → conservative False
 
 
 class KeywordTableRestructureTests(unittest.TestCase):

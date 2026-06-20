@@ -1,3 +1,4 @@
+// 与后端 chat.py MULTIMODAL_MODEL_MARKERS 同步
 const MULTIMODAL_MODEL_MARKERS = [
   "gemini",
   "gpt-4o",
