@@ -903,6 +903,11 @@ class ChatHandler:
                 else:
                     pieces.append(_ATTACHMENT_DATA_NEUTRAL_MARKER)  # image_url/binary/malformed part
             sanitized["content"] = _strip_attachment_data_blocks("\n".join(pieces))
+        elif content is not None:
+            # 未知形状（dict 等）：fail-closed —— 序列化后整体过 strip，绝不让原始标记文本漏给摘要器。
+            sanitized["content"] = _strip_attachment_data_blocks(
+                json.dumps(content, ensure_ascii=False)
+            )
 
         return sanitized
 
