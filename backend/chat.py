@@ -4074,11 +4074,13 @@ class ChatHandler:
         if resolved:
             note_lines.append("")
             note_lines.append("[本轮附带材料]")
+            # 列出所有附带材料（含图片）做清单，模型据此知道本轮挂了什么、可按 id 引用；
+            # 图片材料的实际内容另经下方 image_url（多模态）/转写数据块（纯文本模型）注入。
             for material in resolved:
-                if material["media_kind"] == "image_like":
-                    continue
+                # display_name 是用户可控文件名（不可信）：消毒哨兵定界符，防其在清单文本里伪造数据块边界 / 注入。
                 note_lines.append(
-                    f"- {material['id']} | {material['display_name']} | {material['source_type']} | {material['file_type']}"
+                    f"- {material['id']} | {_neutralize_attachment_data_markers(material['display_name'])} "
+                    f"| {material['source_type']} | {material['file_type']}"
                 )
             note_lines.append("需要读取文本材料时，请调用 read_material_file。")
 
