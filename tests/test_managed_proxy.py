@@ -102,5 +102,112 @@ class ManagedProxyTests(unittest.TestCase):
         self.assertTrue(kwargs["stream"])
 
 
+class ProxyPassthroughTests(unittest.TestCase):
+    """B1: model passthrough, selectable_models, /health fields."""
+
+    def _client(self):
+        s = ProxySettings(
+            upstream_base_url="http://up/v1",
+            upstream_api_key="k",
+            allowed_models=["deepseek-v4-pro", "Qwen/Qwen3-VL-8B-Instruct"],
+            selectable_models=["deepseek-v4-pro"],
+            client_bearer_token="managed",
+        )
+        return TestClient(create_app(s)), s
+
+    def test_vision_model_passes_through_not_rewritten(self):
+        client, _ = self._client()
+        captured = {}
+
+        def fake_post(url, headers, json, stream, timeout):
+            captured["model"] = json["model"]
+            m = mock.Mock()
+            m.status_code = 200
+            m.content = b'{"ok":1}'
+            m.headers = {"content-type": "application/json"}
+            m.close = lambda: None
+            return m
+
+        with mock.patch("managed_proxy.app.requests.post", side_effect=fake_post):
+            r = client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer managed"},
+                json={"model": "Qwen/Qwen3-VL-8B-Instruct", "messages": []},
+            )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(captured["model"], "Qwen/Qwen3-VL-8B-Instruct")
+
+    def test_primary_model_passes_through_unchanged(self):
+        client, _ = self._client()
+        captured = {}
+
+        def fake_post(url, headers, json, stream, timeout):
+            captured["model"] = json["model"]
+            m = mock.Mock()
+            m.status_code = 200
+            m.content = b'{"ok":1}'
+            m.headers = {"content-type": "application/json"}
+            m.close = lambda: None
+            return m
+
+        with mock.patch("managed_proxy.app.requests.post", side_effect=fake_post):
+            r = client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer managed"},
+                json={"model": "deepseek-v4-pro", "messages": []},
+            )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(captured["model"], "deepseek-v4-pro")
+
+    def test_disallowed_model_returns_400(self):
+        client, _ = self._client()
+        with mock.patch("managed_proxy.app.requests.post") as mock_post:
+            r = client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer managed"},
+                json={"model": "gpt-99", "messages": []},
+            )
+        self.assertEqual(r.status_code, 400)
+
+    def test_models_endpoint_only_lists_selectable(self):
+        client, _ = self._client()
+        r = client.get("/v1/models", headers={"Authorization": "Bearer managed"})
+        self.assertEqual(r.status_code, 200)
+        ids = [m["id"] for m in r.json()["data"]]
+        self.assertIn("deepseek-v4-pro", ids)
+        self.assertNotIn("Qwen/Qwen3-VL-8B-Instruct", ids)
+
+    def test_health_lists_allowed_and_selectable_for_preflight(self):
+        client, _ = self._client()
+        r = client.get("/health")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertIn("Qwen/Qwen3-VL-8B-Instruct", body["allowed_models"])
+        self.assertEqual(body["selectable_models"], ["deepseek-v4-pro"])
+
+    def test_selectable_defaults_to_allowed_when_not_specified(self):
+        """Backward compat: if selectable_models not given, defaults to full allowed list."""
+        s = ProxySettings(
+            upstream_base_url="http://up/v1",
+            upstream_api_key="k",
+            allowed_models=["model-a", "model-b"],
+            client_bearer_token="tok",
+        )
+        self.assertEqual(s.selectable_models, ["model-a", "model-b"])
+
+    def test_from_env_reads_selectable_models(self):
+        env = {
+            "MANAGED_PROXY_UPSTREAM_BASE_URL": "http://up/v1",
+            "MANAGED_PROXY_UPSTREAM_API_KEY": "k",
+            "MANAGED_PROXY_ALLOWED_MODELS": "deepseek-v4-pro,Qwen/Qwen3-VL-8B-Instruct",
+            "MANAGED_PROXY_SELECTABLE_MODELS": "deepseek-v4-pro",
+            "MANAGED_PROXY_CLIENT_TOKEN": "tok",
+        }
+        with mock.patch.dict("os.environ", env, clear=False):
+            s = ProxySettings.from_env()
+        self.assertEqual(s.allowed_models, ["deepseek-v4-pro", "Qwen/Qwen3-VL-8B-Instruct"])
+        self.assertEqual(s.selectable_models, ["deepseek-v4-pro"])
+
+
 if __name__ == "__main__":
     unittest.main()
