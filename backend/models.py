@@ -1,4 +1,5 @@
 import base64
+import binascii
 from datetime import datetime
 from typing import Literal, List, Optional
 
@@ -104,10 +105,29 @@ class ChatRequest(BaseModel):
                     f"附件 {att.name!r} 的 data_url 格式无效，"
                     "需要 data:<mime>;base64,<payload> 格式"
                 )
-            b64_payload = data_url.split(";base64,", 1)[1]
+            # Fix2: the data_url header carries the REAL mime the provider sees — the
+            # `mime_type` field alone is not enough, since chat.py forwards data_url verbatim
+            # as the image_url. Parse `data:<mime>;base64,` and require <mime> to be both
+            # allow-listed AND equal to the declared mime_type field (no smuggling a
+            # text/html data_url behind a mime_type="image/png" label).
+            header, b64_payload = data_url.split(";base64,", 1)
+            data_url_mime = header[len("data:"):]
+            if data_url_mime not in ALLOWED_IMAGE_MIME:
+                raise ValueError(
+                    f"附件 {att.name!r} 的 data_url 声明的格式 {data_url_mime!r} 不被支持，"
+                    f"允许的格式：{', '.join(sorted(ALLOWED_IMAGE_MIME))}"
+                )
+            if data_url_mime != att.mime_type:
+                raise ValueError(
+                    f"附件 {att.name!r} 的 data_url 格式 {data_url_mime!r} 与声明的 "
+                    f"mime_type {att.mime_type!r} 不一致"
+                )
+            # Fix3: strict base64 decode — validate=False silently drops invalid chars, so a
+            # non-canonical payload (e.g. trailing "!!!!") would pass and make byte accounting
+            # unreliable. Use validate=True and surface a clean Chinese validation error.
             try:
-                decoded = base64.b64decode(b64_payload, validate=False)
-            except Exception:
+                decoded = base64.b64decode(b64_payload, validate=True)
+            except (binascii.Error, ValueError):
                 raise ValueError(
                     f"附件 {att.name!r} 的 data_url 无法解码：base64 内容损坏"
                 )

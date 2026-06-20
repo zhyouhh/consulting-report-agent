@@ -83,6 +83,29 @@ class SkillEngineTests(unittest.TestCase):
             if imported_dir.exists():
                 self.assertEqual(list(imported_dir.iterdir()), [])
 
+    def test_add_materials_rejects_oversized_workspace_select(self):
+        """Fix4: a workspace-relative (live-reference) source larger than the cap is rejected too.
+
+        The size check used to live only in the import/copy branch, so files selected from
+        INSIDE the workspace bypassed the 25MB cap. Now both paths reject an oversized source.
+        """
+        from backend import material_limits as _ml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir(parents=True, exist_ok=True)
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._project_payload(workspace))
+            pid = project["id"]
+            # Source lives INSIDE the workspace → live-reference branch.
+            src = workspace / "big.pdf"
+            src.write_bytes(b"x" * 200)
+
+            with mock.patch.object(_ml, "MAX_HEAVY_MATERIAL_BYTES", 100):
+                with self.assertRaises(ValueError) as ctx:
+                    engine.add_materials(pid, [str(src)], added_via="workspace_select")
+            self.assertIn("超过上传限制", str(ctx.exception))
+
     def test_shared_hash_delete_one_keeps_cache(self):
         from backend.material_conversion import MaterialConverter
 

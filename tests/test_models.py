@@ -177,6 +177,58 @@ class ModelsSchemaTests(unittest.TestCase):
                 ],
             )
 
+    # --- N6 security fixes: data_url MIME allowlist + strict base64 ---
+
+    def test_transient_data_url_mime_mismatch_rejected(self):
+        # Fix2: declaring mime_type="image/png" but smuggling a text/html data_url must be rejected.
+        with self.assertRaisesRegex(Exception, "不一致|不被支持|格式"):
+            ChatRequest(
+                project_id="p",
+                message_text="看图",
+                transient_attachments=[
+                    {
+                        "id": "att-1",
+                        "name": "evil.png",
+                        "mime_type": "image/png",
+                        "data_url": "data:text/html;base64,Zg==",
+                    }
+                ],
+            )
+
+    def test_transient_matching_data_url_mime_accepted(self):
+        # Fix2: a data_url whose header mime matches the (allow-listed) mime_type field passes.
+        ok = ChatRequest(
+            project_id="p",
+            message_text="看图",
+            transient_attachments=[
+                {
+                    "id": "att-1",
+                    "name": "a.png",
+                    "mime_type": "image/png",
+                    "data_url": "data:image/png;base64,Zg==",
+                }
+            ],
+        )
+        self.assertEqual(len(ok.transient_attachments), 1)
+        self.assertEqual(ok.transient_attachments[0].data_url, "data:image/png;base64,Zg==")
+
+    def test_transient_noncanonical_base64_rejected(self):
+        # Fix3: a valid-looking but non-canonical base64 payload (invalid chars) must NOT be
+        # silently accepted — strict decode surfaces a clean validation error, not a 500.
+        with self.assertRaisesRegex(Exception, "损坏|无法解码"):
+            ChatRequest(
+                project_id="p",
+                message_text="看图",
+                transient_attachments=[
+                    {
+                        "id": "att-1",
+                        "name": "a.png",
+                        "mime_type": "image/png",
+                        "data_url": "data:image/png;base64,AAAA!!!!",
+                    }
+                ],
+            )
+
     def test_system_trigger_turn_passes_without_attachments(self):
         """system_trigger turns carry no transient_attachments — must not fail limit check."""
         req = ChatRequest(

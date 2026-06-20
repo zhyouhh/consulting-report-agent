@@ -94,10 +94,30 @@ _ATTACHMENT_DATA_NEUTRAL_MARKER = "「附件数据（已隔离，未纳入摘要
 
 
 def _strip_attachment_data_blocks(text: str) -> str:
-    """把 OPEN…CLOSE 整块替换成中性标记。仅作用于 str（list/其他形状由调用方处理）。"""
-    if not text or ATTACHMENT_DATA_OPEN not in text:
+    """把 OPEN…CLOSE 整块替换成中性标记，FAIL-CLOSED。仅作用于 str（list/其他形状由调用方处理）。
+
+    安全边界：摘要器是个会把文本当指令执行的 LLM，任何残留的不可信附件正文都可能被它当成
+    `[对话摘要]` 裸指令重生。因此这里**必须 fail-closed**——不只替换 OPEN…CLOSE 完整对：
+
+    1) 替换所有匹配的 OPEN…CLOSE 块（非贪婪、DOTALL、可多块）。
+    2) 若仍残留 OPEN（无后续 CLOSE，畸形/被截断的框定）：从该 OPEN 起到字符串末尾整段砍掉
+       → 中性标记。绝不让 OPEN 之后的裸文本漏到摘要器。
+    3) 任何残留的裸 CLOSE token 也替成中性标记。
+    """
+    if not text:
         return text
-    return _ATTACHMENT_DATA_BLOCK_RE.sub(_ATTACHMENT_DATA_NEUTRAL_MARKER, text)
+    if ATTACHMENT_DATA_OPEN not in text and ATTACHMENT_DATA_CLOSE not in text:
+        return text
+    # 1) 完整 OPEN…CLOSE 块
+    text = _ATTACHMENT_DATA_BLOCK_RE.sub(_ATTACHMENT_DATA_NEUTRAL_MARKER, text)
+    # 2) fail-closed：残留的孤儿 OPEN → 砍到串尾
+    open_idx = text.find(ATTACHMENT_DATA_OPEN)
+    if open_idx != -1:
+        text = text[:open_idx] + _ATTACHMENT_DATA_NEUTRAL_MARKER
+    # 3) 残留的裸 CLOSE token → 中性标记
+    if ATTACHMENT_DATA_CLOSE in text:
+        text = text.replace(ATTACHMENT_DATA_CLOSE, _ATTACHMENT_DATA_NEUTRAL_MARKER)
+    return text
 
 IMAGE_TOKEN_COST = 1024
 MAX_BUDGET_FIT_ATTEMPTS = 6
@@ -878,12 +898,12 @@ class ChatHandler:
         elif isinstance(content, list):
             cleaned_parts = []
             for part in content:
+                # Every text part goes through the fail-closed strip; everything else
+                # (image_url/binary/url payloads, or malformed parts) collapses to the marker.
                 if isinstance(part, dict) and isinstance(part.get("text"), str):
                     cleaned = dict(part)
                     cleaned["text"] = _strip_attachment_data_blocks(part["text"])
                     cleaned_parts.append(cleaned)
-                elif isinstance(part, dict) and part.get("type") == "text":
-                    cleaned_parts.append(part)
                 else:
                     # non-text parts (image_url 等): drop the binary/url payload, keep only a marker.
                     cleaned_parts.append({"type": "non_text", "note": _ATTACHMENT_DATA_NEUTRAL_MARKER})

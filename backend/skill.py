@@ -1181,6 +1181,20 @@ class SkillEngine:
                 raise ValueError(f"材料不存在: {raw_path}")
                 raise ValueError(f"鏉愭枡涓嶅瓨鍦? {raw_path}")
 
+            # Fix4: hard size limit applies to BOTH paths. Live workspace-selected files used to
+            # skip this (the check sat only in the import/copy branch), letting an oversized
+            # in-workspace file slip past the 25MB cap. Enforce BEFORE the workspace-vs-import
+            # branch so neither path can reference/copy an oversized source.
+            from backend import material_limits as _ml
+            source_size = source_path.stat().st_size
+            if source_size > _ml.MAX_HEAVY_MATERIAL_BYTES:
+                limit_mb = _ml.MAX_HEAVY_MATERIAL_BYTES / (1024 * 1024)
+                actual_mb = source_size / (1024 * 1024)
+                raise ValueError(
+                    f"文件 {source_path.name!r} 大小 {actual_mb:.1f} MB 超过上传限制 "
+                    f"{limit_mb:.0f} MB，请压缩后重试"
+                )
+
             workspace_relative = self._workspace_relative_path(source_path, workspace_root)
             if workspace_relative is not None:
                 duplicate = self._find_existing_workspace_material(materials, workspace_relative)
@@ -1197,16 +1211,6 @@ class SkillEngine:
                 if duplicate:
                     added_materials.append(duplicate)
                     continue
-                # Hard size limit for persistent imports (workspace_select / chat_upload copy path)
-                from backend import material_limits as _ml
-                source_size = source_path.stat().st_size
-                if source_size > _ml.MAX_HEAVY_MATERIAL_BYTES:
-                    limit_mb = _ml.MAX_HEAVY_MATERIAL_BYTES / (1024 * 1024)
-                    actual_mb = source_size / (1024 * 1024)
-                    raise ValueError(
-                        f"文件 {source_path.name!r} 大小 {actual_mb:.1f} MB 超过上传限制 "
-                        f"{limit_mb:.0f} MB，请压缩后重试"
-                    )
                 destination_rel = self._build_imported_destination(project_path, source_path.name)
                 destination_path = project_path / destination_rel
                 destination_path.parent.mkdir(parents=True, exist_ok=True)
