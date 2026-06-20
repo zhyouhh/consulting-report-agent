@@ -31,9 +31,21 @@ Example runtime env:
 ```env
 MANAGED_PROXY_UPSTREAM_BASE_URL=http://127.0.0.1:3000/v1
 MANAGED_PROXY_UPSTREAM_API_KEY=<dedicated-upstream-key>
-MANAGED_PROXY_ALLOWED_MODELS=deepseek-v4-pro
+MANAGED_PROXY_ALLOWED_MODELS=deepseek-v4-pro,Qwen/Qwen3-VL-8B-Instruct
+MANAGED_PROXY_SELECTABLE_MODELS=deepseek-v4-pro
 MANAGED_PROXY_CLIENT_TOKEN=<dedicated-client-token>
 ```
+
+## N6 视觉转写（2026-06-21 已上线 jp-app-01）
+
+N6 起：纯文本主模型上传图片时，App 走内部视觉模型 `Qwen/Qwen3-VL-8B-Instruct` 转写。薄网关改为「白名单透传」（new-api 按模型名路由），不再强改写 model：
+
+- `MANAGED_PROXY_ALLOWED_MODELS` 必须含视觉模型（可达）；`MANAGED_PROXY_SELECTABLE_MODELS` 仅列用户可选的主模型（视觉模型**不暴露**进 `/v1/models` 下拉）。`SELECTABLE` 缺省=ALLOWED（向后兼容）。
+- 新增 `GET /health` 暴露 `allowed_models`/`selectable_models` 供 ops preflight。
+- **上游 new-api 前置条件**（否则 proxy 透传后 new-api 仍 403/503）：
+  1. 上游 token（proxy 用的 `MANAGED_PROXY_UPSTREAM_API_KEY` 对应的 new-api token）若开了 `model_limits`，必须把 `Qwen/Qwen3-VL-8B-Instruct` 加进其 `model_limits`。
+  2. 承载该模型的渠道（jp-app-01 当前为渠道 60『商业·硅基流动』）的 `group` 必须含该 token 的 group；直接改 `channels.group` 后还要在 `abilities` 表补 `(group, model, channel_id)` 路由行（new-api 的 abilities 不随重启重建，只随渠道经 UI/API 保存时重建），再重启 new-api。
+  - 改 new-api DB 前先 `cp one-api.db one-api.db.bak-<ts>`。
 
 ## Deploy Commands
 

@@ -53,10 +53,10 @@
 ## 仍需手工接续（mac 做不了，留交接）
 
 - **F2（Windows 打包 smoke + 删 legacy 解析器）**：`build.bat` 重打包 → 打包态启动 + 各格式（docx/pptx/xlsx/pdf/老 doc/图片转写降级）逐一验 + 体积量测；smoke 全过后删 `backend/skill.py` 里 feature-flag 期保留的 `_legacy_read_document`/`_read_docx`/`_read_xlsx`/`_read_pdf`，跑全量回归。**LibreOffice 不随包分发**——老 .doc/.ppt/.xls 在没装 LibreOffice 的目标机会友好失败（建议用户改存新版格式重传）。
-- **F4（ops 薄网关上线，需用户在场）**：jp-app-01 上 `consulting-report-managed-proxy` 容器 env 加：
-  - `MANAGED_PROXY_ALLOWED_MODELS=deepseek-v4-pro,Qwen/Qwen3-VL-8B-Instruct`
-  - `MANAGED_PROXY_SELECTABLE_MODELS=deepseek-v4-pro`
-  - 重部署后 preflight：`curl https://<proxy>/health` 断言 `allowed_models` 含视觉模型、`selectable_models` 仅 `deepseek-v4-pro`；再经 App 冒烟一张图转写调通（new-api 渠道 60 已含 `Qwen/Qwen3-VL-8B-Instruct`）。**动线上前与用户确认。**
+- **F4（ops 薄网关上线）✅ 已完成 2026-06-21（jp-app-01）**：经 `VPS-fix-private` 库 `bin/vps` / `.run-remote.py` / `.push-file.py` 操作（全程备份+preflight，记录见 `VPS-fix-private/notes/jp-app-01.md`）：
+  - 推新 `app.py`（白名单透传版）+ `proxy.env` 加 `MANAGED_PROXY_ALLOWED_MODELS=deepseek-v4-pro,Qwen/Qwen3-VL-8B-Instruct` + `MANAGED_PROXY_SELECTABLE_MODELS=deepseek-v4-pro` + 重建容器（旧版备份 `app.py.bak`/`proxy.env.bak` + docker 镜像 `rollback-20260620-235614`）。
+  - **实测踩到 new-api 前置坑**（plan 假设渠道已就绪，实际没有）：上游 token『ds专用』`model_limits` 只含 deepseek → 加 `Qwen/Qwen3-VL-8B-Instruct`；渠道 60『商业·硅基流动』group `default`→`default,ds` 且 `abilities` 表补 `(ds,Qwen/Qwen3-VL-8B-Instruct,60)` 路由行（abilities 不随重启重建）→ 重启 new-api（DB 备份 `one-api.db.bak-n6vision-20260621-000700`）。详见更新后的 `docs/managed-proxy-deployment.md`「N6 视觉转写」段。
+  - **preflight 全过**：`/health` selectable 不含视觉模型、`/v1/models` 仅 deepseek、非白名单 model 400、32×32 PNG 经 Qwen3-VL 转写 HTTP 200 返回正确颜色描述（101 tokens，成本低）。
 
 ## 已知限制（v1，单用户桌面可接受）
 
