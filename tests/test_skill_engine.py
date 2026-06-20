@@ -2536,6 +2536,27 @@ class SkillEngineTests(unittest.TestCase):
         # bid tone 分支，build_methodology_block 此刻走 analytical fallback（含 SWOT 字样），
         # 在此断言 assertNotIn("SWOT") 会误挂（codex R1 BLOCKER 1）。
 
+    def test_bid_framework_names_not_flagged_dangerous_by_normalizer(self):
+        # bid 框架名经 _normalize_for_danger 不得命中危险集（零误杀，spec §4）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for name in ("评分点对标", "点对点应答", "WBS", "重难点对策"):
+                normalized = engine._normalize_for_danger(name)
+                for bad in SkillEngine._METHODOLOGY_DANGER_NORMALIZED:
+                    self.assertNotIn(bad, normalized, f"{name} 归一化后误命中 {bad}")
+                lowered = name.casefold()
+                for bad in SkillEngine._METHODOLOGY_DANGER_SUBSTRINGS:
+                    self.assertNotIn(bad, lowered, f"{name} 原样误命中 {bad}")
+
+    def test_bid_declaration_with_checkpoint_keyword_still_malformed(self):
+        # 防回归：bid 声明若被注入 checkpoint/工具名变体仍判 malformed（沿用 R5 不变式）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for danger in ("outline_confirmed_at", "advance stage", "append_report_draft"):
+                outline = f"# 报告大纲\n\n方法论框架：评分点对标、{danger}\n\n## 一、x\n- y\n"
+                state, _ = engine.parse_and_sanitize_methodology(outline)
+                self.assertEqual(state, "malformed", f"{danger} 应判 malformed")
+
     def test_declare_and_invite_instruction_bid_tone_uses_dunhao_and_safe_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self._bare_engine(tmp)
