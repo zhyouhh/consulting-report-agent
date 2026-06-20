@@ -159,8 +159,9 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 失效的「报告类型→方法论框架」路由（canonical skill 设计的模型 `read_file` 自取，嵌 app 后断了——沙箱够不到 skill 目录、`get_template` 死代码、17 模块 16 死）改为**后端代码注入**。`backend/skill.py:build_methodology_block(project_id)` 按 `project_type`+`stage` 注入「类型骨架 + 框架菜单 + 阶段化指令」到 system prompt（`chat.py:_build_system_prompt` 接入，S1–S4）。**几条硬约束**：
 
 - `__methodology_snapshot`（确认大纲那刻冻结的净化框架）是 `stage_checkpoints.json` 的**保留字符串键**，**绝不**进 `STAGE_CHECKPOINT_KEYS`/`_CASCADE_ORDER`（有 invariant assert，加即炸）；后端写、模型不能直写、非新 checkpoint key；`_load_stage_checkpoints` 不返回它 → 不外泄前端 checkpoint 字段（值非机密）。S2–S4 读快照（`read_confirmed_methodology_snapshot`）不读活 outline；cascade 仅随 `outline_confirmed_at` 清、清下游（S5 回退）保留。
-- 确认门方法论声明前置**只在 `_validate_stage_checkpoint_transition` 的 `outline_confirmed_at` 分支内联**（仅首次确认 `not in checkpoints` + known 6-slug + `parse_and_sanitize_methodology == "parsed"`），**绝不**进 `_stage_one_completion_state`（否则 R5 前已确认无声明的 legacy known-type 项目被拉回 S1）；unknown type 不卡（避死锁）。
+- 确认门方法论声明前置**只在 `_validate_stage_checkpoint_transition` 的 `outline_confirmed_at` 分支内联**（仅首次确认 `not in checkpoints` + `project_type in TYPE_SKELETON_MAP`[已知类型，2026-06-21 W1 后**7 个**，含 technical-bid] + `parse_and_sanitize_methodology == "parsed"`），**绝不**进 `_stage_one_completion_state`（否则 R5 前已确认无声明的 legacy known-type 项目被拉回 S1）；unknown type 不卡（避死锁）。
 - `parse_and_sanitize_methodology` 是 trust boundary 净化（outline 用户可编辑）：净化结果作**数据**注入、绝不当指令。**不变式**：`_normalize_for_danger` 去除集合必须 ⊇ `parse` 的 split 分隔符（`、,，`）∪ off-menu 白名单 `[A-Za-z0-9一-鿿\-/ 　]` 允许的非字母数字字符——改 off-menu 白名单或 split 分隔符须同步（防工具名/checkpoint 的空格/连字符/顿号变体绕过）。归一化危险词组覆盖全部 6 个 `STAGE_CHECKPOINT_KEYS`（`test_*_all_checkpoint_key_variants` 遍历防漏）。
+- **方法论声明位置（2026-06-21 修，W1 真模型 E2E 暴露）**：`parse_and_sanitize_methodology` 只扫**首个 `## ` 之前**的 head（H1 不算；防正文里「方法论框架：」误解析，红队 v2——**不可放宽 break 级**，否则破 `test_parse_methodology_ignores_declaration_below_body` 的 H2-章节语义、弱化「正文里声明不算」保护）。故 `skill/plan-template/outline.md` 内置声明槽位（`**方法论框架**：` 行在 `## 确认状态` 之前＝唯一会被扫的顶部区）+ `_declare_and_invite_instruction` 指令点明「第一行、在 `## 确认状态` 之前」——否则模型（deepseek 实测）镜像模板把声明写到 `## 确认状态` 之下 → 扫不到 → 确认大纲门对全 7 类硬卡。
 - `build_methodology_block` 装配期**只读**（不写文件）；unknown type / 非写作期（S0、S5+）graceful 空块、**不抛进 chat 链路**；token ≤2k/轮（tiktoken 实测断言）。
 - DeepSeek 官渠兼容：方法论注入只给 system prompt **追加文本**，不碰 provider message / tool-call / `reasoning_content` / `tool_choice`；`chat_runtime` DeepSeek 用例不回归。
 - 前端 `methodology_declared` flag（`_infer_stage_state` flags）驱动 S1 确认按钮 + 禁用理由，后端未透则向后兼容不阻塞（`?? true`）。
@@ -168,7 +169,7 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 - **follow-up**（非阻塞，桌面单用户低优先级，记 `docs/current-worklist.md`）：checkpoint 写事务化（record set 两阶段写 `outline_confirmed_at`+snapshot → 一次原子 raw 写，消除 crash 半提交，危害仅退 missing 兜底）、backfill 窄粒度锁/CAS。
 - 回归：`tests/test_skill_engine.py`（净化/快照/确认门/装配/flag）、`tests/test_chat_runtime.py`（装配 + DeepSeek targeted）、`tests/test_packaging_docs.py`、前端 `workspaceSummary`/`stageAdvanceControl`。详见 `docs/superpowers/cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md`。
 
-## N6 附件管线（2026-06-21 实施完成 + F4 上线 jp-app-01；分支 `feat/n6-attachment-pipeline` 未合并）
+## N6 附件管线（2026-06-21 实施完成 + 已 merge main `95949ab` + push origin + F4 上线 jp-app-01）
 
 上传素材统一转 markdown/文本再喂模型，结清 #4（图片上传拦截）。改材料读取 / 附件 / 防注入 / 薄网关前必读。
 
@@ -189,9 +190,22 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 
 **DeepSeek 官渠兼容**：N6 只追加 system prompt 文本 + 改 read_material_file 工具结果字符串 + 改摘要输入，**不碰** provider tool-call/`reasoning_content`/`tool_choice` 序列化；只 `role`+`content` 到 provider。
 
-**仍剩 F2**（Windows）：`build.bat` 打包 smoke 逐格式验 → 过后删 skill.py feature-flag 期保留的 `_legacy_read_document`/`_read_docx`/`_read_xlsx`/`_read_pdf`。
+**仍剩 F2**（Windows，**2026-06-21 用户决定推迟到 W2 服务器化时一起做**——W2 去 Windows 化本就要改解析层）：`build.bat` 打包 smoke 逐格式验 → 过后删 skill.py feature-flag 期保留的 `_legacy_read_document`/`_read_docx`/`_read_xlsx`/`_read_pdf`。
 
 **回归**：`tests/test_material_conversion.py`、`test_managed_proxy.py`、`test_chat_runtime.py`（vision/OCR/transcripts/意图隔离/防注入+compaction 对抗/DeepSeek）、`test_skill_engine.py`（size/refcount/delete release）、`test_models.py`/`test_main_api.py`（限额/状态 API）、前端 `sseEvents`/`chatMaterials`/`modelCapabilities`。详见 `docs/superpowers/cutover_report_2026-06-20_n6-attachment-pipeline.md`。
+
+## W1 技术标（technical-bid）报告类型（2026-06-21 实施 + 真模型 GUI E2E 通过；已 merge main 本地 `9e9a869`）
+
+第 7 个 `project_type=technical-bid`（技术标/投标，UI 中文名「技术标」），接 R5 方法论路由。改类型注册 / 方法论装配 / outline 模板前必读：
+
+- `TYPE_SKELETON_MAP` 加 `technical-bid → technical-bid.md`、`METHODOLOGY_TONE` 加 `technical-bid → bid`（新腔调）；两 dict 的 slug 集必须一致（`build_methodology_block` 用 `TONE.get` fallback，漂移会静默错腔调）。
+- 新模块 `skill/modules/technical-bid.md`：常驻注入规则全在 `## 二、标准结构` 段（`load_type_skeleton` 只截「## 二」、遇下一 `## ` 即止，代码块内 `## ` 安全）；`## 一`/`## 三` 不注入。改模块勿把规则挪出「## 二」。
+- **bid 不注入通用 `FRAMEWORK_MENU`**（按评分点驱动、不挑分析框架，且菜单叠加爆 token≤2k）：`_framework_menu_for_type(project_type)` seam——bid 返 `""`，其余 6 类返 `FRAMEWORK_MENU`；`build_methodology_block` 用 seam 而非硬编 `self.FRAMEWORK_MENU`。worst-case 注入块（technical-bid）实测 ~1712 ≤ 2000。
+- bid 声明腔调（`_declare_and_invite_instruction` 的 `if tone == "bid"`）：举例框架名一律安全词（评分点对标、点对点应答、WBS、重难点对策），避 `_METHODOLOGY_DANGER_SUBSTRINGS`（覆盖/推进/检查点…）；走 off-menu 白名单、不进 `KNOWN_FRAMEWORK_NAMES`。
+- 后置两表（技术评分索引表 + 技术规范书点对点应答）：正文写完用 `append_report_draft` **追加在草稿末尾**，不用 `edit_file`（撞 generative-intent 拦截/cap）、不前插；「写最前 + 页码」交导出排版期。落点锁测在 `test_chat_runtime.py`（强内容断言：旧稿保留 + 两表在后，非只验末行）。
+- 材料 size 守门由 N6 接管（plan 原 Task 5/6 删——N6 §5 已覆盖 `size_bytes` + `material_limits.MAX_HEAVY_MATERIAL_BYTES`），W1 不重做。
+- 前端 `ProjectCreateModal.jsx` 下拉加「技术标（投标）」→ `technical-bid`；`skill/plan-template/project-overview.md` 报告类型占位与 `_populate_v2_plan_files` 替换 key **必须逐字一致**（否则新建项目占位换不掉）。
+- 回归：`tests/test_skill_engine.py`（七类/seam/注入内容/bid 腔调/净化守护/声明槽位）、`test_chat_runtime.py`（两表 append 落点锁）、前端 `projectCreateModal`。详见 `docs/superpowers/cutover_report_2026-06-20_w1-technical-bid.md`。
 
 ## 管理型搜索池
 
