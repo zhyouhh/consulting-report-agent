@@ -40,6 +40,7 @@ from .report_tools import (
     run_lint_report,
     run_quality_check,
 )
+from .material_limits import MAX_HEAVY_MATERIAL_BYTES
 from .skill import SkillEngine, StaleFileError, UserWriteForbiddenError
 
 
@@ -251,13 +252,37 @@ async def upload_materials(project_id: str, files: list[UploadFile] = File(...))
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
+    limit_mb = MAX_HEAVY_MATERIAL_BYTES / (1024 * 1024)
     staged_paths = []
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         for upload in files:
             safe_name = Path(upload.filename or "attachment").name
             temp_path = tmpdir_path / safe_name
-            temp_path.write_bytes(await upload.read())
+            # Stream-accumulate to enforce size limit without buffering the whole file
+            chunk_size = 256 * 1024  # 256 KB chunks
+            total_bytes = 0
+            with temp_path.open("wb") as f:
+                while True:
+                    chunk = await upload.read(chunk_size)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_HEAVY_MATERIAL_BYTES:
+                        # Partial file: close and clean up before rejecting
+                        f.close()
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(
+                                f"文件 {safe_name!r} 大小超过上传限制 {limit_mb:.0f} MB，"
+                                "请压缩后重试"
+                            ),
+                        )
+                    f.write(chunk)
             staged_paths.append(str(temp_path))
 
         try:

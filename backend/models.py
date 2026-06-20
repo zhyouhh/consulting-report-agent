@@ -1,7 +1,14 @@
+import base64
 from datetime import datetime
 from typing import Literal, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from backend.material_limits import (
+    ALLOWED_IMAGE_MIME,
+    MAX_TRANSIENT_ATTACHMENTS,
+    MAX_TRANSIENT_IMAGE_BYTES,
+)
 
 
 class ProjectInfo(BaseModel):
@@ -39,9 +46,12 @@ class TransientAttachment(BaseModel):
     data_url: str = Field(..., min_length=1)
 
     @model_validator(mode="after")
-    def _ensure_image_only(self):
-        if not self.mime_type.startswith("image/"):
-            raise ValueError("transient_attachments only supports image/* payloads")
+    def _ensure_allowed_mime(self):
+        if self.mime_type not in ALLOWED_IMAGE_MIME:
+            raise ValueError(
+                f"不支持的图片格式 {self.mime_type!r}，"
+                f"允许的格式：{', '.join(sorted(ALLOWED_IMAGE_MIME))}"
+            )
         return self
 
 
@@ -73,6 +83,42 @@ class ChatRequest(BaseModel):
     def validate_message_or_trigger(self):
         if self.system_trigger is None and not self.message_text.strip():
             raise ValueError("message_text must be non-empty when system_trigger is None")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_transient_attachment_limits(self):
+        attachments = self.transient_attachments
+        if not attachments:
+            return self
+        # Count limit
+        if len(attachments) > MAX_TRANSIENT_ATTACHMENTS:
+            raise ValueError(
+                f"图片数量过多：最多 {MAX_TRANSIENT_ATTACHMENTS} 张，当前 {len(attachments)} 张"
+            )
+        # Per-attachment byte size limit (decoded)
+        for att in attachments:
+            data_url = att.data_url
+            # Require the canonical data URL format: "data:<mime>;base64,<payload>"
+            if not data_url.startswith("data:") or ";base64," not in data_url:
+                raise ValueError(
+                    f"附件 {att.name!r} 的 data_url 格式无效，"
+                    "需要 data:<mime>;base64,<payload> 格式"
+                )
+            b64_payload = data_url.split(";base64,", 1)[1]
+            try:
+                decoded = base64.b64decode(b64_payload, validate=False)
+            except Exception:
+                raise ValueError(
+                    f"附件 {att.name!r} 的 data_url 无法解码：base64 内容损坏"
+                )
+            decoded_bytes = len(decoded)
+            if decoded_bytes > MAX_TRANSIENT_IMAGE_BYTES:
+                limit_mb = MAX_TRANSIENT_IMAGE_BYTES / (1024 * 1024)
+                actual_mb = decoded_bytes / (1024 * 1024)
+                raise ValueError(
+                    f"附件 {att.name!r} 大小 {actual_mb:.1f} MB 超过单图上限 {limit_mb:.0f} MB，"
+                    f"请压缩后重试（字节数：{decoded_bytes}）"
+                )
         return self
 
 

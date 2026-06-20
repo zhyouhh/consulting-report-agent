@@ -1197,6 +1197,16 @@ class SkillEngine:
                 if duplicate:
                     added_materials.append(duplicate)
                     continue
+                # Hard size limit for persistent imports (workspace_select / chat_upload copy path)
+                from backend import material_limits as _ml
+                source_size = source_path.stat().st_size
+                if source_size > _ml.MAX_HEAVY_MATERIAL_BYTES:
+                    limit_mb = _ml.MAX_HEAVY_MATERIAL_BYTES / (1024 * 1024)
+                    actual_mb = source_size / (1024 * 1024)
+                    raise ValueError(
+                        f"文件 {source_path.name!r} 大小 {actual_mb:.1f} MB 超过上传限制 "
+                        f"{limit_mb:.0f} MB，请压缩后重试"
+                    )
                 destination_rel = self._build_imported_destination(project_path, source_path.name)
                 destination_path = project_path / destination_rel
                 destination_path.parent.mkdir(parents=True, exist_ok=True)

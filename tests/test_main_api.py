@@ -520,6 +520,53 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(len(args[1]), 1)
         self.assertTrue(args[1][0].endswith("市场图表.png"))
 
+    @mock.patch("backend.main.MAX_HEAVY_MATERIAL_BYTES", 10)
+    @mock.patch("backend.main.skill_engine.get_project_record")
+    def test_upload_oversized_file_returns_413(self, mock_get_project_record):
+        """Upload endpoint rejects files exceeding MAX_HEAVY_MATERIAL_BYTES with HTTP 413."""
+        mock_get_project_record.return_value = {
+            "id": "proj-demo",
+            "workspace_dir": "D:/Workspaces/demo",
+        }
+        oversized_data = b"X" * 20  # 20 bytes > patched limit of 10 bytes
+
+        response = self.client.post(
+            "/api/projects/proj-demo/materials/upload",
+            files=[("files", ("big.pdf", BytesIO(oversized_data), "application/pdf"))],
+        )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("超过上传限制", response.json()["detail"])
+
+    @mock.patch("backend.main.MAX_HEAVY_MATERIAL_BYTES", 10)
+    @mock.patch("backend.main.skill_engine.get_project_record")
+    def test_upload_oversized_file_not_persisted(self, mock_get_project_record):
+        """Rejected oversized upload must not leave a file in the temp directory."""
+        mock_get_project_record.return_value = {
+            "id": "proj-demo",
+            "workspace_dir": "D:/Workspaces/demo",
+        }
+        oversized_data = b"X" * 20
+
+        with mock.patch("backend.main.tempfile.TemporaryDirectory") as mock_tmpdir:
+            import tempfile as _tf
+            real_tmpdir = _tf.mkdtemp()
+            mock_tmpdir.return_value.__enter__ = mock.Mock(return_value=real_tmpdir)
+            mock_tmpdir.return_value.__exit__ = mock.Mock(return_value=False)
+
+            try:
+                response = self.client.post(
+                    "/api/projects/proj-demo/materials/upload",
+                    files=[("files", ("big.pdf", BytesIO(oversized_data), "application/pdf"))],
+                )
+                self.assertEqual(response.status_code, 413)
+                # Partial temp file must be cleaned up
+                leftover = list(Path(real_tmpdir).iterdir())
+                self.assertEqual(leftover, [], f"Partial file left behind: {leftover}")
+            finally:
+                import shutil as _sh
+                _sh.rmtree(real_tmpdir, ignore_errors=True)
+
     @mock.patch("backend.main.run_quality_check")
     @mock.patch("backend.main.skill_engine.get_script_path")
     @mock.patch("backend.main.skill_engine.get_primary_report_path")

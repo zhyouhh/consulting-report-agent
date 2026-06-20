@@ -59,6 +59,30 @@ class SkillEngineTests(unittest.TestCase):
                     engine.read_material_file(pid, mats[0]["id"])
             self.assertIn("过大", str(ctx.exception))
 
+    def test_add_materials_rejects_oversized_import(self):
+        """add_materials raises ValueError before copying an oversized file."""
+        from backend import material_limits as _ml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(
+                self._project_payload(Path(tmp) / "workspace")
+            )
+            pid = project["id"]
+            src = Path(tmp) / "huge.pdf"
+            src.write_bytes(b"x" * 200)
+
+            with mock.patch.object(_ml, "MAX_HEAVY_MATERIAL_BYTES", 100):
+                with self.assertRaises(ValueError) as ctx:
+                    engine.add_materials(pid, [str(src)], added_via="chat_upload")
+            self.assertIn("超过上传限制", str(ctx.exception))
+
+            # The file must NOT have been copied into the project's imported dir
+            project_dir = Path(project["project_dir"])
+            imported_dir = project_dir / "materials" / "imported"
+            if imported_dir.exists():
+                self.assertEqual(list(imported_dir.iterdir()), [])
+
     def test_shared_hash_delete_one_keeps_cache(self):
         from backend.material_conversion import MaterialConverter
 
