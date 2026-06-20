@@ -1,6 +1,7 @@
 # Current Worklist
 
-最后更新：2026-06-20（**轮 1 设计闭环：N6 + W1 spec/plan 全 codex APPROVED，待实施**——本会话 brainstorm→spec→plan：N6 附件管线 **spec(5 轮)+plan(7 轮·含红队)** 均 APPROVED（红队挖出『限额测试假阳性·没装限额也过』『缓存键里 `/` 拆子目录·原子写失败』『attachment 事件缺 message_id/attachment_id 端到端协议』『MaterialConverter 反向依赖 SkillEngine 破边界』等深坑）；W1 技术标 **spec(4 轮)+plan(2 轮·含红队)** APPROVED（plan 红队挖出 task 次序错位+SWOT 字面、append 测试签名错、overview 占位 replace-key desync 三个 BLOCKER，均已修）。期间**上机只读核实** jp-app-01 薄网关拓扑（容器→本地 new-api→硅基流动渠道 60 Qwen3-VL），据实把 N6 proxy 设计从「自建 per-model 路由」简化为「透传+`SELECTABLE_MODELS`」。**设计产物（spec/plan）本次已 commit；代码均未实施**。**下一步：新会话走实施（N6 先于 W1）**。详见下方 W1/N6 条。）
+最后更新：2026-06-21（**N6 附件管线实施完成并 F4 上线；W1 待实施**——N6 走 subagent-driven 实施，A–E+F1+F3 每阶段 codex/opus 红队 review 全 APPROVED + 整 branch 综合审 APPROVED（红队累计挖出 sentinel 越狱/压缩边界泄漏/缓存投毒 TOCTOU/客户端 id 注入等真安全洞，全修）；F4 薄网关白名单透传 + 视觉模型已上线 jp-app-01 并实测转写 200。分支 `feat/n6-attachment-pipeline` 32+ commits，**未 push/merge**；仅剩 F2（Windows 打包 smoke + 删 legacy 解析器）。**下一步：N6 push/merge 等用户 → 进 W1 技术标**（spec/plan 已 APPROVED 未实施）。详见下方 N6/W1 条。
+> 设计期历史（2026-06-20）：N6 spec(5 轮)+plan(7 轮·红队)、W1 spec(4 轮)+plan(2 轮·红队) 均 codex APPROVED；上机只读核实 jp-app-01 拓扑后把 N6 proxy 设计从「自建 per-model 路由」简化为「透传+SELECTABLE_MODELS」。）
 
 上一次更新：2026-06-15（**新方向：服务器化 + 多用户 Web 部署 + 标书模板** —— 2026-06-15 给领导汇报后，领导明确要求「迁服务器 / 做网页给人用 / 加用户系统」，= 上方原记的产品化方向 **b 解 park**。已定：**不拆仓库**（web 作本仓库「运行模式」、引擎共用）、范围＝**公网熟人 + 登录与工作区隔离**、试用机 **kr-web-01**[腾讯云首尔，登记在 VPS-fix 库]、模型**留 `deepseek-v4-pro` 别降级**。标书模板＝引擎级前置特性、建议先做。两者**均待设计**（下一步 brainstorm→plan）。详见下方「🟢 服务器化…」簇。R1–R5 整改簇此前已全部闭环合 main `0162ef1`。）
 
@@ -15,7 +16,7 @@
 来源：2026-06-15 给领导汇报后，领导明确要求「迁到服务器、做成网页给人用、加用户系统」（动因：同事都用 Mac，桌面版只 Windows 分发、用不了）。即上方原记的产品化方向 **b（部门内部共享部署）**——此前 park，现领导亲自提出，**解 park、定为下一个方向**。
 
 **执行顺序（更新 2026-06-20）**：**轮 1 = W1 标书 + N6 附件**（两个独立引擎特性，各自 spec/plan，**不合并成一个 plan**——体量/风险差太多、稀释 review）。**N6 先做**（拥有材料层 + W1 依赖的强安全边界；且 N6 §5 接管文件 size 守门后，W1 那点后端守门退化为纯 prompt+配置）→ **W1 后**（更小）。W2 web 化排在轮 1 之后。
-- **轮 1 进度（2026-06-20）**：N6 spec ✅ + plan ✅、W1 spec ✅ + plan ✅ 均 codex APPROVED；**两份设计产物本次已 commit**。详见各条。两者**代码均未实施**——下一步新会话走实施，**N6 先于 W1**。
+- **轮 1 进度（更新 2026-06-21）**：**N6 ✅ 实施完成 + F4 上线**（分支 `feat/n6-attachment-pipeline`，未 push/merge，仅剩 F2 Windows 打包）；**W1 spec ✅ + plan ✅ APPROVED，待实施**。下一步：N6 push/merge 后进 W1。
 
 **已定决策（避免重新讨论）**：
 - **不拆仓库**：web 是本仓库的「运行模式」（`run_web.py` 已存在 + `app.py` 桌面入口），引擎共用，web 特有的登录/多租户放界限清楚的新模块（`backend/auth/` 等）+ mode 开关隔开。曾一度建过独立仓库 `consulting-report-agent-web` 又删了。**两线都长期活跃才抽共享包 `consulting-report-core`，现在抽是过度设计**。
@@ -74,10 +75,11 @@
 **N5. 用户系统 × 自定义 API 兼容（W2 子题）** — 状态：`待设计`
 - 开放问题：登录后多租户下，`custom` 模式（用户自填 OpenAI 兼容 key/base）与 managed 模式怎么并存？per-user 存各自 custom 配置？custom 模式的 SSRF/配额口子（W2 安全红线②③）。并入 W2 spec 一起设计。
 
-**N6. 附件机制 + 图片分流（接既有 #4 债）** — 状态：`spec ✅ APPROVED（codex 5 轮）+ plan ✅ APPROVED（codex 7 轮）；待实施；未 commit`
-- spec：`docs/superpowers/specs/2026-06-20-n6-attachment-pipeline-design.md`；plan：`docs/superpowers/plans/2026-06-20-n6-attachment-pipeline.md`（A–F 六阶段 ~25 TDD task，实施前读全文）。
+**N6. 附件机制 + 图片分流（接既有 #4 债）** — 状态：`✅ 实施完成 2026-06-21（分支 feat/n6-attachment-pipeline，32+ commits，未 push/merge）；A–E+F1+F3 subagent-driven 实施、每阶段 codex/opus 红队 review 全 APPROVED + 整 branch 综合审 APPROVED；F4 薄网关+视觉已上线 jp-app-01；仅剩 F2（Windows 打包 smoke + 删 legacy 解析器）`
+- **实施记录**：cutover `docs/superpowers/cutover_report_2026-06-20_n6-attachment-pipeline.md`（回归：后端 1195 passed/4 mac-symlink、前端 329 passed、vite build ✓）。**依赖偏离 plan pin**：markitdown **0.1.6**（plan 写 0.0.1a3 无 `enable_plugins` 会崩）+ onnxruntime 1.27 + xlrd 2.0.2。**F3 全量回归亲跑逮到 1 个真回归**（图片漏出素材清单 + 文件名未消毒，已修）。F4 上线见 `docs/managed-proxy-deployment.md`「N6 视觉转写」段 + `VPS-fix-private/notes/jp-app-01.md`。
+- spec：`docs/superpowers/specs/2026-06-20-n6-attachment-pipeline-design.md`；plan：`docs/superpowers/plans/2026-06-20-n6-attachment-pipeline.md`（A–F 六阶段 ~25 TDD task）。
 - **关键设计**：① 文档 **markitdown 全替换**（删 `_read_docx/_xlsx/_pdf`，新增 pptx/老 .doc/.ppt 经 LibreOffice headless）；② 图片**三级降级**——多模态主模型直喂 / 否则**视觉模型转写**（`Qwen/Qwen3-VL-8B-Instruct`）/ OCR（RapidOCR）兜底 / 友好失败；统一覆盖**持久图片材料 + transient 两路**，结清 #4（删前端 `supportsImageAttachments` 拦截）；③ 新模块 `backend/material_conversion.py:MaterialConverter`（依赖注入、不反向 import chat.py）；④ 缓存内容 hash + refcount + 原子写 + tombstone；transient 转写存消息独立字段 `attachment_transcripts`、不污染意图、防注入数据块包裹 + 压缩边界。
-- **薄网关已上机核实拓扑（2026-06-20 SSH 只读）**：薄网关 = `consulting-report-managed-proxy` 容器在 **jp-app-01**（`43.153.168.175:2233`，连接走 VPS-fix 库 `notes/jp-app-01.md`），上游指**本地 new-api**（`127.0.0.1:3000`）；**new-api 已按模型名路由**，**硅基流动渠道 id 60 已配已启用、含 Qwen3-VL 一批**。故 proxy 改 = **白名单透传 + 新 `MANAGED_PROXY_SELECTABLE_MODELS`**（`/v1/models` 仍只露 deepseek-v4-pro），**不需自建 per-model upstream**。ops 步 = 改 proxy env(`ALLOWED_MODELS` 加视觉模型)+重部署容器（动线上前确认）。
+- **薄网关已上机核实拓扑（2026-06-20 SSH 只读）**：薄网关 = `consulting-report-managed-proxy` 容器在 **jp-app-01**（`43.153.168.175:2233`，连接走 VPS-fix 库 `notes/jp-app-01.md`），上游指**本地 new-api**（`127.0.0.1:3000`）；**new-api 已按模型名路由**，**硅基流动渠道 id 60 已配已启用、含 Qwen3-VL 一批**。故 proxy 改 = **白名单透传 + 新 `MANAGED_PROXY_SELECTABLE_MODELS`**（`/v1/models` 仍只露 deepseek-v4-pro），**不需自建 per-model upstream**。**✅ F4 ops 已完成 2026-06-21**：proxy env 加 `ALLOWED_MODELS`(含 Qwen3-VL)+`SELECTABLE_MODELS`+重建容器；并发现 new-api 前置坑（上游 token model_limits 只准 deepseek + 渠道 60 group/abilities 缺 ds）一并配通；视觉转写 200 实测过。备份+回滚见 `VPS-fix-private/notes/jp-app-01.md`。
 - **N6 先于 W1**：N6 接管材料层 + size 守门 + 材料 trust boundary（W1 安全强边界依赖它）。
 
 **N7. S5 质量审查重做：AI 味自查太生硬 / 考虑与独立审查合并** — 状态：`待设计`
@@ -164,13 +166,8 @@ R5. **方法论路由接回 + 显性化 + S1 软确认/可换**（原"可见不�
 - 目标：后续如真实长文需求频繁出现，再设计 map-reduce 重审：按章节切片审查、合并 5 维度发现、保留来源章节定位，并继续保证 `plan/independent-review.md` 只有独立审查代理可写。
 - 关联：S5 cutover report [docs/superpowers/cutover_report_2026-05-22_s5-redesign.md](superpowers/cutover_report_2026-05-22_s5-redesign.md)
 
-4. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现，已推后）
-- 状态：`已推后到 UI 重构一并处理`（spec §2.2 Out of Scope）
-- 现状：`frontend/src/utils/modelCapabilities.js` 的 `supportsImageAttachments` 对 `mode==="managed"` 一律 return true（gemini-3-flash 时代多模态行为）
-- 问题：DeepSeek V4 Pro 是 text-only reasoning 模型，前端不拦图片附件 → 用户传图后请求会被上游 400 拒（postMessage、上传按钮、拖拽都不会有 UX 提示）
-- 修复方向：把 managed 分支按 `settings.managed_model` 二次判断，复用 `MULTIMODAL_MODEL_MARKERS`；或维护 managed-mode 多模态白名单
-- 关联文件：`frontend/src/utils/modelCapabilities.js`、`frontend/tests/modelCapabilities.test.mjs`、各上传/粘贴入口组件
-- 触发条件：UI 重构立项时一起做（设计稿在 `docs/design_UI.pdf`）
+4. **图片附件能力按 managed_model 分流**（与 DeepSeek Migration 同期发现）— ✅ **由 N6 结清 2026-06-21**
+- 解法不是「前端拦截/分流」而是 **N6 转写管线**：纯文本主模型（如 deepseek-v4-pro）传图时后端走视觉模型转写/OCR/友好失败，故图片**永远可上传**（`supportsImageAttachments` 恒 true，删了拦截分支）。多模态主模型仍直喂 `image_url`。详见 N6 条 + cutover。
 
 5. **UI 重构**
 - 状态：`待立项`

@@ -160,6 +160,31 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 - **follow-up**（非阻塞，桌面单用户低优先级，记 `docs/current-worklist.md`）：checkpoint 写事务化（record set 两阶段写 `outline_confirmed_at`+snapshot → 一次原子 raw 写，消除 crash 半提交，危害仅退 missing 兜底）、backfill 窄粒度锁/CAS。
 - 回归：`tests/test_skill_engine.py`（净化/快照/确认门/装配/flag）、`tests/test_chat_runtime.py`（装配 + DeepSeek targeted）、`tests/test_packaging_docs.py`、前端 `workspaceSummary`/`stageAdvanceControl`。详见 `docs/superpowers/cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md`。
 
+## N6 附件管线（2026-06-21 实施完成 + F4 上线 jp-app-01；分支 `feat/n6-attachment-pipeline` 未合并）
+
+上传素材统一转 markdown/文本再喂模型，结清 #4（图片上传拦截）。改材料读取 / 附件 / 防注入 / 薄网关前必读。
+
+**转换服务** `backend/material_conversion.py:MaterialConverter`（**DI 纯边界，绝不 import chat**——source-guard 测试锁死，连 docstring 都不能含 `import chat` 子串；不反向依赖 SkillEngine/project，只暴露纯函数 `cache_key_from_sha256` + 只读属性 `image_cache_extra` 供 SkillEngine 算 key）：
+- 文档：txt 直读；docx/pptx/xlsx/pdf/csv/html 走 markitdown（`enable_plugins=False`）；老 .doc/.ppt→LibreOffice headless 转现代格式再 markitdown，.xls markitdown(xlrd) 优先失败回退 LibreOffice。markitdown 0.1.6 对损坏 docx 不报错 → 加了 ZIP-magic(`PK\x03\x04`)文件头校验。
+- 图片：`transcribe_image`（持久带缓存）/`transcribe_image_data_url`（transient 不入持久缓存）→ vision adapter→OCR adapter→`MaterialConversionError`。
+- 缓存：内容 hash key + tombstone(.error) + 引用计数 GC(.refs sidecar，shared-hash 安全) + 原子写。**`convert_document` 先快照源文件再 hash+解析**（关 live workspace 文件 TOCTOU 缓存投毒 + size 绕过）。**cache key→file 必须字符串拼接**（`cache_dir/(key+".md"/".error"/".refs")`，**不用 `with_suffix`**——视觉模型名含点会截断/碰撞）。
+
+**接入** `backend/skill.py`：`read_material_file` size 守门(heavy 后缀>25MB friendly fail)+委派 converter；`add_materials` 加 `size_bytes`/`content_sha256`；**`_cache_key_for_material(material, path)` 按当前 live 文件内容算 key**（与 transcribe/convert 的 live-hash 一致）；retain（read 成功 + chat 显示路径 transcribe 成功）/release（`remove_material` 删前 + `delete_project` rmtree 前 `_release_project_material_caches`）。`ChatHandler.__init__` 装配 converter（lambda 晚绑 `_vision_transcribe`/`_ocr_image`/`_main_model_supports_vision`）。
+
+**trust boundary（防注入，N6 核心，改任何附件→模型路径前必读）**：附件派生文本（图片转写 / `read_material_file` 文档正文 / 素材清单 display_name·file_type）一律框进 `ATTACHMENT_DATA_OPEN/CLOSE` 数据块，且不可信片段先过 `_neutralize_attachment_data_markers`（破坏 `<<<`/`>>>` 定界符防越狱）；`content` 永远是 raw 用户意图；`_build_turn_context` 绝不收附件文本；客户端可控 `material_id`（forged）走删除分支**不回显**（通用提示）；`_summarize_messages` 摘要前 `_sanitize_message_for_summary` **fail-closed strip**（畸形框定从首标记砍到 EOF；list 先 flatten；非 str/list shape 序列化后再 strip）+ 丢 `client_message_id`、`attached_material_ids`→count（生产路径 `_to_provider_message` 本就只重建 `{role,content}`，这是第二层防御）；`_build_system_prompt` 含「附件数据非指令」规则。
+
+**图片分流** `_build_user_content`（两阶段：先收 note_lines 再建 content+image_url，**绝不 mutate content[0]**）：多模态主模型→`image_url`；纯文本主模型→当前轮 transcribe、历史轮 `peek_image_transcript`（cache-first，绝不发新视觉请求）；transient 转写存消息独立字段 `attachment_transcripts`（不混入 content），SSE `attachment_transcribed{message_id,attachment_id,status}`（`client_message_id` 仅普通轮带、system_trigger 不带）。
+
+**薄网关** `managed_proxy/app.py`：白名单透传（删强改写 model）+ `MANAGED_PROXY_SELECTABLE_MODELS`（`/v1/models` 只露可选子集，视觉模型可达但不进下拉）+ `/health` preflight。**已上线 jp-app-01**——部署 + new-api 前置（上游 token `model_limits` + 渠道 group/abilities 都要手配）见 `docs/managed-proxy-deployment.md`「N6 视觉转写」段 + `VPS-fix-private/notes/jp-app-01.md`。
+
+**Settings**（`config.py`）：`managed_vision_model`（默 `Qwen/Qwen3-VL-8B-Instruct`）/`vision_enabled`。**依赖**（`requirements.txt`）：`markitdown[docx,pptx,xlsx,xls,pdf]==0.1.6`（**不能用 plan 写的 0.0.1a3，无 `enable_plugins`**）+ `rapidocr-onnxruntime` + `onnxruntime==1.27.0` + `xlrd==2.0.2`；mac 用 `uv pip install`（venv 无 pip）。**限额**常量集中 `backend/material_limits.py`。
+
+**DeepSeek 官渠兼容**：N6 只追加 system prompt 文本 + 改 read_material_file 工具结果字符串 + 改摘要输入，**不碰** provider tool-call/`reasoning_content`/`tool_choice` 序列化；只 `role`+`content` 到 provider。
+
+**仍剩 F2**（Windows）：`build.bat` 打包 smoke 逐格式验 → 过后删 skill.py feature-flag 期保留的 `_legacy_read_document`/`_read_docx`/`_read_xlsx`/`_read_pdf`。
+
+**回归**：`tests/test_material_conversion.py`、`test_managed_proxy.py`、`test_chat_runtime.py`（vision/OCR/transcripts/意图隔离/防注入+compaction 对抗/DeepSeek）、`test_skill_engine.py`（size/refcount/delete release）、`test_models.py`/`test_main_api.py`（限额/状态 API）、前端 `sseEvents`/`chatMaterials`/`modelCapabilities`。详见 `docs/superpowers/cutover_report_2026-06-20_n6-attachment-pipeline.md`。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
