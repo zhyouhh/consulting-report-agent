@@ -81,7 +81,7 @@ class SkillEngineTests(unittest.TestCase):
             b = engine.add_materials(pid, [str(s2)], added_via="chat_upload")[0]
             engine.read_material_file(pid, a["id"])
             engine.read_material_file(pid, b["id"])
-            key = engine._cache_key_for_material(a)
+            key = engine._cache_key_for_material(a, engine.get_material_path(pid, a["id"]))
             md_path, _ = conv._cache_paths(key)
             self.assertTrue(md_path.exists())
             engine.remove_material(pid, a["id"])
@@ -108,8 +108,44 @@ class SkillEngineTests(unittest.TestCase):
             img.write_bytes(b"\x89PNG fake")
             m = engine.add_materials(pid, [str(img)], added_via="chat_upload")[0]
             conv.transcribe_image(engine.get_material_path(pid, m["id"]), "image/png")
-            key = engine._cache_key_for_material(m)
+            key = engine._cache_key_for_material(m, engine.get_material_path(pid, m["id"]))
             self.assertTrue(conv._cache_paths(key)[0].exists())
+
+    def test_chat_path_retain_holds_shared_image_cache(self):
+        """N6 Fix2: chat 路径用 retain_material_cache 撑住共享缓存——两个同字节图片，
+        chat 路径各自 transcribe + retain，删一个共享缓存仍在，删第二个才真删。"""
+        from backend.material_conversion import MaterialConverter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._project_payload(Path(tmp) / "workspace"))
+            pid = project["id"]
+            conv = MaterialConverter(
+                cache_dir=Path(tmp) / "cache",
+                vision_adapter=lambda *a: "图说",
+                ocr_adapter=lambda p: "",
+                capability_resolver=lambda: False,
+                image_cache_namespace="visM-vp1-ocr1",
+            )
+            engine.set_material_converter(conv)
+            img_bytes = b"\x89PNG identical-bytes"
+            s1 = Path(tmp) / "x.png"
+            s1.write_bytes(img_bytes)
+            s2 = Path(tmp) / "y.png"
+            s2.write_bytes(img_bytes)
+            a = engine.add_materials(pid, [str(s1)], added_via="chat_upload")[0]
+            b = engine.add_materials(pid, [str(s2)], added_via="chat_upload")[0]
+            # 模拟 chat 路径：当前轮自己 transcribe（建缓存项，不经 read_material_file），再 retain。
+            for mat in (a, b):
+                conv.transcribe_image(engine.get_material_path(pid, mat["id"]), "image/png")
+                engine.retain_material_cache(pid, mat["id"])
+            key = engine._cache_key_for_material(a, engine.get_material_path(pid, a["id"]))
+            md_path, _ = conv._cache_paths(key)
+            self.assertTrue(md_path.exists())
+            engine.remove_material(pid, a["id"])
+            self.assertTrue(md_path.exists())  # b's retain still holds
+            engine.remove_material(pid, b["id"])
+            self.assertFalse(md_path.exists())  # no references -> deleted
 
     def _write_stage_gates_at_stage(self, project_dir: Path, stage_code: str):
         (project_dir / "plan" / "stage-gates.md").write_text(

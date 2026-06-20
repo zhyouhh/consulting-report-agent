@@ -1207,10 +1207,13 @@ class SkillEngine:
         if not target:
             raise ValueError("材料不存在")
 
-        # 删源文件前先 release：shared-hash 缓存仅在最后一个引用消失时才真删
+        # 删源文件前先 release：shared-hash 缓存仅在最后一个引用消失时才真删。
+        # 关键：用 live-file 内容算 key（与 retain 一致），且必须在源文件还在时算，否则 hash 不上。
         converter = getattr(self, "_material_converter", None)
-        if converter is not None and target.get("content_sha256"):
-            converter.release(self._cache_key_for_material(target), target["id"])
+        if converter is not None:
+            target_path = self.get_material_path(project_ref, target["id"])
+            if target_path.exists():
+                converter.release(self._cache_key_for_material(target, target_path), target["id"])
 
         if target["source_type"] == "imported":
             imported_path = Path(project_record["project_dir"]) / target["stored_rel_path"]
@@ -1534,7 +1537,7 @@ class SkillEngine:
         else:
             text = self._converter_read_document(project_ref, material_path)
 
-        self._retain_material_cache(material)
+        self._retain_material_cache(material, material_path)
         return text
 
     def set_material_converter(self, converter):
@@ -1551,21 +1554,38 @@ class SkillEngine:
                 h.update(chunk)
         return h.hexdigest()
 
-    def _cache_key_for_material(self, material: dict) -> str:
-        """用 material metadata（add-time content_sha256）算 converter 缓存 key。
-        文档 extra=""、图片 extra=converter.image_cache_extra；不依赖源文件仍在。"""
+    def _cache_key_for_material(self, material: dict, material_path: Path) -> str:
+        """用当前 live 文件内容算 converter 缓存 key（与 transcribe_image/convert_document 的 live-hash 一致），
+        避免 add-time content_sha256 与改动后的 workspace 文件分歧。
+        文档 extra=""、图片 extra=converter.image_cache_extra。"""
         extra = (
             self._material_converter.image_cache_extra
             if material.get("media_kind") == "image_like"
             else ""
         )
-        return self._material_converter.cache_key_from_sha256(material["content_sha256"], extra)
+        content_hash = self._content_sha256(material_path)
+        return self._material_converter.cache_key_from_sha256(content_hash, extra)
 
-    def _retain_material_cache(self, material: dict) -> None:
+    def _retain_material_cache(self, material: dict, material_path: Path) -> None:
         converter = getattr(self, "_material_converter", None)
-        if converter is None or not material.get("content_sha256"):
+        if converter is None or not material_path.exists():
             return
-        converter.retain(self._cache_key_for_material(material), material["id"])
+        converter.retain(self._cache_key_for_material(material, material_path), material["id"])
+
+    def retain_material_cache(self, project_ref, material_id) -> None:
+        """chat 路径专用：当前轮自己 transcribe 图片后补 retain（live-hash key），
+        否则同内容另一材料被删时会连带删掉共享缓存。retain 失败由调用方吞掉、不影响展示。"""
+        converter = getattr(self, "_material_converter", None)
+        if converter is None:
+            return
+        try:
+            material = self.get_material(project_ref, material_id)
+            material_path = self.get_material_path(project_ref, material_id)
+        except Exception:
+            return
+        if not material_path.exists():
+            return
+        converter.retain(self._cache_key_for_material(material, material_path), material["id"])
 
     def _converter_read_document(self, project_ref, material_path):
         if getattr(self, "_material_converter", None) is None:

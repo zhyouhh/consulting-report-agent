@@ -41,13 +41,16 @@ class MaterialConverter:
         cache_dir: Path,
         vision_adapter: Callable[[str, str], str],   # (data_url, mime) -> 转写文本
         ocr_adapter: Callable[[Path], str],           # (image_path) -> 文字
-        capability_resolver: Callable[[], bool],      # () -> 主模型是否多模态
+        capability_resolver: Callable[[], bool],      # () -> 主模型是否多模态（RESERVED，见下）
         image_cache_namespace: str = "default",       # = 视觉模型 id + prompt 版本 + OCR 版本（spec §6 缓存键）
     ):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._vision_adapter = vision_adapter
         self._ocr_adapter = ocr_adapter
+        # RESERVED：A6 起注入、被测试 wire，但当前 capability fork（主模型是否多模态 →
+        # 走 image_url / 走转写）实际由 caller ChatHandler._build_user_content 强制；
+        # 这里保留 resolver 供未来 converter 侧路由对称。不要删除。
         self._capability_resolver = capability_resolver
         self._image_cache_namespace = image_cache_namespace
         self._locks: dict[str, threading.Lock] = {}
@@ -234,17 +237,27 @@ class MaterialConverter:
             return text
 
     def transcribe_image_data_url(self, data_url: str, mime: str) -> str:
-        """transient 图：data_url → 系统临时文件 → _transcribe_raw（不入持久缓存）→ 清理。"""
+        """transient 图：data_url → 系统临时文件 → _transcribe_raw（不入持久缓存）→ 清理。
+        畸形 data_url / base64 解码失败 / 临时写失败一律收口成 MaterialConversionError 友好失败，
+        绝不把 binascii.Error / OSError 抛给调用方（否则整轮崩）。"""
         import base64
+        import binascii
         import tempfile
         import os as _os
-        b64 = data_url.split(",", 1)[1] if "," in data_url else data_url
-        raw = base64.b64decode(b64)
+        try:
+            b64 = data_url.split(",", 1)[1] if "," in data_url else data_url
+            raw = base64.b64decode(b64)
+        except (binascii.Error, ValueError, IndexError) as exc:
+            raise MaterialConversionError("这张图没读出来") from exc
         fd, tmp = tempfile.mkstemp(suffix=".img")  # 系统临时目录，非 cache_dir
         try:
             with _os.fdopen(fd, "wb") as f:
                 f.write(raw)
             return self._transcribe_raw(Path(tmp), mime)
+        except MaterialConversionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 temp/write 失败 → 友好失败
+            raise MaterialConversionError("这张图没读出来") from exc
         finally:
             try:
                 _os.unlink(tmp)
