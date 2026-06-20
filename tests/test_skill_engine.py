@@ -42,6 +42,23 @@ class SkillEngineTests(unittest.TestCase):
         self.engine = engine
         return project_dir
 
+    def test_read_oversized_heavy_material_raises(self):
+        from backend import material_limits
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(
+                self._project_payload(Path(tmp) / "workspace")
+            )
+            pid = project["id"]
+            src = Path(tmp) / "big.pdf"
+            src.write_bytes(b"%PDF-1.4 " + b"x" * 2048)
+            mats = engine.add_materials(pid, [str(src)], added_via="chat_upload")
+            with mock.patch.object(material_limits, "MAX_HEAVY_MATERIAL_BYTES", 100):
+                with self.assertRaises(ValueError) as ctx:
+                    engine.read_material_file(pid, mats[0]["id"])
+            self.assertIn("过大", str(ctx.exception))
+
     def _write_stage_gates_at_stage(self, project_dir: Path, stage_code: str):
         (project_dir / "plan" / "stage-gates.md").write_text(
             f"# Stage gates\n\n**阶段**: {stage_code}\n**状态**: 进行中\n",

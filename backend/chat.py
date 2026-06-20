@@ -345,6 +345,36 @@ class ChatHandler:
             http_client=http_client,
         )
 
+        from backend.material_conversion import MaterialConverter
+
+        self.material_converter = MaterialConverter(
+            cache_dir=self.skill_engine.projects_dir.parent / "materials_cache",
+            vision_adapter=lambda data_url, mime: self._vision_transcribe(data_url, mime),   # filled by C1
+            ocr_adapter=lambda path: self._ocr_image(path),                                   # filled by C2
+            capability_resolver=lambda: self._main_model_supports_vision(),                  # filled by B3
+            image_cache_namespace=self._vision_cache_namespace(),
+        )
+        self.skill_engine.set_material_converter(self.material_converter)
+
+    VISION_PROMPT_VERSION = "vp1"
+    OCR_ENGINE_VERSION = "rapidocr-onnx-v1"
+
+    def _vision_cache_namespace(self) -> str:
+        import re
+
+        model = getattr(self.settings, "managed_vision_model", "Qwen/Qwen3-VL-8B-Instruct")
+        raw = f"{model}-{self.VISION_PROMPT_VERSION}-{self.OCR_ENGINE_VERSION}"
+        return re.sub(r"[^A-Za-z0-9._-]", "_", raw)   # 默认模型名含 '/'，sanitize 防 cache_dir 被拆子目录
+
+    def _main_model_supports_vision(self) -> bool:
+        return False   # A6 stub; B3 replaces with real resolver
+
+    def _vision_transcribe(self, data_url: str, mime: str) -> str:
+        raise NotImplementedError("vision transcribe is implemented in task C1")
+
+    def _ocr_image(self, path) -> str:
+        raise NotImplementedError("OCR is implemented in task C2")
+
     def _build_stream_timeout(self, active_model: str):
         import httpx
 

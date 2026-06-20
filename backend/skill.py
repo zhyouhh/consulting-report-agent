@@ -1182,6 +1182,7 @@ class SkillEngine:
                 "added_via": added_via,
                 "file_type": source_path.suffix.lstrip(".").lower(),
                 "mime_type": mime_type or "application/octet-stream",
+                "size_bytes": (source_path.stat().st_size if source_path.exists() else 0),
                 "created_at": datetime.now().isoformat(timespec="seconds"),
             }
             materials.append(material)
@@ -1501,15 +1502,46 @@ class SkillEngine:
         return tail.casefold() == self.STAGE_CHECKPOINTS_FILENAME.casefold()
 
     def read_material_file(self, project_ref: str, material_id: str) -> str:
+        from backend import material_limits
+
         project_record = self.get_project_record(project_ref)
         if not project_record:
             raise ValueError(f"项目 {project_ref} 不存在")
 
         material = self.get_material(project_ref, material_id)
-        if material["media_kind"] == "image_like":
-            raise ValueError("当前暂不支持读取该材料")
-
         material_path = self.get_material_path(project_ref, material_id)
+        suffix = material_path.suffix.lower()
+
+        if material_limits.is_heavy_suffix(suffix):
+            actual = material_path.stat().st_size if material_path.exists() else 0
+            if actual > material_limits.MAX_HEAVY_MATERIAL_BYTES:
+                raise ValueError(
+                    "这个文件过大，读不动；请只传关键的评分标准/技术规范书等小文件"
+                )
+
+        if material["media_kind"] == "image_like":
+            return self._converter_read_image(project_ref, material_id)
+
+        return self._converter_read_document(project_ref, material_path)
+
+    def set_material_converter(self, converter):
+        self._material_converter = converter
+
+    def _converter_read_document(self, project_ref, material_path):
+        if getattr(self, "_material_converter", None) is None:
+            return self._legacy_read_document(material_path)   # 无 converter 的纯单测回退
+        from backend.material_conversion import MaterialConversionError
+
+        try:
+            return self._material_converter.convert_document(material_path)
+        except MaterialConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def _converter_read_image(self, project_ref, material_id):
+        # A6 占位：图片道由 C5 实现；此处尚不应被生产路径调用
+        raise NotImplementedError("image material read is implemented in task C5")
+
+    def _legacy_read_document(self, material_path: Path) -> str:
         suffix = material_path.suffix.lower()
 
         if suffix in self.TEXT_SUFFIXES:
