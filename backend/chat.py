@@ -122,6 +122,21 @@ _PROJECT_REQUEST_LOCKS: dict[str, threading.RLock] = {}
 _PROJECT_REQUEST_LOCKS_GUARD = threading.Lock()
 _SEARCH_ROUTER_SINGLETON: SearchRouter | None = None
 _SEARCH_ROUTER_GUARD = threading.Lock()
+_RAPIDOCR_SINGLETON = None
+_RAPIDOCR_TRIED = False
+
+
+def _get_rapidocr():
+    global _RAPIDOCR_SINGLETON, _RAPIDOCR_TRIED
+    if _RAPIDOCR_TRIED:
+        return _RAPIDOCR_SINGLETON
+    _RAPIDOCR_TRIED = True
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+        _RAPIDOCR_SINGLETON = RapidOCR()
+    except Exception:  # 未装/初始化失败 → OCR 不可用
+        _RAPIDOCR_SINGLETON = None
+    return _RAPIDOCR_SINGLETON
 _STAGE_ACK_STRIP_RE = re.compile(
     r'<stage-ack(?:\s+action="(?:set|clear)")?>[a-z_0-9]+</stage-ack>',
     re.IGNORECASE,
@@ -399,7 +414,13 @@ class ChatHandler:
         return (resp.choices[0].message.content or "").strip()
 
     def _ocr_image(self, path) -> str:
-        raise NotImplementedError("OCR is implemented in task C2")
+        ocr = _get_rapidocr()
+        if ocr is None:
+            return ""
+        result, _ = ocr(str(path))
+        if not result:
+            return ""
+        return "\n".join(line[1] for line in result if len(line) > 1)
 
     def _build_stream_timeout(self, active_model: str):
         import httpx

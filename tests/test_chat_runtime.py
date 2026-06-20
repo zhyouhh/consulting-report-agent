@@ -13947,3 +13947,28 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(VisionTranscribeTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class OcrImageTests(ChatRuntimeTests):
+    """C2: _ocr_image adapter — lazy RapidOCR singleton + graceful degradation."""
+
+    def test_ocr_image_lazy_and_returns_text(self):
+        h = self._h()
+        fake = mock.Mock(return_value=([("box", "营收 1.2 亿", 0.99)], 0.01))
+        with mock.patch("backend.chat._get_rapidocr", return_value=fake):
+            out = h._ocr_image(Path("/tmp/x.png"))
+        self.assertIn("营收", out)
+
+    def test_ocr_unavailable_returns_empty(self):
+        h = self._h()
+        with mock.patch("backend.chat._get_rapidocr", return_value=None):
+            self.assertEqual(h._ocr_image(Path("/tmp/x.png")), "")
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in OcrImageTests.__dict__
+    ):
+        setattr(OcrImageTests, _inherited_test_name, None)
+del _inherited_test_name
