@@ -50,7 +50,7 @@ class ManagedProxyTests(unittest.TestCase):
         mock_post.assert_not_called()
 
     @mock.patch("managed_proxy.app.requests.post")
-    def test_non_stream_request_forces_model_and_injects_upstream_key(self, mock_post):
+    def test_non_stream_request_passes_model_and_injects_upstream_key(self, mock_post):
         mock_post.return_value = mock.Mock(
             status_code=200,
             content=b'{"id":"chatcmpl-test","choices":[]}',
@@ -168,6 +168,7 @@ class ProxyPassthroughTests(unittest.TestCase):
                 json={"model": "gpt-99", "messages": []},
             )
         self.assertEqual(r.status_code, 400)
+        mock_post.assert_not_called()
 
     def test_models_endpoint_only_lists_selectable(self):
         client, _ = self._client()
@@ -207,6 +208,56 @@ class ProxyPassthroughTests(unittest.TestCase):
             s = ProxySettings.from_env()
         self.assertEqual(s.allowed_models, ["deepseek-v4-pro", "Qwen/Qwen3-VL-8B-Instruct"])
         self.assertEqual(s.selectable_models, ["deepseek-v4-pro"])
+
+    def test_disallowed_model_rejected_on_stream_path(self):
+        """Whitelist guard fires on stream requests too; no upstream call is made."""
+        client, _ = self._client()
+        with mock.patch("managed_proxy.app.requests.post") as mock_post:
+            r = client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer managed"},
+                json={"model": "gpt-99", "messages": [], "stream": True},
+            )
+        self.assertEqual(r.status_code, 400)
+        mock_post.assert_not_called()
+
+    def test_missing_model_defaults_to_primary(self):
+        """Backward-compat: body with no 'model' key passes through with the primary model."""
+        client, _ = self._client()
+        captured = {}
+
+        def fake_post(url, headers, json, stream, timeout):
+            captured["model"] = json["model"]
+            m = mock.Mock()
+            m.status_code = 200
+            m.content = b'{"ok":1}'
+            m.headers = {"content-type": "application/json"}
+            m.close = lambda: None
+            return m
+
+        with mock.patch("managed_proxy.app.requests.post", side_effect=fake_post):
+            r = client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer managed"},
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+        self.assertEqual(r.status_code, 200)
+        # primary_model is allowed_models[0] = "deepseek-v4-pro"
+        self.assertEqual(captured["model"], "deepseek-v4-pro")
+
+    def test_empty_selectable_models_lists_nothing(self):
+        """An explicit selectable_models=[] produces an empty /v1/models data list (no vision-model leak)."""
+        s = ProxySettings(
+            upstream_base_url="http://up/v1",
+            upstream_api_key="k",
+            allowed_models=["deepseek-v4-pro", "Qwen/Qwen3-VL-8B-Instruct"],
+            selectable_models=[],
+            client_bearer_token="managed",
+        )
+        client = TestClient(create_app(s))
+        r = client.get("/v1/models", headers={"Authorization": "Bearer managed"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["data"], [])
 
 
 if __name__ == "__main__":

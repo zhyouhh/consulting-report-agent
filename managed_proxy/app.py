@@ -85,7 +85,7 @@ def _build_models_payload(settings: ProxySettings) -> dict:
                 "created": 0,
                 "owned_by": "consulting-report-managed-proxy",
             }
-            for model in (settings.selectable_models or settings.allowed_models)
+            for model in settings.selectable_models
         ],
     }
 
@@ -125,6 +125,8 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         _ensure_authorized(authorization, runtime_settings)
 
         payload = await request.json()
+        # Backward-compat: an omitted model defaults to the primary model (always in allowed_models).
+        # Explicit None/"" or any non-allowed model is rejected 400 below.
         requested_model = payload.get("model", runtime_settings.primary_model)
         if requested_model not in runtime_settings.allowed_models:
             raise HTTPException(status_code=400, detail=f"model '{requested_model}' is not allowed")
