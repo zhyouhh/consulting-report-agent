@@ -69,3 +69,22 @@ test("prepareProjectCreatePayload rejects themes that cannot yield a meaningful 
     /有效的报告主题/,
   );
 });
+
+test("ProjectCreateModal exposes the technical-bid (技术标) option", () => {
+  assert.match(modalSource, /value="technical-bid"/);
+  assert.match(modalSource, /技术标（投标）/);
+});
+
+test("prepareProjectCreatePayload carries technical-bid project_type", () => {
+  const payload = prepareProjectCreatePayload({
+    workspace_dir: "D:\\workspace",
+    project_type: "technical-bid",
+    theme: "广西电网数据资源入表技术标",
+    deadline: "2026-04-02",
+    expected_length: "8000字",
+    notes: "",
+    initial_material_paths: [],
+  });
+  assert.equal(payload.project_type, "technical-bid");
+  assert.equal(payload.name, "广西电网数据资源入表技术标");
+});

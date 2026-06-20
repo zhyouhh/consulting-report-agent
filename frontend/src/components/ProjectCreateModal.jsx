@@ -117,6 +117,7 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
           <option value="management-document">管理制度</option>
           <option value="implementation-plan">实施方案</option>
           <option value="due-diligence">尽职调查</option>
+          <option value="technical-bid">技术标（投标）</option>
         </select>
 
         <input

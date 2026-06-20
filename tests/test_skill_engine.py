@@ -646,6 +646,20 @@ class SkillEngineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "工作目录无效"):
                 engine.create_project(self._project_payload(workspace_file))
 
+    def test_create_project_replaces_report_type_placeholder(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for ptype in ("strategy-consulting", "technical-bid"):
+                project = engine.create_project(self._project_payload(
+                    Path(tmp) / f"ws-{ptype}",
+                    project_type=ptype, name=f"demo-{ptype}", theme=f"主题-{ptype}",
+                ))
+                overview = (Path(project["project_dir"]) / "plan" / "project-overview.md").read_text(encoding="utf-8")
+                # 占位必须被实际 project_type 替换，不残留原始占位清单方括号
+                self.assertIn(f"**报告类型**: {ptype}", overview)
+                self.assertNotIn("战略咨询/市场研究", overview)  # 原始占位清单不得残留
+
     def test_get_project_path_ignores_unregistered_legacy_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -2467,20 +2481,131 @@ class SkillEngineTests(unittest.TestCase):
     def _bare_engine(self, tmp):
         return SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
 
-    def test_type_skeleton_map_covers_six_slugs(self):
+    def test_type_skeleton_map_covers_seven_slugs(self):
         self.assertEqual(
             set(SkillEngine.TYPE_SKELETON_MAP),
             {
                 "strategy-consulting", "market-research", "specialized-research",
                 "management-document", "implementation-plan", "due-diligence",
+                "technical-bid",
             },
         )
         # management-document slug 映射到 management-system.md（slug≠文件名）
         self.assertEqual(SkillEngine.TYPE_SKELETON_MAP["management-document"], "management-system.md")
+        self.assertEqual(SkillEngine.TYPE_SKELETON_MAP["technical-bid"], "technical-bid.md")
         self.assertEqual(
             set(SkillEngine.TYPE_SKELETON_MAP), set(SkillEngine.METHODOLOGY_TONE),
             "TYPE_SKELETON_MAP 与 METHODOLOGY_TONE 的 slug 集必须一致（B6 用 TONE.get fallback，漂移会静默错腔调）",
         )
+        self.assertEqual(SkillEngine.METHODOLOGY_TONE["technical-bid"], "bid")
+
+    def test_framework_menu_for_type_skips_menu_for_technical_bid(self):
+        # 技术标按评分点驱动、不靠挑分析框架；通用菜单既误导又挤爆 token 预算（spec §3.2 + 用户拍板）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            self.assertEqual(
+                engine._framework_menu_for_type("strategy-consulting"),
+                SkillEngine.FRAMEWORK_MENU,
+            )
+            self.assertEqual(engine._framework_menu_for_type("technical-bid"), "")
+            # 未知 type 不影响（沿用通用菜单，build_methodology_block 自己挡未知 type）
+            self.assertEqual(
+                engine._framework_menu_for_type("custom-unknown"),
+                SkillEngine.FRAMEWORK_MENU,
+            )
+
+    def _make_technical_bid_project_at_s1(self) -> Path:
+        """建一个 technical-bid 项目并推到 S1（未确认）。"""
+        project_dir = self._make_project()
+        registry = self.engine._load_registry()
+        registry["projects"][0]["project_type"] = "technical-bid"
+        self.engine._save_registry(registry)
+        self._write_stage_two_prerequisites(project_dir)
+        self.assertEqual(self.engine._infer_stage_state(project_dir)["stage_code"], "S1")
+        return project_dir
+
+    def test_build_methodology_block_technical_bid_injects_all_rule_subsections(self):
+        self._make_technical_bid_project_at_s1()
+        block = self.engine.build_methodology_block("demo")
+        # 参考骨架（框定为「参考，以 RFP 为准」）
+        self.assertIn("招标文件", block)
+        self.assertIn("技术评分索引表", block)
+        self.assertIn("技术规范书点对点应答", block)
+        # RFP 驱动：结构真来源 + 先与用户讨论确认结构 + 不漏项
+        self.assertIn("结构真来源", block)
+        self.assertIn("请其确认或调整", block)  # 章节结构须先讲给用户、由用户拍板（非闷头按骨架/RFP 定）
+        self.assertIn("最终结构由用户拍板", block)  # codex R1 NIT：锁强确认语义，防后续改文案降级成弱确认
+        self.assertIn("再展开正文", block)
+        self.assertIn("漏项", block)
+        # 后置生成：append 两表在末尾、不用 edit_file、跨轮先 read_file
+        self.assertIn("append_report_draft", block)
+        self.assertIn("不要用 `edit_file`", block)
+        self.assertIn("read_file", block)
+        # 字数/质量护栏
+        self.assertIn("预期篇幅", block)
+        self.assertIn("张冠李戴", block)
+        # 「## 三」段不注入
+        self.assertNotIn("撰写要点", block)
+        # 注：bid 不注入通用菜单（assertNotIn SWOT/波特五力）的锁测放 Task 3——本 Task 尚未实现
+        # bid tone 分支，build_methodology_block 此刻走 analytical fallback（含 SWOT 字样），
+        # 在此断言 assertNotIn("SWOT") 会误挂（codex R1 BLOCKER 1）。
+
+    def test_bid_framework_names_not_flagged_dangerous_by_normalizer(self):
+        # bid 框架名经 _normalize_for_danger 不得命中危险集（零误杀，spec §4）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for name in ("评分点对标", "点对点应答", "WBS", "重难点对策"):
+                normalized = engine._normalize_for_danger(name)
+                for bad in SkillEngine._METHODOLOGY_DANGER_NORMALIZED:
+                    self.assertNotIn(bad, normalized, f"{name} 归一化后误命中 {bad}")
+                lowered = name.casefold()
+                for bad in SkillEngine._METHODOLOGY_DANGER_SUBSTRINGS:
+                    self.assertNotIn(bad, lowered, f"{name} 原样误命中 {bad}")
+
+    def test_bid_declaration_with_checkpoint_keyword_still_malformed(self):
+        # 防回归：bid 声明若被注入 checkpoint/工具名变体仍判 malformed（沿用 R5 不变式）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for danger in ("outline_confirmed_at", "advance stage", "append_report_draft"):
+                outline = f"# 报告大纲\n\n方法论框架：评分点对标、{danger}\n\n## 一、x\n- y\n"
+                state, _ = engine.parse_and_sanitize_methodology(outline)
+                self.assertEqual(state, "malformed", f"{danger} 应判 malformed")
+
+    def test_declare_and_invite_instruction_bid_tone_uses_dunhao_and_safe_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            instr = engine._declare_and_invite_instruction("technical-bid")
+        # bid 腔调要点：依招标文件/技规评分点组织结构 + 逐条响应
+        self.assertIn("评分点", instr)
+        self.assertIn("点对点应答", instr)
+        # 框架举例之间用顿号（codex R5 BLOCKER 4：用 + / 空格会被 parser 判 malformed）
+        self.assertIn("评分点对标、点对点应答", instr)
+        # 安全词：声明腔调举例不得含危险归一化词（覆盖/推进/检查点…，codex R1 NIT 3）
+        for bad in ("覆盖", "推进", "回退", "检查点", "门禁"):
+            self.assertNotIn(bad, instr)
+
+    def test_bid_declaration_line_parses_as_parsed(self):
+        # bid 典型框架名（中文，走 off-menu 白名单）应被净化判 parsed，不卡确认门。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            outline = "# 报告大纲\n\n方法论框架：评分点对标、点对点应答、WBS、重难点对策\n\n## 一、对项目的理解\n- x\n"
+            state, frameworks = engine.parse_and_sanitize_methodology(outline)
+        self.assertEqual(state, "parsed")
+        self.assertIn("评分点对标", frameworks)
+        self.assertIn("点对点应答", frameworks)
+        self.assertIn("WBS", frameworks)
+
+    def test_build_methodology_block_technical_bid_s1_uses_bid_tone(self):
+        self._make_technical_bid_project_at_s1()
+        block = self.engine.build_methodology_block("demo")
+        self.assertIn("方法论声明", block)
+        self.assertIn("评分点对标、点对点应答", block)
+        self.assertIn("方法论框架：", block)  # 顿号声明格式保留
+        self.assertIn("〕、〔", block)
+        # bid 不注入通用框架菜单（Task 1 seam 跳过 FRAMEWORK_MENU），且 bid tone 文案不含
+        # SWOT 字面（codex R1 BLOCKER 1：菜单 + analytical fallback 都会带入 SWOT）。
+        self.assertNotIn("SWOT", block)
+        self.assertNotIn("波特五力", block)
 
     def test_build_methodology_block_s1_has_declaration_and_invite(self):
         project_dir = self._make_project()
@@ -2620,7 +2745,8 @@ class SkillEngineTests(unittest.TestCase):
             for slug in SkillEngine.TYPE_SKELETON_MAP:
                 skeleton = engine.load_type_skeleton(slug)
                 instr = engine._declare_and_invite_instruction(slug)  # S1 块（含菜单，最大）
-                block = engine._render_methodology_block(skeleton, SkillEngine.FRAMEWORK_MENU, instr)
+                menu = engine._framework_menu_for_type(slug)
+                block = engine._render_methodology_block(skeleton, menu, instr)
                 worst = max(worst, len(enc.encode(block)))
             self.assertLessEqual(worst, 2000, f"方法论注入块 token={worst} 超 2k 预算（spec §4.3）")
 
@@ -2771,6 +2897,47 @@ class SkillEngineTests(unittest.TestCase):
             outline = "# 大纲\n\n## 一、背景\n方法论框架：advance_stage\n"
             state, selected = engine.parse_and_sanitize_methodology(outline)
         self.assertEqual(state, "missing")
+
+    def test_outline_scaffold_declares_methodology_slot_above_confirm_status(self):
+        # R5 修复（2026-06-21，W1 GUI E2E 实锤）：outline 模板必须内置方法论声明槽位、且在
+        # 「## 确认状态」之前——否则模型镜像模板把声明写到首个 ## 之下、parser 只扫首个 ## 之前
+        # 的顶部区 → 扫不到 → 确认大纲硬卡（影响全 7 类）。
+        template = (self.repo_skill_dir / "plan-template" / "outline.md").read_text(encoding="utf-8")
+        self.assertIn("**方法论框架**：", template)
+        # 按行首定位真正的声明行与标题行（「方法论框架」「## 确认状态」子串在引导注释里也出现，
+        # 用 .index 整串比对会误测注释内部顺序——codex NIT）。
+        lines = template.splitlines()
+        decl_line = next(i for i, ln in enumerate(lines) if ln.startswith("**方法论框架**："))
+        status_line = next(i for i, ln in enumerate(lines) if ln.startswith("## 确认状态"))
+        self.assertLess(
+            decl_line,
+            status_line,
+            "方法论声明行必须在「## 确认状态」标题之前（parser 只扫首个 ## 之前）",
+        )
+
+    def test_parse_methodology_parsed_when_declaration_in_scaffold_slot(self):
+        # 模型按新模板把声明填在 `# 报告大纲` 与 `## 确认状态` 之间 → parser 必须识别 parsed；
+        # 空槽位（未填）仍判 missing，确认门仍要求真填。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            filled = (
+                "# 报告大纲\n\n**方法论框架**：评分点对标、WBS、重难点对策\n\n"
+                "## 确认状态\n<!-- [ ] 初稿 | [x] 已确认 -->\n\n## 大纲结构\n### 一、对项目的理解\n"
+            )
+            state, selected = engine.parse_and_sanitize_methodology(filled)
+            self.assertEqual(state, "parsed")
+            self.assertIn("WBS", selected)
+            empty = "# 报告大纲\n\n**方法论框架**：\n\n## 确认状态\n"
+            self.assertEqual(engine.parse_and_sanitize_methodology(empty)[0], "missing")
+
+    def test_declare_and_invite_instruction_pins_declaration_before_confirm_status(self):
+        # ③：指令必须点明声明行在「## 确认状态」之前（消「顶部」歧义——GUI E2E 暴露 deepseek
+        # 把「顶部」理解成大纲内容顶部、放到了 ## 确认状态 之下）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for slug in ("strategy-consulting", "technical-bid"):
+                instr = engine._declare_and_invite_instruction(slug)
+                self.assertIn("确认状态", instr, slug)
 
     def test_parse_methodology_allows_spaced_offmenu_framework(self):
         with tempfile.TemporaryDirectory() as tmp:

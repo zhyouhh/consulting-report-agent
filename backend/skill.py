@@ -247,6 +247,7 @@ class SkillEngine:
         "management-document": "management-system.md",
         "implementation-plan": "implementation-plan.md",
         "due-diligence": "due-diligence.md",
+        "technical-bid": "technical-bid.md",
     }
 
     # R5: 类型→声明腔调（§7.3）。analytical=招牌框架；structural=结构纪律；specialized=按子题。
@@ -257,6 +258,7 @@ class SkillEngine:
         "management-document": "structural",
         "implementation-plan": "structural",
         "specialized-research": "specialized",
+        "technical-bid": "bid",
     }
 
     # R5: 共享分析框架菜单（横向对所有类型可用，v1 仅菜单一行；细节全文留 v2）。
@@ -1057,7 +1059,7 @@ class SkillEngine:
         )
         replacements = {
             "[填写项目名称]": name,
-            "[战略咨询/市场研究/尽职调查/运营优化]": project_type,
+            "[战略咨询/市场研究/专项研究/管理制度/实施方案/尽职调查/技术标]": project_type,
             "[描述客户背景、行业环境、当前面临的挑战]": theme,
             "[具体、可衡量的项目目标]": project_goal,
             "[填写目标读者]": target_audience,
@@ -2832,7 +2834,13 @@ class SkillEngine:
         tone = self.METHODOLOGY_TONE.get(project_type, "analytical")
         # 注意：腔调举例里框架之间一律用「顿号」分隔，与声明行格式（顿号分隔）一致——
         # 否则模型照提示用 + / 空格连接，会被 B3 parser 判 malformed、卡住确认门（codex R1 BLOCKER 4）。
-        if tone == "structural":
+        if tone == "bid":
+            tone_line = (
+                "本技术标的方法＝依招标文件/技规评分点组织结构，并逐条响应；"
+                "在声明里写清所用方法（如评分点对标、点对点应答、WBS、重难点对策）。"
+                "结构以招标文件为准，不要硬贴通用分析框架。"
+            )
+        elif tone == "structural":
             tone_line = (
                 "本报告的「方法论」是结构纪律：管理制度用「章-条-款-项」规范结构；"
                 "实施方案用 SMART、RACI、里程碑。按本报告类型选，不要硬贴 SWOT 之类分析框架。"
@@ -2850,7 +2858,7 @@ class SkillEngine:
         return (
             "## 方法论声明（S1）\n"
             f"{tone_line}\n"
-            "在 `plan/outline.md` 顶部写一行可见声明（格式固定，供系统识别）：\n"
+            "在 `plan/outline.md` 第一行（在 `## 确认状态` 等二级标题之前）写一行可见声明（格式固定，供系统识别）：\n"
             "`方法论框架：〔框架1〕、〔框架2〕`（顿号分隔，可加粗 `**方法论框架**：…`）。\n"
             "写完声明后，在聊天里顺口告诉用户本报告将采用〔所选框架〕；若用户想换方法论，"
             "告诉你即可，否则按这个继续，可随时在工作区点「确认大纲」。"
@@ -2870,6 +2878,13 @@ class SkillEngine:
             "本报告未记录已确认的方法论框架。按报告类型与框架菜单选合适框架展开分析，"
             "保持结论先行、结构清晰；不要凭空声称某框架是「已确认」的。"
         )
+
+    def _framework_menu_for_type(self, project_type: str) -> str:
+        """技术标按评分点驱动、逐条响应，不靠「挑分析框架」；通用框架菜单对它既误导又
+        挤爆 token 预算（spec §3.2，2026-06-20 用户拍板）→ bid 不注入菜单。其余类型沿用。"""
+        if project_type == "technical-bid":
+            return ""
+        return self.FRAMEWORK_MENU
 
     def _render_methodology_block(self, skeleton: str, menu: str, instr: str) -> str:
         return (
@@ -2900,7 +2915,9 @@ class SkillEngine:
         else:
             state, selected = self.read_confirmed_methodology_snapshot(project_path)
             instr = self._adhere_instruction(state, selected)
-        return self._render_methodology_block(skeleton, self.FRAMEWORK_MENU, instr)
+        return self._render_methodology_block(
+            skeleton, self._framework_menu_for_type(project_type), instr
+        )
 
     def _methodology_declared_flag(self, project_path: Path) -> bool:
         """前端确认按钮用：known type + 未确认时，要求 outline 有 parsed 声明才 True；
