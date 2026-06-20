@@ -880,6 +880,13 @@ class ChatHandler:
             return message
         sanitized = dict(message)
 
+        # 客户端可控的非 content 字段绝不进摘要器：json.dumps 会序列化整条消息，
+        # forged 的 attached_material_ids / client_message_id 可夹带指令。只留数量、丢 id。
+        sanitized.pop("client_message_id", None)
+        if "attached_material_ids" in sanitized:
+            ids = sanitized.get("attached_material_ids") or []
+            sanitized["attached_material_ids"] = len(ids)
+
         transcripts = sanitized.get("attachment_transcripts")
         if isinstance(transcripts, list) and transcripts:
             sanitized["attachment_transcripts"] = [
@@ -4069,7 +4076,9 @@ class ChatHandler:
             try:
                 resolved.append(self.skill_engine.get_material(project_id, material_id))
             except Exception:  # noqa: BLE001 - deleted/stale material id -> skip + note
-                note_lines.append(f"[材料已删除：{material_id}，已跳过]")
+                # material_id 是请求里客户端可控字符串：forged 值可夹带指令/哨兵。不回显它，
+                # 用通用提示（语义相同、零泄露），避免在数据块外把攻击者文本喂给模型/历史/摘要器。
+                note_lines.append("[一个本轮引用的材料已删除，已跳过]")
 
         if resolved:
             note_lines.append("")
