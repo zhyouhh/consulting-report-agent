@@ -3,7 +3,8 @@ import axios from 'axios'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { showError, showInfo, showSuccess } from '../utils/toast'
-import { buildChatRequest, toggleMaterialSelection } from '../utils/chatMaterials'
+import { buildChatRequest, buildTransientAttachmentsPayload, conversionStatusChip, toggleMaterialSelection } from '../utils/chatMaterials'
+import { applyAttachmentTranscribed, historyTranscriptIndicators } from '../utils/sseEvents'
 import {
   createPendingTriggerItem,
   dequeuePendingTrigger,
@@ -28,7 +29,6 @@ import {
 import { shouldSubmitComposerKeydown } from '../utils/composerInputBehavior'
 import { describeConnectionMode } from '../utils/connectionMode'
 import { formatContextUsage, getContextUsagePercent } from '../utils/contextUsage'
-import { supportsImageAttachments } from '../utils/modelCapabilities'
 import {
   buildPendingAttachment,
   fileToDataUrl,
@@ -79,7 +79,6 @@ const ChatPanel = forwardRef(function ChatPanel({
   const connection = describeConnectionMode(settings || {})
   const workspaceSummary = summarizeWorkspace(workspace || {})
   const selectedMaterials = materials.filter(material => selectedMaterialIds.includes(material.id))
-  const canSendImages = supportsImageAttachments(settings)
   const { transientImages: pendingImageAttachments, persistentDocuments: pendingDocumentAttachments } = splitPendingAttachments(pendingAttachments)
   const contextUsage = tokenUsage ? formatContextUsage(tokenUsage) : null
   const contextUsagePercent = tokenUsage ? getContextUsagePercent(tokenUsage) : null
@@ -152,6 +151,9 @@ const ChatPanel = forwardRef(function ChatPanel({
                 role: m.role,
                 content: m.content,
                 attachedMaterialIds: m.attached_material_ids || [],
+                // N6 Fix2: carry persisted image transcripts so a reloaded chat re-shows the
+                // 已转写图片 / 图片没读出来 indicator (live-in-turn transientAttachments are gone).
+                historyTranscripts: historyTranscriptIndicators(m),
               }))
             setMessages(displayMessages)
           } else {
@@ -389,18 +391,21 @@ const ChatPanel = forwardRef(function ChatPanel({
     return merged
   }
 
-  const buildTransientAttachmentsPayload = async (attachments = []) => {
-    const payload = []
+  const buildTransientAttachments = async (attachments = []) => {
+    const resolved = []
 
     for (const attachment of attachments) {
-      payload.push({
+      // Preserve the pending-attachment id so attachment_transcribed SSE events correlate back
+      // to the exact bubble attachment (backend echoes this as attachment_id).
+      resolved.push({
+        id: attachment.id,
         name: attachment.displayName,
         mime_type: attachment.mimeType,
         data_url: await fileToDataUrl(attachment.file),
       })
     }
 
-    return payload
+    return buildTransientAttachmentsPayload(resolved)
   }
 
   const startStream = useCallback(async ({
@@ -419,12 +424,21 @@ const ChatPanel = forwardRef(function ChatPanel({
       : (typeof messageText === 'string' ? messageText.trim() : '')
     if (!requestMessageText && !systemTrigger) return false
 
+    // client_message_id correlates the user bubble with attachment_transcribed SSE events.
+    // Only a normal user turn that renders a bubble needs/sends one (system triggers omit it).
+    const clientMessageId = (renderUserBubble && !systemTrigger)
+      ? `${Date.now()}-${Math.random()}`
+      : null
+
     if (renderUserBubble) {
       const userMsg = {
-        id: `${Date.now()}-${Math.random()}`,
+        id: clientMessageId || `${Date.now()}-${Math.random()}`,
         role: 'user',
         content: requestMessageText,
         attachedMaterialIds,
+        // Keep the transient image attachments (with their ids) on the bubble so an incoming
+        // attachment_transcribed event can mark the exact attachment as transcribed / failed.
+        transientAttachments,
       }
       setMessages(prev => [...prev, userMsg])
     }
@@ -451,6 +465,7 @@ const ChatPanel = forwardRef(function ChatPanel({
           transientAttachments,
           systemTrigger,
           triggerMetadata,
+          clientMessageId,
         })),
         signal: controller.signal
       })
@@ -542,6 +557,14 @@ const ChatPanel = forwardRef(function ChatPanel({
                     surface_to_user: parsed.surface_to_user !== false,
                   },
                 ])
+              } else if (parsed.type === 'attachment_transcribed') {
+                // N6 D2: mark the matched transient image on its user bubble as transcribed /
+                // failed (pure update; no-op when no bubble/attachment matches).
+                if (!isActiveProjectRequest(requestProjectId)) {
+                  streamCompleted = true
+                  break
+                }
+                setMessages(prev => applyAttachmentTranscribed(prev, parsed.data))
               } else if (parsed.type === 'error') {
                 streamFailed = true
                 if (shouldFlushStreamingQueueImmediately('error')) {
@@ -677,10 +700,6 @@ const ChatPanel = forwardRef(function ChatPanel({
   const sendMessage = async () => {
     const trimmedInput = input.trim()
     if (!trimmedInput || !projectId || uploading) return
-    if ((selectedMaterials.some(material => material.media_kind === 'image_like') || pendingImageAttachments.length > 0) && !canSendImages) {
-      showError('当前模型不支持图片输入，请切换模型或取消选择图片材料')
-      return
-    }
 
     const persistentDocumentFiles = pendingDocumentAttachments.map(attachment => attachment.file)
     let requestAttachedMaterialIds = selectedMaterialIds
@@ -702,7 +721,7 @@ const ChatPanel = forwardRef(function ChatPanel({
 
         if (pendingImageAttachments.length > 0) {
           preparationStage = 'images'
-          transientAttachmentsPayload = await buildTransientAttachmentsPayload(pendingImageAttachments)
+          transientAttachmentsPayload = await buildTransientAttachments(pendingImageAttachments)
         }
       } catch (error) {
         const detail = error?.response?.data?.detail || error?.message || '未知错误'
@@ -843,6 +862,46 @@ const ChatPanel = forwardRef(function ChatPanel({
                         </span>
                       )
                     })}
+                  </div>
+                )}
+                {msg.transientAttachments?.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    {msg.transientAttachments.map(attachment => (
+                      <span
+                        key={attachment.id || attachment.name}
+                        className={`text-[11px] px-2 py-1 rounded-full border ${
+                          attachment.transcriptionStatus === 'failed'
+                            ? 'bg-[#3a1a1a] border-[#6b3a3a] text-[#f0b8b8]'
+                            : 'bg-[#1a1a2e] border-[#3a3a5a] text-[#b8bbe8]'
+                        }`}
+                      >
+                        {attachment.transcribed
+                          ? '📎 已转写图片'
+                          : attachment.transcriptionStatus === 'failed'
+                          ? `⚠️ 图片没读出来：${attachment.name || '图片'}`
+                          : `🖼️ ${attachment.name || '图片'}`}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {/* N6 Fix2: reloaded-history transcripts (no live transientAttachments) — same
+                    indicator branch as above so a refreshed chat keeps the 已转写图片 / 没读出来 note. */}
+                {msg.historyTranscripts?.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    {msg.historyTranscripts.map(indicator => (
+                      <span
+                        key={indicator.id}
+                        className={`text-[11px] px-2 py-1 rounded-full border ${
+                          indicator.status === 'failed'
+                            ? 'bg-[#3a1a1a] border-[#6b3a3a] text-[#f0b8b8]'
+                            : 'bg-[#1a1a2e] border-[#3a3a5a] text-[#b8bbe8]'
+                        }`}
+                      >
+                        {indicator.status === 'parsed'
+                          ? '📎 已转写图片'
+                          : `⚠️ 图片没读出来：${indicator.name || '图片'}`}
+                      </span>
+                    ))}
                   </div>
                 )}
                 {msg.role === 'assistant' ? (
@@ -1001,25 +1060,37 @@ const ChatPanel = forwardRef(function ChatPanel({
         )}
         {materials.length > 0 && (
           <div className="mb-3 flex flex-wrap gap-2">
-            {materials.map(material => (
-              <button
-                key={material.id}
-                type="button"
-                onClick={() => setSelectedMaterialIds(prev => toggleMaterialSelection(prev, material.id))}
-                className={`text-xs px-2 py-1 rounded-full border ${
-                  selectedMaterialIds.includes(material.id)
-                    ? 'bg-blue-600 border-blue-500 text-white'
-                    : 'bg-[#15162d] border-[#2f3158] text-[#b6b8de]'
-                }`}
-              >
-                {material.display_name}
-              </button>
-            ))}
-          </div>
-        )}
-        {!canSendImages && (selectedMaterials.some(material => material.media_kind === 'image_like') || pendingImageAttachments.length > 0) && (
-          <div className="mb-3 text-xs text-[#f5b16a]">
-            当前自定义模型按保守规则视为不支持图片输入，选中图片材料或待发送图片时会阻止发送。
+            {materials.map(material => {
+              const statusChip = conversionStatusChip(material)
+              return (
+                <button
+                  key={material.id}
+                  type="button"
+                  onClick={() => setSelectedMaterialIds(prev => toggleMaterialSelection(prev, material.id))}
+                  className={`text-xs px-2 py-1 rounded-full border inline-flex items-center gap-1 ${
+                    selectedMaterialIds.includes(material.id)
+                      ? 'bg-blue-600 border-blue-500 text-white'
+                      : 'bg-[#15162d] border-[#2f3158] text-[#b6b8de]'
+                  }`}
+                >
+                  <span>{material.display_name}</span>
+                  {statusChip && (
+                    <span
+                      title={statusChip.title || undefined}
+                      className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                        statusChip.tone === 'failed'
+                          ? 'bg-[#3a1a1a] text-[#f0b8b8]'
+                          : statusChip.tone === 'not_parsed'
+                          ? 'bg-[#1e1f3a] text-[#8e92bd]'
+                          : 'bg-[#15402a] text-[#9fe0bd]'
+                      }`}
+                    >
+                      {statusChip.label}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
           </div>
         )}
         {dragActive && (

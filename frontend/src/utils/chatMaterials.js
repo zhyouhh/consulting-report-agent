@@ -29,6 +29,35 @@ export function toggleMaterialSelection(selectedMaterialIds = [], materialId) {
   return [...selectedMaterialIds, materialId];
 }
 
+// N6 D2: build the transient-attachment payload sent to the backend. Each item PRESERVES the
+// pending attachment `id` so the backend's `attachment_transcribed` SSE event (which echoes
+// `attachment_id`) can be correlated back to the exact bubble attachment on the frontend.
+// `data_url` is resolved by the caller (async file read) and passed in per item.
+export function buildTransientAttachmentsPayload(resolvedAttachments = []) {
+  return resolvedAttachments.map((attachment) => ({
+    id: attachment.id,
+    name: attachment.name,
+    mime_type: attachment.mime_type,
+    data_url: attachment.data_url,
+  }));
+}
+
+// N6 D2: map a material's backend conversion_status to a small Chinese chip label + tooltip.
+// v1 status set is exactly {not_parsed, parsed, failed} — there is no "parsing" state.
+// Spec §8 requires every material show 未解析/已解析/失败+原因. `not_parsed` returns a neutral
+// (muted) chip — it just means the model hasn't read this material yet (conversion is lazy),
+// so it's informative, not alarming.
+export function conversionStatusChip(material = {}) {
+  const status = material?.conversion_status;
+  if (status === "parsed") {
+    return { label: "已解析", tone: "parsed", title: null };
+  }
+  if (status === "failed") {
+    return { label: "失败", tone: "failed", title: material?.conversion_reason || "转换失败" };
+  }
+  return { label: "未解析", tone: "not_parsed", title: "尚未被读取（用到时才解析）" };
+}
+
 export function buildChatRequest({
   projectId,
   messageText = "",
@@ -36,6 +65,7 @@ export function buildChatRequest({
   transientAttachments = [],
   systemTrigger = null,
   triggerMetadata = null,
+  clientMessageId = null,
 }) {
   const trimmed = typeof messageText === "string" ? messageText.trim() : "";
   const payload = {
@@ -50,6 +80,11 @@ export function buildChatRequest({
   }
   if (systemTrigger) {
     payload.system_trigger = systemTrigger;
+  }
+  // client_message_id correlates the user bubble with attachment_transcribed SSE events. It is
+  // OMITTED on system_trigger turns (those render no user bubble, so there is nothing to mark).
+  if (!systemTrigger && clientMessageId) {
+    payload.client_message_id = clientMessageId;
   }
   // C5: run-bound trigger metadata travels with a system trigger so the backend can bind a
   // review report to the exact run that produced it. run_id / report_mtime_ns are OPAQUE

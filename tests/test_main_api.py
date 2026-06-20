@@ -520,6 +520,53 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(len(args[1]), 1)
         self.assertTrue(args[1][0].endswith("市场图表.png"))
 
+    @mock.patch("backend.main.MAX_HEAVY_MATERIAL_BYTES", 10)
+    @mock.patch("backend.main.skill_engine.get_project_record")
+    def test_upload_oversized_file_returns_413(self, mock_get_project_record):
+        """Upload endpoint rejects files exceeding MAX_HEAVY_MATERIAL_BYTES with HTTP 413."""
+        mock_get_project_record.return_value = {
+            "id": "proj-demo",
+            "workspace_dir": "D:/Workspaces/demo",
+        }
+        oversized_data = b"X" * 20  # 20 bytes > patched limit of 10 bytes
+
+        response = self.client.post(
+            "/api/projects/proj-demo/materials/upload",
+            files=[("files", ("big.pdf", BytesIO(oversized_data), "application/pdf"))],
+        )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("超过上传限制", response.json()["detail"])
+
+    @mock.patch("backend.main.MAX_HEAVY_MATERIAL_BYTES", 10)
+    @mock.patch("backend.main.skill_engine.get_project_record")
+    def test_upload_oversized_file_not_persisted(self, mock_get_project_record):
+        """Rejected oversized upload must not leave a file in the temp directory."""
+        mock_get_project_record.return_value = {
+            "id": "proj-demo",
+            "workspace_dir": "D:/Workspaces/demo",
+        }
+        oversized_data = b"X" * 20
+
+        with mock.patch("backend.main.tempfile.TemporaryDirectory") as mock_tmpdir:
+            import tempfile as _tf
+            real_tmpdir = _tf.mkdtemp()
+            mock_tmpdir.return_value.__enter__ = mock.Mock(return_value=real_tmpdir)
+            mock_tmpdir.return_value.__exit__ = mock.Mock(return_value=False)
+
+            try:
+                response = self.client.post(
+                    "/api/projects/proj-demo/materials/upload",
+                    files=[("files", ("big.pdf", BytesIO(oversized_data), "application/pdf"))],
+                )
+                self.assertEqual(response.status_code, 413)
+                # Partial temp file must be cleaned up
+                leftover = list(Path(real_tmpdir).iterdir())
+                self.assertEqual(leftover, [], f"Partial file left behind: {leftover}")
+            finally:
+                import shutil as _sh
+                _sh.rmtree(real_tmpdir, ignore_errors=True)
+
     @mock.patch("backend.main.run_quality_check")
     @mock.patch("backend.main.skill_engine.get_script_path")
     @mock.patch("backend.main.skill_engine.get_primary_report_path")
@@ -1537,6 +1584,7 @@ class WorkspaceApiTests(unittest.TestCase):
             "请结合新增材料整理问题树",
             ["mat-1", "mat-2"],
             [],
+            client_message_id=None,
         )
 
     @mock.patch("backend.main.get_chat_handler")
@@ -1587,6 +1635,7 @@ class WorkspaceApiTests(unittest.TestCase):
                 "attached_material_ids": [],
                 "transient_attachments": [
                     {
+                        "id": "att-1",
                         "name": "bug.png",
                         "mime_type": "image/png",
                         "data_url": "data:image/png;base64,AAAA",
@@ -1603,11 +1652,13 @@ class WorkspaceApiTests(unittest.TestCase):
             [],
             [
                 {
+                    "id": "att-1",
                     "name": "bug.png",
                     "mime_type": "image/png",
                     "data_url": "data:image/png;base64,AAAA",
                 }
             ],
+            client_message_id=None,
         )
 
     @mock.patch("backend.main.get_chat_handler")
@@ -1674,6 +1725,7 @@ class WorkspaceApiTests(unittest.TestCase):
             [],
             system_trigger="independent_review_done",
             trigger_metadata={"run_id": "run-abc-123", "report_mtime_ns": big_mtime},
+            client_message_id=None,
         )
         # The nanosecond mtime stays a string (never coerced to a JSON number / int).
         forwarded = handler.chat_stream.call_args.kwargs["trigger_metadata"]
@@ -2004,3 +2056,164 @@ class R3FileApiTests(unittest.TestCase):
         r = self.client.get(f"/api/projects/{self.pid}/workspace")
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["flags"]["review_stale"])
+
+
+class MaterialConversionStatusApiTests(unittest.TestCase):
+    """N6 D2: GET /materials surfaces conversion_status per material (no 500 if unconverted)."""
+
+    def setUp(self):
+        self.client = TestClient(main_module.app)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        from backend.skill import SkillEngine
+        repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+        self.engine = SkillEngine(Path(self._tmp.name) / "projects", repo_skill_dir)
+        project = self.engine.create_project({
+            "name": "demo", "workspace_dir": str(Path(self._tmp.name) / "ws"),
+            "project_type": "strategy-consulting", "theme": "t",
+            "target_audience": "a", "deadline": "2026-04-01",
+            "expected_length": "3000 words", "notes": "n",
+        })
+        self.pid = project["id"]
+        self._patch = mock.patch.object(main_module, "skill_engine", self.engine)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def _add_text_material(self, name="note.txt", body="some-content"):
+        src = Path(self._tmp.name) / name
+        src.write_text(body, encoding="utf-8")
+        return self.engine.add_materials(self.pid, [str(src)], added_via="chat_upload")[0]
+
+    def test_materials_endpoint_reports_conversion_status_field(self):
+        # No converter wired → every material falls back to not_parsed, never 500.
+        self._add_text_material()
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)
+        items = r.json()["materials"]
+        self.assertTrue(len(items) >= 1)
+        for item in items:
+            self.assertIn("conversion_status", item)
+            self.assertIn("conversion_reason", item)
+            self.assertIn(item["conversion_status"], {"not_parsed", "parsed", "failed"})
+        self.assertEqual(items[0]["conversion_status"], "not_parsed")
+        self.assertIsNone(items[0]["conversion_reason"])
+
+    def test_materials_endpoint_reports_parsed_and_failed(self):
+        from backend.material_conversion import MaterialConverter
+        conv = MaterialConverter(
+            cache_dir=Path(self._tmp.name) / "cache",
+            vision_adapter=lambda *a: "V",
+            ocr_adapter=lambda p: "O",
+            capability_resolver=lambda: False,
+        )
+        self.engine.set_material_converter(conv)
+        parsed = self._add_text_material(name="parsed.txt", body="parsed-body")
+        failed = self._add_text_material(name="failed.txt", body="failed-body")
+        not_yet = self._add_text_material(name="fresh.txt", body="fresh-body")
+
+        # parsed: prime the .md cache via a real read
+        self.engine.read_material_file(self.pid, parsed["id"])
+        # failed: drop an .error tombstone at the material's key
+        key = self.engine._cache_key_for_material(
+            failed, self.engine.get_material_path(self.pid, failed["id"])
+        )
+        _, err_path = conv._cache_paths(key)
+        err_path.write_text("文档解析失败：BoomError", encoding="utf-8")
+
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)
+        by_id = {m["id"]: m for m in r.json()["materials"]}
+        self.assertEqual(by_id[parsed["id"]]["conversion_status"], "parsed")
+        self.assertIsNone(by_id[parsed["id"]]["conversion_reason"])
+        self.assertEqual(by_id[failed["id"]]["conversion_status"], "failed")
+        self.assertEqual(by_id[failed["id"]]["conversion_reason"], "文档解析失败：BoomError")
+        self.assertEqual(by_id[not_yet["id"]]["conversion_status"], "not_parsed")
+
+    # --- N6 Fix5: lock the advisory-status fallback paths (status probe must never raise) ---
+
+    def test_status_falls_back_to_not_parsed_when_no_converter_wired(self):
+        # (a) No converter set on the engine → list_materials / GET must report not_parsed, no 500.
+        self.assertIsNone(getattr(self.engine, "_material_converter", None))
+        self._add_text_material(name="no_converter.txt", body="x")
+        items = self.engine.list_materials(self.pid)
+        self.assertTrue(len(items) >= 1)
+        for item in items:
+            self.assertEqual(item["conversion_status"], "not_parsed")
+            self.assertIsNone(item["conversion_reason"])
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)
+        for item in r.json()["materials"]:
+            self.assertEqual(item["conversion_status"], "not_parsed")
+
+    def test_status_falls_back_to_not_parsed_when_content_sha256_missing(self):
+        # (b) A material whose content_sha256 is missing → status probe short-circuits to not_parsed.
+        from backend.material_conversion import MaterialConverter
+        conv = MaterialConverter(
+            cache_dir=Path(self._tmp.name) / "cache",
+            vision_adapter=lambda *a: "V",
+            ocr_adapter=lambda p: "O",
+            capability_resolver=lambda: False,
+        )
+        self.engine.set_material_converter(conv)
+        mat = self._add_text_material(name="no_hash.txt", body="hash-me")
+        # Strip the add-time hash off the persisted record.
+        record = self.engine.get_project_record(self.pid)
+        materials = self.engine._load_materials(record)
+        for m in materials:
+            if m["id"] == mat["id"]:
+                m.pop("content_sha256", None)
+        self.engine._save_materials(record, materials)
+
+        items = self.engine.list_materials(self.pid)
+        by_id = {m["id"]: m for m in items}
+        self.assertEqual(by_id[mat["id"]]["conversion_status"], "not_parsed")
+        self.assertIsNone(by_id[mat["id"]]["conversion_reason"])
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)
+
+    def test_status_falls_back_to_not_parsed_when_probe_raises(self):
+        # (c) The converter's status_for_key raising must be swallowed → not_parsed, no 500.
+        from backend.material_conversion import MaterialConverter
+        conv = MaterialConverter(
+            cache_dir=Path(self._tmp.name) / "cache",
+            vision_adapter=lambda *a: "V",
+            ocr_adapter=lambda p: "O",
+            capability_resolver=lambda: False,
+        )
+
+        def _boom(_key):
+            raise RuntimeError("probe exploded")
+
+        conv.status_for_key = _boom  # type: ignore[method-assign]
+        self.engine.set_material_converter(conv)
+        mat = self._add_text_material(name="boom.txt", body="boom-body")
+
+        items = self.engine.list_materials(self.pid)
+        by_id = {m["id"]: m for m in items}
+        self.assertEqual(by_id[mat["id"]]["conversion_status"], "not_parsed")
+        self.assertIsNone(by_id[mat["id"]]["conversion_reason"])
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)
+
+    def test_status_not_parsed_when_source_file_deleted_despite_cache(self):
+        # (d) Source file deleted/moved but its old cache .md still exists → must report
+        # not_parsed, never a stale "parsed" from the orphaned cache entry.
+        from backend.material_conversion import MaterialConverter
+        conv = MaterialConverter(
+            cache_dir=Path(self._tmp.name) / "cache",
+            vision_adapter=lambda *a: "V",
+            ocr_adapter=lambda p: "O",
+            capability_resolver=lambda: False,
+        )
+        self.engine.set_material_converter(conv)
+        mat = self._add_text_material(name="will_delete.txt", body="parse-then-delete")
+        # Convert it so a cache .md entry exists → now reads as parsed.
+        self.engine.read_material_file(self.pid, mat["id"])
+        by_id = {m["id"]: m for m in self.engine.list_materials(self.pid)}
+        self.assertEqual(by_id[mat["id"]]["conversion_status"], "parsed")
+        # Delete the source file out from under the material (external delete).
+        self.engine.get_material_path(self.pid, mat["id"]).unlink()
+        by_id2 = {m["id"]: m for m in self.engine.list_materials(self.pid)}
+        self.assertEqual(by_id2[mat["id"]]["conversion_status"], "not_parsed")
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)

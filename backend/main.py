@@ -7,7 +7,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -40,6 +40,7 @@ from .report_tools import (
     run_lint_report,
     run_quality_check,
 )
+from .material_limits import MAX_HEAVY_MATERIAL_BYTES
 from .skill import SkillEngine, StaleFileError, UserWriteForbiddenError
 
 
@@ -118,6 +119,8 @@ class SettingsUpdate(BaseModel):
     mode: Literal["managed", "custom"]
     managed_base_url: str
     managed_model: str
+    managed_vision_model: Optional[str] = None
+    vision_enabled: Optional[bool] = None
     custom_api_base: str = ""
     custom_api_key: str = ""
     custom_model: str = ""
@@ -131,6 +134,10 @@ async def update_settings(update: SettingsUpdate):
         settings.mode = update.mode
         settings.managed_base_url = update.managed_base_url
         settings.managed_model = update.managed_model
+        if "managed_vision_model" in update.model_fields_set and update.managed_vision_model is not None:
+            settings.managed_vision_model = update.managed_vision_model
+        if "vision_enabled" in update.model_fields_set and update.vision_enabled is not None:
+            settings.vision_enabled = update.vision_enabled
         settings.custom_api_base = update.custom_api_base
         if update.custom_api_key != "***":
             settings.custom_api_key = update.custom_api_key
@@ -245,13 +252,37 @@ async def upload_materials(project_id: str, files: list[UploadFile] = File(...))
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
+    limit_mb = MAX_HEAVY_MATERIAL_BYTES / (1024 * 1024)
     staged_paths = []
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         for upload in files:
             safe_name = Path(upload.filename or "attachment").name
             temp_path = tmpdir_path / safe_name
-            temp_path.write_bytes(await upload.read())
+            # Stream-accumulate to enforce size limit without buffering the whole file
+            chunk_size = 256 * 1024  # 256 KB chunks
+            total_bytes = 0
+            with temp_path.open("wb") as f:
+                while True:
+                    chunk = await upload.read(chunk_size)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_HEAVY_MATERIAL_BYTES:
+                        # Partial file: close and clean up before rejecting
+                        f.close()
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(
+                                f"文件 {safe_name!r} 大小超过上传限制 {limit_mb:.0f} MB，"
+                                "请压缩后重试"
+                            ),
+                        )
+                    f.write(chunk)
             staged_paths.append(str(temp_path))
 
         try:
@@ -282,6 +313,7 @@ async def chat(request: Request, chat_request: ChatRequest):
             chat_request.message_text,
             chat_request.attached_material_ids,
             [item.model_dump() for item in chat_request.transient_attachments],
+            client_message_id=chat_request.client_message_id,
         )
         token_usage = result.get("token_usage") or {}
         logger.info(f"Chat completed, tokens: {token_usage.get('context_used_tokens', 0)}")
@@ -738,6 +770,7 @@ def chat_stream(request: Request, chat_request: ChatRequest):
                 [item.model_dump() for item in chat_request.transient_attachments],
                 system_trigger=chat_request.system_trigger,
                 trigger_metadata=trigger_metadata,
+                client_message_id=chat_request.client_message_id,
             ):
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"

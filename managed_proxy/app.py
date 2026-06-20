@@ -16,19 +16,38 @@ class ProxySettings:
     upstream_base_url: str = ""
     upstream_api_key: str = ""
     allowed_models: list[str] = field(default_factory=lambda: [DEFAULT_ALLOWED_MODEL])
+    # selectable_models: subset shown in /v1/models (user-facing dropdown).
+    # Defaults to None; resolved to full allowed_models at runtime via property.
+    selectable_models: list[str] | None = None
     client_bearer_token: str = "managed"
     host: str = "127.0.0.1"
     port: int = 18731
     request_timeout_seconds: int = 300
 
+    def __post_init__(self) -> None:
+        # Normalize: None means "same as allowed_models" (backward compat).
+        if self.selectable_models is None:
+            self.selectable_models = list(self.allowed_models)
+
     @classmethod
     def from_env(cls) -> "ProxySettings":
         allowed_models_raw = os.getenv("MANAGED_PROXY_ALLOWED_MODELS", DEFAULT_ALLOWED_MODEL)
         allowed_models = [item.strip() for item in allowed_models_raw.split(",") if item.strip()]
+        allowed_models = allowed_models or [DEFAULT_ALLOWED_MODEL]
+
+        selectable_raw = os.getenv("MANAGED_PROXY_SELECTABLE_MODELS", "")
+        if selectable_raw.strip():
+            selectable_models: list[str] | None = [
+                item.strip() for item in selectable_raw.split(",") if item.strip()
+            ]
+        else:
+            selectable_models = None  # will default to allowed_models in __post_init__
+
         return cls(
             upstream_base_url=os.getenv("MANAGED_PROXY_UPSTREAM_BASE_URL", "").rstrip("/"),
             upstream_api_key=os.getenv("MANAGED_PROXY_UPSTREAM_API_KEY", ""),
-            allowed_models=allowed_models or [DEFAULT_ALLOWED_MODEL],
+            allowed_models=allowed_models,
+            selectable_models=selectable_models,
             client_bearer_token=os.getenv("MANAGED_PROXY_CLIENT_TOKEN", "managed"),
             host=os.getenv("MANAGED_PROXY_HOST", "127.0.0.1"),
             port=int(os.getenv("MANAGED_PROXY_PORT", "18731")),
@@ -66,7 +85,7 @@ def _build_models_payload(settings: ProxySettings) -> dict:
                 "created": 0,
                 "owned_by": "consulting-report-managed-proxy",
             }
-            for model in settings.allowed_models
+            for model in settings.selectable_models
         ],
     }
 
@@ -89,6 +108,8 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         return {
             "status": "ok",
             "model": runtime_settings.primary_model,
+            "allowed_models": runtime_settings.allowed_models,
+            "selectable_models": runtime_settings.selectable_models,
         }
 
     @app.get("/v1/models")
@@ -104,11 +125,13 @@ def create_app(settings: ProxySettings | None = None) -> FastAPI:
         _ensure_authorized(authorization, runtime_settings)
 
         payload = await request.json()
+        # Backward-compat: an omitted model defaults to the primary model (always in allowed_models).
+        # Explicit None/"" or any non-allowed model is rejected 400 below.
         requested_model = payload.get("model", runtime_settings.primary_model)
         if requested_model not in runtime_settings.allowed_models:
             raise HTTPException(status_code=400, detail=f"model '{requested_model}' is not allowed")
 
-        payload["model"] = runtime_settings.primary_model
+        payload["model"] = requested_model
         stream_requested = bool(payload.get("stream"))
 
         try:

@@ -1131,7 +1131,39 @@ class SkillEngine:
         project_record = self.get_project_record(project_ref)
         if not project_record:
             return []
-        return self._load_materials(project_record)
+        materials = self._load_materials(project_record)
+        for material in materials:
+            status, reason = self._material_conversion_status(project_record, material)
+            material["conversion_status"] = status
+            material["conversion_reason"] = reason
+        return materials
+
+    def _material_conversion_status(self, project_record: dict, material: dict) -> tuple[str, str | None]:
+        """N6 D2：只读探测材料转换状态，供材料列表展示。
+        必须健壮（任何缺失/异常一律降级 not_parsed），绝不抛——材料列表接口不能 500。
+
+        N6 Fix3（perf）：状态探测是 advisory 展示，绝不 re-hash live 文件（list 调一次就 O(n×文件大小)）。
+        改为用 add-time 存的 content_sha256 算 key（inline 派生，不经 _cache_key_for_material——后者
+        会读 live 文件）。常见的 imported/chat_upload 不可变场景下 add-time hash == live hash、状态正确；
+        被改过的 workspace 文件 chip 可能略 stale，下次真正 read 时自愈，advisory 可接受。
+        """
+        converter = getattr(self, "_material_converter", None)
+        if converter is None:
+            return "not_parsed", None
+        content_sha256 = material.get("content_sha256")
+        if not content_sha256:
+            return "not_parsed", None
+        try:
+            # 源文件已被删/移走时，旧 .md/.error 缓存仍可能在 → 必须降级 not_parsed，
+            # 不能据陈旧缓存误报 parsed/failed。存在性检查是廉价 stat、不 re-hash（守住 Fix3 perf）。
+            material_path = self._resolve_material_path(project_record, material)
+            if not material_path.exists():
+                return "not_parsed", None
+            extra = converter.image_cache_extra if material.get("media_kind") == "image_like" else ""
+            key = converter.cache_key_from_sha256(content_sha256, extra)
+            return converter.status_for_key(key)
+        except Exception:  # noqa: BLE001 探测失败一律降级，绝不阻断材料列表
+            return "not_parsed", None
 
     def add_materials(self, project_ref: str, material_paths: Iterable[str], added_via: str) -> list[dict]:
         project_record = self.get_project_record(project_ref)
@@ -1147,7 +1179,20 @@ class SkillEngine:
             source_path = Path(raw_path).expanduser().resolve()
             if not source_path.exists() or not source_path.is_file():
                 raise ValueError(f"材料不存在: {raw_path}")
-                raise ValueError(f"鏉愭枡涓嶅瓨鍦? {raw_path}")
+
+            # Fix4: hard size limit applies to BOTH paths. Live workspace-selected files used to
+            # skip this (the check sat only in the import/copy branch), letting an oversized
+            # in-workspace file slip past the 25MB cap. Enforce BEFORE the workspace-vs-import
+            # branch so neither path can reference/copy an oversized source.
+            from backend import material_limits as _ml
+            source_size = source_path.stat().st_size
+            if source_size > _ml.MAX_HEAVY_MATERIAL_BYTES:
+                limit_mb = _ml.MAX_HEAVY_MATERIAL_BYTES / (1024 * 1024)
+                actual_mb = source_size / (1024 * 1024)
+                raise ValueError(
+                    f"文件 {source_path.name!r} 大小 {actual_mb:.1f} MB 超过上传限制 "
+                    f"{limit_mb:.0f} MB，请压缩后重试"
+                )
 
             workspace_relative = self._workspace_relative_path(source_path, workspace_root)
             if workspace_relative is not None:
@@ -1158,6 +1203,8 @@ class SkillEngine:
                 stored_rel_path = workspace_relative
                 source_type = "workspace"
                 original_path = ""
+                # workspace 材料是 live 文件，按源路径取 add-time hash（已知低危：之后被改写不重算，v1 接受）
+                hashed_path = source_path
             else:
                 duplicate = self._find_existing_imported_material(materials, source_path)
                 if duplicate:
@@ -1170,6 +1217,8 @@ class SkillEngine:
                 stored_rel_path = self._to_posix(destination_rel)
                 source_type = "imported"
                 original_path = str(source_path)
+                # chat_upload（imported）已落盘拷贝，按拷贝后文件取 hash
+                hashed_path = destination_path
 
             mime_type, _ = mimetypes.guess_type(source_path.name)
             material = {
@@ -1182,6 +1231,8 @@ class SkillEngine:
                 "added_via": added_via,
                 "file_type": source_path.suffix.lstrip(".").lower(),
                 "mime_type": mime_type or "application/octet-stream",
+                "size_bytes": (source_path.stat().st_size if source_path.exists() else 0),
+                "content_sha256": self._content_sha256(hashed_path),
                 "created_at": datetime.now().isoformat(timespec="seconds"),
             }
             materials.append(material)
@@ -1201,6 +1252,14 @@ class SkillEngine:
         if not target:
             raise ValueError("材料不存在")
 
+        # 删源文件前先 release：shared-hash 缓存仅在最后一个引用消失时才真删。
+        # 关键：用 live-file 内容算 key（与 retain 一致），且必须在源文件还在时算，否则 hash 不上。
+        converter = getattr(self, "_material_converter", None)
+        if converter is not None:
+            target_path = self.get_material_path(project_ref, target["id"])
+            if target_path.exists():
+                converter.release(self._cache_key_for_material(target, target_path), target["id"])
+
         if target["source_type"] == "imported":
             imported_path = Path(project_record["project_dir"]) / target["stored_rel_path"]
             if imported_path.exists():
@@ -1213,6 +1272,7 @@ class SkillEngine:
     def delete_project(self, project_ref: str):
         project_record = self.get_project_record(project_ref)
         if project_record:
+            self._release_project_material_caches(project_record)   # N6: free cache refs before deleting the project dir
             project_path = Path(project_record["project_dir"])
             if project_path.exists():
                 shutil.rmtree(project_path)
@@ -1223,6 +1283,29 @@ class SkillEngine:
 
 
         raise ValueError(f"项目 {project_ref} 不存在")
+
+    def _release_project_material_caches(self, project_record: dict) -> None:
+        """N6: 删项目前，逐条释放材料的共享缓存引用——N6 缓存活在 projects_dir 之外
+        （materials_cache），rmtree 删不到。release 必须在源文件还在时执行（与 remove_material 同），
+        最后一个引用消失时 shared-hash GC 才会删掉转写/markdown/tombstone/.refs。
+        无 converter / 缺路径优雅跳过，单条失败不阻断删项目。"""
+        converter = getattr(self, "_material_converter", None)
+        if converter is None:
+            return
+        try:
+            materials = self._load_materials(project_record)
+        except Exception:
+            return
+        for material in materials:
+            try:
+                if not material.get("content_sha256"):
+                    continue
+                path = self._resolve_material_path(project_record, material)
+                if not path.exists():
+                    continue
+                converter.release(self._cache_key_for_material(material, path), material["id"])
+            except Exception:  # noqa: BLE001 单个材料 release 失败不应阻断删项目
+                continue
 
     def read_file(self, project_ref: str, file_path: str) -> str:
         """璇诲彇椤圭洰鏂囦欢"""
@@ -1501,15 +1584,103 @@ class SkillEngine:
         return tail.casefold() == self.STAGE_CHECKPOINTS_FILENAME.casefold()
 
     def read_material_file(self, project_ref: str, material_id: str) -> str:
+        from backend import material_limits
+
         project_record = self.get_project_record(project_ref)
         if not project_record:
             raise ValueError(f"项目 {project_ref} 不存在")
 
         material = self.get_material(project_ref, material_id)
+        material_path = self.get_material_path(project_ref, material_id)
+        suffix = material_path.suffix.lower()
+
+        if material_limits.is_heavy_suffix(suffix):
+            actual = material_path.stat().st_size if material_path.exists() else 0
+            if actual > material_limits.MAX_HEAVY_MATERIAL_BYTES:
+                raise ValueError(
+                    "这个文件过大，读不动；请只传关键的评分标准/技术规范书等小文件"
+                )
+
         if material["media_kind"] == "image_like":
-            raise ValueError("当前暂不支持读取该材料")
+            text = self._converter_read_image(project_ref, material_id)
+        else:
+            text = self._converter_read_document(project_ref, material_path)
+
+        self._retain_material_cache(material, material_path)
+        return text
+
+    def set_material_converter(self, converter):
+        self._material_converter = converter
+
+    @staticmethod
+    def _content_sha256(path: Path) -> str:
+        """落盘文件 sha256（与 MaterialConverter._content_hash 同算法、同分块）。"""
+        import hashlib
+
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _cache_key_for_material(self, material: dict, material_path: Path) -> str:
+        """用当前 live 文件内容算 converter 缓存 key（与 transcribe_image/convert_document 的 live-hash 一致），
+        避免 add-time content_sha256 与改动后的 workspace 文件分歧。
+        文档 extra=""、图片 extra=converter.image_cache_extra。"""
+        extra = (
+            self._material_converter.image_cache_extra
+            if material.get("media_kind") == "image_like"
+            else ""
+        )
+        content_hash = self._content_sha256(material_path)
+        return self._material_converter.cache_key_from_sha256(content_hash, extra)
+
+    def _retain_material_cache(self, material: dict, material_path: Path) -> None:
+        converter = getattr(self, "_material_converter", None)
+        if converter is None or not material_path.exists():
+            return
+        converter.retain(self._cache_key_for_material(material, material_path), material["id"])
+
+    def retain_material_cache(self, project_ref, material_id) -> None:
+        """chat 路径专用：当前轮自己 transcribe 图片后补 retain（live-hash key），
+        否则同内容另一材料被删时会连带删掉共享缓存。retain 失败由调用方吞掉、不影响展示。"""
+        converter = getattr(self, "_material_converter", None)
+        if converter is None:
+            return
+        try:
+            material = self.get_material(project_ref, material_id)
+            material_path = self.get_material_path(project_ref, material_id)
+        except Exception:
+            return
+        if not material_path.exists():
+            return
+        converter.retain(self._cache_key_for_material(material, material_path), material["id"])
+
+    def _converter_read_document(self, project_ref, material_path):
+        if getattr(self, "_material_converter", None) is None:
+            return self._legacy_read_document(material_path)   # 无 converter 的纯单测回退
+        from backend.material_conversion import MaterialConversionError
+
+        try:
+            return self._material_converter.convert_document(material_path)
+        except MaterialConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def _converter_read_image(self, project_ref, material_id):
+        converter = getattr(self, "_material_converter", None)
+        if converter is None:
+            raise ValueError("当前环境无法读取图片材料")
+        from backend.material_conversion import MaterialConversionError
 
         material_path = self.get_material_path(project_ref, material_id)
+        material = self.get_material(project_ref, material_id)
+        mime = material.get("mime_type") or "image/png"
+        try:
+            return converter.transcribe_image(material_path, mime)
+        except MaterialConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def _legacy_read_document(self, material_path: Path) -> str:
         suffix = material_path.suffix.lower()
 
         if suffix in self.TEXT_SUFFIXES:
@@ -1526,18 +1697,35 @@ class SkillEngine:
         except UnicodeDecodeError as exc:
             raise ValueError(f"当前暂不支持读取 {suffix} 材料") from exc
 
-    def get_material(self, project_ref: str, material_id: str) -> dict:
-        material = next((item for item in self.list_materials(project_ref) if item["id"] == material_id), None)
+    def _get_raw_material(self, project_record: dict, material_id: str) -> dict:
+        """N6 Fix4（perf）：按 id 取 RAW 材料记录，不做 conversion_status 富化。
+        chat 路径 / read_material_file 只需路径与元字段，不该为单条查找付 list_materials 的
+        O(n) 状态探测。status 富化只在公开 list_materials（/materials 端点）里发生。"""
+        material = next(
+            (item for item in self._load_materials(project_record) if item["id"] == material_id),
+            None,
+        )
         if not material:
             raise ValueError("材料不存在")
         return material
+
+    def get_material(self, project_ref: str, material_id: str) -> dict:
+        project_record = self.get_project_record(project_ref)
+        if not project_record:
+            raise ValueError(f"项目 {project_ref} 不存在")
+        return self._get_raw_material(project_record, material_id)
 
     def get_material_path(self, project_ref: str, material_id: str) -> Path:
         project_record = self.get_project_record(project_ref)
         if not project_record:
             raise ValueError(f"项目 {project_ref} 不存在")
 
-        material = self.get_material(project_ref, material_id)
+        material = self._get_raw_material(project_record, material_id)
+        return self._resolve_material_path(project_record, material)
+
+    @staticmethod
+    def _resolve_material_path(project_record: dict, material: dict) -> Path:
+        """从 material dict + project_record 直接解析落盘路径，不经 get_material（避免 list_materials 再入）。"""
         if material["source_type"] == "workspace":
             return (Path(project_record["workspace_dir"]) / material["stored_rel_path"]).resolve()
         return (Path(project_record["project_dir"]) / material["stored_rel_path"]).resolve()

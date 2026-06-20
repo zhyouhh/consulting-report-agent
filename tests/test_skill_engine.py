@@ -42,6 +42,190 @@ class SkillEngineTests(unittest.TestCase):
         self.engine = engine
         return project_dir
 
+    def test_read_oversized_heavy_material_raises(self):
+        from backend import material_limits
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(
+                self._project_payload(Path(tmp) / "workspace")
+            )
+            pid = project["id"]
+            src = Path(tmp) / "big.pdf"
+            src.write_bytes(b"%PDF-1.4 " + b"x" * 2048)
+            mats = engine.add_materials(pid, [str(src)], added_via="chat_upload")
+            with mock.patch.object(material_limits, "MAX_HEAVY_MATERIAL_BYTES", 100):
+                with self.assertRaises(ValueError) as ctx:
+                    engine.read_material_file(pid, mats[0]["id"])
+            self.assertIn("过大", str(ctx.exception))
+
+    def test_add_materials_rejects_oversized_import(self):
+        """add_materials raises ValueError before copying an oversized file."""
+        from backend import material_limits as _ml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(
+                self._project_payload(Path(tmp) / "workspace")
+            )
+            pid = project["id"]
+            src = Path(tmp) / "huge.pdf"
+            src.write_bytes(b"x" * 200)
+
+            with mock.patch.object(_ml, "MAX_HEAVY_MATERIAL_BYTES", 100):
+                with self.assertRaises(ValueError) as ctx:
+                    engine.add_materials(pid, [str(src)], added_via="chat_upload")
+            self.assertIn("超过上传限制", str(ctx.exception))
+
+            # The file must NOT have been copied into the project's imported dir
+            project_dir = Path(project["project_dir"])
+            imported_dir = project_dir / "materials" / "imported"
+            if imported_dir.exists():
+                self.assertEqual(list(imported_dir.iterdir()), [])
+
+    def test_add_materials_rejects_oversized_workspace_select(self):
+        """Fix4: a workspace-relative (live-reference) source larger than the cap is rejected too.
+
+        The size check used to live only in the import/copy branch, so files selected from
+        INSIDE the workspace bypassed the 25MB cap. Now both paths reject an oversized source.
+        """
+        from backend import material_limits as _ml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir(parents=True, exist_ok=True)
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._project_payload(workspace))
+            pid = project["id"]
+            # Source lives INSIDE the workspace → live-reference branch.
+            src = workspace / "big.pdf"
+            src.write_bytes(b"x" * 200)
+
+            with mock.patch.object(_ml, "MAX_HEAVY_MATERIAL_BYTES", 100):
+                with self.assertRaises(ValueError) as ctx:
+                    engine.add_materials(pid, [str(src)], added_via="workspace_select")
+            self.assertIn("超过上传限制", str(ctx.exception))
+
+    def test_shared_hash_delete_one_keeps_cache(self):
+        from backend.material_conversion import MaterialConverter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._project_payload(Path(tmp) / "workspace"))
+            pid = project["id"]
+            conv = MaterialConverter(
+                cache_dir=Path(tmp) / "cache",
+                vision_adapter=lambda *a: "V",
+                ocr_adapter=lambda p: "O",
+                capability_resolver=lambda: False,
+            )
+            engine.set_material_converter(conv)
+            s1 = Path(tmp) / "a.txt"
+            s1.write_text("same-content", encoding="utf-8")
+            s2 = Path(tmp) / "b.txt"
+            s2.write_text("same-content", encoding="utf-8")
+            a = engine.add_materials(pid, [str(s1)], added_via="chat_upload")[0]
+            b = engine.add_materials(pid, [str(s2)], added_via="chat_upload")[0]
+            engine.read_material_file(pid, a["id"])
+            engine.read_material_file(pid, b["id"])
+            key = engine._cache_key_for_material(a, engine.get_material_path(pid, a["id"]))
+            md_path, _ = conv._cache_paths(key)
+            self.assertTrue(md_path.exists())
+            engine.remove_material(pid, a["id"])
+            self.assertTrue(md_path.exists())  # b still references
+            engine.remove_material(pid, b["id"])
+            self.assertFalse(md_path.exists())  # no references -> deleted
+
+    def test_delete_project_releases_material_caches(self):
+        """N6 Fix3: 删项目要释放材料缓存引用——缓存活在 projects_dir 外，rmtree 删不到。
+        唯一引用的材料随项目删除后，其 .md / .refs 应被 release 真删（无其他引用）。"""
+        from backend.material_conversion import MaterialConverter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._project_payload(Path(tmp) / "workspace"))
+            pid = project["id"]
+            # 缓存目录在 projects_dir 之外（与生产一致：materials_cache 紧邻 projects_dir，非项目内）。
+            conv = MaterialConverter(
+                cache_dir=Path(tmp) / "cache",
+                vision_adapter=lambda *a: "V",
+                ocr_adapter=lambda p: "O",
+                capability_resolver=lambda: False,
+            )
+            engine.set_material_converter(conv)
+            src = Path(tmp) / "only.txt"
+            src.write_text("unique-content", encoding="utf-8")
+            mat = engine.add_materials(pid, [str(src)], added_via="chat_upload")[0]
+            # read_material_file 转换并 retain（建 .md + .refs）。
+            engine.read_material_file(pid, mat["id"])
+            key = engine._cache_key_for_material(mat, engine.get_material_path(pid, mat["id"]))
+            md_path, _ = conv._cache_paths(key)
+            refs_path = conv._refs_path(key)
+            self.assertTrue(md_path.exists())
+            self.assertTrue(refs_path.exists())
+            engine.delete_project(pid)
+            # 项目删了，缓存在外面——helper 必须释放最后一个引用并 GC 掉派生缓存。
+            self.assertFalse(md_path.exists())
+            self.assertFalse(refs_path.exists())
+
+    def test_image_material_cache_key_matches_transcribe_image(self):
+        from backend.material_conversion import MaterialConverter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._project_payload(Path(tmp) / "workspace"))
+            pid = project["id"]
+            conv = MaterialConverter(
+                cache_dir=Path(tmp) / "cache",
+                vision_adapter=lambda *a: "图说",
+                ocr_adapter=lambda p: "",
+                capability_resolver=lambda: False,
+                image_cache_namespace="visM-vp1-ocr1",
+            )
+            engine.set_material_converter(conv)
+            img = Path(tmp) / "c.png"
+            img.write_bytes(b"\x89PNG fake")
+            m = engine.add_materials(pid, [str(img)], added_via="chat_upload")[0]
+            conv.transcribe_image(engine.get_material_path(pid, m["id"]), "image/png")
+            key = engine._cache_key_for_material(m, engine.get_material_path(pid, m["id"]))
+            self.assertTrue(conv._cache_paths(key)[0].exists())
+
+    def test_chat_path_retain_holds_shared_image_cache(self):
+        """N6 Fix2: chat 路径用 retain_material_cache 撑住共享缓存——两个同字节图片，
+        chat 路径各自 transcribe + retain，删一个共享缓存仍在，删第二个才真删。"""
+        from backend.material_conversion import MaterialConverter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._project_payload(Path(tmp) / "workspace"))
+            pid = project["id"]
+            conv = MaterialConverter(
+                cache_dir=Path(tmp) / "cache",
+                vision_adapter=lambda *a: "图说",
+                ocr_adapter=lambda p: "",
+                capability_resolver=lambda: False,
+                image_cache_namespace="visM-vp1-ocr1",
+            )
+            engine.set_material_converter(conv)
+            img_bytes = b"\x89PNG identical-bytes"
+            s1 = Path(tmp) / "x.png"
+            s1.write_bytes(img_bytes)
+            s2 = Path(tmp) / "y.png"
+            s2.write_bytes(img_bytes)
+            a = engine.add_materials(pid, [str(s1)], added_via="chat_upload")[0]
+            b = engine.add_materials(pid, [str(s2)], added_via="chat_upload")[0]
+            # 模拟 chat 路径：当前轮自己 transcribe（建缓存项，不经 read_material_file），再 retain。
+            for mat in (a, b):
+                conv.transcribe_image(engine.get_material_path(pid, mat["id"]), "image/png")
+                engine.retain_material_cache(pid, mat["id"])
+            key = engine._cache_key_for_material(a, engine.get_material_path(pid, a["id"]))
+            md_path, _ = conv._cache_paths(key)
+            self.assertTrue(md_path.exists())
+            engine.remove_material(pid, a["id"])
+            self.assertTrue(md_path.exists())  # b's retain still holds
+            engine.remove_material(pid, b["id"])
+            self.assertFalse(md_path.exists())  # no references -> deleted
+
     def _write_stage_gates_at_stage(self, project_dir: Path, stage_code: str):
         (project_dir / "plan" / "stage-gates.md").write_text(
             f"# Stage gates\n\n**阶段**: {stage_code}\n**状态**: 进行中\n",
