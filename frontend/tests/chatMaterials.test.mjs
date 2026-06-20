@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   buildChatRequest,
+  buildTransientAttachmentsPayload,
+  conversionStatusChip,
   mergeMaterials,
   toggleMaterialSelection,
 } from "../src/utils/chatMaterials.js";
@@ -159,4 +161,62 @@ test("buildChatRequest omits metadata fields when triggerMetadata is null", () =
 
   assert.equal(Object.prototype.hasOwnProperty.call(req, "run_id"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(req, "report_mtime_ns"), false);
+});
+
+test("buildChatRequest carries client_message_id on a normal user turn", () => {
+  const req = buildChatRequest({
+    projectId: "proj-1",
+    messageText: "  请看截图  ",
+    clientMessageId: "bubble-123",
+  });
+
+  assert.equal(req.client_message_id, "bubble-123");
+  assert.equal(req.message_text, "请看截图");
+});
+
+test("buildChatRequest omits client_message_id when absent", () => {
+  const req = buildChatRequest({ projectId: "proj-1", messageText: "hi" });
+  assert.equal(Object.prototype.hasOwnProperty.call(req, "client_message_id"), false);
+});
+
+test("buildChatRequest never sends client_message_id on a system_trigger turn", () => {
+  const req = buildChatRequest({
+    projectId: "demo",
+    messageText: "",
+    systemTrigger: "independent_review_done",
+    clientMessageId: "bubble-should-be-dropped",
+  });
+
+  assert.equal(req.system_trigger, "independent_review_done");
+  assert.equal(Object.prototype.hasOwnProperty.call(req, "client_message_id"), false);
+});
+
+test("buildTransientAttachmentsPayload preserves the pending attachment id", () => {
+  const payload = buildTransientAttachmentsPayload([
+    { id: "att-1", name: "bug.png", mime_type: "image/png", data_url: "data:image/png;base64,AAAA" },
+    { id: "att-2", name: "chart.png", mime_type: "image/png", data_url: "data:image/png;base64,BBBB" },
+  ]);
+
+  assert.deepEqual(payload, [
+    { id: "att-1", name: "bug.png", mime_type: "image/png", data_url: "data:image/png;base64,AAAA" },
+    { id: "att-2", name: "chart.png", mime_type: "image/png", data_url: "data:image/png;base64,BBBB" },
+  ]);
+});
+
+test("conversionStatusChip returns null for not_parsed (and missing)", () => {
+  assert.equal(conversionStatusChip({ conversion_status: "not_parsed" }), null);
+  assert.equal(conversionStatusChip({}), null);
+  assert.equal(conversionStatusChip(), null);
+});
+
+test("conversionStatusChip labels parsed and failed", () => {
+  assert.deepEqual(conversionStatusChip({ conversion_status: "parsed" }), {
+    label: "已解析",
+    tone: "parsed",
+    title: null,
+  });
+  assert.deepEqual(
+    conversionStatusChip({ conversion_status: "failed", conversion_reason: "文件损坏" }),
+    { label: "失败", tone: "failed", title: "文件损坏" },
+  );
 });

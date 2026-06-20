@@ -270,6 +270,24 @@ class MaterialConverter:
         converter 不反向依赖 SkillEngine/project。"""
         return content_sha256 + "-" + CONVERTER_VERSION + extra
 
+    def status_for_key(self, key: str) -> tuple[str, str | None]:
+        """只读探测某个缓存 key 的转换状态（不触发转换/不发请求）。
+        v1 同步转换：无 `parsing` 中间态。
+        - `.md` 命中 → ("parsed", None)
+        - `.error` tombstone 命中 → ("failed", <tombstone 文本>)
+        - 都没有 → ("not_parsed", None)
+        """
+        md_path, err_path = self._cache_paths(key)
+        if md_path.exists():
+            return "parsed", None
+        if err_path.exists():
+            try:
+                reason = err_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                reason = None
+            return "failed", (reason or None)
+        return "not_parsed", None
+
     def _libreoffice_to_markdown(self, path: Path, target_ext: str) -> str:
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
         if not soffice:

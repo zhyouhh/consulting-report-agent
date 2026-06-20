@@ -1131,7 +1131,32 @@ class SkillEngine:
         project_record = self.get_project_record(project_ref)
         if not project_record:
             return []
-        return self._load_materials(project_record)
+        materials = self._load_materials(project_record)
+        for material in materials:
+            status, reason = self._material_conversion_status(project_record, material)
+            material["conversion_status"] = status
+            material["conversion_reason"] = reason
+        return materials
+
+    def _material_conversion_status(self, project_record: dict, material: dict) -> tuple[str, str | None]:
+        """N6 D2：只读探测材料转换状态，供材料列表展示。
+        必须健壮（任何缺失/异常一律降级 not_parsed），绝不抛——材料列表接口不能 500。
+        关键：路径解析走 _resolve_material_path（不经 get_material/get_material_path），
+        否则 list_materials → _material_conversion_status → get_material → list_materials 无限再入。
+        """
+        converter = getattr(self, "_material_converter", None)
+        if converter is None:
+            return "not_parsed", None
+        if not material.get("content_sha256"):
+            return "not_parsed", None
+        try:
+            material_path = self._resolve_material_path(project_record, material)
+            if not material_path.exists():
+                return "not_parsed", None
+            key = self._cache_key_for_material(material, material_path)
+            return converter.status_for_key(key)
+        except Exception:  # noqa: BLE001 探测失败一律降级，绝不阻断材料列表
+            return "not_parsed", None
 
     def add_materials(self, project_ref: str, material_paths: Iterable[str], added_via: str) -> list[dict]:
         project_record = self.get_project_record(project_ref)
@@ -1640,6 +1665,11 @@ class SkillEngine:
             raise ValueError(f"项目 {project_ref} 不存在")
 
         material = self.get_material(project_ref, material_id)
+        return self._resolve_material_path(project_record, material)
+
+    @staticmethod
+    def _resolve_material_path(project_record: dict, material: dict) -> Path:
+        """从 material dict + project_record 直接解析落盘路径，不经 get_material（避免 list_materials 再入）。"""
         if material["source_type"] == "workspace":
             return (Path(project_record["workspace_dir"]) / material["stored_rel_path"]).resolve()
         return (Path(project_record["project_dir"]) / material["stored_rel_path"]).resolve()

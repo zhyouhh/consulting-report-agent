@@ -2009,3 +2009,75 @@ class R3FileApiTests(unittest.TestCase):
         r = self.client.get(f"/api/projects/{self.pid}/workspace")
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["flags"]["review_stale"])
+
+
+class MaterialConversionStatusApiTests(unittest.TestCase):
+    """N6 D2: GET /materials surfaces conversion_status per material (no 500 if unconverted)."""
+
+    def setUp(self):
+        self.client = TestClient(main_module.app)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        from backend.skill import SkillEngine
+        repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+        self.engine = SkillEngine(Path(self._tmp.name) / "projects", repo_skill_dir)
+        project = self.engine.create_project({
+            "name": "demo", "workspace_dir": str(Path(self._tmp.name) / "ws"),
+            "project_type": "strategy-consulting", "theme": "t",
+            "target_audience": "a", "deadline": "2026-04-01",
+            "expected_length": "3000 words", "notes": "n",
+        })
+        self.pid = project["id"]
+        self._patch = mock.patch.object(main_module, "skill_engine", self.engine)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def _add_text_material(self, name="note.txt", body="some-content"):
+        src = Path(self._tmp.name) / name
+        src.write_text(body, encoding="utf-8")
+        return self.engine.add_materials(self.pid, [str(src)], added_via="chat_upload")[0]
+
+    def test_materials_endpoint_reports_conversion_status_field(self):
+        # No converter wired → every material falls back to not_parsed, never 500.
+        self._add_text_material()
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)
+        items = r.json()["materials"]
+        self.assertTrue(len(items) >= 1)
+        for item in items:
+            self.assertIn("conversion_status", item)
+            self.assertIn("conversion_reason", item)
+            self.assertIn(item["conversion_status"], {"not_parsed", "parsed", "failed"})
+        self.assertEqual(items[0]["conversion_status"], "not_parsed")
+        self.assertIsNone(items[0]["conversion_reason"])
+
+    def test_materials_endpoint_reports_parsed_and_failed(self):
+        from backend.material_conversion import MaterialConverter
+        conv = MaterialConverter(
+            cache_dir=Path(self._tmp.name) / "cache",
+            vision_adapter=lambda *a: "V",
+            ocr_adapter=lambda p: "O",
+            capability_resolver=lambda: False,
+        )
+        self.engine.set_material_converter(conv)
+        parsed = self._add_text_material(name="parsed.txt", body="parsed-body")
+        failed = self._add_text_material(name="failed.txt", body="failed-body")
+        not_yet = self._add_text_material(name="fresh.txt", body="fresh-body")
+
+        # parsed: prime the .md cache via a real read
+        self.engine.read_material_file(self.pid, parsed["id"])
+        # failed: drop an .error tombstone at the material's key
+        key = self.engine._cache_key_for_material(
+            failed, self.engine.get_material_path(self.pid, failed["id"])
+        )
+        _, err_path = conv._cache_paths(key)
+        err_path.write_text("文档解析失败：BoomError", encoding="utf-8")
+
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)
+        by_id = {m["id"]: m for m in r.json()["materials"]}
+        self.assertEqual(by_id[parsed["id"]]["conversion_status"], "parsed")
+        self.assertIsNone(by_id[parsed["id"]]["conversion_reason"])
+        self.assertEqual(by_id[failed["id"]]["conversion_status"], "failed")
+        self.assertEqual(by_id[failed["id"]]["conversion_reason"], "文档解析失败：BoomError")
+        self.assertEqual(by_id[not_yet["id"]]["conversion_status"], "not_parsed")

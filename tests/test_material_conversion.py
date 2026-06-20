@@ -75,6 +75,46 @@ class DocConvertCacheTests(unittest.TestCase):
                     conv.convert_document(src)
 
 
+class StatusForKeyTests(unittest.TestCase):
+    """N6 D2: read-only status probe (no transcription / no request). v1 set = {not_parsed, parsed, failed}."""
+
+    def _conv(self, tmp):
+        return MaterialConverter(
+            cache_dir=Path(tmp), vision_adapter=lambda *a: "V",
+            ocr_adapter=lambda p: "O", capability_resolver=lambda: False,
+        )
+
+    def test_not_parsed_when_no_cache(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            conv = self._conv(tmp)
+            status, reason = conv.status_for_key("deadbeef-n6-v1")
+            self.assertEqual(status, "not_parsed")
+            self.assertIsNone(reason)
+
+    def test_parsed_when_md_cache_exists(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "a.txt"; src.write_text("内容", encoding="utf-8")
+            conv = self._conv(tmp)
+            key = conv._cache_key(src)
+            conv.convert_document(src)  # primes the .md cache
+            status, reason = conv.status_for_key(key)
+            self.assertEqual(status, "parsed")
+            self.assertIsNone(reason)
+
+    def test_failed_returns_tombstone_text(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            conv = self._conv(tmp)
+            key = "feedface-n6-v1"
+            _, err_path = conv._cache_paths(key)
+            err_path.write_text("文档解析失败：BoomError", encoding="utf-8")
+            status, reason = conv.status_for_key(key)
+            self.assertEqual(status, "failed")
+            self.assertEqual(reason, "文档解析失败：BoomError")
+
+
 class CacheGCTests(unittest.TestCase):
     def test_release_only_deletes_when_no_refs(self):
         import tempfile
