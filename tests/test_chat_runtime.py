@@ -13200,6 +13200,8 @@ class AppendReportDraftMutationsListTests(_WriteToolTestMixin, ChatRuntimeTests)
     def test_technical_bid_two_tables_append_records_append_action(self):
         # spec §3.5 落点锁：技术标后置两表用 append_report_draft 追加在草稿末尾，generative
         # 意图（"继续写技术标…"）下不被 modify-intent 拦，记 canonical_action=append（非 edit_file）。
+        # 注：append 路径不按 project_type 分支，此处用默认 strategy-consulting 项目行为与
+        # technical-bid 完全一致——测试名锁的是「两表 append 落点」这条 spec 决策，非 type 路由。
         handler = self._make_handler_with_project()
         old_draft = "# 技术标\n\n## 五、项目技术方案\n" + ("方案正文" * 30) + "\n"
         self._put_draft(old_draft)
@@ -13218,9 +13220,12 @@ class AppendReportDraftMutationsListTests(_WriteToolTestMixin, ChatRuntimeTests)
         mutation = turn_context["canonical_draft_mutations"][-1]
         self.assertEqual(mutation["tool"], "append_report_draft")
         self.assertEqual(mutation["canonical_action"], "append")  # draft 已存在 → append（非 first_draft）
+        self.assertEqual(mutation["old_len"], len(old_draft))          # 追加前旧稿长度
+        self.assertEqual(mutation["new_len"], len(two_tables.strip()))  # 追加内容长度（strip 后）
+        # 强内容断言：旧稿保留在前、两表追加在后，join 方式为 rstrip+"\n\n"+strip（_join_report_draft_append）
         draft = (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8")
-        self.assertIn("## 技术评分索引表", draft)
-        self.assertTrue(draft.rstrip().endswith("6.3 节 |"))  # 两表追加在草稿末尾
+        expected = f"{old_draft.rstrip()}\n\n{two_tables.strip()}"
+        self.assertEqual(draft, expected)  # 旧稿未被替换，两表追加在末尾，不多不少
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):
