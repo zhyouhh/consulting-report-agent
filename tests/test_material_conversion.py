@@ -58,3 +58,23 @@ class DocConvertCacheTests(unittest.TestCase):
             # 再次调用命中 tombstone 仍抛（不重复全量解析）
             with self.assertRaises(MaterialConversionError):
                 conv.convert_document(src)
+
+
+class CacheGCTests(unittest.TestCase):
+    def test_release_only_deletes_when_no_refs(self):
+        import tempfile
+        from backend.material_conversion import MaterialConverter
+        with tempfile.TemporaryDirectory() as tmp:
+            conv = MaterialConverter(cache_dir=Path(tmp), vision_adapter=lambda *a: "V",
+                                     ocr_adapter=lambda p: "O", capability_resolver=lambda: False)
+            src = Path(tmp) / "a.txt"; src.write_text("同内容", encoding="utf-8")
+            key = conv._cache_key(src)
+            conv.convert_document(src)
+            md_path, _ = conv._cache_paths(key)
+            self.assertTrue(md_path.exists())
+            # 两个材料引用同 hash：mat1, mat2
+            conv.retain(key, "mat1"); conv.retain(key, "mat2")
+            conv.release(key, "mat1")
+            self.assertTrue(md_path.exists())   # 还有 mat2 引用
+            conv.release(key, "mat2")
+            self.assertFalse(md_path.exists())  # 无引用才删

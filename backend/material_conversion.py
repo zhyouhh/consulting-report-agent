@@ -91,6 +91,30 @@ class MaterialConverter:
             self._atomic_write(md_path, md)
             return md
 
+    def _refs_path(self, key: str) -> Path:
+        return self.cache_dir / (key + ".refs")
+
+    def retain(self, key: str, material_id: str) -> None:
+        with self._lock_for(key):
+            refs = self._read_refs(key); refs.add(material_id)
+            self._atomic_write(self._refs_path(key), "\n".join(sorted(refs)))
+
+    def release(self, key: str, material_id: str) -> None:
+        with self._lock_for(key):
+            refs = self._read_refs(key); refs.discard(material_id)
+            if refs:
+                self._atomic_write(self._refs_path(key), "\n".join(sorted(refs)))
+                return
+            for p in (self._refs_path(key), *self._cache_paths(key)):
+                if p.exists():
+                    p.unlink()
+
+    def _read_refs(self, key: str) -> set[str]:
+        p = self._refs_path(key)
+        if not p.exists():
+            return set()
+        return {ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()}
+
     def _raw_convert_document(self, path: Path, suffix: str) -> str:
         if suffix in TEXT_SUFFIXES:
             return path.read_text(encoding="utf-8")
