@@ -46,6 +46,18 @@
 - **安全红线（web 新增威胁面，桌面版只绑 127.0.0.1 没有）**：① 每接口校验资源归属（A 不能读 B）；② `custom` 模式自填 API base 堵 SSRF；③ LLM / 搜索 per-user 日配额防滥用；④ 上传文件类型 / 大小 / 内容校验；⑤ 沿用报告内容 trust boundary（数据非指令）。
 - 待设计开放问题：会话方案、数据根布局、归属校验如何织入每个接口、并发键化改造粒度。
 
+### ✅ R5 方法论声明硬卡已修（2026-06-21，W1 GUI E2E 发现并当场修复，影响全 7 类）
+
+**已修**（2026-06-21，分支 `feat/w1-technical-bid-type`）：选了**不动 parser（trust boundary）**的方案——②`skill/plan-template/outline.md` 内置方法论声明槽位（`**方法论框架**：` + 引导注释，放在 `# 报告大纲` 与 `## 确认状态` 之间＝parser 唯一会扫的顶部区）让模型镜像模板就填对位置；③`_declare_and_invite_instruction` 把「outline.md 顶部」改成「第一行（在 `## 确认状态` 等二级标题之前）」消歧义。**没碰 parser 的 head 窗 / 净化逻辑**（改 break 级会破红队 `test_parse_methodology_ignores_declaration_below_body` 的 H2-章节语义、弱化「正文里声明不算」保护——故走模板+指令）。token 注入块 1694→1712 ≤2000。回归：3 新测试 + 25 个 parse 红队测试全绿。**根因复盘留档于下**：
+
+
+
+来源：2026-06-21 W1 技术标 GUI E2E（真模型 deepseek-v4-pro，web 模式）。现象：S1 阶段 agent 写出**有效**方法论声明行（`**方法论框架**：评分点对标响应法、WBS分解法、重难点对策分析法`，bid 框架名正确），但放在 outline.md 的 `## 确认状态` H2 段**之后**。`parse_and_sanitize_methodology` 只扫**首个 `## ` 标题之前**的 head（H1 不算），故扫不到 → 返回 `missing` → `methodology_declared` flag = False → 前端「确认大纲」按钮禁用 + 提示「请在大纲顶部补一行方法论声明（如『方法论框架：SWOT、波特五力』）」（连示例都是 SWOT，对技术标不贴）；且 `_validate_stage_checkpoint_transition` 的 `outline_confirmed_at` 分支对 `project_type in TYPE_SKELETON_MAP`（含全 7 类）**硬要求 `parse=='parsed'`** → 即便绕过前端按钮，checkpoint 也会 400。**用户在 S1 被硬卡、确认不了大纲**。
+- **根因实证**（2026-06-21）：把声明行挪到首个 H2 之前（无论是否 `**加粗**`）→ parse 立即 `parsed`（3 个 bid 框架名全认）；放在 `## 确认状态` 之后 → `missing`。即纯**位置**问题，非框架名、非加粗、非 W1。
+- **非 W1 引入**：parser 头窗策略 + outline 模板（`plan-template/outline.md` 首个 H2 是 `## 确认状态`）+ deepseek 摆放习惯三者交互；6 个老类型同样在 TYPE_SKELETON_MAP、同样会中招。R5 当初 E2E 用 fable5（声明放首行）没暴露；**这是首次真 deepseek E2E 走到 S1 确认**才浮现。
+- **W1 本身无辜且已验证**：bid 方法论注入 + RFP 驱动评分点结构 + bid 声明腔调（评分点对标响应法/WBS/重难点对策，非 SWOT）+ 后置两表 + 先讲结构请确认 + 字数复用预期篇幅，真模型全部正确落地（见 W1 cutover「GUI E2E」段）。
+- **修法候选**（待 brainstorm 选一）：① parser 放宽 head 窗口——不在 `## 确认状态` 处截断，扫到 `## 大纲结构` 前或前 N 行都收（最小改、根治）；② outline 模板 `plan-template/outline.md` 内置方法论声明占位行（在 `## 确认状态` 之前或独立 slot），引导模型填对位置；③ R5/bid 指令显式要求「方法论框架声明行必须是 outline.md 第一行正文、在任何 `## ` 之前」。建议 ①+② 组合。回归须扩 `test_skill_engine.py` 的 parse 用例覆盖「声明在 `## 确认状态` 后」。
+
 ### 🟡 mac 迁移后新一批想法（2026-06-19 · 待逐条定优先级）
 
 来源：2026-06-19 迁到 mac、web 模式开发环境跑通后用户口述的一批想法。**多数是 W2 产品化/web 化的前置松绑或既有债的细化**，已就地查实现状，记此防遗忘。环境现状：`uv` 托管 Python 3.12 建 `.venv`（系统 3.14 太新装不了依赖）、`run_web.py` → `http://localhost:8888` 可用、私有文件就位。

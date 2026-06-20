@@ -2898,6 +2898,47 @@ class SkillEngineTests(unittest.TestCase):
             state, selected = engine.parse_and_sanitize_methodology(outline)
         self.assertEqual(state, "missing")
 
+    def test_outline_scaffold_declares_methodology_slot_above_confirm_status(self):
+        # R5 修复（2026-06-21，W1 GUI E2E 实锤）：outline 模板必须内置方法论声明槽位、且在
+        # 「## 确认状态」之前——否则模型镜像模板把声明写到首个 ## 之下、parser 只扫首个 ## 之前
+        # 的顶部区 → 扫不到 → 确认大纲硬卡（影响全 7 类）。
+        template = (self.repo_skill_dir / "plan-template" / "outline.md").read_text(encoding="utf-8")
+        self.assertIn("**方法论框架**：", template)
+        # 按行首定位真正的声明行与标题行（「方法论框架」「## 确认状态」子串在引导注释里也出现，
+        # 用 .index 整串比对会误测注释内部顺序——codex NIT）。
+        lines = template.splitlines()
+        decl_line = next(i for i, ln in enumerate(lines) if ln.startswith("**方法论框架**："))
+        status_line = next(i for i, ln in enumerate(lines) if ln.startswith("## 确认状态"))
+        self.assertLess(
+            decl_line,
+            status_line,
+            "方法论声明行必须在「## 确认状态」标题之前（parser 只扫首个 ## 之前）",
+        )
+
+    def test_parse_methodology_parsed_when_declaration_in_scaffold_slot(self):
+        # 模型按新模板把声明填在 `# 报告大纲` 与 `## 确认状态` 之间 → parser 必须识别 parsed；
+        # 空槽位（未填）仍判 missing，确认门仍要求真填。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            filled = (
+                "# 报告大纲\n\n**方法论框架**：评分点对标、WBS、重难点对策\n\n"
+                "## 确认状态\n<!-- [ ] 初稿 | [x] 已确认 -->\n\n## 大纲结构\n### 一、对项目的理解\n"
+            )
+            state, selected = engine.parse_and_sanitize_methodology(filled)
+            self.assertEqual(state, "parsed")
+            self.assertIn("WBS", selected)
+            empty = "# 报告大纲\n\n**方法论框架**：\n\n## 确认状态\n"
+            self.assertEqual(engine.parse_and_sanitize_methodology(empty)[0], "missing")
+
+    def test_declare_and_invite_instruction_pins_declaration_before_confirm_status(self):
+        # ③：指令必须点明声明行在「## 确认状态」之前（消「顶部」歧义——GUI E2E 暴露 deepseek
+        # 把「顶部」理解成大纲内容顶部、放到了 ## 确认状态 之下）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for slug in ("strategy-consulting", "technical-bid"):
+                instr = engine._declare_and_invite_instruction(slug)
+                self.assertIn("确认状态", instr, slug)
+
     def test_parse_methodology_allows_spaced_offmenu_framework(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self._bare_engine(tmp)
