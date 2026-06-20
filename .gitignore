@@ -14,6 +14,10 @@ __pycache__/
 .env
 managed_client_token.txt
 managed_search_pool.json
+ADDPOOL.txt
+
+# 客户参考样本：真实投标文件（广西电网技术标，~422MB + 客户机密），仅本地参考、不入库
+bid reference/
 
 # Python
 *.py[cod]

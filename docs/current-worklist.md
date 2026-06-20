@@ -1,6 +1,8 @@
 # Current Worklist
 
-最后更新：2026-06-15（**新方向：服务器化 + 多用户 Web 部署 + 标书模板** —— 2026-06-15 给领导汇报后，领导明确要求「迁服务器 / 做网页给人用 / 加用户系统」，= 上方原记的产品化方向 **b 解 park**。已定：**不拆仓库**（web 作本仓库「运行模式」、引擎共用）、范围＝**公网熟人 + 登录与工作区隔离**、试用机 **kr-web-01**[腾讯云首尔，登记在 VPS-fix 库]、模型**留 `deepseek-v4-pro` 别降级**。标书模板＝引擎级前置特性、建议先做。两者**均待设计**（下一步 brainstorm→plan）。详见下方「🟢 服务器化…」簇。R1–R5 整改簇此前已全部闭环合 main `0162ef1`。）
+最后更新：2026-06-20（**轮 1 设计闭环：N6 + W1 spec/plan 全 codex APPROVED，待实施**——本会话 brainstorm→spec→plan：N6 附件管线 **spec(5 轮)+plan(7 轮·含红队)** 均 APPROVED（红队挖出『限额测试假阳性·没装限额也过』『缓存键里 `/` 拆子目录·原子写失败』『attachment 事件缺 message_id/attachment_id 端到端协议』『MaterialConverter 反向依赖 SkillEngine 破边界』等深坑）；W1 技术标 **spec(4 轮)+plan(2 轮·含红队)** APPROVED（plan 红队挖出 task 次序错位+SWOT 字面、append 测试签名错、overview 占位 replace-key desync 三个 BLOCKER，均已修）。期间**上机只读核实** jp-app-01 薄网关拓扑（容器→本地 new-api→硅基流动渠道 60 Qwen3-VL），据实把 N6 proxy 设计从「自建 per-model 路由」简化为「透传+`SELECTABLE_MODELS`」。**设计产物（spec/plan）本次已 commit；代码均未实施**。**下一步：新会话走实施（N6 先于 W1）**。详见下方 W1/N6 条。）
+
+上一次更新：2026-06-15（**新方向：服务器化 + 多用户 Web 部署 + 标书模板** —— 2026-06-15 给领导汇报后，领导明确要求「迁服务器 / 做网页给人用 / 加用户系统」，= 上方原记的产品化方向 **b 解 park**。已定：**不拆仓库**（web 作本仓库「运行模式」、引擎共用）、范围＝**公网熟人 + 登录与工作区隔离**、试用机 **kr-web-01**[腾讯云首尔，登记在 VPS-fix 库]、模型**留 `deepseek-v4-pro` 别降级**。标书模板＝引擎级前置特性、建议先做。两者**均待设计**（下一步 brainstorm→plan）。详见下方「🟢 服务器化…」簇。R1–R5 整改簇此前已全部闭环合 main `0162ef1`。）
 
 上一次更新：2026-06-11（**批 3 R4+R5 ✅ 全完成并合并 main `0162ef1` + 重打干净包**——subagent-driven 11 task[A1+B1-B10] + codex 双轨/红队逐 task APPROVED，commit `584abb6`→`86b6b24`，skill_engine 210/packaging 14/前端 299/build 绿；红队审实现挖出 plan 文档级没暴露的 trust boundary/并发真洞[B3 5轮分隔符绕过→归一化根治、B4 半提交→自愈+temp竞态、B7 DeepSeek 5攻击面守住]；cutover `cutover_report_2026-06-10_batch3-source-credibility-and-methodology.md`、CLAUDE.md/AGENTS.md 已同步 R4/R5 硬约束段；GUI E2E ✅（2026-06-11 fable5 真模型 deepseek-v4-pro 全程：R4 52 条 data-log 色点[赛迪挂 news.cn 仍 🟡/财联社转述 ⚪ 印证按机构性质]+R5 大纲首行声明/章节内化/`__methodology_snapshot` 与 outline_confirmed_at 同刻冻结 全 PASS，14 commit `584abb6`→`deed618`）→ merge main `0162ef1`(--no-ff) + 清 dist/build 重打干净包(build.ps1 exit 0、前端 vite 重构、307MB) + push origin；剩 follow-up[checkpoint 写事务化/backfill 窄锁，桌面单用户低优先级]。— 批 2 R3 已 merge main `53c52fd`+push；批 1 R1+R2 已闭环 main `f111f0e`+push。整个 R1-R5 整改簇至此全部实施闭环。）
 
@@ -12,7 +14,8 @@
 
 来源：2026-06-15 给领导汇报后，领导明确要求「迁到服务器、做成网页给人用、加用户系统」（动因：同事都用 Mac，桌面版只 Windows 分发、用不了）。即上方原记的产品化方向 **b（部门内部共享部署）**——此前 park，现领导亲自提出，**解 park、定为下一个方向**。
 
-**执行顺序（建议）**：先 W1 标书模板（独立引擎特性、上线前要、风险低），再 W2 web 化（动筋骨、先正经设计）。两者**均尚未设计**，下一步 brainstorm → plan/spec。
+**执行顺序（更新 2026-06-20）**：**轮 1 = W1 标书 + N6 附件**（两个独立引擎特性，各自 spec/plan，**不合并成一个 plan**——体量/风险差太多、稀释 review）。**N6 先做**（拥有材料层 + W1 依赖的强安全边界；且 N6 §5 接管文件 size 守门后，W1 那点后端守门退化为纯 prompt+配置）→ **W1 后**（更小）。W2 web 化排在轮 1 之后。
+- **轮 1 进度（2026-06-20）**：N6 spec ✅ + plan ✅、W1 spec ✅ + plan ✅ 均 codex APPROVED；**两份设计产物本次已 commit**。详见各条。两者**代码均未实施**——下一步新会话走实施，**N6 先于 W1**。
 
 **已定决策（避免重新讨论）**：
 - **不拆仓库**：web 是本仓库的「运行模式」（`run_web.py` 已存在 + `app.py` 桌面入口），引擎共用，web 特有的登录/多租户放界限清楚的新模块（`backend/auth/` 等）+ mode 开关隔开。曾一度建过独立仓库 `consulting-report-agent-web` 又删了。**两线都长期活跃才抽共享包 `consulting-report-core`，现在抽是过度设计**。
@@ -21,9 +24,13 @@
 - **服务器**：试用机 `kr-web-01`（腾讯云轻量首尔 2C2G+swap+40G，Debian 13，SSH 2233，已 fail2ban+ufw+komari），登记在 VPS-fix 库 `notes/kr-web-01.md`（运维不在本项目重复）。渠道商代购、**非自有账号、仅试用、转生产换自有/公司账号正经实例**。Linux 部署、不 PyInstaller、venv 跑 uvicorn。
 - **成本**：先垫钱、推广试用后报销。
 
-**W1. 标书（技术方案）报告类型模板** — 状态：`待设计`
-- 用户想在 web 上线前给引擎加「标书 / 技术方案」类型，属**引擎级特性**（新 `project_type` + 方法论框架，接 R5 `build_methodology_block` 路由），加一次桌面 + web 都吃到——这也是「不 fork」的核心理由。跟 web 化**解耦、建议先做**。
-- 涉及（预估）：`backend/skill.py`（`project_type` 骨架 + `FRAMEWORK_MENU` / 类型腔调）、`skill/SKILL.md`、前端类型选择。brainstorm 要定：标书该长啥样、套哪个框架（SMART / RACI / 章-条-款-项…）、跟现有类型怎么并存。
+**W1. 标书（技术标）报告类型模板** — 状态：`spec ✅ APPROVED（codex 4 轮）；plan ✅ APPROVED（codex 2 轮·含红队）；未实施`
+- spec：`docs/superpowers/specs/2026-06-20-w1-technical-bid-type-design.md`、plan：`docs/superpowers/plans/2026-06-20-w1-technical-bid-type.md`（实施真值源，10 个 TDD task）。
+- **plan 关键决策（偏离 spec §3.1，已用户拍板）**：technical-bid **不注入通用 `FRAMEWORK_MENU`**——实测「骨架+RFP+后置+护栏全塞进『## 二』」叠加 531-token 菜单会爆 token≤2k 预算（最坏 2128>2000），且通用分析框架菜单对 RFP 驱动的技术标本就误导。plan Task 1 引 `_framework_menu_for_type` seam（bid 返 ""，其余 6 类不变），跳过后最坏 1679、余量 321。参考骨架据 `bid reference/` 真实样本校准（理论政策依据升格独立块前移、重难点两段式、实施管理五件套、人员附佐证清单）；模块 RFP 段强制「拟好结构先讲给用户确认/调整再展开正文」（用户：参考骨架只能参考、最终结构由人拍板）。
+- **范围已定**（brainstorm 拍板）：只做**技术标主体**，主要用于**副标**（替别家公司写的陪标，内容与主标相近、字数可少、质量松——用户："更多时候只是字数差别"），质量按主标看齐做。参考样本在仓库 `bid reference/`（1 主标+3 副标真实 docx，广西电网数据资源入表；写 plan 时据此精修参考骨架）。
+- **关键设计**：① 新第 7 个 `project_type=technical-bid` + `METHODOLOGY_TONE` 新腔调 `bid`，接 R5 `build_methodology_block`；② 骨架是**参考非模板**——结构由本次招标文件/技规评分点决定（RFP 驱动，参考骨架兜底）；③ 评分索引表 + 点对点应答**后置生成**（正文 append 完再 append 在草稿末尾，「写最前」交导出排版期；不用 edit_file——撞 generative-intent 拦截/cap）；④ 字数复用「预期篇幅」、不加主/副开关；⑤ 含一点轻量后端（`size_bytes` 守门，但 N6 先做后这块被 N6 吸收）。
+- 危险词坑：方法论声明行框架名避开 `覆盖`/`推进` 等（在 `_METHODOLOGY_DANGER_SUBSTRINGS`，命中判 malformed），用「评分点对标/点对点应答/WBS/重难点对策」。
+- 涉及：`backend/skill.py`（`TYPE_SKELETON_MAP`+`METHODOLOGY_TONE`+`_declare_and_invite_instruction` bid 分支）、新 `skill/modules/technical-bid.md`、前端 `ProjectCreateModal.jsx` 下拉、`skill/plan-template/project-overview.md` 旧类型清单同步。
 
 **W2. 服务器化 + 多用户 Web 化** — 状态：`待设计（大改、先出 spec/plan）`
 - 迁移工作项：
@@ -36,6 +43,47 @@
   - **部署**：venv 跑 uvicorn + Cloudflare 域名 / HTTPS。
 - **安全红线（web 新增威胁面，桌面版只绑 127.0.0.1 没有）**：① 每接口校验资源归属（A 不能读 B）；② `custom` 模式自填 API base 堵 SSRF；③ LLM / 搜索 per-user 日配额防滥用；④ 上传文件类型 / 大小 / 内容校验；⑤ 沿用报告内容 trust boundary（数据非指令）。
 - 待设计开放问题：会话方案、数据根布局、归属校验如何织入每个接口、并发键化改造粒度。
+
+### 🟡 mac 迁移后新一批想法（2026-06-19 · 待逐条定优先级）
+
+来源：2026-06-19 迁到 mac、web 模式开发环境跑通后用户口述的一批想法。**多数是 W2 产品化/web 化的前置松绑或既有债的细化**，已就地查实现状，记此防遗忘。环境现状：`uv` 托管 Python 3.12 建 `.venv`（系统 3.14 太新装不了依赖）、`run_web.py` → `http://localhost:8888` 可用、私有文件就位。
+
+**进度（2026-06-19）**：N1–N4 四个 quick win **已全部实施 + codex review APPROVED**（首轮挖 1 BLOCKER[N3 target_audience=None → `str.replace(None)` 崩]+1 NIT[N4 拖动监听卸载泄漏]，均已修 + 回归测试，二轮 APPROVED）。后端 1089 pass / 前端 305 pass / vite build 绿。N5–N7 仍待设计。
+- ⚠️ **macOS 测试坑（预存、非本批回归）**：`test_skill_engine.py`/`test_workspace_materials.py` 有 **4 个用例在 mac 上失败**，根因是 macOS `tempfile` 给 `/var/folders/…` 但系统解析成 `/private/var/folders/…`（symlink），测试拿未解析的临时路径比对已解析路径 → `relative_to`/相等失败；**Windows 上通过**。属测试夹具 realpath 问题，要 mac 测试全绿需把这些用例的临时路径断言改走 `os.path.realpath`/`.resolve()`（独立小任务，未做）。
+- ⚠️ **改 `managed_search_pool.json` 后需重启服务**：路由单例加载后不热重载（`_SEARCH_ROUTER_SINGLETON`），N1 限额 + N2 新 key 要重启 `run_web.py` 才生效。
+
+**N1. 放开搜索/写作额度（quick win，纯参数）** — 状态：`✅ 完成（搜索 5/30/60 + 写作 MAX_CANONICAL_MUTATIONS_PER_TURN 10；含 test_report_writing/test_chat_runtime 同步 + CLAUDE/AGENTS doc）`
+- 搜索：`managed_search_pool.json` `limits` 段现 `per_turn_searches=2 / project_minute_limit=10 / global_minute_limit=20`，**改 JSON 即生效**（路由单例加载后不热重载，要重启）。建议 `5 / 30 / 60`。
+- 写正文：`backend/report_writing.py:119 MAX_CANONICAL_MUTATIONS_PER_TURN`，一行常量，**已 3→10（用户定）**。与 `342d439`（stream max_iterations 20→50）同思路。
+- 动因：web/产品化不能保留单机这么紧的限制；桌面单用户时代的保守值。
+
+**N2. ADDPOOL 搜索 key 接入做轮询（small code change）** — 状态：`✅ 完成（方案 B）`
+- 落地：`config.py` `ManagedSearchProviderConfig` 加 `api_keys: tuple[...]` + `__post_init__` 与单 `api_key` 互相回填；`_parse_provider_api_keys` 兼容 `api_keys` 列表与 `api_key` 单值；`search_providers.py` `BaseSearchProvider` 加 `_next_api_key()` 线程安全轮转、`_request_payload(query, api_key)` 4 provider 统一改签名按 key 发请求；`chat.py` 工厂传 `api_keys`。ADDPOOL 5 个 key 已并入 `managed_search_pool.json`（serper 2/tavily 3/exa 3/brave 1），**daily_soft_limit 按 key 数缩放**（serper 5000/tavily 3000/exa 3000）让轮询有实际余量。`ADDPOOL.txt` 已并入并删除、且已 gitignore。
+- 测试：`test_config`（多 key 解析 + 单 key 回填）、`test_search_providers`（4 次轮转 a/b/c/a + 单 key 兼容 + header 断言）。
+- 原现状实锤（保留备查）：旧 schema 一 provider 一个 `api_key`、不支持同 provider 多 key（`config.py:120`）；ADDPOOL 是另一项目 env 格式（`SEARCH_*_KEYS=k1,k2`）。
+
+**N3. 删「报告面向对象/目标读者」字段（高层/中层/执行）** — 状态：`✅ 完成`
+- 落地：前端移除选择器 + initialForm 字段 + `projectCreatePayload` 不再带 + `chatPresentation` 欢迎语不再显示目标读者。后端 `models.py` 字段改**可选 default ""**（非删，向后兼容旧客户端/老项目）；`skill.py` normalize **显式归一 None/空白→""**（codex BLOCKER：原 setdefault 兜不住显式 None → `str.replace(None)` 崩）+ `_populate_v2_plan_files` 防御性归一 + 目标读者留空时项目目标句省略「面向…」避病句。独立审查维度「## 5. 目标读者匹配」保留（概念独立、报告仍有读者）。
+- 测试：新增 `test_create_project_without_target_audience_does_not_crash`；前端 projectCreateModal/chatPresentation source-guard + payload 断言同步。
+- 备注：HTTP 显式传 `target_audience: null` 仍会 422（schema 是 `str` default 非 `str|None`）——省略字段才是正路，前端已省略，非崩溃路径，不处理。接既有待办 #7。
+
+**N4. 文件栏布局调整（small frontend）** — 状态：`✅ 完成`
+- 落地：① 文件树高度由 `treePct` 状态驱动、**默认三七分**（30/70），去掉固定 `max-h-64`；② 新增可拖动分隔条（`startTreeResize` window 级监听 + 卸载兜底清理，codex NIT：防中途卸载泄漏）；③ `fileTree.js` **当前阶段所在分组置顶**（splice+unshift，其余保持 GROUP_ORDER 流水线序 → 上一阶段自然紧随）。拖动数学抽 `utils/filePanelLayout.js`（`clampTreePct`/`computeTreePct` 纯函数 + 单测，无 jsdom）。
+- 测试：`filePanelLayout.test.mjs`（clamp/compute 边界）、`fileTree.test.mjs`（当前组置顶 + 已置顶时保序）、`filePreviewPanel.source.test.mjs`（state 高度 + 拖动 + 卸载清理 source-guard）。
+
+**N5. 用户系统 × 自定义 API 兼容（W2 子题）** — 状态：`待设计`
+- 开放问题：登录后多租户下，`custom` 模式（用户自填 OpenAI 兼容 key/base）与 managed 模式怎么并存？per-user 存各自 custom 配置？custom 模式的 SSRF/配额口子（W2 安全红线②③）。并入 W2 spec 一起设计。
+
+**N6. 附件机制 + 图片分流（接既有 #4 债）** — 状态：`spec ✅ APPROVED（codex 5 轮）+ plan ✅ APPROVED（codex 7 轮）；待实施；未 commit`
+- spec：`docs/superpowers/specs/2026-06-20-n6-attachment-pipeline-design.md`；plan：`docs/superpowers/plans/2026-06-20-n6-attachment-pipeline.md`（A–F 六阶段 ~25 TDD task，实施前读全文）。
+- **关键设计**：① 文档 **markitdown 全替换**（删 `_read_docx/_xlsx/_pdf`，新增 pptx/老 .doc/.ppt 经 LibreOffice headless）；② 图片**三级降级**——多模态主模型直喂 / 否则**视觉模型转写**（`Qwen/Qwen3-VL-8B-Instruct`）/ OCR（RapidOCR）兜底 / 友好失败；统一覆盖**持久图片材料 + transient 两路**，结清 #4（删前端 `supportsImageAttachments` 拦截）；③ 新模块 `backend/material_conversion.py:MaterialConverter`（依赖注入、不反向 import chat.py）；④ 缓存内容 hash + refcount + 原子写 + tombstone；transient 转写存消息独立字段 `attachment_transcripts`、不污染意图、防注入数据块包裹 + 压缩边界。
+- **薄网关已上机核实拓扑（2026-06-20 SSH 只读）**：薄网关 = `consulting-report-managed-proxy` 容器在 **jp-app-01**（`43.153.168.175:2233`，连接走 VPS-fix 库 `notes/jp-app-01.md`），上游指**本地 new-api**（`127.0.0.1:3000`）；**new-api 已按模型名路由**，**硅基流动渠道 id 60 已配已启用、含 Qwen3-VL 一批**。故 proxy 改 = **白名单透传 + 新 `MANAGED_PROXY_SELECTABLE_MODELS`**（`/v1/models` 仍只露 deepseek-v4-pro），**不需自建 per-model upstream**。ops 步 = 改 proxy env(`ALLOWED_MODELS` 加视觉模型)+重部署容器（动线上前确认）。
+- **N6 先于 W1**：N6 接管材料层 + size 守门 + 材料 trust boundary（W1 安全强边界依赖它）。
+
+**N7. S5 质量审查重做：AI 味自查太生硬 / 考虑与独立审查合并** — 状态：`待设计`
+- 现状：「AI 味自查」是 PowerShell 脚本 `skill/scripts/quality_check.ps1`（4 机械维度，写 `plan/lint-report.md`）；「独立审查」是 LLM 会话 `IndependentReviewAgent`（5 维度，写 `plan/independent-review.md`）。脚本式生硬 + 去 Windows 化本就要把它改 Python。
+- 想法：参考 Humanizer-zh skill（https://github.com/op7418/Humanizer-zh）重做 AI 味判断，或**直接和独立审查合并成「一个审查」**。brainstorm 时定：合并 vs 并存、用 LLM 替脚本后两按钮要不要并一个。
+- 关联：去 Windows 化（W2，`quality_check.ps1`/`export_draft.ps1` 改 Python）。
 
 ### 🔴 领导评审反馈整改（2026-06-05，高优先簇 · 整体高于下方「UI 重构」一档）
 
