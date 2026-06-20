@@ -2536,6 +2536,42 @@ class SkillEngineTests(unittest.TestCase):
         # bid tone 分支，build_methodology_block 此刻走 analytical fallback（含 SWOT 字样），
         # 在此断言 assertNotIn("SWOT") 会误挂（codex R1 BLOCKER 1）。
 
+    def test_declare_and_invite_instruction_bid_tone_uses_dunhao_and_safe_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            instr = engine._declare_and_invite_instruction("technical-bid")
+        # bid 腔调要点：依招标文件/技规评分点组织结构 + 逐条响应
+        self.assertIn("评分点", instr)
+        self.assertIn("点对点应答", instr)
+        # 框架举例之间用顿号（codex R5 BLOCKER 4：用 + / 空格会被 parser 判 malformed）
+        self.assertIn("评分点对标、点对点应答", instr)
+        # 安全词：声明腔调举例不得含危险归一化词（覆盖/推进/检查点…，codex R1 NIT 3）
+        for bad in ("覆盖", "推进", "回退", "检查点", "门禁"):
+            self.assertNotIn(bad, instr)
+
+    def test_bid_declaration_line_parses_as_parsed(self):
+        # bid 典型框架名（中文，走 off-menu 白名单）应被净化判 parsed，不卡确认门。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            outline = "# 报告大纲\n\n方法论框架：评分点对标、点对点应答、WBS、重难点对策\n\n## 一、对项目的理解\n- x\n"
+            state, frameworks = engine.parse_and_sanitize_methodology(outline)
+        self.assertEqual(state, "parsed")
+        self.assertIn("评分点对标", frameworks)
+        self.assertIn("点对点应答", frameworks)
+        self.assertIn("WBS", frameworks)
+
+    def test_build_methodology_block_technical_bid_s1_uses_bid_tone(self):
+        self._make_technical_bid_project_at_s1()
+        block = self.engine.build_methodology_block("demo")
+        self.assertIn("方法论声明", block)
+        self.assertIn("评分点对标、点对点应答", block)
+        self.assertIn("方法论框架：", block)  # 顿号声明格式保留
+        self.assertIn("〕、〔", block)
+        # bid 不注入通用框架菜单（Task 1 seam 跳过 FRAMEWORK_MENU），且 bid tone 文案不含
+        # SWOT 字面（codex R1 BLOCKER 1：菜单 + analytical fallback 都会带入 SWOT）。
+        self.assertNotIn("SWOT", block)
+        self.assertNotIn("波特五力", block)
+
     def test_build_methodology_block_s1_has_declaration_and_invite(self):
         project_dir = self._make_project()
         self._write_stage_two_prerequisites(project_dir)  # S1（未确认）

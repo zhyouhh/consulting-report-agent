@@ -2834,7 +2834,13 @@ class SkillEngine:
         tone = self.METHODOLOGY_TONE.get(project_type, "analytical")
         # 注意：腔调举例里框架之间一律用「顿号」分隔，与声明行格式（顿号分隔）一致——
         # 否则模型照提示用 + / 空格连接，会被 B3 parser 判 malformed、卡住确认门（codex R1 BLOCKER 4）。
-        if tone == "structural":
+        if tone == "bid":
+            tone_line = (
+                "本技术标的方法＝依招标文件/技规评分点组织结构，并逐条响应；"
+                "在声明里写清所用方法（如评分点对标、点对点应答、WBS、重难点对策）。"
+                "结构以招标文件为准，不要硬贴通用分析框架。"
+            )
+        elif tone == "structural":
             tone_line = (
                 "本报告的「方法论」是结构纪律：管理制度用「章-条-款-项」规范结构；"
                 "实施方案用 SMART、RACI、里程碑。按本报告类型选，不要硬贴 SWOT 之类分析框架。"
