@@ -7,7 +7,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -118,6 +118,8 @@ class SettingsUpdate(BaseModel):
     mode: Literal["managed", "custom"]
     managed_base_url: str
     managed_model: str
+    managed_vision_model: Optional[str] = None
+    vision_enabled: Optional[bool] = None
     custom_api_base: str = ""
     custom_api_key: str = ""
     custom_model: str = ""
@@ -131,6 +133,10 @@ async def update_settings(update: SettingsUpdate):
         settings.mode = update.mode
         settings.managed_base_url = update.managed_base_url
         settings.managed_model = update.managed_model
+        if "managed_vision_model" in update.model_fields_set and update.managed_vision_model is not None:
+            settings.managed_vision_model = update.managed_vision_model
+        if "vision_enabled" in update.model_fields_set and update.vision_enabled is not None:
+            settings.vision_enabled = update.vision_enabled
         settings.custom_api_base = update.custom_api_base
         if update.custom_api_key != "***":
             settings.custom_api_key = update.custom_api_key

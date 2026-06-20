@@ -497,6 +497,22 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertEqual(resolved, config_dir / "search_cache.json")
 
 
+class VisionSettingsTests(unittest.TestCase):
+    def test_settings_has_vision_defaults(self):
+        from backend.config import Settings
+        s = Settings()
+        self.assertEqual(s.managed_vision_model, "Qwen/Qwen3-VL-8B-Instruct")
+        self.assertTrue(s.vision_enabled)
+
+    def test_legacy_config_without_vision_fields_loads(self):
+        from backend.config import normalize_settings_payload
+        out = normalize_settings_payload({"mode": "managed"})
+        self.assertIn("managed_vision_model", out)
+        self.assertIn("vision_enabled", out)
+        self.assertEqual(out["managed_vision_model"], "Qwen/Qwen3-VL-8B-Instruct")
+        self.assertTrue(out["vision_enabled"])
+
+
 class HealStaleManagedModelTests(unittest.TestCase):
     """Auto-heal: when stored managed_model is no longer in proxy /v1/models,
     swap to first available so old configs survive an exe upgrade with a

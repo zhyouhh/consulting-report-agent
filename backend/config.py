@@ -8,6 +8,7 @@ import sys
 
 DEFAULT_MANAGED_BASE_URL = "https://newapi.z0y0h.work/client/v1"
 DEFAULT_MANAGED_MODEL = "deepseek-v4-pro"
+DEFAULT_MANAGED_VISION_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 DEFAULT_MANAGED_SEARCH_API_URL = "https://search.z0y0h.work/search"
 DEFAULT_MANAGED_CLIENT_TOKEN = "managed"
 MANAGED_CLIENT_TOKEN_FILENAME = "managed_client_token.txt"
@@ -240,6 +241,8 @@ class Settings(BaseSettings):
     # 默认托管通道
     managed_base_url: str = DEFAULT_MANAGED_BASE_URL
     managed_model: str = DEFAULT_MANAGED_MODEL
+    managed_vision_model: str = DEFAULT_MANAGED_VISION_MODEL
+    vision_enabled: bool = True
     managed_search_api_url: str = DEFAULT_MANAGED_SEARCH_API_URL
     managed_client_token: str = Field(default_factory=get_default_managed_client_token)
 
@@ -298,6 +301,8 @@ def normalize_settings_payload(data: dict) -> dict:
 
     normalized.setdefault("managed_base_url", DEFAULT_MANAGED_BASE_URL)
     normalized.setdefault("managed_model", DEFAULT_MANAGED_MODEL)
+    normalized.setdefault("managed_vision_model", DEFAULT_MANAGED_VISION_MODEL)
+    normalized.setdefault("vision_enabled", True)
     normalized.setdefault("managed_search_api_url", DEFAULT_MANAGED_SEARCH_API_URL)
     normalized["managed_client_token"] = runtime_managed_token
     normalized.setdefault("custom_api_base", normalized.get("api_base", ""))
