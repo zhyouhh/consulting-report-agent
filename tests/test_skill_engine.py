@@ -646,6 +646,20 @@ class SkillEngineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "工作目录无效"):
                 engine.create_project(self._project_payload(workspace_file))
 
+    def test_create_project_replaces_report_type_placeholder(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for ptype in ("strategy-consulting", "technical-bid"):
+                project = engine.create_project(self._project_payload(
+                    Path(tmp) / f"ws-{ptype}",
+                    project_type=ptype, name=f"demo-{ptype}", theme=f"主题-{ptype}",
+                ))
+                overview = (Path(project["project_dir"]) / "plan" / "project-overview.md").read_text(encoding="utf-8")
+                # 占位必须被实际 project_type 替换，不残留原始占位清单方括号
+                self.assertIn(f"**报告类型**: {ptype}", overview)
+                self.assertNotIn("战略咨询/市场研究", overview)  # 原始占位清单不得残留
+
     def test_get_project_path_ignores_unregistered_legacy_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"

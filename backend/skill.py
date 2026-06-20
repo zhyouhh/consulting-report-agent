@@ -1059,7 +1059,7 @@ class SkillEngine:
         )
         replacements = {
             "[填写项目名称]": name,
-            "[战略咨询/市场研究/尽职调查/运营优化]": project_type,
+            "[战略咨询/市场研究/专项研究/管理制度/实施方案/尽职调查/技术标]": project_type,
             "[描述客户背景、行业环境、当前面临的挑战]": theme,
             "[具体、可衡量的项目目标]": project_goal,
             "[填写目标读者]": target_audience,
