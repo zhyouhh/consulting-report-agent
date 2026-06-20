@@ -247,6 +247,7 @@ class SkillEngine:
         "management-document": "management-system.md",
         "implementation-plan": "implementation-plan.md",
         "due-diligence": "due-diligence.md",
+        "technical-bid": "technical-bid.md",
     }
 
     # R5: 类型→声明腔调（§7.3）。analytical=招牌框架；structural=结构纪律；specialized=按子题。
@@ -257,6 +258,7 @@ class SkillEngine:
         "management-document": "structural",
         "implementation-plan": "structural",
         "specialized-research": "specialized",
+        "technical-bid": "bid",
     }
 
     # R5: 共享分析框架菜单（横向对所有类型可用，v1 仅菜单一行；细节全文留 v2）。

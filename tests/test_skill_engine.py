@@ -2467,20 +2467,23 @@ class SkillEngineTests(unittest.TestCase):
     def _bare_engine(self, tmp):
         return SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
 
-    def test_type_skeleton_map_covers_six_slugs(self):
+    def test_type_skeleton_map_covers_seven_slugs(self):
         self.assertEqual(
             set(SkillEngine.TYPE_SKELETON_MAP),
             {
                 "strategy-consulting", "market-research", "specialized-research",
                 "management-document", "implementation-plan", "due-diligence",
+                "technical-bid",
             },
         )
         # management-document slug 映射到 management-system.md（slug≠文件名）
         self.assertEqual(SkillEngine.TYPE_SKELETON_MAP["management-document"], "management-system.md")
+        self.assertEqual(SkillEngine.TYPE_SKELETON_MAP["technical-bid"], "technical-bid.md")
         self.assertEqual(
             set(SkillEngine.TYPE_SKELETON_MAP), set(SkillEngine.METHODOLOGY_TONE),
             "TYPE_SKELETON_MAP 与 METHODOLOGY_TONE 的 slug 集必须一致（B6 用 TONE.get fallback，漂移会静默错腔调）",
         )
+        self.assertEqual(SkillEngine.METHODOLOGY_TONE["technical-bid"], "bid")
 
     def test_framework_menu_for_type_skips_menu_for_technical_bid(self):
         # 技术标按评分点驱动、不靠挑分析框架；通用菜单既误导又挤爆 token 预算（spec §3.2 + 用户拍板）。
@@ -2496,6 +2499,42 @@ class SkillEngineTests(unittest.TestCase):
                 engine._framework_menu_for_type("custom-unknown"),
                 SkillEngine.FRAMEWORK_MENU,
             )
+
+    def _make_technical_bid_project_at_s1(self) -> Path:
+        """建一个 technical-bid 项目并推到 S1（未确认）。"""
+        project_dir = self._make_project()
+        registry = self.engine._load_registry()
+        registry["projects"][0]["project_type"] = "technical-bid"
+        self.engine._save_registry(registry)
+        self._write_stage_two_prerequisites(project_dir)
+        self.assertEqual(self.engine._infer_stage_state(project_dir)["stage_code"], "S1")
+        return project_dir
+
+    def test_build_methodology_block_technical_bid_injects_all_rule_subsections(self):
+        self._make_technical_bid_project_at_s1()
+        block = self.engine.build_methodology_block("demo")
+        # 参考骨架（框定为「参考，以 RFP 为准」）
+        self.assertIn("招标文件", block)
+        self.assertIn("技术评分索引表", block)
+        self.assertIn("技术规范书点对点应答", block)
+        # RFP 驱动：结构真来源 + 先与用户讨论确认结构 + 不漏项
+        self.assertIn("结构真来源", block)
+        self.assertIn("请其确认或调整", block)  # 章节结构须先讲给用户、由用户拍板（非闷头按骨架/RFP 定）
+        self.assertIn("最终结构由用户拍板", block)  # codex R1 NIT：锁强确认语义，防后续改文案降级成弱确认
+        self.assertIn("再展开正文", block)
+        self.assertIn("漏项", block)
+        # 后置生成：append 两表在末尾、不用 edit_file、跨轮先 read_file
+        self.assertIn("append_report_draft", block)
+        self.assertIn("不要用 `edit_file`", block)
+        self.assertIn("read_file", block)
+        # 字数/质量护栏
+        self.assertIn("预期篇幅", block)
+        self.assertIn("张冠李戴", block)
+        # 「## 三」段不注入
+        self.assertNotIn("撰写要点", block)
+        # 注：bid 不注入通用菜单（assertNotIn SWOT/波特五力）的锁测放 Task 3——本 Task 尚未实现
+        # bid tone 分支，build_methodology_block 此刻走 analytical fallback（含 SWOT 字样），
+        # 在此断言 assertNotIn("SWOT") 会误挂（codex R1 BLOCKER 1）。
 
     def test_build_methodology_block_s1_has_declaration_and_invite(self):
         project_dir = self._make_project()
@@ -2635,7 +2674,8 @@ class SkillEngineTests(unittest.TestCase):
             for slug in SkillEngine.TYPE_SKELETON_MAP:
                 skeleton = engine.load_type_skeleton(slug)
                 instr = engine._declare_and_invite_instruction(slug)  # S1 块（含菜单，最大）
-                block = engine._render_methodology_block(skeleton, SkillEngine.FRAMEWORK_MENU, instr)
+                menu = engine._framework_menu_for_type(slug)
+                block = engine._render_methodology_block(skeleton, menu, instr)
                 worst = max(worst, len(enc.encode(block)))
             self.assertLessEqual(worst, 2000, f"方法论注入块 token={worst} 超 2k 预算（spec §4.3）")
 
