@@ -2081,3 +2081,69 @@ class MaterialConversionStatusApiTests(unittest.TestCase):
         self.assertEqual(by_id[failed["id"]]["conversion_status"], "failed")
         self.assertEqual(by_id[failed["id"]]["conversion_reason"], "文档解析失败：BoomError")
         self.assertEqual(by_id[not_yet["id"]]["conversion_status"], "not_parsed")
+
+    # --- N6 Fix5: lock the advisory-status fallback paths (status probe must never raise) ---
+
+    def test_status_falls_back_to_not_parsed_when_no_converter_wired(self):
+        # (a) No converter set on the engine → list_materials / GET must report not_parsed, no 500.
+        self.assertIsNone(getattr(self.engine, "_material_converter", None))
+        self._add_text_material(name="no_converter.txt", body="x")
+        items = self.engine.list_materials(self.pid)
+        self.assertTrue(len(items) >= 1)
+        for item in items:
+            self.assertEqual(item["conversion_status"], "not_parsed")
+            self.assertIsNone(item["conversion_reason"])
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)
+        for item in r.json()["materials"]:
+            self.assertEqual(item["conversion_status"], "not_parsed")
+
+    def test_status_falls_back_to_not_parsed_when_content_sha256_missing(self):
+        # (b) A material whose content_sha256 is missing → status probe short-circuits to not_parsed.
+        from backend.material_conversion import MaterialConverter
+        conv = MaterialConverter(
+            cache_dir=Path(self._tmp.name) / "cache",
+            vision_adapter=lambda *a: "V",
+            ocr_adapter=lambda p: "O",
+            capability_resolver=lambda: False,
+        )
+        self.engine.set_material_converter(conv)
+        mat = self._add_text_material(name="no_hash.txt", body="hash-me")
+        # Strip the add-time hash off the persisted record.
+        record = self.engine.get_project_record(self.pid)
+        materials = self.engine._load_materials(record)
+        for m in materials:
+            if m["id"] == mat["id"]:
+                m.pop("content_sha256", None)
+        self.engine._save_materials(record, materials)
+
+        items = self.engine.list_materials(self.pid)
+        by_id = {m["id"]: m for m in items}
+        self.assertEqual(by_id[mat["id"]]["conversion_status"], "not_parsed")
+        self.assertIsNone(by_id[mat["id"]]["conversion_reason"])
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)
+
+    def test_status_falls_back_to_not_parsed_when_probe_raises(self):
+        # (c) The converter's status_for_key raising must be swallowed → not_parsed, no 500.
+        from backend.material_conversion import MaterialConverter
+        conv = MaterialConverter(
+            cache_dir=Path(self._tmp.name) / "cache",
+            vision_adapter=lambda *a: "V",
+            ocr_adapter=lambda p: "O",
+            capability_resolver=lambda: False,
+        )
+
+        def _boom(_key):
+            raise RuntimeError("probe exploded")
+
+        conv.status_for_key = _boom  # type: ignore[method-assign]
+        self.engine.set_material_converter(conv)
+        mat = self._add_text_material(name="boom.txt", body="boom-body")
+
+        items = self.engine.list_materials(self.pid)
+        by_id = {m["id"]: m for m in items}
+        self.assertEqual(by_id[mat["id"]]["conversion_status"], "not_parsed")
+        self.assertIsNone(by_id[mat["id"]]["conversion_reason"])
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)

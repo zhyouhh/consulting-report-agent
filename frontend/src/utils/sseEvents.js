@@ -50,3 +50,28 @@ export function applyAttachmentTranscribed(messages = [], event = {}) {
 
   return matched ? next : messages;
 }
+
+/**
+ * N6 Fix2: derive the persisted-attachment indicators from a loaded-history user message.
+ *
+ * The backend persists `attachment_transcripts` (array of `{id,name,mime_type,text,status,...}`)
+ * on user messages, and the GET-conversation endpoint returns them. Reloaded/refreshed chats
+ * must re-show the "已转写图片" / "图片没读出来" indicator (spec §8) — but the live-in-turn
+ * `transientAttachments` bubble state only exists for the turn that produced it. This pure
+ * normalizer maps the persisted transcripts to a minimal indicator shape the bubble renders.
+ *
+ * @param {object} message — a loaded-history message (possibly with attachment_transcripts).
+ * @returns {Array<{name: string, status: string}>} one entry per transcript; [] when none.
+ */
+export function historyTranscriptIndicators(message = {}) {
+  const transcripts = message?.attachment_transcripts;
+  if (!Array.isArray(transcripts) || transcripts.length === 0) {
+    return [];
+  }
+  return transcripts.map((transcript, index) => ({
+    name: transcript?.name || "图片",
+    status: transcript?.status === "parsed" ? "parsed" : "failed",
+    // a stable-ish key for React rendering; transcripts carry an id, fall back to index.
+    id: transcript?.id || `transcript-${index}`,
+  }));
+}

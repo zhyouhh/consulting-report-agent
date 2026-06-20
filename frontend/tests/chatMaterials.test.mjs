@@ -203,10 +203,16 @@ test("buildTransientAttachmentsPayload preserves the pending attachment id", () 
   ]);
 });
 
-test("conversionStatusChip returns null for not_parsed (and missing)", () => {
-  assert.equal(conversionStatusChip({ conversion_status: "not_parsed" }), null);
-  assert.equal(conversionStatusChip({}), null);
-  assert.equal(conversionStatusChip(), null);
+test("conversionStatusChip returns a neutral 未解析 chip for not_parsed (and missing)", () => {
+  // N6 Fix1: spec §8 requires every material show a status; not_parsed gets a muted chip.
+  const notParsed = conversionStatusChip({ conversion_status: "not_parsed" });
+  assert.notEqual(notParsed, null);
+  assert.equal(notParsed.label, "未解析");
+  assert.equal(notParsed.tone, "not_parsed");
+
+  // Missing / undefined status falls back to the same neutral chip.
+  assert.equal(conversionStatusChip({}).label, "未解析");
+  assert.equal(conversionStatusChip().label, "未解析");
 });
 
 test("conversionStatusChip labels parsed and failed", () => {

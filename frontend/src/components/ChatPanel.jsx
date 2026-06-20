@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { showError, showInfo, showSuccess } from '../utils/toast'
 import { buildChatRequest, buildTransientAttachmentsPayload, conversionStatusChip, toggleMaterialSelection } from '../utils/chatMaterials'
-import { applyAttachmentTranscribed } from '../utils/sseEvents'
+import { applyAttachmentTranscribed, historyTranscriptIndicators } from '../utils/sseEvents'
 import {
   createPendingTriggerItem,
   dequeuePendingTrigger,
@@ -151,6 +151,9 @@ const ChatPanel = forwardRef(function ChatPanel({
                 role: m.role,
                 content: m.content,
                 attachedMaterialIds: m.attached_material_ids || [],
+                // N6 Fix2: carry persisted image transcripts so a reloaded chat re-shows the
+                // 已转写图片 / 图片没读出来 indicator (live-in-turn transientAttachments are gone).
+                historyTranscripts: historyTranscriptIndicators(m),
               }))
             setMessages(displayMessages)
           } else {
@@ -881,6 +884,26 @@ const ChatPanel = forwardRef(function ChatPanel({
                     ))}
                   </div>
                 )}
+                {/* N6 Fix2: reloaded-history transcripts (no live transientAttachments) — same
+                    indicator branch as above so a refreshed chat keeps the 已转写图片 / 没读出来 note. */}
+                {msg.historyTranscripts?.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    {msg.historyTranscripts.map(indicator => (
+                      <span
+                        key={indicator.id}
+                        className={`text-[11px] px-2 py-1 rounded-full border ${
+                          indicator.status === 'failed'
+                            ? 'bg-[#3a1a1a] border-[#6b3a3a] text-[#f0b8b8]'
+                            : 'bg-[#1a1a2e] border-[#3a3a5a] text-[#b8bbe8]'
+                        }`}
+                      >
+                        {indicator.status === 'parsed'
+                          ? '📎 已转写图片'
+                          : `⚠️ 图片没读出来：${indicator.name || '图片'}`}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 {msg.role === 'assistant' ? (
                   <div className="space-y-2">
                     {assistantBlocks.map((block, index) => block.type === 'tool' ? (
@@ -1057,6 +1080,8 @@ const ChatPanel = forwardRef(function ChatPanel({
                       className={`text-[10px] px-1.5 py-0.5 rounded-full ${
                         statusChip.tone === 'failed'
                           ? 'bg-[#3a1a1a] text-[#f0b8b8]'
+                          : statusChip.tone === 'not_parsed'
+                          ? 'bg-[#1e1f3a] text-[#8e92bd]'
                           : 'bg-[#15402a] text-[#9fe0bd]'
                       }`}
                     >

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { applyAttachmentTranscribed } from "../src/utils/sseEvents.js";
+import { applyAttachmentTranscribed, historyTranscriptIndicators } from "../src/utils/sseEvents.js";
 
 function sampleMessages() {
   return [
@@ -95,4 +95,49 @@ test("applyAttachmentTranscribed does not mutate the input messages", () => {
     status: "parsed",
   });
   assert.equal(JSON.stringify(before), snapshot);
+});
+
+// N6 Fix2: persisted attachment_transcripts → reloaded-history bubble indicators.
+test("historyTranscriptIndicators maps a parsed transcript to a 已转写 indicator", () => {
+  const indicators = historyTranscriptIndicators({
+    role: "user",
+    attachment_transcripts: [
+      { id: "t-1", name: "chart.png", status: "parsed", text: "..." },
+    ],
+  });
+  assert.equal(indicators.length, 1);
+  assert.equal(indicators[0].status, "parsed");
+  assert.equal(indicators[0].name, "chart.png");
+  assert.equal(indicators[0].id, "t-1");
+});
+
+test("historyTranscriptIndicators maps a failed transcript to a 没读出来 indicator", () => {
+  const indicators = historyTranscriptIndicators({
+    attachment_transcripts: [{ id: "t-2", name: "bad.png", status: "failed", text: "" }],
+  });
+  assert.equal(indicators.length, 1);
+  assert.equal(indicators[0].status, "failed");
+  assert.equal(indicators[0].name, "bad.png");
+});
+
+test("historyTranscriptIndicators treats any non-parsed status as failed", () => {
+  const indicators = historyTranscriptIndicators({
+    attachment_transcripts: [{ id: "t-3", name: "weird.png", status: "pending" }],
+  });
+  assert.equal(indicators[0].status, "failed");
+});
+
+test("historyTranscriptIndicators falls back to a default name and synthesized id", () => {
+  const indicators = historyTranscriptIndicators({
+    attachment_transcripts: [{ status: "parsed" }],
+  });
+  assert.equal(indicators[0].name, "图片");
+  assert.equal(indicators[0].id, "transcript-0");
+});
+
+test("historyTranscriptIndicators returns [] when there are no transcripts", () => {
+  assert.deepEqual(historyTranscriptIndicators({ role: "user" }), []);
+  assert.deepEqual(historyTranscriptIndicators({ attachment_transcripts: [] }), []);
+  assert.deepEqual(historyTranscriptIndicators({}), []);
+  assert.deepEqual(historyTranscriptIndicators(), []);
 });

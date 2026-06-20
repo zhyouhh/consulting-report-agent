@@ -44,7 +44,9 @@ export function buildTransientAttachmentsPayload(resolvedAttachments = []) {
 
 // N6 D2: map a material's backend conversion_status to a small Chinese chip label + tooltip.
 // v1 status set is exactly {not_parsed, parsed, failed} — there is no "parsing" state.
-// Returns null for not_parsed (no chip), so the materials list stays quiet until something happens.
+// Spec §8 requires every material show 未解析/已解析/失败+原因. `not_parsed` returns a neutral
+// (muted) chip — it just means the model hasn't read this material yet (conversion is lazy),
+// so it's informative, not alarming.
 export function conversionStatusChip(material = {}) {
   const status = material?.conversion_status;
   if (status === "parsed") {
@@ -53,7 +55,7 @@ export function conversionStatusChip(material = {}) {
   if (status === "failed") {
     return { label: "失败", tone: "failed", title: material?.conversion_reason || "转换失败" };
   }
-  return null;
+  return { label: "未解析", tone: "not_parsed", title: "尚未被读取（用到时才解析）" };
 }
 
 export function buildChatRequest({

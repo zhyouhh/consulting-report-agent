@@ -1141,19 +1141,21 @@ class SkillEngine:
     def _material_conversion_status(self, project_record: dict, material: dict) -> tuple[str, str | None]:
         """N6 D2：只读探测材料转换状态，供材料列表展示。
         必须健壮（任何缺失/异常一律降级 not_parsed），绝不抛——材料列表接口不能 500。
-        关键：路径解析走 _resolve_material_path（不经 get_material/get_material_path），
-        否则 list_materials → _material_conversion_status → get_material → list_materials 无限再入。
+
+        N6 Fix3（perf）：状态探测是 advisory 展示，绝不 re-hash live 文件（list 调一次就 O(n×文件大小)）。
+        改为用 add-time 存的 content_sha256 算 key（inline 派生，不经 _cache_key_for_material——后者
+        会读 live 文件）。常见的 imported/chat_upload 不可变场景下 add-time hash == live hash、状态正确；
+        被改过的 workspace 文件 chip 可能略 stale，下次真正 read 时自愈，advisory 可接受。
         """
         converter = getattr(self, "_material_converter", None)
         if converter is None:
             return "not_parsed", None
-        if not material.get("content_sha256"):
+        content_sha256 = material.get("content_sha256")
+        if not content_sha256:
             return "not_parsed", None
         try:
-            material_path = self._resolve_material_path(project_record, material)
-            if not material_path.exists():
-                return "not_parsed", None
-            key = self._cache_key_for_material(material, material_path)
+            extra = converter.image_cache_extra if material.get("media_kind") == "image_like" else ""
+            key = converter.cache_key_from_sha256(content_sha256, extra)
             return converter.status_for_key(key)
         except Exception:  # noqa: BLE001 探测失败一律降级，绝不阻断材料列表
             return "not_parsed", None
@@ -1653,18 +1655,30 @@ class SkillEngine:
         except UnicodeDecodeError as exc:
             raise ValueError(f"当前暂不支持读取 {suffix} 材料") from exc
 
-    def get_material(self, project_ref: str, material_id: str) -> dict:
-        material = next((item for item in self.list_materials(project_ref) if item["id"] == material_id), None)
+    def _get_raw_material(self, project_record: dict, material_id: str) -> dict:
+        """N6 Fix4（perf）：按 id 取 RAW 材料记录，不做 conversion_status 富化。
+        chat 路径 / read_material_file 只需路径与元字段，不该为单条查找付 list_materials 的
+        O(n) 状态探测。status 富化只在公开 list_materials（/materials 端点）里发生。"""
+        material = next(
+            (item for item in self._load_materials(project_record) if item["id"] == material_id),
+            None,
+        )
         if not material:
             raise ValueError("材料不存在")
         return material
+
+    def get_material(self, project_ref: str, material_id: str) -> dict:
+        project_record = self.get_project_record(project_ref)
+        if not project_record:
+            raise ValueError(f"项目 {project_ref} 不存在")
+        return self._get_raw_material(project_record, material_id)
 
     def get_material_path(self, project_ref: str, material_id: str) -> Path:
         project_record = self.get_project_record(project_ref)
         if not project_record:
             raise ValueError(f"项目 {project_ref} 不存在")
 
-        material = self.get_material(project_ref, material_id)
+        material = self._get_raw_material(project_record, material_id)
         return self._resolve_material_path(project_record, material)
 
     @staticmethod

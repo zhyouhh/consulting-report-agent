@@ -15,7 +15,7 @@ test("ChatPanel handles the attachment_transcribed SSE event via applyAttachment
   const src = chatPanelSrc();
   assert.match(src, /parsed\.type === 'attachment_transcribed'/);
   assert.match(src, /applyAttachmentTranscribed\(prev, parsed\.data\)/);
-  assert.match(src, /import \{ applyAttachmentTranscribed \} from '\.\.\/utils\/sseEvents'/);
+  assert.match(src, /import \{ applyAttachmentTranscribed.*\} from '\.\.\/utils\/sseEvents'/);
 });
 
 test("ChatPanel threads clientMessageId into buildChatRequest", () => {
@@ -36,4 +36,19 @@ test("ChatPanel renders a conversion-status chip on the materials list", () => {
   const src = chatPanelSrc();
   assert.match(src, /conversionStatusChip\(material\)/);
   assert.match(src, /statusChip\.label/);
+});
+
+test("ChatPanel renders a muted chip for the not_parsed tone", () => {
+  // N6 Fix1: not_parsed gets its own muted style branch (informative, not alarming).
+  const src = chatPanelSrc();
+  assert.match(src, /statusChip\.tone === 'not_parsed'/);
+});
+
+test("ChatPanel rebuilds history attachment_transcripts indicators on reload", () => {
+  // N6 Fix2: reloaded chats must re-show 已转写图片 / 没读出来 from persisted attachment_transcripts.
+  const src = chatPanelSrc();
+  assert.match(src, /historyTranscriptIndicators/);
+  assert.match(src, /import \{ applyAttachmentTranscribed, historyTranscriptIndicators \} from '\.\.\/utils\/sseEvents'/);
+  assert.match(src, /historyTranscripts:/);
+  assert.match(src, /msg\.historyTranscripts\?\.length > 0/);
 });
