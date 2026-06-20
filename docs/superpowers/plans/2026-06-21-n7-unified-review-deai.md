@@ -172,7 +172,7 @@ class ScanPlaceholdersTests(unittest.TestCase):
         hits = rq.scan_placeholders(text)
         linenos = [h[0] for h in hits]
         self.assertEqual(linenos, [2, 4])  # 1-based 行号
-        self.assertIn("TBD", [h[2] for h in hits][0] + [h[2] for h in hits][0])
+        self.assertEqual([h[2].upper() for h in hits], ["TBD", "XXX"])  # 命中词顺序正确
 
     def test_empty_text_no_hits(self):
         self.assertEqual(rq.scan_placeholders(""), [])
@@ -477,7 +477,9 @@ git commit -m "feat(review): inject placeholder grounding into review first run 
 - Modify: `backend/skill.py`（`:356-361` prereq、`:1981-1992` lint 锁分支、`:2563-2596` effective helpers）
 - Test: `tests/test_skill_engine.py`
 
-- [ ] **Step 1: 写门禁单报告测试（先失败）**
+- [ ] **Step 1: 写门禁单报告测试（先失败）+ 删旧 lint-lock 测试**
+
+**先删/改现有 lint-lock 测试**（Codex BLOCKER：`tests/test_skill_engine.py:2221-2281` 有 `test_record_stage_checkpoint_rejects_review_passed_when_lint_lock_held` 之类，删 lint 锁分支后必失败）：删该 lint-lock 用例；把同区 no-lock / inside-project-lock 用例改成只验证 independent review lock（不再 assert lint lock）。
 
 ```python
 # tests/test_skill_engine.py 内新增/改
@@ -646,16 +648,29 @@ Expected: FAIL
 ```
 （`flags["review_passed"]` 已在 flags dict 中存在；若 `_build_completed_items` 作用域拿不到该 flag，用 `"review_passed_at" in checkpoints` 等价判断——核对该函数签名内可用变量。）
 
-- [ ] **Step 7: 跑确认通过**
+- [ ] **Step 7: `_sync_stage_tracking_files` S5 next_actions 去 lint（`skill.py:1884-1893`，Codex BLOCKER）**
+
+该函数把 next_actions 回写 `progress.md`/`tasks.md`/workspace summary，现 S5 分支仍按两按钮分四态。替换 `:1884-1893` 整段为：
+```python
+        if stage_code == "S5":
+            flags = stage_state.get("flags", {})
+            if not bool(flags.get("independent_review_ready")):
+                next_actions = ["请点击上方'独立审查'按钮完成审查"]
+            else:
+                next_actions = ["等主代理跟你讨论审查结果，确认通过后说'审查通过'"]
+```
+加测试 `test_s5_next_actions_single_review`：无独立审查 → 含「请点击上方'独立审查'」、不含「AI 味自查」；有独立审查 → 含「等主代理…确认通过」。
+
+- [ ] **Step 8: 跑确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_skill_engine.py -q`
 Expected: PASS（全 skill_engine 绿，含既有阶段检测用例）
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add backend/skill.py tests/test_skill_engine.py
-git commit -m "feat(stage): collapse S5 checklist to 2 items; drop lint flags from stage cascade"
+git commit -m "feat(stage): collapse S5 checklist to 2 items; drop lint flags from stage cascade + next_actions"
 ```
 
 ---
@@ -668,9 +683,11 @@ git commit -m "feat(stage): collapse S5 checklist to 2 items; drop lint flags fr
 
 - [ ] **Step 1: 改测试预期（先失败）**
 
+逐文件改（Codex BLOCKER：删 lint 会打断这些现存断言，必须全枚举）：
 - `tests/test_report_tools.py`：删 `run_quality_check`/`run_lint_report` 相关用例，保留 `export_reviewable_draft` 用例。
-- `tests/test_main_api.py`：删 `/quality-check`、`/lint-report` 用例。
-- `tests/test_chat_runtime.py`：删 `lint_report_done` system_trigger 用例。
+- `tests/test_main_api.py`：删 `/quality-check`、`/lint-report` 用例（`:327-348`）；workspace flags 断言去 `lint_report_ready`/`review_reports_ready`；review_stale fixture（`:2030-2058`）不再写 lint-report、改为只基于 independent-review mtime。
+- `tests/test_chat_runtime.py`：删 `lint_report_done` system_trigger 用例（`:6061-6081`/`:6112-6137`）；删主代理 write/edit **lint-report 拒写**专用断言（`:6637-6664`/`:6699-6728`/`:11447-11464`），**保留** independent-review 拒写断言。
+- `tests/test_report_writing.py`：grep 命中——核对其 lint/quality_check 引用，删/改对应断言（多半是 mixed-intent 或 invariant 列表里的 `quality_check` 标签，按 spec §3.8 NIT 处理）。
 - `tests/test_skill_engine.py`：新增 `lint-report.md ∉ FORMAL_PLAN_FILES`、`"plan/lint-report.md" ∈ RETIRED_WORKSPACE_FILES`、`"plan/lint-report.md" ∉ FILE_SEMANTICS` 断言。
 - `tests/test_workspace_materials.py`：`:120-121` 不再创建 lint-report；`:260` 断言改为只提示「独立审查」；`:477` 删 AI 味断言。
 
@@ -729,11 +746,13 @@ git commit -m "feat(lint-removal): delete lint backend path (report_tools/models
 - Modify frontend: `StagePanel.jsx`、`WorkspacePanel.jsx`、`FilePreviewPanel.jsx`、`utils/stagePanelButtons.js`、`utils/workspaceSummary.js`
 - Test: `tests/test_skill_assets.py`、`tests/test_packaging_docs.py`、前端 source/状态测试
 
-- [ ] **Step 1: 改测试预期（先失败）**
+- [ ] **Step 1: 改测试预期（先失败）——全枚举（Codex BLOCKER）**
 
-- `tests/test_skill_assets.py`：`quality_check.{sh,ps1}`（`:13`/`:23`/`:37`）改断言**不存在**、删 ps1-runs 测试（`:46-52`）、`lint-report.md ∉ FORMAL_PLAN_FILES`（`:81` 反断言）、lint-report 模板不存在（`:111` 反断言）。**`export_draft.{sh,ps1}` 存在断言（`:14`/`:24`/`:38`）+ export ps1 编码测试一律保留不动。**
+- **`git rm tests/test_lint_report.py`**（spec §6 要求删整文件；删 `run_lint_report` 后必炸——这是之前漏的关键删除）。
+- `tests/test_skill_assets.py`：`quality_check.{sh,ps1}`（`:13`/`:23`/`:37`）改断言**不存在**、删 ps1-runs 测试（`:46-52`）、`lint-report.md ∉ FORMAL_PLAN_FILES`（`:81` 反断言）、lint-report 模板不存在（`:111` 反断言）、**新项目 lint stub 与 `validate_plan_write("plan/lint-report.md")` 接受测试（`:115-168`）改为：只断言 independent-review stub 存在、lint-report 不生成/退役、`validate_plan_write` 对 lint-report 拒绝**。**`export_draft.{sh,ps1}` 存在断言（`:14`/`:24`/`:38`）+ export ps1 编码测试一律保留不动。**
+- **`tests/smoke_packaged_app.py`**：删 lint smoke（`:55`、`:184-195`、`:299-307`：`lint-report.md` 模板 / `quality_check.ps1` / `/lint-report` endpoint），保留 independent-review / export smoke。
 - `tests/test_packaging_docs.py`：SKILL/stage-gates/tasks/progress/consulting-lifecycle/quality-review/final-delivery 锁两按钮旧句的断言改为单审查表述。
-- 前端测试：`stagePanelButtons` / `workspaceSummary` / `WorkspacePanel.source` / `FilePreviewPanel.source` 去 lint / `/quality-check` / `review_reports_ready` / stale 文案。
+- **前端测试（6 个含 `lint_report_done` / lint）**：`reviewChatWindow.test.mjs:157`、`chatMaterials.test.mjs:158`、`chatPanelStartStream.test.mjs:16`/`:60-65`、`independentReviewDrawer.source.test.mjs:153-158`、`stagePanelButtons.test.mjs`、`workspaceSummary.test.mjs`——删 `lint_report_done` trigger 场景 / 改 independent-only；去 lint / `/quality-check` / `review_reports_ready` / stale 文案。
 
 Run: 对应 `-q` / `node --test`，Expected: FAIL
 
@@ -761,6 +780,8 @@ git rm skill/scripts/quality_check.ps1 skill/scripts/quality_check.sh skill/plan
 - `FilePreviewPanel.jsx:300`：stale-review 文案「独立审查 / AI 味自查报告」→ 单审查表述。
 - `utils/stagePanelButtons.js`：去 `lint_report_ready` 高亮 + `lintRunning` 互斥（S5 只剩独立审查按钮）。
 - `utils/workspaceSummary.js:39`：去 `review_reports_ready` 消费、用 `independent_review_ready`。
+- `utils/fileTree.js:26`：删 `FILE_DISPLAY_NAMES` 的 `"plan/lint-report.md": "AI 味自查报告"` 映射（Codex NIT，否则 final grep 残留活前端文案）。
+- `backend/skill.py:1496-1500`：`validate_user_write` docstring 提到 `independent-review/lint-report` 的旧说明改为只 independent-review + 退役文件默认拒写（Codex NIT，非运行时问题，顺手清）。
 
 - [ ] **Step 5: 跑确认通过**
 
