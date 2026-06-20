@@ -165,6 +165,12 @@ class ChatRuntimeTests(unittest.TestCase):
             setattr(h.settings, k, v)
         return h
 
+    def _chat_completion(self, text: str):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=[]))],
+        )
+
     def _mark_s0_confirmation_completed(self, handler):
         state = handler._empty_conversation_state()
         state["s0_confirmation_completed"] = True
@@ -13904,4 +13910,40 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in WriteFileGenericRegressionTests.__dict__
     ):
         setattr(WriteFileGenericRegressionTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class VisionTranscribeTests(ChatRuntimeTests):
+    """C1: _vision_transcribe adapter — managed proxy call / unavailable paths."""
+
+    def test_vision_transcribe_managed_calls_proxy_with_vision_model(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro", vision_enabled=True)
+        with mock.patch.object(h.client.chat.completions, "create") as m:
+            m.return_value = self._chat_completion("图中是一张折线图，2020-2024 营收上升")
+            out = h._vision_transcribe("data:image/png;base64,XXXX", "image/png")
+        self.assertIn("折线图", out)
+        kwargs = m.call_args.kwargs
+        self.assertEqual(kwargs["model"], h.settings.managed_vision_model)
+        self.assertEqual(kwargs["max_tokens"], 1500)  # VISION_MAX_TOKENS
+
+    def test_vision_transcribe_custom_mode_unavailable_no_client_call(self):
+        from backend.material_conversion import VisionUnavailable
+        h = self._h(mode="custom", custom_model="some-text-llm", vision_enabled=True)
+        with mock.patch.object(h.client.chat.completions, "create", side_effect=AssertionError("custom 不应调视觉")):
+            with self.assertRaises(VisionUnavailable):
+                h._vision_transcribe("data:image/png;base64,XXXX", "image/png")
+
+    def test_vision_transcribe_disabled_unavailable(self):
+        from backend.material_conversion import VisionUnavailable
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro", vision_enabled=False)
+        with self.assertRaises(VisionUnavailable):
+            h._vision_transcribe("data:image/png;base64,XXXX", "image/png")
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in VisionTranscribeTests.__dict__
+    ):
+        setattr(VisionTranscribeTests, _inherited_test_name, None)
 del _inherited_test_name

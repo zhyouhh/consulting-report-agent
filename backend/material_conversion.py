@@ -30,6 +30,10 @@ class MaterialConversionError(Exception):
     """转换失败（含 tombstone 命中）。caller 据此返回工具 error，不当成功正文。"""
 
 
+class VisionUnavailable(Exception):
+    """视觉转写不可用（custom 模式 / 关闭 / 无 endpoint）；caller 落 OCR 兜底。"""
+
+
 class MaterialConverter:
     def __init__(
         self,

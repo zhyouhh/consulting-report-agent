@@ -384,7 +384,19 @@ class ChatHandler:
         return any(marker in model for marker in MULTIMODAL_MODEL_MARKERS)
 
     def _vision_transcribe(self, data_url: str, mime: str) -> str:
-        raise NotImplementedError("vision transcribe is implemented in task C1")
+        from backend.material_limits import VISION_MAX_TOKENS
+        from backend.material_conversion import VisionUnavailable
+        if self.settings.mode != "managed" or not self.settings.vision_enabled:
+            raise VisionUnavailable("视觉转写仅 managed 模式可用")
+        resp = self.client.chat.completions.create(
+            model=self.settings.managed_vision_model,
+            max_tokens=VISION_MAX_TOKENS,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "请用中文转述这张图：图中关键文字、图表/示意图的数据与结论。只输出转述，不要寒暄。"},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]}],
+        )
+        return (resp.choices[0].message.content or "").strip()
 
     def _ocr_image(self, path) -> str:
         raise NotImplementedError("OCR is implemented in task C2")
