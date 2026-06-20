@@ -9,6 +9,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from typing import Callable
@@ -126,7 +127,7 @@ class MaterialConverter:
             with open(file_path, "rb") as fh:
                 magic = fh.read(4)
             if magic != _ZIP_MAGIC:
-                raise ValueError(f"文件头校验失败，不是有效的 {file_path.suffix.lower()} 格式（ZIP magic 不匹配）")
+                raise MaterialConversionError(f"文件头校验失败，不是有效的 {file_path.suffix.lower()} 格式（文件可能损坏，请重新导出后上传）")
         from markitdown import MarkItDown
         # 收面：禁插件、禁远程抓取（仅本地文件转换，§9.3）
         text = (MarkItDown(enable_plugins=False).convert(str(file_path)).text_content or "").strip()
@@ -138,31 +139,28 @@ class MaterialConverter:
         if suffix in TEXT_SUFFIXES:
             return path.read_text(encoding="utf-8")
         if suffix in LIBREOFFICE_FORCE_SUFFIXES:                 # .doc/.ppt：必须先 LibreOffice
-            converted = self._libreoffice_to_modern(path, LIBREOFFICE_FORCE_SUFFIXES[suffix])
-            return self._markitdown_convert(converted)
+            return self._libreoffice_to_markdown(path, LIBREOFFICE_FORCE_SUFFIXES[suffix])
         if suffix == ".xls":                                     # .xls：markitdown 优先，失败回退 LibreOffice
             try:
                 return self._markitdown_convert(path)
             except Exception:
-                converted = self._libreoffice_to_modern(path, "xlsx")
-                return self._markitdown_convert(converted)
+                return self._libreoffice_to_markdown(path, "xlsx")
         return self._markitdown_convert(path)                    # docx/pptx/xlsx/pdf/html/csv…
 
-    def _libreoffice_to_modern(self, path: Path, target_ext: str) -> Path:
+    def _libreoffice_to_markdown(self, path: Path, target_ext: str) -> str:
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
         if not soffice:
             raise MaterialConversionError("老版本 .doc/.ppt 在当前环境读不了（缺 LibreOffice）")
-        outdir = self.cache_dir / "_soffice"
-        outdir.mkdir(parents=True, exist_ok=True)
-        try:
-            subprocess.run(
-                [soffice, "--headless", "--convert-to", target_ext, "--outdir", str(outdir), str(path)],
-                timeout=SOFFICE_TIMEOUT_SECONDS, check=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
-            raise MaterialConversionError("老格式转换失败（LibreOffice 超时或出错），请改存为新版格式重传") from exc
-        out = outdir / (path.stem + "." + target_ext)
-        if not out.exists():
-            raise MaterialConversionError("老格式转换未产出文件，请改存为新版格式重传")
-        return out
+        with tempfile.TemporaryDirectory(prefix="n6_soffice_") as outdir:
+            try:
+                subprocess.run(
+                    [soffice, "--headless", "--convert-to", target_ext, "--outdir", outdir, str(path)],
+                    timeout=SOFFICE_TIMEOUT_SECONDS, check=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+                raise MaterialConversionError("老格式转换失败（LibreOffice 超时或出错），请改存为新版格式重传") from exc
+            out = Path(outdir) / (path.stem + "." + target_ext)
+            if not out.exists():
+                raise MaterialConversionError("老格式转换未产出文件，请改存为新版格式重传")
+            return self._markitdown_convert(out)

@@ -49,15 +49,18 @@ class DocConvertCacheTests(unittest.TestCase):
 
     def test_failure_writes_tombstone_and_raises(self):
         import tempfile
+        from unittest import mock
         from backend.material_conversion import MaterialConversionError
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "bad.docx"; src.write_bytes(b"not a real docx")
             conv = self._conv(tmp)
             with self.assertRaises(MaterialConversionError):
                 conv.convert_document(src)
-            # 再次调用命中 tombstone 仍抛（不重复全量解析）
-            with self.assertRaises(MaterialConversionError):
-                conv.convert_document(src)
+            # 第二次必须命中 tombstone、绝不重新解析：patch _raw_convert_document 断言不被调用
+            with mock.patch.object(conv, "_raw_convert_document",
+                                   side_effect=AssertionError("应命中 tombstone，不应重新解析")):
+                with self.assertRaises(MaterialConversionError):
+                    conv.convert_document(src)
 
 
 class CacheGCTests(unittest.TestCase):
