@@ -1179,7 +1179,6 @@ class SkillEngine:
             source_path = Path(raw_path).expanduser().resolve()
             if not source_path.exists() or not source_path.is_file():
                 raise ValueError(f"材料不存在: {raw_path}")
-                raise ValueError(f"鏉愭枡涓嶅瓨鍦? {raw_path}")
 
             # Fix4: hard size limit applies to BOTH paths. Live workspace-selected files used to
             # skip this (the check sat only in the import/copy branch), letting an oversized
@@ -1273,6 +1272,7 @@ class SkillEngine:
     def delete_project(self, project_ref: str):
         project_record = self.get_project_record(project_ref)
         if project_record:
+            self._release_project_material_caches(project_record)   # N6: free cache refs before deleting the project dir
             project_path = Path(project_record["project_dir"])
             if project_path.exists():
                 shutil.rmtree(project_path)
@@ -1283,6 +1283,29 @@ class SkillEngine:
 
 
         raise ValueError(f"项目 {project_ref} 不存在")
+
+    def _release_project_material_caches(self, project_record: dict) -> None:
+        """N6: 删项目前，逐条释放材料的共享缓存引用——N6 缓存活在 projects_dir 之外
+        （materials_cache），rmtree 删不到。release 必须在源文件还在时执行（与 remove_material 同），
+        最后一个引用消失时 shared-hash GC 才会删掉转写/markdown/tombstone/.refs。
+        无 converter / 缺路径优雅跳过，单条失败不阻断删项目。"""
+        converter = getattr(self, "_material_converter", None)
+        if converter is None:
+            return
+        try:
+            materials = self._load_materials(project_record)
+        except Exception:
+            return
+        for material in materials:
+            try:
+                if not material.get("content_sha256"):
+                    continue
+                path = self._resolve_material_path(project_record, material)
+                if not path.exists():
+                    continue
+                converter.release(self._cache_key_for_material(material, path), material["id"])
+            except Exception:  # noqa: BLE001 单个材料 release 失败不应阻断删项目
+                continue
 
     def read_file(self, project_ref: str, file_path: str) -> str:
         """璇诲彇椤圭洰鏂囦欢"""

@@ -136,6 +136,38 @@ class SkillEngineTests(unittest.TestCase):
             engine.remove_material(pid, b["id"])
             self.assertFalse(md_path.exists())  # no references -> deleted
 
+    def test_delete_project_releases_material_caches(self):
+        """N6 Fix3: 删项目要释放材料缓存引用——缓存活在 projects_dir 外，rmtree 删不到。
+        唯一引用的材料随项目删除后，其 .md / .refs 应被 release 真删（无其他引用）。"""
+        from backend.material_conversion import MaterialConverter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._project_payload(Path(tmp) / "workspace"))
+            pid = project["id"]
+            # 缓存目录在 projects_dir 之外（与生产一致：materials_cache 紧邻 projects_dir，非项目内）。
+            conv = MaterialConverter(
+                cache_dir=Path(tmp) / "cache",
+                vision_adapter=lambda *a: "V",
+                ocr_adapter=lambda p: "O",
+                capability_resolver=lambda: False,
+            )
+            engine.set_material_converter(conv)
+            src = Path(tmp) / "only.txt"
+            src.write_text("unique-content", encoding="utf-8")
+            mat = engine.add_materials(pid, [str(src)], added_via="chat_upload")[0]
+            # read_material_file 转换并 retain（建 .md + .refs）。
+            engine.read_material_file(pid, mat["id"])
+            key = engine._cache_key_for_material(mat, engine.get_material_path(pid, mat["id"]))
+            md_path, _ = conv._cache_paths(key)
+            refs_path = conv._refs_path(key)
+            self.assertTrue(md_path.exists())
+            self.assertTrue(refs_path.exists())
+            engine.delete_project(pid)
+            # 项目删了，缓存在外面——helper 必须释放最后一个引用并 GC 掉派生缓存。
+            self.assertFalse(md_path.exists())
+            self.assertFalse(refs_path.exists())
+
     def test_image_material_cache_key_matches_transcribe_image(self):
         from backend.material_conversion import MaterialConverter
 

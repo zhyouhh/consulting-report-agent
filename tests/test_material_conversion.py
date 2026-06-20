@@ -233,6 +233,27 @@ class ImageTranscribeTests(unittest.TestCase):
             self.assertEqual(self._conv(tmp, multimodal=False, vision="OLD", namespace="ns-A").transcribe_image(img, "image/png"), "OLD")
             self.assertEqual(self._conv(tmp, multimodal=False, vision="NEW", namespace="ns-B").transcribe_image(img, "image/png"), "NEW")
 
+    def test_dotted_namespace_keys_do_not_collide(self):
+        """Fix1: 视觉模型名带点（gpt-4.1 / gpt-4.2）使 cache key 含点。with_suffix 会把
+        ...img-visM-gpt-4.1-... 截成 ...img-visM-gpt-4.md → 不同 namespace 撞同一文件。
+        string-concat 后两个 key 的 .md 路径必须不同，各自返回自己的转写。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Path(tmp) / "a.png"; img.write_bytes(b"\x89PNG fake")
+            conv_a = self._conv(tmp, multimodal=False, vision="TXT-A", namespace="visM-gpt-4.1")
+            conv_b = self._conv(tmp, multimodal=False, vision="TXT-B", namespace="visM-gpt-4.2")
+            key_a = conv_a._cache_key(img, extra=conv_a.image_cache_extra)
+            key_b = conv_b._cache_key(img, extra=conv_b.image_cache_extra)
+            md_a, _ = conv_a._cache_paths(key_a)
+            md_b, _ = conv_b._cache_paths(key_b)
+            # 两个 key 的 .md（和派生缓存路径）必须互不相同，无碰撞。
+            self.assertNotEqual(md_a, md_b)
+            self.assertEqual(conv_a.transcribe_image(img, "image/png"), "TXT-A")
+            self.assertEqual(conv_b.transcribe_image(img, "image/png"), "TXT-B")
+            # 字面 key 在文件名里完整保留（点未被 with_suffix 吞掉）。
+            self.assertTrue(md_a.name.endswith("gpt-4.1.md") or "gpt-4.1" in md_a.name)
+            self.assertTrue(md_b.name.endswith("gpt-4.2.md") or "gpt-4.2" in md_b.name)
+
     def test_vision_fail_falls_to_ocr(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:

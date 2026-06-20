@@ -72,11 +72,14 @@ class MaterialConverter:
             return lock
 
     def _cache_paths(self, content_hash: str) -> tuple[Path, Path]:
-        base = self.cache_dir / content_hash
-        return base.with_suffix(".md"), base.with_suffix(".error")
+        # 入参是完整缓存 KEY（图片 key 含视觉模型命名空间，模型名可能带点，如 gpt-4.1）。
+        # 绝不用 Path.with_suffix——它会替换最后一个点之后的一切，把 ...gpt-4.1-... 截成 ...gpt-4.md，
+        # 不同 key 撞同一文件，且与 string-concat 的 .refs 路径对不上。改 string-concat 保字面 key。
+        return self.cache_dir / (content_hash + ".md"), self.cache_dir / (content_hash + ".error")
 
     def _atomic_write(self, target: Path, text: str) -> None:
-        tmp = target.with_suffix(target.suffix + ".tmp")
+        # 同理：with_suffix 对带点文件名脆弱，用 name 拼接保字面。
+        tmp = target.parent / (target.name + ".tmp")
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, target)
 
