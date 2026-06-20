@@ -265,3 +265,26 @@ class ImageTranscribeTests(unittest.TestCase):
             self.assertEqual(out, "图说Z")
             residue = [f for f in os.listdir(Path(tmp)/"cache") if f.endswith((".md", ".error", ".refs"))]
             self.assertEqual(residue, [])
+
+
+class ConverterHardeningTests(unittest.TestCase):
+    def test_markitdown_plugins_disabled_and_no_url_fetch(self):
+        import inspect, backend.material_conversion as m
+        src = inspect.getsource(m)
+        self.assertIn("enable_plugins=False", src)        # markitdown 禁插件
+        self.assertNotIn("http://", src)                  # 不内嵌 URL 抓取
+        self.assertNotIn("requests.get", src)
+
+    def test_subprocess_calls_have_timeout(self):
+        import inspect, backend.material_conversion as m
+        src = inspect.getsource(m.MaterialConverter._libreoffice_to_markdown)  # 真实方法名
+        self.assertIn("timeout=", src)                    # LibreOffice 带超时
+
+    def test_transcribe_image_data_url_friendly_fails_on_bad_input(self):
+        import tempfile
+        from backend.material_conversion import MaterialConverter, MaterialConversionError
+        with tempfile.TemporaryDirectory() as tmp:
+            conv = MaterialConverter(cache_dir=Path(tmp), vision_adapter=lambda *a: "V",
+                                     ocr_adapter=lambda p: "O", capability_resolver=lambda: False)
+            with self.assertRaises(MaterialConversionError):
+                conv.transcribe_image_data_url("data:image/png;base64,!!!notbase64!!!", "image/png")

@@ -249,8 +249,9 @@ class MaterialConverter:
             raw = base64.b64decode(b64)
         except (binascii.Error, ValueError, IndexError) as exc:
             raise MaterialConversionError("这张图没读出来") from exc
-        fd, tmp = tempfile.mkstemp(suffix=".img")  # 系统临时目录，非 cache_dir
+        tmp = None
         try:
+            fd, tmp = tempfile.mkstemp(suffix=".img")  # 系统临时目录，非 cache_dir
             with _os.fdopen(fd, "wb") as f:
                 f.write(raw)
             return self._transcribe_raw(Path(tmp), mime)
@@ -259,10 +260,11 @@ class MaterialConverter:
         except Exception as exc:  # noqa: BLE001 temp/write 失败 → 友好失败
             raise MaterialConversionError("这张图没读出来") from exc
         finally:
-            try:
-                _os.unlink(tmp)
-            except OSError:
-                pass
+            if tmp is not None:
+                try:
+                    _os.unlink(tmp)
+                except OSError:
+                    pass
 
     @staticmethod
     def cache_key_from_sha256(content_sha256: str, extra: str = "") -> str:
