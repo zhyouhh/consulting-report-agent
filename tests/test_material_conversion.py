@@ -78,3 +78,60 @@ class CacheGCTests(unittest.TestCase):
             self.assertTrue(md_path.exists())   # 还有 mat2 引用
             conv.release(key, "mat2")
             self.assertFalse(md_path.exists())  # 无引用才删
+
+
+class LegacyConvertTests(unittest.TestCase):
+    def _conv(self, tmp):
+        from backend.material_conversion import MaterialConverter
+        return MaterialConverter(cache_dir=Path(tmp), vision_adapter=lambda *a: "V",
+                                 ocr_adapter=lambda p: "O", capability_resolver=lambda: False)
+
+    def test_doc_no_soffice_raises_friendly(self):
+        import tempfile
+        from unittest import mock
+        from backend.material_conversion import MaterialConversionError
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "old.doc"; src.write_bytes(b"\xd0\xcf\x11\xe0legacy")
+            conv = self._conv(tmp)
+            with mock.patch("backend.material_conversion.shutil.which", return_value=None):
+                with self.assertRaises(MaterialConversionError) as ctx:
+                    conv.convert_document(src)
+            self.assertIn("老版本", str(ctx.exception))
+
+    def test_doc_soffice_success_then_markitdown(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "old.doc"; src.write_bytes(b"\xd0\xcf\x11\xe0legacy")
+            conv = self._conv(tmp)
+            with mock.patch("backend.material_conversion.shutil.which", return_value="/usr/bin/soffice"), \
+                 mock.patch("backend.material_conversion.subprocess.run") as run, \
+                 mock.patch.object(conv, "_markitdown_convert", return_value="转换后正文"):
+                def _fake_run(cmd, **kw):
+                    out = Path(cmd[cmd.index("--outdir") + 1]) / (src.stem + ".docx"); out.write_text("x")
+                    return mock.Mock(returncode=0)
+                run.side_effect = _fake_run
+                self.assertEqual(conv.convert_document(src), "转换后正文")
+
+    def test_doc_soffice_timeout_friendly(self):
+        import tempfile, subprocess
+        from unittest import mock
+        from backend.material_conversion import MaterialConversionError
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "old.doc"; src.write_bytes(b"\xd0\xcf\x11\xe0legacy")
+            conv = self._conv(tmp)
+            with mock.patch("backend.material_conversion.shutil.which", return_value="/usr/bin/soffice"), \
+                 mock.patch("backend.material_conversion.subprocess.run", side_effect=subprocess.TimeoutExpired("soffice", 120)):
+                with self.assertRaises(MaterialConversionError) as ctx:
+                    conv.convert_document(src)
+            self.assertIn("超时", str(ctx.exception))
+
+    def test_xls_markitdown_first_no_soffice(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "old.xls"; src.write_bytes(b"\xd0\xcf\x11\xe0xls")
+            conv = self._conv(tmp)
+            with mock.patch("backend.material_conversion.shutil.which", return_value=None), \
+                 mock.patch.object(conv, "_markitdown_convert", return_value="表格正文"):
+                self.assertEqual(conv.convert_document(src), "表格正文")

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import subprocess
 import threading
 from pathlib import Path
 from typing import Callable
@@ -14,6 +16,9 @@ from typing import Callable
 CONVERTER_VERSION = "n6-v1"
 
 TEXT_SUFFIXES = {".txt", ".md", ".csv", ".markdown"}
+
+LIBREOFFICE_FORCE_SUFFIXES = {".doc": "docx", ".ppt": "pptx"}  # .xls 不在内：先试 markitdown
+SOFFICE_TIMEOUT_SECONDS = 120
 
 # Office Open XML 和 ODF 格式均为 ZIP 容器，magic bytes = b"PK\x03\x04"
 ZIP_BASED_SUFFIXES = {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"}
@@ -115,19 +120,49 @@ class MaterialConverter:
             return set()
         return {ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()}
 
-    def _raw_convert_document(self, path: Path, suffix: str) -> str:
-        if suffix in TEXT_SUFFIXES:
-            return path.read_text(encoding="utf-8")
-        # ZIP 容器格式（docx/xlsx/pptx/odt…）校验文件头，防止 markitdown 把损坏文件当纯文本返回
-        if suffix in ZIP_BASED_SUFFIXES:
-            with open(path, "rb") as fh:
+    def _markitdown_convert(self, file_path: Path) -> str:
+        # ZIP 容器格式（docx/xlsx/pptx/odt…）校验文件头：markitdown 会把损坏文件当纯文本返回，先挡住
+        if file_path.suffix.lower() in ZIP_BASED_SUFFIXES:
+            with open(file_path, "rb") as fh:
                 magic = fh.read(4)
             if magic != _ZIP_MAGIC:
-                raise ValueError(f"文件头校验失败，不是有效的 {suffix} 格式（ZIP magic 不匹配）")
+                raise ValueError(f"文件头校验失败，不是有效的 {file_path.suffix.lower()} 格式（ZIP magic 不匹配）")
         from markitdown import MarkItDown
         # 收面：禁插件、禁远程抓取（仅本地文件转换，§9.3）
-        result = MarkItDown(enable_plugins=False).convert(str(path))
-        text = (result.text_content or "").strip()
+        text = (MarkItDown(enable_plugins=False).convert(str(file_path)).text_content or "").strip()
         if not text:
             raise ValueError("empty conversion result")
         return text
+
+    def _raw_convert_document(self, path: Path, suffix: str) -> str:
+        if suffix in TEXT_SUFFIXES:
+            return path.read_text(encoding="utf-8")
+        if suffix in LIBREOFFICE_FORCE_SUFFIXES:                 # .doc/.ppt：必须先 LibreOffice
+            converted = self._libreoffice_to_modern(path, LIBREOFFICE_FORCE_SUFFIXES[suffix])
+            return self._markitdown_convert(converted)
+        if suffix == ".xls":                                     # .xls：markitdown 优先，失败回退 LibreOffice
+            try:
+                return self._markitdown_convert(path)
+            except Exception:
+                converted = self._libreoffice_to_modern(path, "xlsx")
+                return self._markitdown_convert(converted)
+        return self._markitdown_convert(path)                    # docx/pptx/xlsx/pdf/html/csv…
+
+    def _libreoffice_to_modern(self, path: Path, target_ext: str) -> Path:
+        soffice = shutil.which("soffice") or shutil.which("libreoffice")
+        if not soffice:
+            raise MaterialConversionError("老版本 .doc/.ppt 在当前环境读不了（缺 LibreOffice）")
+        outdir = self.cache_dir / "_soffice"
+        outdir.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(
+                [soffice, "--headless", "--convert-to", target_ext, "--outdir", str(outdir), str(path)],
+                timeout=SOFFICE_TIMEOUT_SECONDS, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+            raise MaterialConversionError("老格式转换失败（LibreOffice 超时或出错），请改存为新版格式重传") from exc
+        out = outdir / (path.stem + "." + target_ext)
+        if not out.exists():
+            raise MaterialConversionError("老格式转换未产出文件，请改存为新版格式重传")
+        return out
