@@ -2147,3 +2147,26 @@ class MaterialConversionStatusApiTests(unittest.TestCase):
         self.assertIsNone(by_id[mat["id"]]["conversion_reason"])
         r = self.client.get(f"/api/projects/{self.pid}/materials")
         self.assertEqual(r.status_code, 200)
+
+    def test_status_not_parsed_when_source_file_deleted_despite_cache(self):
+        # (d) Source file deleted/moved but its old cache .md still exists → must report
+        # not_parsed, never a stale "parsed" from the orphaned cache entry.
+        from backend.material_conversion import MaterialConverter
+        conv = MaterialConverter(
+            cache_dir=Path(self._tmp.name) / "cache",
+            vision_adapter=lambda *a: "V",
+            ocr_adapter=lambda p: "O",
+            capability_resolver=lambda: False,
+        )
+        self.engine.set_material_converter(conv)
+        mat = self._add_text_material(name="will_delete.txt", body="parse-then-delete")
+        # Convert it so a cache .md entry exists → now reads as parsed.
+        self.engine.read_material_file(self.pid, mat["id"])
+        by_id = {m["id"]: m for m in self.engine.list_materials(self.pid)}
+        self.assertEqual(by_id[mat["id"]]["conversion_status"], "parsed")
+        # Delete the source file out from under the material (external delete).
+        self.engine.get_material_path(self.pid, mat["id"]).unlink()
+        by_id2 = {m["id"]: m for m in self.engine.list_materials(self.pid)}
+        self.assertEqual(by_id2[mat["id"]]["conversion_status"], "not_parsed")
+        r = self.client.get(f"/api/projects/{self.pid}/materials")
+        self.assertEqual(r.status_code, 200)

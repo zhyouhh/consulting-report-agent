@@ -1154,6 +1154,11 @@ class SkillEngine:
         if not content_sha256:
             return "not_parsed", None
         try:
+            # 源文件已被删/移走时，旧 .md/.error 缓存仍可能在 → 必须降级 not_parsed，
+            # 不能据陈旧缓存误报 parsed/failed。存在性检查是廉价 stat、不 re-hash（守住 Fix3 perf）。
+            material_path = self._resolve_material_path(project_record, material)
+            if not material_path.exists():
+                return "not_parsed", None
             extra = converter.image_cache_extra if material.get("media_kind") == "image_like" else ""
             key = converter.cache_key_from_sha256(content_sha256, extra)
             return converter.status_for_key(key)
