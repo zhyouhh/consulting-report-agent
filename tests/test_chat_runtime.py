@@ -18,6 +18,7 @@ from backend.config import (
     ManagedSearchRoutingConfig,
     Settings,
 )
+from backend.report_writing import MAX_CANONICAL_MUTATIONS_PER_TURN
 from backend.skill import SkillEngine
 
 
@@ -4132,31 +4133,22 @@ class ChatRuntimeTests(unittest.TestCase):
         self._start_report_writing_turn(handler, "继续写正文")
         self._read_file_for_turn(handler, "content/report_draft_v1.md")
 
-        first = handler._execute_tool(
+        for i in range(MAX_CANONICAL_MUTATIONS_PER_TURN):
+            result = handler._execute_tool(
+                self.project_id,
+                self._make_append_report_tool_call(call_id=f"call-append-{i + 1}"),
+            )
+            self.assertEqual(result["status"], "success", msg=result)
+        after_cap = draft_path.read_text(encoding="utf-8")
+        over_cap = handler._execute_tool(
             self.project_id,
-            self._make_append_report_tool_call(),
-        )
-        second = handler._execute_tool(
-            self.project_id,
-            self._make_append_report_tool_call(call_id="call-append-2"),
-        )
-        third = handler._execute_tool(
-            self.project_id,
-            self._make_append_report_tool_call(call_id="call-append-3"),
-        )
-        after_third = draft_path.read_text(encoding="utf-8")
-        fourth = handler._execute_tool(
-            self.project_id,
-            self._make_append_report_tool_call(call_id="call-append-4"),
+            self._make_append_report_tool_call(call_id="call-append-over"),
         )
 
-        self.assertEqual(first["status"], "success")
-        self.assertEqual(second["status"], "success", msg=second)
-        self.assertEqual(third["status"], "success", msg=third)
-        self.assertEqual(fourth["status"], "error")
-        self.assertIn("达到上限", fourth["message"])
-        self.assertIn("report_progress", fourth)
-        self.assertEqual(draft_path.read_text(encoding="utf-8"), after_third)
+        self.assertEqual(over_cap["status"], "error")
+        self.assertIn("达到上限", over_cap["message"])
+        self.assertIn("report_progress", over_cap)
+        self.assertEqual(draft_path.read_text(encoding="utf-8"), after_cap)
 
     @mock.patch("backend.chat.OpenAI")
     def test_append_report_draft_rejects_short_content(self, mock_openai):
@@ -12442,22 +12434,15 @@ class AppendReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         handler = self._make_handler_with_project()
         self._setup_outline_confirmed_s4(handler)
         handler._build_turn_context(self.project_id, "开始写报告")
-        # 第一次成功（首次，无需 read）
-        first = handler._tool_append_report_draft(
-            self.project_id, content=self._VALID_APPEND_CONTENT,
-        )
-        second = handler._tool_append_report_draft(
-            self.project_id, content=self._VALID_APPEND_CONTENT,
-        )
-        third = handler._tool_append_report_draft(
-            self.project_id, content=self._VALID_APPEND_CONTENT,
-        )
+        # 连续 append 到上限均成功（首次无需 read，其后属同轮 self-mutation）
+        for _ in range(MAX_CANONICAL_MUTATIONS_PER_TURN):
+            ok = handler._tool_append_report_draft(
+                self.project_id, content=self._VALID_APPEND_CONTENT,
+            )
+            self.assertEqual(ok.get("status"), "success", msg=ok)
         result = handler._tool_append_report_draft(
             self.project_id, content=self._VALID_APPEND_CONTENT,
         )
-        self.assertEqual(first.get("status"), "success", msg=first)
-        self.assertEqual(second.get("status"), "success", msg=second)
-        self.assertEqual(third.get("status"), "success", msg=third)
         self.assertEqual(result.get("status"), "error")
         self.assertIn("达到上限", result.get("message", ""))
         self.assertIn("当前", result.get("message", ""))
@@ -13604,9 +13589,13 @@ class EditFileCanonicalInvariantRejectTests(_EditFileDispatcherTestMixin, ChatRu
         handler = self._make_handler_with_project()
         turn_context = self._prepare_canonical_edit(handler, user_message="把引言段改成新引言")
         turn_context["canonical_draft_mutations"] = [
-            {"canonical_action": "text_replace", "target_label": "m0", "old_len": 1, "new_len": 1},
-            {"canonical_action": "text_replace", "target_label": "m1", "old_len": 1, "new_len": 1},
-            {"canonical_action": "text_replace", "target_label": "m2", "old_len": 1, "new_len": 1},
+            {
+                "canonical_action": "text_replace",
+                "target_label": f"m{i}",
+                "old_len": 1,
+                "new_len": 1,
+            }
+            for i in range(MAX_CANONICAL_MUTATIONS_PER_TURN)
         ]
 
         result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")

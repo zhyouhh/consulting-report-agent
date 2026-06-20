@@ -31,15 +31,15 @@ test("buildProjectWelcomeMessage reflects seeded project metadata", () => {
     name: "猪猪侠研究项目",
     project_type: "strategy-consulting",
     theme: "猪猪侠IP研究",
-    target_audience: "高层决策者",
     deadline: "2026-04-01",
     expected_length: "3000字",
   });
 
   assert.match(message, /猪猪侠研究项目/);
   assert.match(message, /猪猪侠IP研究/);
-  assert.match(message, /高层决策者/);
   assert.match(message, /2026-04-01/);
+  // 目标读者已从欢迎语移除。
+  assert.doesNotMatch(message, /目标读者/);
 });
 
 test("shouldFlushStreamingQueueImmediately only flushes for disruptive events", () => {

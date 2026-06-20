@@ -92,6 +92,23 @@ test("shows review_stale advisory on the draft", () => {
   assert.match(s, /建议重新审查/);
 });
 
+test("tree/preview split is state-driven + draggable, not a fixed max-h-64 (N4)", () => {
+  const s = src();
+  // 文件树高度由 treePct 状态驱动（默认三七分），不再写死 max-h-64
+  assert.match(s, /from ['"]\.\.\/utils\/filePanelLayout['"]/);
+  assert.match(s, /const \[treePct, setTreePct\] = useState\(DEFAULT_TREE_PCT\)/);
+  assert.match(s, /style=\{\{ height: `\$\{treePct\}%` \}\}/);
+  assert.doesNotMatch(s, /max-h-64/);
+  // 可拖动分隔条
+  assert.match(s, /const startTreeResize = useCallback/);
+  assert.match(s, /onMouseDown=\{startTreeResize\}/);
+  assert.match(s, /cursor-row-resize/);
+  assert.match(s, /computeTreePct\(ev\.clientY/);
+  // 拖动监听必须有卸载兜底清理，避免中途卸载泄漏 + setState-after-unmount
+  assert.match(s, /resizeCleanupRef/);
+  assert.match(s, /useEffect\(\(\) => \(\) => resizeCleanupRef\.current\?\.\(\), \[\]\)/);
+});
+
 test("enter-edit invalidated by any allowed leave during async reload via selection epoch (codex BLOCKER 2)", () => {
   const s = src();
   assert.match(s, /const selectionSeqRef = useRef/);

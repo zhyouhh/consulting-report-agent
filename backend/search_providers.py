@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -48,16 +49,33 @@ class BaseSearchProvider:
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str | None = None,
+        api_keys: list[str] | tuple[str, ...] | None = None,
         session: requests.Session | Any | None = None,
         timeout_seconds: int = DEFAULT_SEARCH_TIMEOUT_SECONDS,
     ) -> None:
-        self.api_key = api_key
+        keys = [str(key) for key in (api_keys or []) if str(key)]
+        if not keys and api_key:
+            keys = [api_key]
+        self._api_keys = keys or [""]
+        self.api_key = self._api_keys[0]
+        self._key_index = 0
+        self._key_lock = threading.Lock()
         self.session = session or requests.Session()
         self.timeout_seconds = timeout_seconds
 
+    def _next_api_key(self) -> str:
+        """多账号轮询：每次取一个 key 并前移游标（线程安全）。单 key 时直接返回。"""
+        if len(self._api_keys) <= 1:
+            return self._api_keys[0]
+        with self._key_lock:
+            key = self._api_keys[self._key_index % len(self._api_keys)]
+            self._key_index += 1
+            return key
+
     def search(self, query: str) -> ProviderSearchResult:
-        payload = self._request_payload(query)
+        api_key = self._next_api_key()
+        payload = self._request_payload(query, api_key)
         items = self._parse_items(payload)
         return ProviderSearchResult(
             provider=self.provider_name,
@@ -65,7 +83,7 @@ class BaseSearchProvider:
             result_type="empty_result" if not items else "success",
         )
 
-    def _request_payload(self, query: str) -> dict[str, Any]:
+    def _request_payload(self, query: str, api_key: str) -> dict[str, Any]:
         raise NotImplementedError
 
     def _parse_items(self, payload: dict[str, Any]) -> list[SearchItem]:
@@ -172,12 +190,12 @@ class SerperProvider(BaseSearchProvider):
     provider_name = "serper"
     endpoint = "https://google.serper.dev/search"
 
-    def _request_payload(self, query: str) -> dict[str, Any]:
+    def _request_payload(self, query: str, api_key: str) -> dict[str, Any]:
         return self._request_json(
             "post",
             self.endpoint,
             headers={
-                "X-API-KEY": self.api_key,
+                "X-API-KEY": api_key,
                 "Content-Type": "application/json",
             },
             json={"q": query},
@@ -203,13 +221,13 @@ class BraveProvider(BaseSearchProvider):
     provider_name = "brave"
     endpoint = "https://api.search.brave.com/res/v1/web/search"
 
-    def _request_payload(self, query: str) -> dict[str, Any]:
+    def _request_payload(self, query: str, api_key: str) -> dict[str, Any]:
         return self._request_json(
             "get",
             self.endpoint,
             headers={
                 "Accept": "application/json",
-                "X-Subscription-Token": self.api_key,
+                "X-Subscription-Token": api_key,
             },
             params={
                 "q": query,
@@ -240,12 +258,12 @@ class TavilyProvider(BaseSearchProvider):
     provider_name = "tavily"
     endpoint = "https://api.tavily.com/search"
 
-    def _request_payload(self, query: str) -> dict[str, Any]:
+    def _request_payload(self, query: str, api_key: str) -> dict[str, Any]:
         return self._request_json(
             "post",
             self.endpoint,
             headers={
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
@@ -276,12 +294,12 @@ class ExaProvider(BaseSearchProvider):
     provider_name = "exa"
     endpoint = "https://api.exa.ai/search"
 
-    def _request_payload(self, query: str) -> dict[str, Any]:
+    def _request_payload(self, query: str, api_key: str) -> dict[str, Any]:
         return self._request_json(
             "post",
             self.endpoint,
             headers={
-                "x-api-key": self.api_key,
+                "x-api-key": api_key,
                 "Content-Type": "application/json",
             },
             json={

@@ -19,13 +19,21 @@ test("displayName maps known path to Chinese, falls back to basename", () => {
   assert.equal(displayName("weird/unknown.md"), "unknown");
 });
 
-test("buildFileTree groups and orders groups with tracking last", () => {
+test("buildFileTree floats current-stage group to top, tracking last", () => {
   const tree = buildFileTree(files, "S2");
   const groupKeys = tree.map((g) => g.group);
-  // tracking 在最后
+  // 当前阶段（S2 → research）分组置顶
+  assert.equal(groupKeys[0], "research");
+  // tracking 仍在最后
   assert.equal(groupKeys[groupKeys.length - 1], "tracking");
-  // 顺序遵循 GROUP_ORDER 子序
-  const idx = groupKeys.map((k) => GROUP_ORDER.indexOf(k));
+  // 置顶组之后，其余分组保持 GROUP_ORDER 子序
+  const restIdx = groupKeys.slice(1).map((k) => GROUP_ORDER.indexOf(k));
+  assert.deepEqual(restIdx, [...restIdx].sort((a, b) => a - b));
+});
+
+test("buildFileTree keeps GROUP_ORDER when current-stage group is already first", () => {
+  const tree = buildFileTree(files, "S0"); // overview 当前 → 本就置顶
+  const idx = tree.map((g) => GROUP_ORDER.indexOf(g.group));
   assert.deepEqual(idx, [...idx].sort((a, b) => a - b));
 });
 

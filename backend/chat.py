@@ -5042,7 +5042,7 @@ class ChatHandler:
                 factory = provider_factories.get(provider_name)
                 if factory is None:
                     continue
-                providers[provider_name] = factory(api_key=provider_config.api_key)
+                providers[provider_name] = factory(api_keys=provider_config.api_keys)
 
             _SEARCH_ROUTER_SINGLETON = SearchRouter(
                 config=search_config,

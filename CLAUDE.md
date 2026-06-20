@@ -92,7 +92,7 @@ S4 阶段（大纲已确认）报告正文唯一规范路径是 `content/report_
 
 **关键约束**：
 - 旧专用工具 `rewrite_report_section` / `replace_report_text` / `rewrite_report_draft` 已删除；不要新建、注册或引用。
-- `canonical_draft_mutations` 是 list；每轮最多 3 次 canonical draft mutation，超限错误必须带 mutations 摘要和真实进度。
+- `canonical_draft_mutations` 是 list；每轮最多 `MAX_CANONICAL_MUTATIONS_PER_TURN`（现 10）次 canonical draft mutation，超限错误必须带 mutations 摘要和真实进度。
 - read-before-write：先 `read_file` 才能改（首次起草除外）；mtime 变了要重读
 
 **Turn-end 对账**：`_chat_*_unlocked` no-tool-call 分支检测 `canonical_obligation` set + `canonical_draft_mutations` 为空 + assistant 文本声称已写 → 注入 corrective user message + retry。只兜底"完全没写却声称写了"，不解决 partial obligation retry。
@@ -146,7 +146,8 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 - 写接口 `POST /api/projects/{id}/files/{path}` `{content, base_mtime_ns}`：mtime CAS（不匹配 `StaleFileError`→409）+ 同目录 temp + `os.replace` 原子写；`base_mtime_ns` 全程 **opaque str**（pydantic 拒 number→422）。**临界区跑专用 `_USER_WRITE_EXECUTOR`，不是 `run_in_threadpool`**——硬约束：`chat_stream` 是同步 generator、被 anyio 默认池迭代、`with request_lock:`（RLock）owner 是 anyio worker；保存若用默认池可能复用 owner 线程→RLock 重入放行→绕过 CAS。专用池线程绝非 chat worker，`acquire` 真阻塞到 chat 释放。**别改回 `run_in_threadpool`**（`test_main_api.py` 有 source-guard 守）。
 - 读接口 `GET /files/{path}` 返回 `{content, mtime_ns, editable}`，**不持锁**（chat_stream 整轮持锁，读进锁会冻预览）：`read_file_with_mtime` 先 stat 再 read。AI 写**可编辑**文件（plan 内容文件 + canonical draft `edit_file`）全经原子 `write_file`（temp+`os.replace`），故无锁读不会读到半截、最坏=保存安全 409（只读追踪文件后端直写，极端下预览瞬时错乱、刷新自愈，不可编辑不入 CAS）。`GET /files` 给结构化 `[{path,group,stage,editable,mtime_ns}]`。
 - `get_workspace_summary().flags.review_stale`（D6 advisory）：两份审查报告**有效**（`_has_effective_review_reports`，非 scaffold 模板）且 `draft_mtime > min(report mtimes)` 即标，**不** gate 在 `review_passed_at`；不硬阻 S6/S7。
-- 前端：`utils/fileTree.js`（分组/置顶/中文名）、`utils/fileEditState.js`（双模式状态机 + `guardLeave` 返 `allow/confirm/block`）、`FilePreviewPanel.jsx`（forwardRef 暴露 `attemptLeave(action)`/`isEditing()`，脏离开**三按钮「保存/放弃修改/取消」延后动作**弹窗 + Esc=取消 + 进入编辑 `selectionSeqRef` 防竞态）、`WorkspacePanel.jsx`/`App.jsx`（切 tab/切项目/新建项目/收面板 dirty 守卫，ref 链 App→WorkspacePanel→FilePreviewPanel）。**`WorkspacePanel.loadFile` 同步 `setCurrentFile(path)` 再异步 GET 内容**——消除「导航已发起、currentFile 未 commit」窗口（否则进入编辑/保存会锁错文件）；`latestFileRequestRef` 丢弃乱序 content 响应。
+- 前端：`utils/fileTree.js`（分组/置顶/中文名；**2026-06-19 N4：当前阶段所在分组整组置顶**，splice+unshift、其余保持 GROUP_ORDER）、`utils/fileEditState.js`（双模式状态机 + `guardLeave` 返 `allow/confirm/block`）、`FilePreviewPanel.jsx`（forwardRef 暴露 `attemptLeave(action)`/`isEditing()`，脏离开**三按钮「保存/放弃修改/取消」延后动作**弹窗 + Esc=取消 + 进入编辑 `selectionSeqRef` 防竞态）、`WorkspacePanel.jsx`/`App.jsx`（切 tab/切项目/新建项目/收面板 dirty 守卫，ref 链 App→WorkspacePanel→FilePreviewPanel）。**`WorkspacePanel.loadFile` 同步 `setCurrentFile(path)` 再异步 GET 内容**——消除「导航已发起、currentFile 未 commit」窗口（否则进入编辑/保存会锁错文件）；`latestFileRequestRef` 丢弃乱序 content 响应。
+- **N4（2026-06-19）文件树/预览上下分栏**：`FilePreviewPanel` 文件树高度由 `treePct` state 驱动（默认**三七分** 30/70，去掉旧固定 `max-h-64`）+ 可拖动分隔条（`startTreeResize`，window 级监听 + `resizeCleanupRef` + 卸载 `useEffect` 兜底清理防泄漏）；拖动数学抽 `utils/filePanelLayout.js`（`clampTreePct`/`computeTreePct` 纯函数，无 jsdom 单测 + source-guard）。
 - 回归：`tests/test_skill_engine.py`、`tests/test_main_api.py::R3FileApiTests`；前端 `fileTree`/`fileEditState`/`filePreviewPanel.source`/`workspacePanel.source`。详见 `docs/superpowers/cutover_report_2026-06-09_r3-file-tree-editing.md`。
 
 ## 来源可信度标注（R4，2026-06-11）
@@ -170,6 +171,8 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
+
+**多 key 轮询**：每个 provider 支持配多个 key（`managed_search_pool.json` 里 `api_keys: [...]` 列表；旧 `api_key` 单值仍兼容，`config.py:ManagedSearchProviderConfig.__post_init__` 互相回填）。`BaseSearchProvider._next_api_key()` 每次 search **线程安全轮转**取一个 key 传给 `_request_payload(query, api_key)`，把负载摊到多账号；`daily_soft_limit` 应按 key 数缩放才有实际余量。改 key/限额后**要重启**（路由单例不热重载）。
 
 路由单例在 `ChatHandler` 里（`_SEARCH_ROUTER_SINGLETON`），`managed_search_pool.json` 一旦加载不会热重载，改配置需要重启。
 
@@ -208,26 +211,28 @@ build.bat                    # 等价于 powershell -File build.ps1
 
 ### macOS 上做开发（web 模式，无需打包）
 
-桌面端只承诺 Windows 分发，但**日常开发可以在 macOS 上跑**——走 web 模式（`run_web.py`），不碰 PyWebView / 原生文件桥 / PyInstaller，全程跨平台。同样需要 Python 3.11/3.12 + Node 20 LTS。
+桌面端只承诺 Windows 分发，但**日常开发可以在 macOS 上跑**——走 web 模式（`run_web.py`），不碰 PyWebView / 原生文件桥 / PyInstaller，全程跨平台。需要 Python 3.11/3.12 + Node 20 LTS。
+
+> ⚠️ **系统 Python 太新（≥3.13）装不上依赖**（`curl_cffi`/`pydantic` 等无对应 wheel）。mac 上最省事用 `uv` 拉一个托管 3.12 建 venv，别用系统 `python3`（可能是 3.14）：
 
 ```bash
-# 开发环境初始化（注意路径用正斜杠、venv 在 bin/ 下）
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# 开发环境初始化（uv 托管 Python 3.12，避开系统 3.14）
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python -r requirements.txt
 cd frontend && npm install && npm run build && cd ..   # 必须 build，否则 SPA 404
 
 # 启动 web 模式（浏览器访问，不开原生窗口）
-python run_web.py            # → http://localhost:8888
+.venv/bin/python run_web.py            # → http://localhost:8888
 
 # 测试（powershell 相关用例会 skipIf 自动跳过，不报错）
 .venv/bin/python -m pytest tests/
 ```
 
-**两个 macOS 上需要注意的点**：
+**三个 macOS 上需要注意的点**：
 
 1. **私有文件不在 git 里，要从 Windows 机拷过去**：`managed_client_token.txt`、`managed_search_pool.json`（`.gitignore` 忽略）放仓库根，否则 managed 模式认证不了 / 内置搜索不工作。临时方案：设置里切 `custom` 模式自填 OpenAI 兼容 key，无需这两个文件也能跑通对话与写作。
 2. **S5 两个按钮会报错**：「AI 味自查」（`quality_check.ps1`）和「导出可审草稿」（`export_draft.ps1`）经 `backend/report_tools.py` 调硬编码的 `powershell` 命令，macOS 无此命令会失败。属 S5 晚期功能，S0–S4 日常开发碰不到；彻底解决见 worklist「去 Windows 化」（改 Python）。
+3. **4 个测试在 mac 上失败属环境差异、非真 bug**：`test_skill_engine.py` / `test_workspace_materials.py` 里涉及 `tempfile` 路径比对的用例，因 macOS `/var`→`/private/var` symlink、临时路径未解析 vs 已解析不相等而失败，**Windows 上通过**。要 mac 全绿需把这些用例的临时路径断言改走 `os.path.realpath`/`.resolve()`（独立小活，见 worklist N-section）。
 
 ## 文档与追踪
 

@@ -13,7 +13,8 @@ class ProjectInfo(BaseModel):
     workspace_dir: str = Field(..., min_length=1, max_length=500)
     project_type: str = Field(..., min_length=1, max_length=100)
     theme: str = Field(..., min_length=1, max_length=200)
-    target_audience: str = Field(..., min_length=1, max_length=100)
+    # 报告面向对象（高层/中层/执行）已从新建表单移除，保留为可选字段仅作向后兼容。
+    target_audience: str = Field(default="", max_length=100)
     deadline: str = Field(..., min_length=1, max_length=50)
     expected_length: str = Field(..., min_length=1, max_length=100)
     notes: str = Field(default="", max_length=2000)

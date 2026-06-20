@@ -275,6 +275,51 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertEqual(config.routing.primary, ["serper", "brave"])
         self.assertEqual(config.providers["serper"].minute_limit, 60)
         self.assertEqual(config.limits.project_cache_ttl_seconds, 86400)
+        # 单 key 写法向后兼容：api_keys 自动回填为单元素元组。
+        self.assertEqual(config.providers["serper"].api_key, "serper-key")
+        self.assertEqual(config.providers["serper"].api_keys, ("serper-key",))
+
+    def test_load_managed_search_pool_config_reads_multi_key_api_keys(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = Path(tmpdir)
+            (bundle_dir / "managed_search_pool.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "providers": {
+                            "serper": {
+                                "enabled": True,
+                                "api_keys": ["k1", "k2", "k3"],
+                                "weight": 5,
+                                "minute_limit": 60,
+                                "daily_soft_limit": 1200,
+                                "cooldown_seconds": 180,
+                            },
+                        },
+                        "routing": {
+                            "primary": ["serper"],
+                            "secondary": [],
+                            "native_fallback": True,
+                        },
+                        "limits": {
+                            "per_turn_searches": 5,
+                            "project_minute_limit": 30,
+                            "global_minute_limit": 60,
+                            "memory_cache_ttl_seconds": 21600,
+                            "project_cache_ttl_seconds": 86400,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch("backend.config.get_base_path", return_value=bundle_dir):
+                config = load_managed_search_pool_config()
+
+        self.assertEqual(config.providers["serper"].api_keys, ("k1", "k2", "k3"))
+        # api_key 恒为首个 key，供向后兼容的单 key 读取方使用。
+        self.assertEqual(config.providers["serper"].api_key, "k1")
+        self.assertEqual(config.limits.per_turn_searches, 5)
 
     def test_load_managed_search_pool_config_accepts_utf8_bom_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:

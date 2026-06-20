@@ -9,10 +9,12 @@ const modalSource = readFileSync(
   "utf-8",
 );
 
-test("ProjectCreateModal removes legacy title, name, and notes fields and uses a date input", () => {
+test("ProjectCreateModal removes legacy title, name, notes, and target-audience fields and uses a date input", () => {
   assert.doesNotMatch(modalSource, /新建咨询项目/);
   assert.doesNotMatch(modalSource, /项目名称/);
   assert.doesNotMatch(modalSource, /已有材料或备注/);
+  // 报告面向对象（高层/中层/执行）选择器已移除。
+  assert.doesNotMatch(modalSource, /target_audience|高层决策者|中层管理者|执行团队/);
   assert.match(modalSource, /type="date"/);
   assert.match(modalSource, /onCreate\(prepareProjectCreatePayload\(formData\)\)/);
 });
@@ -22,7 +24,6 @@ test("prepareProjectCreatePayload derives the project name from the theme and ke
     workspace_dir: "D:\\workspace",
     project_type: "strategy-consulting",
     theme: "  超人起飞  ",
-    target_audience: "高层决策者",
     deadline: "2026-04-02",
     expected_length: "5000字",
     notes: "",
@@ -33,6 +34,8 @@ test("prepareProjectCreatePayload derives the project name from the theme and ke
   assert.equal(payload.theme, "超人起飞");
   assert.equal(payload.deadline, "2026-04-02");
   assert.equal(payload.notes, "");
+  // 目标读者字段已移除，payload 不再携带。
+  assert.equal(payload.target_audience, undefined);
   assert.deepEqual(payload.initial_material_paths, ["D:\\workspace\\brief.md"]);
 });
 
@@ -41,7 +44,6 @@ test("prepareProjectCreatePayload preserves a meaningful theme as the project di
     workspace_dir: "D:\\workspace",
     project_type: "strategy-consulting",
     theme: "AI 战略 / 2026!",
-    target_audience: "高层决策者",
     deadline: "2026-04-02",
     expected_length: "5000字",
     notes: "",
@@ -59,7 +61,6 @@ test("prepareProjectCreatePayload rejects themes that cannot yield a meaningful 
         workspace_dir: "D:\\workspace",
         project_type: "strategy-consulting",
         theme: "---",
-        target_audience: "高层决策者",
         deadline: "2026-04-02",
         expected_length: "5000字",
         notes: "",

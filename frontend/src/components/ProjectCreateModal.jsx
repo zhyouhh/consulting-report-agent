@@ -6,7 +6,6 @@ const initialForm = {
   workspace_dir: '',
   project_type: 'strategy-consulting',
   theme: '',
-  target_audience: '高层决策者',
   deadline: '',
   expected_length: '',
   initial_material_paths: [],
@@ -147,16 +146,6 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
             />
           </div>
         </div>
-
-        <select
-          value={formData.target_audience}
-          onChange={e => setFormData({ ...formData, target_audience: e.target.value })}
-          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-3"
-        >
-          <option value="高层决策者">高层决策者</option>
-          <option value="中层管理者">中层管理者</option>
-          <option value="执行团队">执行团队</option>
-        </select>
 
         <div className="mb-3 rounded border border-[#2f3158] bg-[#15162d] p-3">
           <div className="text-sm text-[#e2e2f0] mb-2">初始材料</div>

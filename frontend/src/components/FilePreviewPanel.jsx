@@ -14,6 +14,7 @@ import {
   initialEditState, enterEdit, editDraft, startSaving,
   saveSucceeded, saveFailed, reloadAfterConflict, guardLeave,
 } from '../utils/fileEditState'
+import { DEFAULT_TREE_PCT, computeTreePct } from '../utils/filePanelLayout'
 import { showError } from '../utils/toast'
 
 const markdownComponents = {
@@ -69,8 +70,31 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
   const [edit, setEdit] = useState(initialEditState)
   const [collapsed, setCollapsed] = useState({})
   const [leaveDialog, setLeaveDialog] = useState(null) // null | { action }
+  const [treePct, setTreePct] = useState(DEFAULT_TREE_PCT) // 文件树占比（默认三七分），分隔条可拖动
+  const containerRef = useRef(null)
+  const resizeCleanupRef = useRef(null) // 活跃拖动的 window 监听清理器
   const editRef = useRef(edit)
   editRef.current = edit
+
+  // 拖动上下分隔条调整文件树/预览框高度（window 级监听，拖出组件也跟手）。
+  const startTreeResize = useCallback((e) => {
+    e.preventDefault()
+    resizeCleanupRef.current?.() // 清掉上一次残留监听（防重复绑定）
+    const onMove = (ev) => {
+      setTreePct(computeTreePct(ev.clientY, containerRef.current?.getBoundingClientRect()))
+    }
+    const cleanup = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', cleanup)
+      resizeCleanupRef.current = null
+    }
+    resizeCleanupRef.current = cleanup
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', cleanup)
+  }, [])
+
+  // 卸载时兜底清理：拖动中途切走/收面板不留泄漏监听、不在卸载后 setTreePct。
+  useEffect(() => () => resizeCleanupRef.current?.(), [])
   // 选择序号：每次「放行的离开」（切文件 / 切项目 / 切 tab）自增。进入编辑是异步的（先 GET 取 base），
   // 期间的离开可能尚未 commit 到 currentFile（WorkspacePanel.loadFile 也是异步），故不能比 currentFile，
   // 改比这个同步自增的序号——序号变了即说明已切走（codex 前端审 BLOCKER 2 二轮）。
@@ -229,9 +253,12 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
   }, [leaveDialog, closeLeaveDialog])
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 relative">
-      {/* 文件树（分组 + 当前阶段置顶 + 中文名） */}
-      <div className="border-b border-[#2a2a4a] max-h-64 overflow-y-auto text-sm">
+    <div ref={containerRef} className="flex-1 flex flex-col min-h-0 relative">
+      {/* 文件树（分组 + 当前阶段置顶 + 中文名），默认占三成，分隔条可拖动 */}
+      <div
+        className="overflow-y-auto text-sm flex-shrink-0"
+        style={{ height: `${treePct}%` }}
+      >
         {groups.map((group) => {
           const isCollapsed = collapsed[group.group] ?? group.defaultCollapsed
           return (
@@ -260,6 +287,15 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
           )
         })}
       </div>
+
+      {/* 可拖动上下分隔条：调整文件树 / 预览框高度 */}
+      <div
+        onMouseDown={startTreeResize}
+        className="h-1.5 cursor-row-resize bg-[#2a2a4a] hover:bg-[#3a3a6a] flex-shrink-0"
+        role="separator"
+        aria-orientation="horizontal"
+        title="拖动调整上下高度"
+      />
 
       {/* review_stale advisory（仅正文页显示） */}
       {isDraft && reviewStale && (

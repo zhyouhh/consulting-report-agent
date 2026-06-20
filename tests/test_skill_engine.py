@@ -378,6 +378,30 @@ class SkillEngineTests(unittest.TestCase):
             self.assertNotIn("review-checklist.md", created_file_names)
             self.assertNotIn("project-info.md", created_file_names)
 
+    def test_create_project_without_target_audience_does_not_crash(self):
+        # 目标读者已从新建表单移除：省略该字段（→ None）必须正常建项目、不触发
+        # _populate_v2_plan_files 的 str.replace(None) TypeError，记录归一为 ""。
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = projects_dir / "demo"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                "demo",
+                "strategy-consulting",
+                "AI 战略规划",
+                deadline="2026-04-01",
+                expected_length="3000字",
+            )
+
+            self.assertEqual(project["target_audience"], "")
+            overview = (
+                workspace_dir / ".consulting-report" / "plan" / "project-overview.md"
+            ).read_text(encoding="utf-8")
+            # 目标读者留空：不得出现字面 None / 未替换占位符，且项目目标句不带病句「面向形成」。
+            self.assertNotIn("None", overview)
+            self.assertNotIn("[填写目标读者]", overview)
+            self.assertNotIn("面向形成", overview)
+
     def test_create_project_initializes_only_registered_formal_plan_templates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"

@@ -71,6 +71,17 @@ class ManagedSearchProviderConfig:
     minute_limit: int
     daily_soft_limit: int
     cooldown_seconds: int
+    api_keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # 兼容单 key（api_key）与多 key 轮询（api_keys）：两者互相回填，
+        # api_key 恒为首个有效 key，api_keys 恒为去空后的元组。
+        keys = tuple(k for k in self.api_keys if k)
+        if not keys and self.api_key:
+            keys = (self.api_key,)
+        object.__setattr__(self, "api_keys", keys)
+        if not self.api_key and keys:
+            object.__setattr__(self, "api_key", keys[0])
 
 
 @dataclass(frozen=True)
@@ -111,18 +122,33 @@ def _require_bool(payload: dict, key: str) -> bool:
     return value
 
 
+def _parse_provider_api_keys(name: str, payload: dict) -> tuple[str, ...]:
+    """支持 `api_keys`（多账号轮询）与 `api_key`（单账号）两种写法。
+
+    `api_keys` 优先；两者都缺省则返回空元组（enabled provider 上游会报错）。
+    """
+    raw_keys = payload.get("api_keys")
+    if raw_keys is not None:
+        if not isinstance(raw_keys, list):
+            raise ValueError(f"managed_search_pool.json 中 {name}.api_keys 必须是列表")
+        return tuple(str(key).strip() for key in raw_keys if str(key).strip())
+    single = str(payload.get("api_key", "")).strip()
+    return (single,) if single else ()
+
+
 def _require_provider_entry(name: str, payload: dict) -> ManagedSearchProviderConfig:
     if not isinstance(payload, dict):
         raise ValueError(f"managed_search_pool.json 中 {name} 配置格式不正确")
     enabled = payload.get("enabled", False)
     if not isinstance(enabled, bool):
         raise ValueError(f"managed_search_pool.json 中 {name}.enabled 必须是 boolean")
-    api_key = str(payload.get("api_key", "")).strip()
-    if enabled and not api_key:
+    api_keys = _parse_provider_api_keys(name, payload)
+    if enabled and not api_keys:
         raise ValueError(f"managed_search_pool.json 中 {name} 缺少 api_key")
     return ManagedSearchProviderConfig(
         enabled=enabled,
-        api_key=api_key,
+        api_key=api_keys[0] if api_keys else "",
+        api_keys=api_keys,
         weight=_require_int(payload, "weight"),
         minute_limit=_require_int(payload, "minute_limit"),
         daily_soft_limit=_require_int(payload, "daily_soft_limit"),

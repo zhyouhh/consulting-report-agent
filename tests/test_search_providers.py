@@ -198,6 +198,33 @@ class SearchProvidersTests(unittest.TestCase):
         self.assertEqual(result.items, [])
         self.assertEqual(result.result_type, "empty_result")
 
+    def test_multi_key_round_robin_rotates_per_search(self):
+        session = mock.Mock()
+        session.post.return_value = _mock_response(payload={"organic": []})
+        adapter = SerperProvider(api_keys=["a", "b", "c"], session=session)
+
+        for _ in range(4):
+            adapter.search("q")
+
+        used = [
+            call.kwargs["headers"]["X-API-KEY"]
+            for call in session.post.call_args_list
+        ]
+        self.assertEqual(used, ["a", "b", "c", "a"])
+        # api_key 暴露首个 key，向后兼容单 key 读取。
+        self.assertEqual(adapter.api_key, "a")
+
+    def test_single_key_via_api_keys_backward_compat(self):
+        session = mock.Mock()
+        session.post.return_value = _mock_response(payload={"organic": []})
+        adapter = SerperProvider(api_keys=["solo"], session=session)
+
+        adapter.search("q")
+
+        self.assertEqual(
+            session.post.call_args.kwargs["headers"]["X-API-KEY"], "solo"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

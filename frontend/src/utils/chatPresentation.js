@@ -171,9 +171,6 @@ export function buildProjectWelcomeMessage(project = {}) {
   if (project.project_type) {
     detailParts.push(`类型：${project.project_type}`);
   }
-  if (project.target_audience) {
-    detailParts.push(`目标读者：${project.target_audience}`);
-  }
   if (project.deadline) {
     detailParts.push(`截止日期：${project.deadline}`);
   }

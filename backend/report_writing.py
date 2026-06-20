@@ -116,7 +116,7 @@ def check_no_mixed_intent_in_turn(
     return None
 
 
-MAX_CANONICAL_MUTATIONS_PER_TURN = 3
+MAX_CANONICAL_MUTATIONS_PER_TURN = 10
 
 
 def check_no_prior_canonical_mutation_in_turn(

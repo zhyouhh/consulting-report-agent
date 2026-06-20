@@ -66,5 +66,11 @@ export function buildFileTree(files = [], currentStage = null) {
       defaultCollapsed: group === "tracking",
     });
   }
+  // 当前阶段所在分组置顶；其余分组保持 GROUP_ORDER 流水线序（上一阶段自然紧随其后）。
+  const currentIdx = groups.findIndex((g) => g.hasCurrentStage);
+  if (currentIdx > 0) {
+    const [currentGroup] = groups.splice(currentIdx, 1);
+    groups.unshift(currentGroup);
+  }
   return groups;
 }

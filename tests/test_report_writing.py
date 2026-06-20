@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from backend.report_writing import (
+    MAX_CANONICAL_MUTATIONS_PER_TURN,
     assistant_text_claims_modification,
     check_no_fetch_url_pending,
     check_no_mixed_intent_in_turn,
@@ -629,7 +630,7 @@ class UserMessageRequestsFullRewriteTests(unittest.TestCase):
         self.assertFalse(user_message_requests_full_rewrite("把标题改一下"))
 
 
-class MutationLimit3Tests(unittest.TestCase):
+class MutationLimitTests(unittest.TestCase):
     def _ctx(self, mutations_count):
         return {
             "canonical_draft_mutations": [
@@ -649,37 +650,47 @@ class MutationLimit3Tests(unittest.TestCase):
     def test_zero_mutations_passes(self):
         self.assertIsNone(check_no_prior_canonical_mutation_in_turn(self._ctx(0)))
 
-    def test_two_mutations_passes(self):
-        self.assertIsNone(check_no_prior_canonical_mutation_in_turn(self._ctx(2)))
+    def test_below_cap_passes(self):
+        self.assertIsNone(
+            check_no_prior_canonical_mutation_in_turn(
+                self._ctx(MAX_CANONICAL_MUTATIONS_PER_TURN - 1)
+            )
+        )
 
-    def test_three_mutations_blocks_fourth(self):
-        msg = check_no_prior_canonical_mutation_in_turn(self._ctx(3))
+    def test_at_cap_blocks_next(self):
+        msg = check_no_prior_canonical_mutation_in_turn(
+            self._ctx(MAX_CANONICAL_MUTATIONS_PER_TURN)
+        )
         self.assertIsNotNone(msg)
-        self.assertIn("3", msg)
+        self.assertIn(str(MAX_CANONICAL_MUTATIONS_PER_TURN), msg)
 
     def test_error_msg_summarizes_mutations(self):
-        msg = check_no_prior_canonical_mutation_in_turn(self._ctx(3))
+        msg = check_no_prior_canonical_mutation_in_turn(
+            self._ctx(MAX_CANONICAL_MUTATIONS_PER_TURN)
+        )
         self.assertIn("text_replace", msg)
         self.assertIn("m0", msg)
-        self.assertIn("m2", msg)
+        self.assertIn(f"m{MAX_CANONICAL_MUTATIONS_PER_TURN - 1}", msg)
 
     def test_non_list_mutations_field_passes(self):
         ctx = {"canonical_draft_mutations": {"tool": "edit_file"}}
         self.assertIsNone(check_no_prior_canonical_mutation_in_turn(ctx))
 
     def test_error_msg_summarizes_malformed_mutation_entries(self):
-        ctx = {
-            "canonical_draft_mutations": [
-                {
-                    "canonical_action": "text_replace",
-                    "target_label": "m0",
-                    "old_len": 1,
-                    "new_len": 2,
-                },
-                "not-a-dict",
-                None,
-            ]
-        }
+        entries = [
+            {
+                "canonical_action": "text_replace",
+                "target_label": "m0",
+                "old_len": 1,
+                "new_len": 2,
+            },
+            "not-a-dict",
+            None,
+        ]
+        # 补满到上限以触发限流分支，保留前三条畸形项验证摘要容错。
+        while len(entries) < MAX_CANONICAL_MUTATIONS_PER_TURN:
+            entries.append({"canonical_action": "noop", "target_label": "pad"})
+        ctx = {"canonical_draft_mutations": entries}
         msg = check_no_prior_canonical_mutation_in_turn(ctx)
         self.assertIn("text_replace", msg)
         self.assertIn("m0", msg)

@@ -42,7 +42,7 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 
 ## 打包态 QA 接续（2026-05-19）
 
-正式待办仍以 `docs/current-worklist.md` 为唯一真值源；最近一次打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-19-stage-conductor-packaged-qa.md`。
+正式待办仍以 `docs/current-worklist.md` 为唯一真值源；2026-05-19 的打包态 S0-S7 记录在 `docs/superpowers/handoffs/2026-05-19-stage-conductor-packaged-qa.md`。
 
 已修复并打包验证：
 
@@ -92,7 +92,7 @@ S4 阶段（大纲已确认）报告正文唯一规范路径是 `content/report_
 
 **关键约束**：
 - 旧专用工具 `rewrite_report_section` / `replace_report_text` / `rewrite_report_draft` 已删除；不要新建、注册或引用。
-- `canonical_draft_mutations` 是 list；每轮最多 3 次 canonical draft mutation，超限错误必须带 mutations 摘要和真实进度。
+- `canonical_draft_mutations` 是 list；每轮最多 `MAX_CANONICAL_MUTATIONS_PER_TURN`（现 10）次 canonical draft mutation，超限错误必须带 mutations 摘要和真实进度。
 - read-before-write：先 `read_file` 才能改（首次起草除外）；mtime 变了要重读
 
 **Turn-end 对账**：`_chat_*_unlocked` no-tool-call 分支检测 `canonical_obligation` set + `canonical_draft_mutations` 为空 + assistant 文本声称已写 → 注入 corrective user message + retry。只兜底"完全没写却声称写了"，不解决 partial obligation retry。
@@ -138,7 +138,8 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 - 写接口 `POST /api/projects/{id}/files/{path}` `{content, base_mtime_ns}`：mtime CAS（不匹配 `StaleFileError`→409）+ 同目录 temp + `os.replace` 原子写；`base_mtime_ns` 全程 **opaque str**（pydantic 拒 number→422）。**临界区跑专用 `_USER_WRITE_EXECUTOR`，不是 `run_in_threadpool`**——`chat_stream` 同步 generator 被 anyio 默认池迭代、`with request_lock:`(RLock) owner 是 anyio worker，保存若用默认池可能复用 owner 线程→RLock 重入绕过 CAS。**别改回 `run_in_threadpool`**（有 source-guard 守）。
 - 读接口 `GET /files/{path}` 返回 `{content, mtime_ns, editable}`，**不持锁**（chat_stream 整轮持锁，读进锁会冻预览）：先 stat 再 read。AI 写可编辑文件全经原子 `write_file`（temp+os.replace），无锁读不会读半截。`GET /files` 给结构化 `[{path,group,stage,editable,mtime_ns}]`。
 - `get_workspace_summary().flags.review_stale`（D6 advisory）：两份审查报告**有效**（`_has_effective_review_reports`）且 `draft_mtime > min(report mtimes)` 即标，**不** gate 在 `review_passed_at`，不硬阻 S6/S7。
-- 前端：`utils/fileTree.js`（分组/置顶/中文名）、`utils/fileEditState.js`（双模式 + `guardLeave` 返 `allow/confirm/block`）、`FilePreviewPanel.jsx`（脏离开三按钮「保存/放弃修改/取消」延后动作弹窗）、`WorkspacePanel.jsx`/`App.jsx`（切 tab/项目/新建/收面板 dirty 守卫）。**`WorkspacePanel.loadFile` 同步 `setCurrentFile(path)` 再异步 GET**——消除「导航已发起、currentFile 未 commit」窗口。
+- 前端：`utils/fileTree.js`（分组/置顶/中文名；**2026-06-19 N4：当前阶段所在分组整组置顶**）、`utils/fileEditState.js`（双模式 + `guardLeave` 返 `allow/confirm/block`）、`FilePreviewPanel.jsx`（脏离开三按钮「保存/放弃修改/取消」延后动作弹窗）、`WorkspacePanel.jsx`/`App.jsx`（切 tab/项目/新建/收面板 dirty 守卫）。**`WorkspacePanel.loadFile` 同步 `setCurrentFile(path)` 再异步 GET**——消除「导航已发起、currentFile 未 commit」窗口。
+- **N4（2026-06-19）文件树/预览上下分栏**：高度 `treePct` state 驱动（默认三七分，去掉旧 `max-h-64`）+ 可拖动分隔条（`startTreeResize` + 卸载清理防泄漏）；拖动数学抽纯函数 `utils/filePanelLayout.js`（`clampTreePct`/`computeTreePct`）。
 - 回归：`tests/test_skill_engine.py`、`tests/test_main_api.py::R3FileApiTests`；前端 `fileTree`/`fileEditState`/`filePreviewPanel.source`/`workspacePanel.source`。详见 `docs/superpowers/cutover_report_2026-06-09_r3-file-tree-editing.md`。
 
 ## 来源可信度标注（R4，2026-06-11）
@@ -162,6 +163,8 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
+
+**多 key 轮询**：每个 provider 支持配多个 key（`managed_search_pool.json` 里 `api_keys: [...]` 列表；旧 `api_key` 单值仍兼容，`config.py:ManagedSearchProviderConfig.__post_init__` 互相回填）。`BaseSearchProvider._next_api_key()` 每次 search **线程安全轮转**取一个 key 传给 `_request_payload(query, api_key)`，把负载摊到多账号；`daily_soft_limit` 应按 key 数缩放。改 key/限额后**要重启**（路由单例不热重载）。
 
 路由单例在 `ChatHandler` 里（`_SEARCH_ROUTER_SINGLETON`），`managed_search_pool.json` 一旦加载不会热重载，改配置需要重启。
 

@@ -984,7 +984,7 @@ class SkillEngine:
             name=payload["name"],
             project_type=payload["project_type"],
             theme=payload["theme"],
-            target_audience=payload["target_audience"],
+            target_audience=payload.get("target_audience", ""),
             deadline=payload["deadline"],
             expected_length=payload["expected_length"],
             notes=payload["notes"],
@@ -996,7 +996,7 @@ class SkillEngine:
             "name": payload["name"],
             "project_type": payload["project_type"],
             "theme": payload["theme"],
-            "target_audience": payload["target_audience"],
+            "target_audience": payload.get("target_audience", ""),
             "deadline": payload["deadline"],
             "expected_length": payload["expected_length"],
             "notes": payload["notes"],
@@ -1042,17 +1042,24 @@ class SkillEngine:
         name: str,
         project_type: str,
         theme: str,
-        target_audience: str,
-        deadline: str,
-        expected_length: str,
-        notes: str,
+        target_audience: str = "",
+        deadline: str = "",
+        expected_length: str = "",
+        notes: str = "",
     ):
         today = datetime.now().strftime("%Y-%m-%d")
+        target_audience = (target_audience or "").strip()  # 防御 None：replace 第二参须为 str
+        # 目标读者已非必填：留空时项目目标句省略「面向…」前缀，避免病句。
+        project_goal = (
+            f"面向{target_audience}形成{expected_length}规模的咨询报告初稿"
+            if target_audience
+            else f"形成{expected_length}规模的咨询报告初稿"
+        )
         replacements = {
             "[填写项目名称]": name,
             "[战略咨询/市场研究/尽职调查/运营优化]": project_type,
             "[描述客户背景、行业环境、当前面临的挑战]": theme,
-            "[具体、可衡量的项目目标]": f"面向{target_audience}形成{expected_length}规模的咨询报告初稿",
+            "[具体、可衡量的项目目标]": project_goal,
             "[填写目标读者]": target_audience,
             "[例如：3000字 / 5000-8000字]": expected_length,
             "[填写负责人]": "",
@@ -2742,13 +2749,15 @@ class SkillEngine:
             payload = {"name": project_info_or_name, **kwargs}
 
         payload.setdefault("notes", "")
+        # 目标读者已非必填：缺省 / 显式 None / 纯空白一律归一为 ""，
+        # 否则 None 会流到 _populate_v2_plan_files 的 str.replace 触发 TypeError。
+        payload["target_audience"] = str(payload.get("target_audience") or "").strip()
         payload.setdefault("workspace_dir", kwargs.get("workspace_dir"))
         payload.setdefault("initial_material_paths", kwargs.get("initial_material_paths") or [])
         required_fields = [
             "name",
             "project_type",
             "theme",
-            "target_audience",
             "deadline",
             "expected_length",
         ]

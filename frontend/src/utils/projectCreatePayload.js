@@ -15,7 +15,6 @@ export function prepareProjectCreatePayload(formData = {}) {
     workspace_dir: (formData.workspace_dir || "").trim(),
     project_type: formData.project_type || "strategy-consulting",
     theme,
-    target_audience: formData.target_audience || "",
     deadline: (formData.deadline || "").trim(),
     expected_length: (formData.expected_length || "").trim(),
     notes: "",
