@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-06-21（**N6 附件管线实施完成并 F4 上线；W1 待实施**——N6 走 subagent-driven 实施，A–E+F1+F3 每阶段 codex/opus 红队 review 全 APPROVED + 整 branch 综合审 APPROVED（红队累计挖出 sentinel 越狱/压缩边界泄漏/缓存投毒 TOCTOU/客户端 id 注入等真安全洞，全修）；F4 薄网关白名单透传 + 视觉模型已上线 jp-app-01 并实测转写 200。分支 `feat/n6-attachment-pipeline` 32+ commits，**未 push/merge**；仅剩 F2（Windows 打包 smoke + 删 legacy 解析器）。**下一步：N6 push/merge 等用户 → 进 W1 技术标**（spec/plan 已 APPROVED 未实施）。详见下方 N6/W1 条。
+最后更新：2026-06-21（**N6 附件管线 + W1 技术标类型均实施完成；轮 1 代码层收口**——W1 走 subagent-driven 实施（开工预检砍掉 N6 已覆盖的 Task 5/6，10→8 task）+ Codex 双轨独立 review（quality 红队挖出 Task 7 两表落点锁测「半假绿」真 BLOCKER 并修）+ 整 branch 综合审全 APPROVED；后端 1204 passed / 4 mac-realpath 环境差异、前端 331 passed、token 注入块 1694≤2000。分支 `feat/w1-technical-bid-type` 8 commits，**未 push/merge**，仅剩 GUI E2E 人工验收。N6 详情见下——N6 走 subagent-driven 实施，A–E+F1+F3 每阶段 codex/opus 红队 review 全 APPROVED + 整 branch 综合审 APPROVED（红队累计挖出 sentinel 越狱/压缩边界泄漏/缓存投毒 TOCTOU/客户端 id 注入等真安全洞，全修）；F4 薄网关白名单透传 + 视觉模型已上线 jp-app-01 并实测转写 200。分支 `feat/n6-attachment-pipeline` 已 **merge main（`95949ab`）+ push origin**；仅剩 F2（Windows 打包 smoke + 删 legacy 解析器，**需 Windows 机、mac 做不了**）。**下一步：实施 W1 技术标**（spec/plan 已 APPROVED 未实施；UI 报告类型中文名定为「技术标」）。详见下方 N6/W1 条。
 > 设计期历史（2026-06-20）：N6 spec(5 轮)+plan(7 轮·红队)、W1 spec(4 轮)+plan(2 轮·红队) 均 codex APPROVED；上机只读核实 jp-app-01 拓扑后把 N6 proxy 设计从「自建 per-model 路由」简化为「透传+SELECTABLE_MODELS」。）
 
 上一次更新：2026-06-15（**新方向：服务器化 + 多用户 Web 部署 + 标书模板** —— 2026-06-15 给领导汇报后，领导明确要求「迁服务器 / 做网页给人用 / 加用户系统」，= 上方原记的产品化方向 **b 解 park**。已定：**不拆仓库**（web 作本仓库「运行模式」、引擎共用）、范围＝**公网熟人 + 登录与工作区隔离**、试用机 **kr-web-01**[腾讯云首尔，登记在 VPS-fix 库]、模型**留 `deepseek-v4-pro` 别降级**。标书模板＝引擎级前置特性、建议先做。两者**均待设计**（下一步 brainstorm→plan）。详见下方「🟢 服务器化…」簇。R1–R5 整改簇此前已全部闭环合 main `0162ef1`。）
@@ -16,7 +16,7 @@
 来源：2026-06-15 给领导汇报后，领导明确要求「迁到服务器、做成网页给人用、加用户系统」（动因：同事都用 Mac，桌面版只 Windows 分发、用不了）。即上方原记的产品化方向 **b（部门内部共享部署）**——此前 park，现领导亲自提出，**解 park、定为下一个方向**。
 
 **执行顺序（更新 2026-06-20）**：**轮 1 = W1 标书 + N6 附件**（两个独立引擎特性，各自 spec/plan，**不合并成一个 plan**——体量/风险差太多、稀释 review）。**N6 先做**（拥有材料层 + W1 依赖的强安全边界；且 N6 §5 接管文件 size 守门后，W1 那点后端守门退化为纯 prompt+配置）→ **W1 后**（更小）。W2 web 化排在轮 1 之后。
-- **轮 1 进度（更新 2026-06-21）**：**N6 ✅ 实施完成 + F4 上线**（分支 `feat/n6-attachment-pipeline`，未 push/merge，仅剩 F2 Windows 打包）；**W1 spec ✅ + plan ✅ APPROVED，待实施**。下一步：N6 push/merge 后进 W1。
+- **轮 1 进度（更新 2026-06-21）**：**N6 ✅ 实施完成 + 已 merge main（`95949ab`）+ push origin + F4 上线**（仅剩 F2 Windows 打包 smoke，需 Windows 机）；**W1 ✅ 实施完成**（分支 `feat/w1-technical-bid-type`，8 commits，未 push/merge；双轨+综合审全 APPROVED；仅剩 GUI E2E 人工验收）。**轮 1 两特性代码层均完成**，剩 push/merge + 人工 E2E 等用户。下一步可选：W1 push/merge → W2 web 化（待设计）。
 
 **已定决策（避免重新讨论）**：
 - **不拆仓库**：web 是本仓库的「运行模式」（`run_web.py` 已存在 + `app.py` 桌面入口），引擎共用，web 特有的登录/多租户放界限清楚的新模块（`backend/auth/` 等）+ mode 开关隔开。曾一度建过独立仓库 `consulting-report-agent-web` 又删了。**两线都长期活跃才抽共享包 `consulting-report-core`，现在抽是过度设计**。
@@ -25,8 +25,9 @@
 - **服务器**：试用机 `kr-web-01`（腾讯云轻量首尔 2C2G+swap+40G，Debian 13，SSH 2233，已 fail2ban+ufw+komari），登记在 VPS-fix 库 `notes/kr-web-01.md`（运维不在本项目重复）。渠道商代购、**非自有账号、仅试用、转生产换自有/公司账号正经实例**。Linux 部署、不 PyInstaller、venv 跑 uvicorn。
 - **成本**：先垫钱、推广试用后报销。
 
-**W1. 标书（技术标）报告类型模板** — 状态：`spec ✅ APPROVED（codex 4 轮）；plan ✅ APPROVED（codex 2 轮·含红队）；未实施`
-- spec：`docs/superpowers/specs/2026-06-20-w1-technical-bid-type-design.md`、plan：`docs/superpowers/plans/2026-06-20-w1-technical-bid-type.md`（实施真值源，10 个 TDD task）。
+**W1. 标书（技术标）报告类型模板** — 状态：`✅ 实施完成 2026-06-21（分支 feat/w1-technical-bid-type，8 commits，未 push/merge）；subagent-driven 实施 + Codex 双轨独立 review（spec+quality 不合并）+ 整 branch 综合审全 APPROVED；仅剩 GUI E2E（人工真模型验收）`
+- **实施记录**：cutover `docs/superpowers/cutover_report_2026-06-20_w1-technical-bid.md`。**开工前预检砍掉 Task 5/6**（plan 原「N6 落地前降级 size 守门」已被 N6 在 main 上超额实现：`size_bytes`/`content_sha256` + `material_limits.py` 的 `MAX_HEAVY_MATERIAL_BYTES` 25MB 覆盖 docx/doc/pdf/pptx/ppt/xlsx/xls）→ 10 task 实做 8。回归：后端 1204 passed / 4 failed（全 mac realpath 环境差异、实证与 W1 无关、Windows 绿）、前端 331 passed、DeepSeek 10 passed、token 注入块实测 **1694 ≤ 2000**。Codex quality 红队挖到并修了 1 真 BLOCKER（Task 7 两表落点锁测「半假绿」：只验末行、没验旧稿保留 → 强内容断言修复 `10b6ece`）。
+- spec：`docs/superpowers/specs/2026-06-20-w1-technical-bid-type-design.md`、plan：`docs/superpowers/plans/2026-06-20-w1-technical-bid-type.md`（实施真值源，原 10 TDD task，实做 8）。
 - **plan 关键决策（偏离 spec §3.1，已用户拍板）**：technical-bid **不注入通用 `FRAMEWORK_MENU`**——实测「骨架+RFP+后置+护栏全塞进『## 二』」叠加 531-token 菜单会爆 token≤2k 预算（最坏 2128>2000），且通用分析框架菜单对 RFP 驱动的技术标本就误导。plan Task 1 引 `_framework_menu_for_type` seam（bid 返 ""，其余 6 类不变），跳过后最坏 1679、余量 321。参考骨架据 `bid reference/` 真实样本校准（理论政策依据升格独立块前移、重难点两段式、实施管理五件套、人员附佐证清单）；模块 RFP 段强制「拟好结构先讲给用户确认/调整再展开正文」（用户：参考骨架只能参考、最终结构由人拍板）。
 - **范围已定**（brainstorm 拍板）：只做**技术标主体**，主要用于**副标**（替别家公司写的陪标，内容与主标相近、字数可少、质量松——用户："更多时候只是字数差别"），质量按主标看齐做。参考样本在仓库 `bid reference/`（1 主标+3 副标真实 docx，广西电网数据资源入表；写 plan 时据此精修参考骨架）。
 - **关键设计**：① 新第 7 个 `project_type=technical-bid` + `METHODOLOGY_TONE` 新腔调 `bid`，接 R5 `build_methodology_block`；② 骨架是**参考非模板**——结构由本次招标文件/技规评分点决定（RFP 驱动，参考骨架兜底）；③ 评分索引表 + 点对点应答**后置生成**（正文 append 完再 append 在草稿末尾，「写最前」交导出排版期；不用 edit_file——撞 generative-intent 拦截/cap）；④ 字数复用「预期篇幅」、不加主/副开关；⑤ 含一点轻量后端（`size_bytes` 守门，但 N6 先做后这块被 N6 吸收）。
@@ -75,7 +76,7 @@
 **N5. 用户系统 × 自定义 API 兼容（W2 子题）** — 状态：`待设计`
 - 开放问题：登录后多租户下，`custom` 模式（用户自填 OpenAI 兼容 key/base）与 managed 模式怎么并存？per-user 存各自 custom 配置？custom 模式的 SSRF/配额口子（W2 安全红线②③）。并入 W2 spec 一起设计。
 
-**N6. 附件机制 + 图片分流（接既有 #4 债）** — 状态：`✅ 实施完成 2026-06-21（分支 feat/n6-attachment-pipeline，32+ commits，未 push/merge）；A–E+F1+F3 subagent-driven 实施、每阶段 codex/opus 红队 review 全 APPROVED + 整 branch 综合审 APPROVED；F4 薄网关+视觉已上线 jp-app-01；仅剩 F2（Windows 打包 smoke + 删 legacy 解析器）`
+**N6. 附件机制 + 图片分流（接既有 #4 债）** — 状态：`✅ 实施完成并 merge main（`95949ab`，2026-06-21）+ push origin（分支 feat/n6-attachment-pipeline 保留）；A–E+F1+F3 subagent-driven 实施、每阶段 codex/opus 红队 review 全 APPROVED + 整 branch 综合审 APPROVED；F4 薄网关+视觉已上线 jp-app-01；仅剩 F2（Windows 打包 smoke + 删 legacy 解析器，需 Windows 机）`
 - **实施记录**：cutover `docs/superpowers/cutover_report_2026-06-20_n6-attachment-pipeline.md`（回归：后端 1195 passed/4 mac-symlink、前端 329 passed、vite build ✓）。**依赖偏离 plan pin**：markitdown **0.1.6**（plan 写 0.0.1a3 无 `enable_plugins` 会崩）+ onnxruntime 1.27 + xlrd 2.0.2。**F3 全量回归亲跑逮到 1 个真回归**（图片漏出素材清单 + 文件名未消毒，已修）。F4 上线见 `docs/managed-proxy-deployment.md`「N6 视觉转写」段 + `VPS-fix-private/notes/jp-app-01.md`。
 - spec：`docs/superpowers/specs/2026-06-20-n6-attachment-pipeline-design.md`；plan：`docs/superpowers/plans/2026-06-20-n6-attachment-pipeline.md`（A–F 六阶段 ~25 TDD task）。
 - **关键设计**：① 文档 **markitdown 全替换**（删 `_read_docx/_xlsx/_pdf`，新增 pptx/老 .doc/.ppt 经 LibreOffice headless）；② 图片**三级降级**——多模态主模型直喂 / 否则**视觉模型转写**（`Qwen/Qwen3-VL-8B-Instruct`）/ OCR（RapidOCR）兜底 / 友好失败；统一覆盖**持久图片材料 + transient 两路**，结清 #4（删前端 `supportsImageAttachments` 拦截）；③ 新模块 `backend/material_conversion.py:MaterialConverter`（依赖注入、不反向 import chat.py）；④ 缓存内容 hash + refcount + 原子写 + tombstone；transient 转写存消息独立字段 `attachment_transcripts`、不污染意图、防注入数据块包裹 + 压缩边界。
