@@ -41,6 +41,14 @@ class PackagingSpecTests(unittest.TestCase):
         )
 
 
+    def test_spec_bundles_n6_deps(self):
+        content = (ROOT / "consulting_report.spec").read_text(encoding="utf-8")
+        self.assertIn("markitdown", content)
+        self.assertIn("magika", content)
+        self.assertIn("rapidocr_onnxruntime", content)
+        self.assertIn("onnxruntime", content)
+
+
 class VersionInfoTests(unittest.TestCase):
     def test_version_info_file_exists_at_repo_root(self):
         repo = Path(__file__).resolve().parents[1]

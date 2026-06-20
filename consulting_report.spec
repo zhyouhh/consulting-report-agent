@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 import sys
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 root = Path.cwd()
 sys.path.insert(0, str(root))
@@ -30,25 +31,31 @@ datas.append((str(managed_search_pool_file), '.'))
 pandoc_binary_file = resolve_bundle_pandoc(root)
 binaries.append((str(pandoc_binary_file), '.'))
 
+# N6 attachment pipeline: bundle document-conversion & OCR deps
+datas += collect_data_files('markitdown') + collect_data_files('magika') + collect_data_files('rapidocr_onnxruntime')
+
+hiddenimports = [
+    'uvicorn.logging',
+    'uvicorn.loops',
+    'uvicorn.loops.auto',
+    'uvicorn.protocols',
+    'uvicorn.protocols.http',
+    'uvicorn.protocols.http.auto',
+    'uvicorn.protocols.websockets',
+    'uvicorn.protocols.websockets.auto',
+    'uvicorn.lifespan',
+    'uvicorn.lifespan.on',
+    'webview.platforms.winforms',
+    'webview.platforms.edgechromium',
+]
+hiddenimports += collect_submodules('markitdown') + ['rapidocr_onnxruntime', 'onnxruntime']
+
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=[
-        'uvicorn.logging',
-        'uvicorn.loops',
-        'uvicorn.loops.auto',
-        'uvicorn.protocols',
-        'uvicorn.protocols.http',
-        'uvicorn.protocols.http.auto',
-        'uvicorn.protocols.websockets',
-        'uvicorn.protocols.websockets.auto',
-        'uvicorn.lifespan',
-        'uvicorn.lifespan.on',
-        'webview.platforms.winforms',
-        'webview.platforms.edgechromium',
-    ],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
