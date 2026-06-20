@@ -28,7 +28,6 @@ import {
 import { shouldSubmitComposerKeydown } from '../utils/composerInputBehavior'
 import { describeConnectionMode } from '../utils/connectionMode'
 import { formatContextUsage, getContextUsagePercent } from '../utils/contextUsage'
-import { supportsImageAttachments } from '../utils/modelCapabilities'
 import {
   buildPendingAttachment,
   fileToDataUrl,
@@ -79,7 +78,6 @@ const ChatPanel = forwardRef(function ChatPanel({
   const connection = describeConnectionMode(settings || {})
   const workspaceSummary = summarizeWorkspace(workspace || {})
   const selectedMaterials = materials.filter(material => selectedMaterialIds.includes(material.id))
-  const canSendImages = supportsImageAttachments(settings)
   const { transientImages: pendingImageAttachments, persistentDocuments: pendingDocumentAttachments } = splitPendingAttachments(pendingAttachments)
   const contextUsage = tokenUsage ? formatContextUsage(tokenUsage) : null
   const contextUsagePercent = tokenUsage ? getContextUsagePercent(tokenUsage) : null
@@ -677,10 +675,6 @@ const ChatPanel = forwardRef(function ChatPanel({
   const sendMessage = async () => {
     const trimmedInput = input.trim()
     if (!trimmedInput || !projectId || uploading) return
-    if ((selectedMaterials.some(material => material.media_kind === 'image_like') || pendingImageAttachments.length > 0) && !canSendImages) {
-      showError('当前模型不支持图片输入，请切换模型或取消选择图片材料')
-      return
-    }
 
     const persistentDocumentFiles = pendingDocumentAttachments.map(attachment => attachment.file)
     let requestAttachedMaterialIds = selectedMaterialIds
@@ -1015,11 +1009,6 @@ const ChatPanel = forwardRef(function ChatPanel({
                 {material.display_name}
               </button>
             ))}
-          </div>
-        )}
-        {!canSendImages && (selectedMaterials.some(material => material.media_kind === 'image_like') || pendingImageAttachments.length > 0) && (
-          <div className="mb-3 text-xs text-[#f5b16a]">
-            当前自定义模型按保守规则视为不支持图片输入，选中图片材料或待发送图片时会阻止发送。
           </div>
         )}
         {dragActive && (

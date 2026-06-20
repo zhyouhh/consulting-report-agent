@@ -34,12 +34,23 @@ test("supportsImageAttachments recognizes common multimodal custom models", () =
   );
 });
 
-test("supportsImageAttachments blocks unknown custom text-only models by default", () => {
+// N6: image upload is always accepted; the backend transcription path handles text-only models.
+// supportsImageAttachments means "the app CAN accept image uploads" (always true),
+// NOT "the main model natively supports vision" (that's isMultimodalModel / backend MULTIMODAL_MODEL_MARKERS).
+test("images always uploadable regardless of model — N6 transcription covers text-only models", () => {
+  // custom text-only model: previously blocked, now always allowed
   assert.equal(
     supportsImageAttachments({
       mode: "custom",
       custom_model: "deepseek-chat",
     }),
-    false,
+    true,
   );
+  // managed deepseek (text-only): always allowed
+  assert.equal(
+    supportsImageAttachments({ mode: "managed", managed_model: "deepseek-v4-pro" }),
+    true,
+  );
+  // null / loading state: always allowed
+  assert.equal(supportsImageAttachments(null), true);
 });
