@@ -94,30 +94,26 @@ _ATTACHMENT_DATA_NEUTRAL_MARKER = "「附件数据（已隔离，未纳入摘要
 
 
 def _strip_attachment_data_blocks(text: str) -> str:
-    """把 OPEN…CLOSE 整块替换成中性标记，FAIL-CLOSED。仅作用于 str（list/其他形状由调用方处理）。
+    """把 ATTACHMENT_DATA 框定整段替成中性标记，FAIL-CLOSED。仅作用于 str（list/其他形状由调用方处理）。
 
-    安全边界：摘要器是个会把文本当指令执行的 LLM，任何残留的不可信附件正文都可能被它当成
-    `[对话摘要]` 裸指令重生。因此这里**必须 fail-closed**——不只替换 OPEN…CLOSE 完整对：
-
-    1) 替换所有匹配的 OPEN…CLOSE 块（非贪婪、DOTALL、可多块）。
-    2) 若仍残留 OPEN（无后续 CLOSE，畸形/被截断的框定）：从该 OPEN 起到字符串末尾整段砍掉
-       → 中性标记。绝不让 OPEN 之后的裸文本漏到摘要器。
-    3) 任何残留的裸 CLOSE token 也替成中性标记。
+    摘要器是会把文本当指令执行的 LLM：任何残留的不可信附件正文都可能被它当 `[对话摘要]` 裸指令重生。
+    因此：
+    1) 先替换所有“完整” OPEN…CLOSE 对（非贪婪、DOTALL、可多块、可跨行）。
+    2) 若替换后仍残留任何 OPEN 或 CLOSE token（嵌套/反序/孤立/被截断等畸形框定），判定框定不规整，
+       从 **原文** 第一个标记位置起、直到字符串末尾，整段砍成中性标记——保留首个标记之前的正常对话
+       文本（那是非附件内容），砍掉其后一切可疑文本。绝不让标记之间/之后的裸文本漏到摘要器。
     """
     if not text:
         return text
     if ATTACHMENT_DATA_OPEN not in text and ATTACHMENT_DATA_CLOSE not in text:
         return text
-    # 1) 完整 OPEN…CLOSE 块
-    text = _ATTACHMENT_DATA_BLOCK_RE.sub(_ATTACHMENT_DATA_NEUTRAL_MARKER, text)
-    # 2) fail-closed：残留的孤儿 OPEN → 砍到串尾
-    open_idx = text.find(ATTACHMENT_DATA_OPEN)
-    if open_idx != -1:
-        text = text[:open_idx] + _ATTACHMENT_DATA_NEUTRAL_MARKER
-    # 3) 残留的裸 CLOSE token → 中性标记
-    if ATTACHMENT_DATA_CLOSE in text:
-        text = text.replace(ATTACHMENT_DATA_CLOSE, _ATTACHMENT_DATA_NEUTRAL_MARKER)
-    return text
+    cleaned = _ATTACHMENT_DATA_BLOCK_RE.sub(_ATTACHMENT_DATA_NEUTRAL_MARKER, text)
+    if ATTACHMENT_DATA_OPEN in cleaned or ATTACHMENT_DATA_CLOSE in cleaned:
+        # 残留标记 = 畸形框定 → 从原文第一个标记砍到串尾（fail-closed）
+        candidates = [i for i in (text.find(ATTACHMENT_DATA_OPEN), text.find(ATTACHMENT_DATA_CLOSE)) if i != -1]
+        first = min(candidates)
+        cleaned = text[:first] + _ATTACHMENT_DATA_NEUTRAL_MARKER
+    return cleaned
 
 IMAGE_TOKEN_COST = 1024
 MAX_BUDGET_FIT_ATTEMPTS = 6
@@ -875,8 +871,10 @@ class ChatHandler:
         - 丢掉 `attachment_transcripts` 里的裸 `text`，只留紧凑元信息（name/status），
           原始转写正文绝不到达摘要器。
         - content 是 str：把 ATTACHMENT_DATA 块（含 Defense 2 包裹的 read_material_file 结果）整段
-          替成中性标记。content 是 list（多模态 parts）：对每个 `text` 段做同样替换，丢弃非文本段
-          （image_url 等）的二进制/URL 负载。
+          替成中性标记。content 是 list（多模态 parts）：先把所有 part 摊平成一个字符串（text 段贡献
+          其文本，image_url/二进制等非文本段贡献中性标记），换行连接后整体过 fail-closed strip——
+          这样跨 part 的 OPEN/CLOSE 才能配对（或畸形时一起 fail-closed），不会因逐 part 独立处理而漏掉
+          落在另一 part 的恶意前缀。
         """
         if not isinstance(message, dict):
             return message
@@ -896,18 +894,15 @@ class ChatHandler:
         if isinstance(content, str):
             sanitized["content"] = _strip_attachment_data_blocks(content)
         elif isinstance(content, list):
-            cleaned_parts = []
+            # 先摊平再 strip：跨 part 的 OPEN/CLOSE 必须先拼成一个字符串才能配对，否则逐 part
+            # 独立处理时一个 part 的 OPEN 与另一 part 的 CLOSE 永不配对，恶意前缀会漏过。
+            pieces = []
             for part in content:
-                # Every text part goes through the fail-closed strip; everything else
-                # (image_url/binary/url payloads, or malformed parts) collapses to the marker.
                 if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    cleaned = dict(part)
-                    cleaned["text"] = _strip_attachment_data_blocks(part["text"])
-                    cleaned_parts.append(cleaned)
+                    pieces.append(part["text"])
                 else:
-                    # non-text parts (image_url 等): drop the binary/url payload, keep only a marker.
-                    cleaned_parts.append({"type": "non_text", "note": _ATTACHMENT_DATA_NEUTRAL_MARKER})
-            sanitized["content"] = cleaned_parts
+                    pieces.append(_ATTACHMENT_DATA_NEUTRAL_MARKER)  # image_url/binary/malformed part
+            sanitized["content"] = _strip_attachment_data_blocks("\n".join(pieces))
 
         return sanitized
 
