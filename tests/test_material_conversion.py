@@ -62,6 +62,18 @@ class DocConvertCacheTests(unittest.TestCase):
                 with self.assertRaises(MaterialConversionError):
                     conv.convert_document(src)
 
+    def test_snapshot_enforces_heavy_size_cap(self):
+        import tempfile
+        from unittest import mock
+        from backend import material_limits
+        from backend.material_conversion import MaterialConversionError
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "big.pdf"; src.write_bytes(b"%PDF-1.4 " + b"x" * 4096)
+            conv = self._conv(tmp)
+            with mock.patch.object(material_limits, "MAX_HEAVY_MATERIAL_BYTES", 100):
+                with self.assertRaises(MaterialConversionError):
+                    conv.convert_document(src)
+
 
 class CacheGCTests(unittest.TestCase):
     def test_release_only_deletes_when_no_refs(self):
@@ -138,3 +150,20 @@ class LegacyConvertTests(unittest.TestCase):
             with mock.patch("backend.material_conversion.shutil.which", return_value=None), \
                  mock.patch.object(conv, "_markitdown_convert", return_value="表格正文"):
                 self.assertEqual(conv.convert_document(src), "表格正文")
+
+    def test_no_shared_soffice_residue_after_conversion(self):
+        # 隔离回归：转换后 cache_dir 下不留共享 _soffice 目录（防同名/并发串台）
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "old.doc"; src.write_bytes(b"\xd0\xcf\x11\xe0legacy")
+            conv = self._conv(tmp)
+            with mock.patch("backend.material_conversion.shutil.which", return_value="/usr/bin/soffice"), \
+                 mock.patch("backend.material_conversion.subprocess.run") as run, \
+                 mock.patch.object(conv, "_markitdown_convert", return_value="正文A"):
+                def _fake_run(cmd, **kw):
+                    out = Path(cmd[cmd.index("--outdir") + 1]) / (src.stem + ".docx"); out.write_text("x")
+                    return mock.Mock(returncode=0)
+                run.side_effect = _fake_run
+                conv.convert_document(src)
+            self.assertFalse((conv.cache_dir / "_soffice").exists())

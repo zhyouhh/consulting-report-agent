@@ -76,26 +76,58 @@ class MaterialConverter:
     def _cache_key(self, path: Path, extra: str = "") -> str:
         return self._content_hash(path) + "-" + CONVERTER_VERSION + extra
 
+    def _snapshot_and_hash(self, path: Path, suffix: str):
+        """快照源文件到独立临时目录（保留原文件名以维持后缀路由 / soffice 行为）并同时算 hash。
+        关键：hash 与后续解析看到完全相同的字节——workspace 选入的材料是 live 文件，
+        可能在 hash/size 检查与解析之间被改写。heavy 后缀拷贝时流式累计字节、超
+        MAX_HEAVY_MATERIAL_BYTES 立即中止，同时关掉「先 stat 过关、再换大文件」的 size 绕过窗口。
+        返回 (snapshot_path, content_hash)；调用方负责 shutil.rmtree(snapshot_path.parent)。"""
+        import tempfile
+        from backend import material_limits
+        heavy = material_limits.is_heavy_suffix(suffix)
+        cap = material_limits.MAX_HEAVY_MATERIAL_BYTES
+        snap_dir = Path(tempfile.mkdtemp(prefix="n6_snap_"))
+        snap = snap_dir / path.name
+        h = hashlib.sha256()
+        total = 0
+        try:
+            with open(path, "rb") as src, open(snap, "wb") as out:
+                for chunk in iter(lambda: src.read(1 << 20), b""):
+                    total += len(chunk)
+                    if heavy and total > cap:
+                        raise MaterialConversionError("这个文件过大，读不动；请只传关键的评分标准/技术规范书等小文件")
+                    h.update(chunk)
+                    out.write(chunk)
+        except BaseException:
+            shutil.rmtree(snap_dir, ignore_errors=True)
+            raise
+        return snap, h.hexdigest()
+
     def convert_document(self, path: Path) -> str:
         suffix = path.suffix.lower()
-        key = self._cache_key(path)
-        md_path, err_path = self._cache_paths(key)
-        with self._lock_for(key):
-            if md_path.exists():
-                return md_path.read_text(encoding="utf-8")
-            if err_path.exists():
-                raise MaterialConversionError(err_path.read_text(encoding="utf-8"))
-            try:
-                md = self._raw_convert_document(path, suffix)
-            except MaterialConversionError as exc:   # 友好原文（老版本/超时…）原样落 tombstone 并 re-raise
-                self._atomic_write(err_path, str(exc))
-                raise
-            except Exception as exc:  # noqa: BLE001 - 其它异常转 tombstone
-                reason = f"文档解析失败：{type(exc).__name__}"
-                self._atomic_write(err_path, reason)
-                raise MaterialConversionError(reason) from exc
-            self._atomic_write(md_path, md)
-            return md
+        snap, content_hash = self._snapshot_and_hash(path, suffix)
+        snap_dir = snap.parent
+        try:
+            key = content_hash + "-" + CONVERTER_VERSION
+            md_path, err_path = self._cache_paths(key)
+            with self._lock_for(key):
+                if md_path.exists():
+                    return md_path.read_text(encoding="utf-8")
+                if err_path.exists():
+                    raise MaterialConversionError(err_path.read_text(encoding="utf-8"))
+                try:
+                    md = self._raw_convert_document(snap, suffix)
+                except MaterialConversionError as exc:
+                    self._atomic_write(err_path, str(exc))
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    reason = f"文档解析失败：{type(exc).__name__}"
+                    self._atomic_write(err_path, reason)
+                    raise MaterialConversionError(reason) from exc
+                self._atomic_write(md_path, md)
+                return md
+        finally:
+            shutil.rmtree(snap_dir, ignore_errors=True)
 
     def _refs_path(self, key: str) -> Path:
         return self.cache_dir / (key + ".refs")
