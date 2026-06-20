@@ -32,6 +32,8 @@ class Message(BaseModel):
 class TransientAttachment(BaseModel):
     """Transient attachment for the current turn."""
 
+    # Front-end pending-attachment id, so attachment_transcribed events can reference it.
+    id: str = Field(..., min_length=1, max_length=100)
     name: str = Field(..., min_length=1, max_length=255)
     mime_type: str = Field(..., min_length=1, max_length=100)
     data_url: str = Field(..., min_length=1)
@@ -53,6 +55,10 @@ class ChatRequest(BaseModel):
 
     project_id: str = Field(..., min_length=1, max_length=100)
     message_text: str = Field(default="", max_length=10000)
+    # Front-end client message id for a normal user turn (so transcription events can target
+    # the right pending message). OPTIONAL: system_trigger turns are not user messages and
+    # won't send it.
+    client_message_id: Optional[str] = Field(default=None, max_length=100)
     attached_material_ids: List[str] = Field(default_factory=list)
     transient_attachments: List[TransientAttachment] = Field(default_factory=list)
     system_trigger: Optional[SystemTriggerType] = None

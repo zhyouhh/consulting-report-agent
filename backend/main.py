@@ -288,6 +288,7 @@ async def chat(request: Request, chat_request: ChatRequest):
             chat_request.message_text,
             chat_request.attached_material_ids,
             [item.model_dump() for item in chat_request.transient_attachments],
+            client_message_id=chat_request.client_message_id,
         )
         token_usage = result.get("token_usage") or {}
         logger.info(f"Chat completed, tokens: {token_usage.get('context_used_tokens', 0)}")
@@ -744,6 +745,7 @@ def chat_stream(request: Request, chat_request: ChatRequest):
                 [item.model_dump() for item in chat_request.transient_attachments],
                 system_trigger=chat_request.system_trigger,
                 trigger_metadata=trigger_metadata,
+                client_message_id=chat_request.client_message_id,
             ):
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"

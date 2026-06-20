@@ -55,6 +55,7 @@ class ModelsSchemaTests(unittest.TestCase):
             message_text="Please review this screenshot.",
             transient_attachments=[
                 {
+                    "id": "att-1",
                     "name": "bug.png",
                     "mime_type": "image/png",
                     "data_url": "data:image/png;base64,AAAA",
@@ -64,6 +65,7 @@ class ModelsSchemaTests(unittest.TestCase):
 
         self.assertEqual(len(payload.transient_attachments), 1)
         self.assertEqual(payload.transient_attachments[0].mime_type, "image/png")
+        self.assertEqual(payload.transient_attachments[0].id, "att-1")
 
     def test_chat_request_defaults_transient_attachments_to_empty_list(self):
         payload = ChatRequest(
@@ -80,6 +82,7 @@ class ModelsSchemaTests(unittest.TestCase):
                 message_text="Please review this file.",
                 transient_attachments=[
                     {
+                        "id": "att-1",
                         "name": "memo.pdf",
                         "mime_type": "application/pdf",
                         "data_url": "data:application/pdf;base64,AAAA",

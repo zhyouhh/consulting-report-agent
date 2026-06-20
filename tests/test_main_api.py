@@ -1537,6 +1537,7 @@ class WorkspaceApiTests(unittest.TestCase):
             "请结合新增材料整理问题树",
             ["mat-1", "mat-2"],
             [],
+            client_message_id=None,
         )
 
     @mock.patch("backend.main.get_chat_handler")
@@ -1587,6 +1588,7 @@ class WorkspaceApiTests(unittest.TestCase):
                 "attached_material_ids": [],
                 "transient_attachments": [
                     {
+                        "id": "att-1",
                         "name": "bug.png",
                         "mime_type": "image/png",
                         "data_url": "data:image/png;base64,AAAA",
@@ -1603,11 +1605,13 @@ class WorkspaceApiTests(unittest.TestCase):
             [],
             [
                 {
+                    "id": "att-1",
                     "name": "bug.png",
                     "mime_type": "image/png",
                     "data_url": "data:image/png;base64,AAAA",
                 }
             ],
+            client_message_id=None,
         )
 
     @mock.patch("backend.main.get_chat_handler")
@@ -1674,6 +1678,7 @@ class WorkspaceApiTests(unittest.TestCase):
             [],
             system_trigger="independent_review_done",
             trigger_metadata={"run_id": "run-abc-123", "report_mtime_ns": big_mtime},
+            client_message_id=None,
         )
         # The nanosecond mtime stays a string (never coerced to a JSON number / int).
         forwarded = handler.chat_stream.call_args.kwargs["trigger_metadata"]

@@ -2575,6 +2575,99 @@ class ChatRuntimeTests(unittest.TestCase):
             },
         )
 
+    # --- N6 C4: attachment_transcripts (single-source helper + events + data-block + intent isolation) ---
+
+    def test_transient_image_transcribed_into_attachment_transcripts(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro")
+        with mock.patch.object(h.material_converter, "_vision_adapter", lambda data_url, mime: "图说：营收上升"):
+            persisted, events = h._build_persisted_user_message_with_transcripts(
+                project_id="pid", client_message_id="cmid-1", user_message="看下这张图", attached_material_ids=[],
+                transient_attachments=[{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,Zg=="}],
+            )
+        self.assertEqual(persisted["content"], "看下这张图")
+        self.assertEqual(persisted["attachment_transcripts"][0]["text"], "图说：营收上升")
+        self.assertEqual(persisted["attachment_transcripts"][0]["status"], "parsed")
+        evs = [e for e in events if e["type"] == "attachment_transcribed"]
+        self.assertEqual(evs[0]["data"]["message_id"], "cmid-1")
+        self.assertEqual(evs[0]["data"]["attachment_id"], "att-1")
+
+    def test_history_provider_message_injects_transcript_as_data_block(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro")
+        msg = {"role": "user", "content": "看图", "attached_material_ids": [],
+               "attachment_transcripts": [{"id": "t1", "source": "transient_image", "name": "a.png",
+                                           "mime_type": "image/png", "text": "营收上升", "status": "parsed", "truncated": False}]}
+        pm = h._to_provider_message("pid", msg, include_images=False)
+        text = pm["content"] if isinstance(pm["content"], str) else pm["content"][0]["text"]
+        self.assertIn("营收上升", text)
+        self.assertIn("ATTACHMENT_DATA", text)
+
+    def test_turn_context_intent_ignores_transcript(self):
+        h = self._h()
+        ctx = h._build_turn_context("pid", "继续写第三章")
+        self.assertNotIn("营收", str(ctx))
+
+    def test_vision_capable_main_model_skips_transient_transcription(self):
+        # gemini-3-flash supports vision -> current turn sends the raw image; no transcript needed.
+        h = self._h(mode="managed", managed_model="gemini-3-flash")
+
+        def _boom(data_url, mime):
+            raise AssertionError("vision-capable main model must not transcribe transient images")
+
+        with mock.patch.object(h.material_converter, "_vision_adapter", _boom):
+            persisted, events = h._build_persisted_user_message_with_transcripts(
+                project_id="pid", client_message_id="cmid-1", user_message="看下这张图", attached_material_ids=[],
+                transient_attachments=[{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,Zg=="}],
+            )
+        self.assertEqual(persisted["content"], "看下这张图")
+        self.assertEqual(persisted["attachment_transcripts"], [])
+        self.assertEqual([e for e in events if e["type"] == "attachment_transcribed"], [])
+
+    def test_transient_image_transcription_failure_marks_status_failed(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro")
+        from backend.material_conversion import MaterialConversionError
+
+        def _fail(data_url, mime):
+            raise MaterialConversionError("这张图没读出来")
+
+        # both vision and ocr fail -> MaterialConversionError bubbles out of transcribe_image_data_url
+        with mock.patch.object(h.material_converter, "_vision_adapter", _fail), \
+                mock.patch.object(h.material_converter, "_ocr_adapter", _fail):
+            persisted, events = h._build_persisted_user_message_with_transcripts(
+                project_id="pid", client_message_id="cmid-1", user_message="看下这张图", attached_material_ids=[],
+                transient_attachments=[{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,Zg=="}],
+            )
+        self.assertEqual(persisted["content"], "看下这张图")
+        self.assertEqual(persisted["attachment_transcripts"][0]["status"], "failed")
+        evs = [e for e in events if e["type"] == "attachment_transcribed"]
+        self.assertEqual(evs[0]["data"]["status"], "failed")
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_nonstream_path_persists_attachment_transcripts(self, mock_openai):
+        h = self._make_handler_with_project()
+        h.settings.managed_model = "deepseek-v4-pro"
+        h.settings.model = "deepseek-v4-pro"
+        client = mock_openai.return_value
+        client.chat.completions.create.return_value = self._chat_completion("收到")
+
+        wrapped = h._build_persisted_user_message_with_transcripts
+        with mock.patch.object(
+            h, "_build_persisted_user_message_with_transcripts", wraps=wrapped
+        ) as spy, mock.patch.object(
+            h.material_converter, "_vision_adapter", lambda data_url, mime: "图说：营收上升"
+        ):
+            h.chat(
+                self.project_id,
+                "看下这张图",
+                [],
+                [{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,Zg=="}],
+            )
+
+        self.assertTrue(spy.called)
+        loaded = h._load_conversation(self.project_id)
+        user_msgs = [m for m in loaded if m.get("role") == "user"]
+        self.assertEqual(user_msgs[-1]["content"], "看下这张图")
+        self.assertEqual(user_msgs[-1]["attachment_transcripts"][0]["text"], "图说：营收上升")
+
     @mock.patch("backend.chat.OpenAI")
     def test_estimate_tokens_counts_assistant_tool_call_arguments(self, mock_openai):
         handler = ChatHandler(
