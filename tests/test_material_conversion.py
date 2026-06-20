@@ -167,3 +167,61 @@ class LegacyConvertTests(unittest.TestCase):
                 run.side_effect = _fake_run
                 conv.convert_document(src)
             self.assertFalse((conv.cache_dir / "_soffice").exists())
+
+
+class ImageTranscribeTests(unittest.TestCase):
+    def _conv(self, tmp, *, multimodal, vision="VIS", ocr="OCRTXT", namespace="visM-p1-ocrR1"):
+        from backend.material_conversion import MaterialConverter
+        return MaterialConverter(cache_dir=Path(tmp),
+            vision_adapter=lambda data_url, mime: vision,
+            ocr_adapter=lambda p: ocr, capability_resolver=lambda: multimodal,
+            image_cache_namespace=namespace)
+
+    def test_textonly_uses_vision_and_caches(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Path(tmp) / "a.png"; img.write_bytes(b"\x89PNG fake")
+            conv = self._conv(tmp, multimodal=False, vision="VIS-OK")
+            self.assertEqual(conv.transcribe_image(img, "image/png"), "VIS-OK")
+            conv._vision_adapter = lambda *a: (_ for _ in ()).throw(AssertionError("不应重转"))
+            self.assertEqual(conv.transcribe_image(img, "image/png"), "VIS-OK")
+
+    def test_cache_miss_when_vision_namespace_changes(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Path(tmp) / "a.png"; img.write_bytes(b"\x89PNG fake")
+            self.assertEqual(self._conv(tmp, multimodal=False, vision="OLD", namespace="ns-A").transcribe_image(img, "image/png"), "OLD")
+            self.assertEqual(self._conv(tmp, multimodal=False, vision="NEW", namespace="ns-B").transcribe_image(img, "image/png"), "NEW")
+
+    def test_vision_fail_falls_to_ocr(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Path(tmp) / "a.png"; img.write_bytes(b"\x89PNG")
+            def boom(*a): raise RuntimeError("vision down")
+            from backend.material_conversion import MaterialConverter
+            conv = MaterialConverter(cache_dir=Path(tmp), vision_adapter=boom,
+                ocr_adapter=lambda p: "OCR-FALLBACK", capability_resolver=lambda: False)
+            self.assertEqual(conv.transcribe_image(img, "image/png"), "OCR-FALLBACK")
+
+    def test_all_fail_raises(self):
+        import tempfile
+        from backend.material_conversion import MaterialConversionError
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Path(tmp) / "a.png"; img.write_bytes(b"\x89PNG")
+            def boom(*a): raise RuntimeError("down")
+            from backend.material_conversion import MaterialConverter
+            conv = MaterialConverter(cache_dir=Path(tmp), vision_adapter=boom,
+                ocr_adapter=lambda p: "", capability_resolver=lambda: False)
+            with self.assertRaises(MaterialConversionError):
+                conv.transcribe_image(img, "image/png")
+
+    def test_transient_data_url_no_persistent_cache(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend.material_conversion import MaterialConverter
+            conv = MaterialConverter(cache_dir=Path(tmp)/"cache", vision_adapter=lambda *a: "图说Z",
+                                     ocr_adapter=lambda p: "O", capability_resolver=lambda: False)
+            out = conv.transcribe_image_data_url("data:image/png;base64,Zg==", "image/png")
+            self.assertEqual(out, "图说Z")
+            residue = [f for f in os.listdir(Path(tmp)/"cache") if f.endswith((".md", ".error", ".refs"))]
+            self.assertEqual(residue, [])

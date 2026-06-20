@@ -183,6 +183,68 @@ class MaterialConverter:
                 return self._libreoffice_to_markdown(path, "xlsx")
         return self._markitdown_convert(path)                    # docx/pptx/xlsx/pdf/html/csv…
 
+    def _image_data_url(self, path: Path, mime: str) -> str:
+        import base64
+        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+
+    def _transcribe_raw(self, path: Path, mime: str) -> str:
+        """vision→OCR→raise 的纯转写逻辑，不读写缓存（供持久与 transient 复用）。"""
+        text = ""
+        try:
+            text = (self._vision_adapter(self._image_data_url(path, mime), mime) or "").strip()
+        except Exception:  # noqa: BLE001 视觉渠道挂/不可用 → OCR 兜底
+            text = ""
+        if not text:
+            try:
+                text = (self._ocr_adapter(path) or "").strip()
+            except Exception:  # noqa: BLE001
+                text = ""
+        if not text:
+            raise MaterialConversionError("这张图没读出来")
+        return text
+
+    def transcribe_image(self, path: Path, mime: str) -> str:
+        """持久图片材料：带缓存（key 含 image_cache_namespace = 视觉模型/prompt/OCR 版本）。"""
+        key = self._cache_key(path, extra="-img-" + self._image_cache_namespace)
+        md_path, err_path = self._cache_paths(key)
+        with self._lock_for(key):
+            if md_path.exists():
+                return md_path.read_text(encoding="utf-8")
+            if err_path.exists():
+                raise MaterialConversionError(err_path.read_text(encoding="utf-8"))
+            try:
+                text = self._transcribe_raw(path, mime)
+            except MaterialConversionError as exc:
+                self._atomic_write(err_path, str(exc))
+                raise
+            self._atomic_write(md_path, text)
+            return text
+
+    def transcribe_image_data_url(self, data_url: str, mime: str) -> str:
+        """transient 图：data_url → 系统临时文件 → _transcribe_raw（不入持久缓存）→ 清理。"""
+        import base64
+        import tempfile
+        import os as _os
+        b64 = data_url.split(",", 1)[1] if "," in data_url else data_url
+        raw = base64.b64decode(b64)
+        fd, tmp = tempfile.mkstemp(suffix=".img")  # 系统临时目录，非 cache_dir
+        try:
+            with _os.fdopen(fd, "wb") as f:
+                f.write(raw)
+            return self._transcribe_raw(Path(tmp), mime)
+        finally:
+            try:
+                _os.unlink(tmp)
+            except OSError:
+                pass
+
+    @staticmethod
+    def cache_key_from_sha256(content_sha256: str, extra: str = "") -> str:
+        """纯函数：caller（SkillEngine）用 material 的 content_sha256 算缓存 key，
+        converter 不反向依赖 SkillEngine/project。"""
+        return content_sha256 + "-" + CONVERTER_VERSION + extra
+
     def _libreoffice_to_markdown(self, path: Path, target_ext: str) -> str:
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
         if not soffice:
