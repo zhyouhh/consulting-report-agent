@@ -53,8 +53,6 @@ from .stream_parsing import ThinkingStreamParser
 from .trust_boundary import (
     ATTACHMENT_DATA_OPEN,
     ATTACHMENT_DATA_CLOSE,
-    UNTRUSTED_DATA_OPEN,
-    UNTRUSTED_DATA_CLOSE,
     _neutralize_attachment_data_markers,
 )
 
