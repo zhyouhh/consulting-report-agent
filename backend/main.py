@@ -307,7 +307,7 @@ class WorkspaceFilesRequest(BaseModel):
 
 
 @app.post("/api/models/list")
-async def list_models(request: ModelsRequest):
+async def list_models(request: ModelsRequest, uid: str = Depends(get_current_uid)):
     try:
         from openai import OpenAI
         import httpx
@@ -327,22 +327,22 @@ async def list_models(request: ModelsRequest):
 
 
 @app.post("/api/system/select-workspace-folder")
-async def select_workspace_folder():
+async def select_workspace_folder(uid: str = Depends(get_current_uid)):
     bridge = require_desktop_bridge()
     selected_path = await asyncio.to_thread(bridge.select_workspace_folder)
     return {"path": selected_path or ""}
 
 
 @app.post("/api/system/select-workspace-files")
-async def select_workspace_files(request: WorkspaceFilesRequest):
+async def select_workspace_files(request: WorkspaceFilesRequest, uid: str = Depends(get_current_uid)):
     bridge = require_desktop_bridge()
     selected_paths = await asyncio.to_thread(bridge.select_workspace_files, request.workspace_dir)
     return {"paths": selected_paths or []}
 
 
 @app.get("/api/projects")
-async def list_projects():
-    return skill_engine.list_projects()
+async def list_projects(uid: str = Depends(get_current_uid)):
+    return get_skill_engine(uid).list_projects()
 
 
 @app.post("/api/projects")
@@ -361,37 +361,33 @@ async def create_project(info: ProjectInfo, request: Request, uid: str = Depends
 
 
 @app.get("/api/projects/{project_id}/materials")
-async def list_project_materials(project_id: str):
-    project = skill_engine.get_project_record(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-    return {"materials": skill_engine.list_materials(project_id)}
+async def list_project_materials(scope: ProjectScope = Depends(require_project)):
+    return {"materials": scope.engine.list_materials(scope.project_id)}
 
 
 @app.post("/api/projects/{project_id}/materials/select-from-workspace")
-async def select_materials_from_workspace(project_id: str):
-    project = skill_engine.get_project_record(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-
+async def select_materials_from_workspace(scope: ProjectScope = Depends(require_project)):
+    # require_project 已校验归属（非属主 404）；之后才判桌面桥（非属主拿 404 而非 503）。
     bridge = require_desktop_bridge()
-    file_paths = await asyncio.to_thread(bridge.select_workspace_files, project["workspace_dir"])
+    file_paths = await asyncio.to_thread(
+        bridge.select_workspace_files, scope.project_record["workspace_dir"]
+    )
     if not file_paths:
         return {"materials": []}
 
     try:
-        materials = skill_engine.add_materials(project_id, file_paths, added_via="workspace_select")
+        materials = scope.engine.add_materials(
+            scope.project_id, file_paths, added_via="workspace_select"
+        )
         return {"materials": materials}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/projects/{project_id}/materials/upload")
-async def upload_materials(project_id: str, files: list[UploadFile] = File(...)):
-    project = skill_engine.get_project_record(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-
+async def upload_materials(
+    scope: ProjectScope = Depends(require_project), files: list[UploadFile] = File(...)
+):
     limit_mb = MAX_HEAVY_MATERIAL_BYTES / (1024 * 1024)
     staged_paths = []
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -426,16 +422,18 @@ async def upload_materials(project_id: str, files: list[UploadFile] = File(...))
             staged_paths.append(str(temp_path))
 
         try:
-            materials = skill_engine.add_materials(project_id, staged_paths, added_via="chat_upload")
+            materials = scope.engine.add_materials(
+                scope.project_id, staged_paths, added_via="chat_upload"
+            )
             return {"materials": materials}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.delete("/api/projects/{project_id}/materials/{material_id}")
-async def delete_material(project_id: str, material_id: str):
+async def delete_material(material_id: str, scope: ProjectScope = Depends(require_project)):
     try:
-        skill_engine.remove_material(project_id, material_id)
+        scope.engine.remove_material(scope.project_id, material_id)
         return {"status": "ok"}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -443,13 +441,16 @@ async def delete_material(project_id: str, material_id: str):
 
 @app.post("/api/chat")
 @limiter.limit("20/minute")
-async def chat(request: Request, chat_request: ChatRequest):
+async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(get_current_uid)):
+    # scope 解析必须在 try 外：require_project 的 404（非属主/不存在）不能被下面的
+    # 宽泛 except Exception 吞成 500（破坏租户隔离 404 契约，Codex T11a review）。
+    logger.info(f"Chat request for project: {chat_request.project_id}")
+    scope = require_project(chat_request.project_id, uid)
+    handler = get_chat_handler(scope.uid, scope.project_id)
     try:
-        logger.info(f"Chat request for project: {chat_request.project_id}")
-        handler = get_chat_handler(chat_request.project_id)
         result = await asyncio.to_thread(
             handler.chat,
-            chat_request.project_id,
+            scope.project_id,
             chat_request.message_text,
             chat_request.attached_material_ids,
             [item.model_dump() for item in chat_request.transient_attachments],
@@ -468,19 +469,19 @@ async def chat(request: Request, chat_request: ChatRequest):
 
 
 @app.get("/api/projects/{project_id}/files")
-async def list_files(project_id: str):
+async def list_files(scope: ProjectScope = Depends(require_project)):
     try:
-        return {"files": skill_engine.list_workspace_files(project_id)}
+        return {"files": scope.engine.list_workspace_files(scope.project_id)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/api/projects/{project_id}/files/{file_path:path}")
-async def read_file(project_id: str, file_path: str):
+async def read_file(file_path: str, scope: ProjectScope = Depends(require_project)):
     try:
-        normalized = skill_engine.normalize_file_path(project_id, file_path)
-        data = skill_engine.read_file_with_mtime(project_id, file_path)
-        data["editable"] = skill_engine.is_user_editable(normalized)
+        normalized = scope.engine.normalize_file_path(scope.project_id, file_path)
+        data = scope.engine.read_file_with_mtime(scope.project_id, file_path)
+        data["editable"] = scope.engine.is_user_editable(normalized)
         return data
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -501,21 +502,22 @@ _USER_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="use
 
 
 @app.post("/api/projects/{project_id}/files/{file_path:path}")
-async def write_user_file(project_id: str, file_path: str, payload: UserFileWrite):
-    # 项目不存在前置判 404（避免靠脆弱字符串匹配区分 404/400）
-    if not skill_engine.get_project_path(project_id):
-        raise HTTPException(status_code=404, detail="项目不存在")
-
-    handler = get_chat_handler(project_id)
-    request_lock = handler._get_project_request_lock(project_id)
+async def write_user_file(
+    file_path: str,
+    payload: UserFileWrite,
+    scope: ProjectScope = Depends(require_project),
+):
+    # require_project 已校验归属（非属主 404）；项目存在性也由它兜底。
+    handler = get_chat_handler(scope.uid, scope.project_id)
+    request_lock = handler._get_project_request_lock(scope.project_id)
 
     def _write_under_lock():
         # 全段持与聊天同一把锁：CAS(stat) → os.replace 必须对 AI 写入原子互斥。
         # 跑在专用池线程（见 _USER_WRITE_EXECUTOR 注释）：锁阻塞落在该线程、不阻塞事件循环，
         # 且该线程绝不是 chat_stream 的 anyio worker，杜绝 RLock 重入绕过。
         with request_lock:
-            new_mtime = skill_engine.user_write_file(
-                project_id, file_path, payload.content, payload.base_mtime_ns
+            new_mtime = scope.engine.user_write_file(
+                scope.project_id, file_path, payload.content, payload.base_mtime_ns
             )
             return {"status": "ok", "mtime_ns": new_mtime}
 
@@ -546,9 +548,9 @@ async def write_user_file(project_id: str, file_path: str, payload: UserFileWrit
 
 
 @app.get("/api/projects/{project_id}/workspace")
-async def get_workspace(project_id: str):
+async def get_workspace(scope: ProjectScope = Depends(require_project)):
     try:
-        return skill_engine.get_workspace_summary(project_id)
+        return scope.engine.get_workspace_summary(scope.project_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -752,21 +754,22 @@ async def independent_review_discard(project_id: str, request: Request):
 
 
 @app.post("/api/projects/{project_id}/export-draft")
-async def export_draft(project_id: str):
+async def export_draft(scope: ProjectScope = Depends(require_project)):
     try:
-        report_path = skill_engine.get_primary_report_path(project_id)
-        output_dir = skill_engine.ensure_output_dir(project_id)
-        script_path = skill_engine.get_script_path("export_draft.ps1")
+        report_path = scope.engine.get_primary_report_path(scope.project_id)
+        output_dir = scope.engine.ensure_output_dir(scope.project_id)
+        script_path = scope.engine.get_script_path("export_draft.ps1")
         return export_reviewable_draft(report_path, output_dir, script_path)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.delete("/api/projects/{project_id}")
-async def delete_project(project_id: str):
+async def delete_project(scope: ProjectScope = Depends(require_project)):
     try:
-        skill_engine.delete_project(project_id)
-        _chat_handlers.pop(project_id, None)
+        scope.engine.delete_project(scope.project_id)
+        with _settings_lock:
+            _chat_handlers.pop((scope.uid, scope.project_id), None)
         return {"status": "ok"}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -785,7 +788,9 @@ _CHECKPOINT_ROUTES = {
 
 
 @app.post("/api/projects/{project_id}/checkpoints/{name}")
-async def set_checkpoint(project_id: str, name: str, action: str = "set"):
+async def set_checkpoint(
+    name: str, action: str = "set", scope: ProjectScope = Depends(require_project)
+):
     key = _CHECKPOINT_ROUTES.get(name)
     if key is None:
         raise HTTPException(status_code=404, detail=f"未知 checkpoint: {name}")
@@ -801,7 +806,7 @@ async def set_checkpoint(project_id: str, name: str, action: str = "set"):
             ),
         )
     try:
-        return skill_engine.record_stage_checkpoint(project_id, key, action)
+        return scope.engine.record_stage_checkpoint(scope.project_id, key, action)
     except ValueError as exc:
         detail = str(exc)
         status = 404 if "项目不存在" in detail else 400
@@ -809,8 +814,8 @@ async def set_checkpoint(project_id: str, name: str, action: str = "set"):
 
 
 @app.get("/api/projects/{project_id}/conversation")
-async def get_conversation(project_id: str):
-    project_path = skill_engine.get_project_path(project_id)
+async def get_conversation(scope: ProjectScope = Depends(require_project)):
+    project_path = scope.engine.get_project_path(scope.project_id)
     if not project_path:
         raise HTTPException(status_code=404, detail="项目不存在")
     conv_file = project_path / "conversation.json"
@@ -834,12 +839,12 @@ async def get_conversation(project_id: str):
 
 
 @app.delete("/api/projects/{project_id}/conversation")
-async def clear_conversation(project_id: str):
-    project_path = skill_engine.get_project_path(project_id)
+async def clear_conversation(scope: ProjectScope = Depends(require_project)):
+    project_path = scope.engine.get_project_path(scope.project_id)
     if not project_path:
         raise HTTPException(status_code=404, detail="项目不存在")
-    handler = get_chat_handler(project_id)
-    request_lock = handler._get_project_request_lock(project_id)
+    handler = get_chat_handler(scope.uid, scope.project_id)
+    request_lock = handler._get_project_request_lock(scope.project_id)
     with request_lock:
         for file_name in (
             "conversation.json",
@@ -854,10 +859,14 @@ async def clear_conversation(project_id: str):
 
 @app.post("/api/chat/stream")
 @limiter.limit("20/minute")
-def chat_stream(request: Request, chat_request: ChatRequest):
+def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(get_current_uid)):
+    # 归属校验在函数体（StreamingResponse 之前）：非属主 → require_project 抛 404，
+    # 而不是把 404 埋进 SSE 流里。scope 解析失败直接以 HTTP 错误冒泡。
+    scope = require_project(chat_request.project_id, uid)
+
     def generate():
         try:
-            handler = get_chat_handler(chat_request.project_id)
+            handler = get_chat_handler(scope.uid, scope.project_id)
             # C5: thread run-bound trigger metadata end-to-end so the main agent can bind a
             # review report to the exact run that produced it (run_id/report_mtime_ns stay
             # opaque strings — pydantic already rejects raw ints; never coerce to Number).
@@ -866,7 +875,7 @@ def chat_stream(request: Request, chat_request: ChatRequest):
                 "report_mtime_ns": chat_request.report_mtime_ns,
             }
             for chunk in handler.chat_stream(
-                chat_request.project_id,
+                scope.project_id,
                 chat_request.message_text,
                 chat_request.attached_material_ids,
                 [item.model_dump() for item in chat_request.transient_attachments],
