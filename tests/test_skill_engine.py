@@ -2137,12 +2137,14 @@ class SkillEngineTests(unittest.TestCase):
 
     def test_record_stage_checkpoint_rejects_review_passed_when_review_lock_held(self):
         from backend.independent_review import get_independent_review_lock
+        from backend.tenant import tenant_project_key
 
         project_dir = self._make_project_past_s4()
         self._write_independent_review(project_dir)
         self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
-        # 审查锁键迁移整体留 T11；T6 record_stage_checkpoint 审查锁检查仍裸 project_id，须持裸键锁才被拒。
-        lock = get_independent_review_lock("demo")
+        # W2-B (T11): record_stage_checkpoint checks the review lock via tenant_project_key(uid,
+        # project_id) — engine uid defaults to "local". Hold the SAME composite-key lock to be rejected.
+        lock = get_independent_review_lock(tenant_project_key("local", "demo"))
         self.assertTrue(lock.acquire(blocking=False))
         try:
             with self.assertRaisesRegex(ValueError, "独立审查正在进行中"):
@@ -2154,11 +2156,12 @@ class SkillEngineTests(unittest.TestCase):
 
     def test_record_stage_checkpoint_review_passed_succeeds_when_no_lock_held(self):
         from backend.independent_review import get_independent_review_lock
+        from backend.tenant import tenant_project_key
 
         project_dir = self._make_project_past_s4()
         self._write_independent_review(project_dir)
         self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
-        lock = get_independent_review_lock("demo")
+        lock = get_independent_review_lock(tenant_project_key("local", "demo"))
         self.assertTrue(lock.acquire(blocking=False))
         lock.release()
 

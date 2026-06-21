@@ -4,12 +4,33 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 import backend.main as main_module
+from backend.skill import SkillEngine
 from tests.test_auth_api import AuthApiTestBase
 
 
 class ProjectCreateApiTests(unittest.TestCase):
-    @mock.patch("backend.main.skill_engine.create_project")
-    def test_create_project_route_passes_workspace_project_payload(self, mock_create_project):
+    def setUp(self):
+        # W2-B (T11c): the create route resolves uid via get_current_uid; auth off → "local".
+        # In desktop/local mode (auth off) the server does NOT reallocate workspace_dir, so the
+        # client payload (workspace_dir + initial_material_paths) reaches create_project verbatim —
+        # which is exactly what this test asserts. Install a MagicMock engine for the 'local' tenant.
+        self._prev_auth = getattr(main_module.app.state, "auth_required", True)
+        main_module.app.state.auth_required = False
+        self.engine = mock.MagicMock(spec=SkillEngine)
+        with main_module._engines_guard:
+            self._prev_engine = main_module._engines.get("local")
+            main_module._engines["local"] = self.engine
+
+    def tearDown(self):
+        main_module.app.state.auth_required = self._prev_auth
+        with main_module._engines_guard:
+            if self._prev_engine is None:
+                main_module._engines.pop("local", None)
+            else:
+                main_module._engines["local"] = self._prev_engine
+
+    def test_create_project_route_passes_workspace_project_payload(self):
+        mock_create_project = self.engine.create_project
         mock_create_project.return_value = {
             "id": "proj-demo",
             "name": "demo",

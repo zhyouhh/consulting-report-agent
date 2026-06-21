@@ -10864,20 +10864,24 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         the independent-review.md file's real mtime (unless overridden), and stash the metadata
         the chat route would forward. Returns {run_id, report_mtime_ns}."""
         from backend.independent_review import _REVIEW_SESSION_STORE
+        from backend.tenant import tenant_project_key
 
-        # 审查 store 键迁移整体留 T11；T6 审查侧仍裸键，seed 用裸 project_id（与 chat 读、端点 worker 一致）。
+        # W2-B (T11): chat-side system_trigger reads the tombstone via get_done_mtime(
+        # tenant_project_key(uid, project_id), run_id) — handler uid defaults to "local". So seed
+        # under the composite key, not the bare project_id, or the lookup misses and nothing injects.
+        store_key = tenant_project_key("local", self.project_id)
         report_path = self.project_dir / "plan" / "independent-review.md"
         if mtime_ns is None:
             mtime_ns = str(report_path.stat().st_mtime_ns)
         with _REVIEW_SESSION_STORE._guard:
-            _REVIEW_SESSION_STORE._records[self.project_id] = {
+            _REVIEW_SESSION_STORE._records[store_key] = {
                 "run_id": run_id,
                 "status": "done",
                 "snapshot": None,
                 "cancel_event": None,
                 "report_mtime_ns": mtime_ns,
             }
-        self.addCleanup(_REVIEW_SESSION_STORE.discard, self.project_id, run_id)
+        self.addCleanup(_REVIEW_SESSION_STORE.discard, store_key, run_id)
         self._independent_run_metadata = {"run_id": run_id, "report_mtime_ns": mtime_ns}
         return self._independent_run_metadata
 
@@ -11455,9 +11459,11 @@ class SystemTriggerRunBoundTests(SystemTriggerStreamTests):
 
     def _review_lock(self):
         from backend.independent_review import get_independent_review_lock
+        from backend.tenant import tenant_project_key
 
-        # 审查锁键迁移整体留 T11；T6 审查侧仍裸键，断言取裸 project_id 锁（与 chat 读、端点 worker 一致）。
-        return get_independent_review_lock(self.project_id)
+        # W2-B (T11): chat-side review lock is keyed by tenant_project_key(uid, project_id) —
+        # handler uid defaults to "local". Assert against the same composite-key lock.
+        return get_independent_review_lock(tenant_project_key("local", self.project_id))
 
     def _assert_review_lock_free(self):
         lock = self._review_lock()

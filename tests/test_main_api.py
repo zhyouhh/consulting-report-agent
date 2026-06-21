@@ -16,6 +16,9 @@ from pydantic import ValidationError
 import backend.main as main_module
 from backend.chat import LEGACY_EMPTY_ASSISTANT_FALLBACKS, USER_VISIBLE_FALLBACK
 from backend.models import ChatRequest
+from backend.skill import SkillEngine
+from backend.tenant import tenant_project_key
+from tests.test_auth_api import AuthApiTestBase
 
 
 async def _collect_streaming_chunks(response):
@@ -23,6 +26,56 @@ async def _collect_streaming_chunks(response):
     async for chunk in response.body_iterator:
         chunks.append(chunk)
     return chunks
+
+
+# ---------------------------------------------------------------------------
+# W2-B 多租户（T11c）：端点测试迁移辅助
+#
+# T11a/T11b 把全部 {project_id} 端点改成租户作用域：每个请求经 get_current_uid 取 uid，
+# 再 require_project(pid, uid) → get_skill_engine(uid).get_project_record(pid) 解析归属。
+# 全局 backend.main.skill_engine 已删除，旧测试的 @mock.patch("backend.main.skill_engine.X")
+# 在 patch 期就炸。auth_required=False 时 get_current_uid 返回 "local"（单用户语义），
+# 这正是迁移后端点测试应跑的方式。
+#
+# 下面两个工具把「单租户 local 引擎」装进 get_skill_engine 的缓存：
+#   _LocalMockEngineMixin —— 装一个 MagicMock(spec=SkillEngine)，echo get_project_record
+#       使 require_project 把 URL 里的 pid 直接当 canonical id（scope.project_id == URL pid），
+#       供原先 @mock.patch decorator 类逐 test 配置具体方法 + 断言。
+#   _install_local_engine(test, engine) —— 把传入的真 SkillEngine 装进 _engines["local"]、
+#       关 auth 并在 cleanup 还原（原先 mock.patch.object(main, "skill_engine", eng) 的真引擎类用），
+#       require_project 自然解析真项目、天然隔离。
+# ---------------------------------------------------------------------------
+
+
+def _install_local_engine(engine):
+    """把 engine 作为 'local' 租户引擎装进 get_skill_engine 缓存。返回 cleanup 闭包。
+    cleanup 还原 auth_required（默认 True），避免「auth off」泄漏到不 reload main 的其它测试文件。"""
+    prev_auth = getattr(main_module.app.state, "auth_required", True)
+    main_module.app.state.auth_required = False
+    with main_module._engines_guard:
+        previous = main_module._engines.get("local")
+        main_module._engines["local"] = engine
+
+    def _cleanup():
+        main_module.app.state.auth_required = prev_auth
+        with main_module._engines_guard:
+            if previous is None:
+                main_module._engines.pop("local", None)
+            else:
+                main_module._engines["local"] = previous
+
+    return _cleanup
+
+
+class _LocalMockEngineMixin:
+    """auth off + 装一个 MagicMock 引擎当 local 租户，echo get_project_record。"""
+
+    def _install_mock_engine(self):
+        engine = mock.MagicMock(spec=SkillEngine)
+        # echo：require_project 把 URL pid 直接 canonical 化（scope.project_id == URL pid）。
+        engine.get_project_record.side_effect = lambda pid: {"id": pid, "name": pid}
+        self.addCleanup(_install_local_engine(engine))
+        return engine
 
 
 class ChatRequestValidationTests(unittest.TestCase):
@@ -137,9 +190,10 @@ class CheckpointTableInvariantTests(unittest.TestCase):
         self.assertEqual(engine_keys, route_keys, "STAGE_CHECKPOINT_KEYS vs _CHECKPOINT_ROUTES values")
 
 
-class CheckpointEndpointTests(unittest.TestCase):
+class CheckpointEndpointTests(_LocalMockEngineMixin, unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main_module.app)
+        self.engine = self._install_mock_engine()
         main_module.register_desktop_bridge(None)
 
     def tearDown(self):
@@ -180,16 +234,16 @@ class CheckpointEndpointTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    @mock.patch("backend.main.skill_engine.record_stage_checkpoint")
-    def test_checkpoint_set_delegates_to_public_service(self, mock_record):
+    def test_checkpoint_set_delegates_to_public_service(self):
+        mock_record = self.engine.record_stage_checkpoint
         mock_record.return_value = {"status": "ok", "key": "outline_confirmed_at", "timestamp": "2026-04-17T12:00:00"}
         r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["timestamp"], "2026-04-17T12:00:00")
         mock_record.assert_called_once_with("demo", "outline_confirmed_at", "set")
 
-    @mock.patch("backend.main.skill_engine.record_stage_checkpoint")
-    def test_checkpoint_clear_passes_clear_action(self, mock_record):
+    def test_checkpoint_clear_passes_clear_action(self):
+        mock_record = self.engine.record_stage_checkpoint
         mock_record.return_value = {"status": "ok", "key": "outline_confirmed_at", "cleared": True}
         r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed?action=clear")
         self.assertEqual(r.status_code, 200)
@@ -199,9 +253,10 @@ class CheckpointEndpointTests(unittest.TestCase):
         r = self.client.post("/api/projects/demo/checkpoints/not-a-real-one")
         self.assertEqual(r.status_code, 404)
 
-    @mock.patch("backend.main.skill_engine.record_stage_checkpoint")
-    def test_missing_project_returns_404(self, mock_record):
-        mock_record.side_effect = ValueError("项目不存在: demo")
+    def test_missing_project_returns_404(self):
+        # require_project echoes a record (project resolves); the engine method then raises
+        # ValueError("项目不存在") which the endpoint maps to 404.
+        self.engine.record_stage_checkpoint.side_effect = ValueError("项目不存在: demo")
         r = self.client.post("/api/projects/demo/checkpoints/outline-confirmed")
         self.assertEqual(r.status_code, 404)
 
@@ -233,26 +288,25 @@ class CheckpointEndpointTests(unittest.TestCase):
                 "# Draft\n\n" + ("有效正文。" * 1200),
                 encoding="utf-8",
             )
-            with mock.patch.object(main_module, "skill_engine", engine):
+            # install the real engine as the 'local' tenant so require_project resolves the real
+            # project and the endpoint exercises the real prerequisite gate.
+            cleanup = _install_local_engine(engine)
+            try:
                 response = self.client.post("/api/projects/demo/checkpoints/review-started")
+            finally:
+                cleanup()
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("data-log", response.json()["detail"])
 
 
-class S0CheckpointEndpointTests(unittest.TestCase):
+class S0CheckpointEndpointTests(_LocalMockEngineMixin, unittest.TestCase):
     def setUp(self):
-        from fastapi.testclient import TestClient
-        from unittest import mock
-        import backend.main as main_module
         self.main_module = main_module
         self.client = TestClient(main_module.app)
-        # Patch the skill_engine singleton
-        self.patcher = mock.patch.object(
-            main_module, "skill_engine", autospec=True
-        )
-        self.mock_engine = self.patcher.start()
-        self.addCleanup(self.patcher.stop)
+        # W2-B: install a MagicMock engine as the 'local' tenant (auth off) instead of the
+        # removed global skill_engine singleton.
+        self.mock_engine = self._install_mock_engine()
         # Successful record returns {"status":"ok","key":...,"timestamp":...}
         self.mock_engine.record_stage_checkpoint.return_value = {
             "status": "ok", "key": "s0_interview_done_at",
@@ -297,17 +351,17 @@ class S0CheckpointEndpointTests(unittest.TestCase):
         # suite asserts is fine — we just check we did not break it
 
 
-class WorkspaceApiTests(unittest.TestCase):
+class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main_module.app)
+        self.engine = self._install_mock_engine()
         main_module.register_desktop_bridge(None)
 
     def tearDown(self):
         main_module.register_desktop_bridge(None)
 
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_workspace_endpoint_returns_stage_summary(self, mock_summary):
-        mock_summary.return_value = {
+    def test_workspace_endpoint_returns_stage_summary(self):
+        self.engine.get_workspace_summary.return_value = {
             "stage_code": "S4",
             "status": "进行中",
             "completed_items": ["报告结构确定"],
@@ -320,11 +374,13 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(response.json()["stage_code"], "S4")
 
     def test_workspace_endpoint_returns_404_for_missing_project(self):
+        # require_project resolves via get_project_record; None → 404 (project not found).
+        self.engine.get_project_record.side_effect = lambda pid: None
         response = self.client.get("/api/projects/definitely-missing-project/workspace")
         self.assertEqual(response.status_code, 404)
 
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_workspace_summary_includes_new_review_flags(self, mock_summary):
+    def test_workspace_summary_includes_new_review_flags(self):
+        mock_summary = self.engine.get_workspace_summary
         mock_summary.return_value = {
             "stage_code": "S5",
             "status": "进行中",
@@ -363,8 +419,8 @@ class WorkspaceApiTests(unittest.TestCase):
         for path, method in deleted:
             self.assertNotIn((path, method), live, f"{method} {path} should be gone")
 
-    @mock.patch("backend.main.skill_engine.get_project_path")
-    def test_clear_conversation_removes_new_and_legacy_sidecars(self, mock_get_project_path):
+    def test_clear_conversation_removes_new_and_legacy_sidecars(self):
+        mock_get_project_path = self.engine.get_project_path
         with self.subTest("remove conversation and both sidecars"):
             import tempfile
             from pathlib import Path
@@ -376,7 +432,12 @@ class WorkspaceApiTests(unittest.TestCase):
                 (project_path / "conversation_compact_state.json").write_text("{}", encoding="utf-8")
                 mock_get_project_path.return_value = project_path
 
-                response = self.client.delete("/api/projects/proj-demo/conversation")
+                # the endpoint also builds a ChatHandler for the request lock; stub get_chat_handler
+                # so the MagicMock engine isn't passed to a real ChatHandler.__init__.
+                handler = mock.Mock()
+                handler._get_project_request_lock.return_value = threading.Lock()
+                with mock.patch("backend.main.get_chat_handler", return_value=handler):
+                    response = self.client.delete("/api/projects/proj-demo/conversation")
 
                 self.assertEqual(response.status_code, 200)
                 self.assertFalse((project_path / "conversation.json").exists())
@@ -399,20 +460,30 @@ class WorkspaceApiTests(unittest.TestCase):
             result_holder = {}
             finished = threading.Event()
 
+            # clear_conversation now takes a ProjectScope (resolved by require_project). Build one
+            # directly with the mock engine so we drive the handler/lock path under test.
+            self.engine.get_project_path.return_value = project_path
+            scope = main_module.ProjectScope(
+                uid="local",
+                project_id="proj-demo",
+                engine=self.engine,
+                project_record={"id": "proj-demo", "name": "proj-demo"},
+                lock_key=tenant_project_key("local", "proj-demo"),
+            )
+
             def run_clear():
                 try:
-                    result_holder["result"] = asyncio.run(main_module.clear_conversation("proj-demo"))
+                    result_holder["result"] = asyncio.run(main_module.clear_conversation(scope))
                 finally:
                     finished.set()
 
-            with mock.patch("backend.main.skill_engine.get_project_path", return_value=project_path):
-                with mock.patch("backend.main.get_chat_handler", return_value=handler):
-                    clear_thread = threading.Thread(target=run_clear)
-                    clear_thread.start()
-                    self.assertFalse(finished.wait(0.2))
-                    self.assertTrue((project_path / "conversation.json").exists())
-                    request_lock.release()
-                    clear_thread.join(timeout=2)
+            with mock.patch("backend.main.get_chat_handler", return_value=handler):
+                clear_thread = threading.Thread(target=run_clear)
+                clear_thread.start()
+                self.assertFalse(finished.wait(0.2))
+                self.assertTrue((project_path / "conversation.json").exists())
+                request_lock.release()
+                clear_thread.join(timeout=2)
 
         self.assertFalse(clear_thread.is_alive())
         self.assertEqual(result_holder["result"], {"status": "ok"})
@@ -420,8 +491,8 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertFalse((project_path / "conversation_state.json").exists())
         self.assertFalse((project_path / "conversation_compact_state.json").exists())
 
-    @mock.patch("backend.main.skill_engine.create_project")
-    def test_create_project_accepts_theme_like_display_name_without_slugging(self, mock_create_project):
+    def test_create_project_accepts_theme_like_display_name_without_slugging(self):
+        mock_create_project = self.engine.create_project
         mock_create_project.return_value = {
             "id": "proj-demo",
             "name": "AI 战略 / 2026!",
@@ -479,15 +550,13 @@ class WorkspaceApiTests(unittest.TestCase):
         )
         bridge.select_workspace_files.assert_called_once_with("D:/Workspaces/demo")
 
-    @mock.patch("backend.main.skill_engine.add_materials")
-    @mock.patch("backend.main.skill_engine.get_project_record")
-    def test_select_materials_from_workspace_uses_bridge_and_imports_selection(
-        self,
-        mock_get_project_record,
-        mock_add_materials,
-    ):
+    def test_select_materials_from_workspace_uses_bridge_and_imports_selection(self):
+        mock_get_project_record = self.engine.get_project_record
+        mock_add_materials = self.engine.add_materials
+        mock_get_project_record.side_effect = None
         mock_get_project_record.return_value = {
             "id": "proj-demo",
+            "name": "proj-demo",
             "workspace_dir": "D:/Workspaces/demo",
         }
         mock_add_materials.return_value = [
@@ -508,15 +577,13 @@ class WorkspaceApiTests(unittest.TestCase):
             added_via="workspace_select",
         )
 
-    @mock.patch("backend.main.skill_engine.add_materials")
-    @mock.patch("backend.main.skill_engine.get_project_record")
-    def test_upload_materials_stages_files_before_importing(
-        self,
-        mock_get_project_record,
-        mock_add_materials,
-    ):
+    def test_upload_materials_stages_files_before_importing(self):
+        mock_get_project_record = self.engine.get_project_record
+        mock_add_materials = self.engine.add_materials
+        mock_get_project_record.side_effect = None
         mock_get_project_record.return_value = {
             "id": "proj-demo",
+            "name": "proj-demo",
             "workspace_dir": "D:/Workspaces/demo",
         }
         mock_add_materials.return_value = [
@@ -537,11 +604,12 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertTrue(args[1][0].endswith("市场图表.png"))
 
     @mock.patch("backend.main.MAX_HEAVY_MATERIAL_BYTES", 10)
-    @mock.patch("backend.main.skill_engine.get_project_record")
-    def test_upload_oversized_file_returns_413(self, mock_get_project_record):
+    def test_upload_oversized_file_returns_413(self):
         """Upload endpoint rejects files exceeding MAX_HEAVY_MATERIAL_BYTES with HTTP 413."""
-        mock_get_project_record.return_value = {
+        self.engine.get_project_record.side_effect = None
+        self.engine.get_project_record.return_value = {
             "id": "proj-demo",
+            "name": "proj-demo",
             "workspace_dir": "D:/Workspaces/demo",
         }
         oversized_data = b"X" * 20  # 20 bytes > patched limit of 10 bytes
@@ -555,11 +623,12 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertIn("超过上传限制", response.json()["detail"])
 
     @mock.patch("backend.main.MAX_HEAVY_MATERIAL_BYTES", 10)
-    @mock.patch("backend.main.skill_engine.get_project_record")
-    def test_upload_oversized_file_not_persisted(self, mock_get_project_record):
+    def test_upload_oversized_file_not_persisted(self):
         """Rejected oversized upload must not leave a file in the temp directory."""
-        mock_get_project_record.return_value = {
+        self.engine.get_project_record.side_effect = None
+        self.engine.get_project_record.return_value = {
             "id": "proj-demo",
+            "name": "proj-demo",
             "workspace_dir": "D:/Workspaces/demo",
         }
         oversized_data = b"X" * 20
@@ -586,33 +655,56 @@ class WorkspaceApiTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # C4: POST /independent-review/stream (run-bound, resume) + discard
     # ------------------------------------------------------------------
+    #
+    # W2-B (T11c): the POST review endpoint keys the lock/store by scope.lock_key ==
+    # tenant_project_key("local", canonical_pid). Since the mock engine echoes get_project_record,
+    # the canonical pid == the URL pid, so the endpoint's store key is _skey(<URL pid>). Tests that
+    # pre-seed the store or acquire the review lock with a bare pid must use _skey(pid) so the
+    # computed lock_key matches. The store's own unit tests (test_independent_review.py) use opaque
+    # keys and stay untouched.
+
+    @staticmethod
+    def _skey(project_id):
+        return tenant_project_key("local", project_id)
+
+    def _scope(self, project_id):
+        # Build the ProjectScope that require_project would produce for the 'local' tenant, for
+        # tests that call independent_review_stream_post(request, scope) directly (bypassing DI).
+        return main_module.ProjectScope(
+            uid="local",
+            project_id=project_id,
+            engine=self.engine,
+            project_record={"id": project_id, "name": project_id},
+            lock_key=self._skey(project_id),
+        )
 
     def _seed_done_tombstone(self, project_id, run_id, body="report"):
-        """Seed the store with a done tombstone via the real atomic commit path."""
+        """Seed the store with a done tombstone via the real atomic commit path (composite key)."""
         store = main_module._REVIEW_SESSION_STORE
-        self.assertTrue(store.claim_first(project_id, run_id, threading.Event()))
+        key = self._skey(project_id)
+        self.assertTrue(store.claim_first(key, run_id, threading.Event()))
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         canonical = os.path.join(tmpdir.name, "independent-review.md")
         fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(body)
-        mtime = store.atomic_commit_report(project_id, run_id, temp_path, canonical, {"messages": []})
+        mtime = store.atomic_commit_report(key, run_id, temp_path, canonical, {"messages": []})
         self.assertIsNotNone(mtime)
-        self.addCleanup(store.discard, project_id, run_id)
+        self.addCleanup(store.discard, key, run_id)
         return mtime
 
     def _seed_errored(self, project_id, run_id, snapshot=None):
         store = main_module._REVIEW_SESSION_STORE
-        self.assertTrue(store.claim_first(project_id, run_id, threading.Event()))
+        key = self._skey(project_id)
+        self.assertTrue(store.claim_first(key, run_id, threading.Event()))
         self.assertTrue(
-            store.set_errored(project_id, run_id, snapshot or {"messages": [], "iteration": 2})
+            store.set_errored(key, run_id, snapshot or {"messages": [], "iteration": 2})
         )
-        self.addCleanup(store.discard, project_id, run_id)
+        self.addCleanup(store.discard, key, run_id)
 
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_post_requires_run_id(self, mock_summary):
-        mock_summary.return_value = {"stage_code": "S5"}
+    def test_review_post_requires_run_id(self):
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         response = self.client.post(
             "/api/projects/demo-post-norun/independent-review/stream",
             json={"resume": False},
@@ -620,9 +712,8 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("run_id required", response.json()["detail"])
 
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_post_requires_s5(self, mock_summary):
-        mock_summary.return_value = {"stage_code": "S4"}
+    def test_review_post_requires_s5(self):
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S4"}
         response = self.client.post(
             "/api/projects/demo-post-s4/independent-review/stream",
             json={"resume": False, "run_id": "r1"},
@@ -631,34 +722,35 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertIn("独立审查只能在 S5 阶段使用", response.json()["detail"])
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_post_first_run(self, mock_summary, mock_agent_cls):
+    def test_review_post_first_run(self, mock_agent_cls):
         # resume=false: a worker starts with the frontend run_id + real store; on success a
         # done tombstone is written and the wrapper emits review-completed carrying that run_id.
         from backend.independent_review import CANONICAL_REVIEW_PATH
 
         project_id = "demo-post-first"
         run_id = "frontend-run-1"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         captured = {}
 
-        def fake_run(project_id_arg, run_id=None, store=None, resume_snapshot=None, cancel_event=None, **kwargs):
+        def fake_run(project_id_arg, run_id=None, store=None, resume_snapshot=None, cancel_event=None, store_key=None, **kwargs):
             del cancel_event, kwargs
             captured["run_id"] = run_id
             captured["store"] = store
             captured["resume_snapshot"] = resume_snapshot
+            captured["store_key"] = store_key
             canonical = os.path.join(tmpdir.name, "independent-review.md")
             fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write("final report")
-            mtime = store.atomic_commit_report(project_id_arg, run_id, temp_path, canonical, {"messages": []})
+            # commit under the composite store_key the endpoint passes (matches get_done_mtime key).
+            mtime = store.atomic_commit_report(store_key, run_id, temp_path, canonical, {"messages": []})
             captured["mtime"] = mtime
             yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": mtime}
 
         mock_agent_cls.return_value.run.side_effect = fake_run
-        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(project_id), run_id)
 
         response = self.client.post(
             f"/api/projects/{project_id}/independent-review/stream",
@@ -667,6 +759,7 @@ class WorkspaceApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured["run_id"], run_id)
+        self.assertEqual(captured["store_key"], self._skey(project_id))
         self.assertIs(captured["store"], main_module._REVIEW_SESSION_STORE)
         self.assertIsNone(captured["resume_snapshot"])
         self.assertIn("review-completed", response.text)
@@ -674,13 +767,12 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertIn(str(captured["mtime"]), response.text)
         self.assertIn("data: [DONE]", response.text)
 
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_post_first_run_409_when_lock_held(self, mock_summary):
+    def test_review_post_first_run_409_when_lock_held(self):
         from backend.independent_review import get_independent_review_lock
 
         project_id = "demo-post-locked"
-        mock_summary.return_value = {"stage_code": "S5"}
-        lock = get_independent_review_lock(project_id)
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
+        lock = get_independent_review_lock(self._skey(project_id))
         self.assertTrue(lock.acquire(blocking=False))
         self.addCleanup(lock.release)
 
@@ -691,18 +783,17 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("上一次独立审查仍在进行中", response.json()["detail"])
 
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_post_first_run_releases_lock_on_claim_fail(self, mock_summary):
+    def test_review_post_first_run_releases_lock_on_claim_fail(self):
         # If claim_first CAS fails (an active running record already exists) the review lock
         # must be released so subsequent requests are not wedged.
         from backend.independent_review import get_independent_review_lock
 
         project_id = "demo-post-claimfail"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         store = main_module._REVIEW_SESSION_STORE
-        # pre-seed an active running record under a different run_id.
-        self.assertTrue(store.claim_first(project_id, "other-run", threading.Event()))
-        self.addCleanup(store.discard, project_id, "other-run")
+        # pre-seed an active running record under a different run_id (composite key).
+        self.assertTrue(store.claim_first(self._skey(project_id), "other-run", threading.Event()))
+        self.addCleanup(store.discard, self._skey(project_id), "other-run")
 
         response = self.client.post(
             f"/api/projects/{project_id}/independent-review/stream",
@@ -710,18 +801,17 @@ class WorkspaceApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 409)
         # lock was released despite the CAS failure.
-        lock = get_independent_review_lock(project_id)
+        lock = get_independent_review_lock(self._skey(project_id))
         self.assertTrue(lock.acquire(blocking=False))
         lock.release()
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_post_resume_errored_continues(self, mock_summary, mock_agent_cls):
+    def test_review_post_resume_errored_continues(self, mock_agent_cls):
         # resume=true against an errored record: the stored snapshot is handed to agent.run.
         project_id = "demo-post-resume-err"
         run_id = "run-resume-1"
         snapshot = {"messages": [{"role": "system", "content": "x"}], "iteration": 3}
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         self._seed_errored(project_id, run_id, snapshot)
         captured = {}
 
@@ -746,13 +836,12 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertIn('"type": "progress"', response.text)
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_post_resume_done_returns_completed_signal(self, mock_summary, mock_agent_cls):
+    def test_review_post_resume_done_returns_completed_signal(self, mock_agent_cls):
         # resume=true against a done tombstone: NO worker runs, the wrapper just re-emits
         # review-completed with the stored mtime (recovers a lost success notification).
         project_id = "demo-post-resume-done"
         run_id = "run-done-1"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         mtime = self._seed_done_tombstone(project_id, run_id)
 
         response = self.client.post(
@@ -769,17 +858,17 @@ class WorkspaceApiTests(unittest.TestCase):
         mock_agent_cls.return_value.run.assert_not_called()
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_resume_done_rereads_tombstone_before_completed(self, mock_summary, mock_agent_cls):
+    def test_review_resume_done_rereads_tombstone_before_completed(self, mock_agent_cls):
         # codex C4-quality BLOCKER + NIT 1: the resume-done branch must NOT emit a stale
         # review-completed from the cached done_mtime. After the handler sees done + releases the
         # lock, a concurrent discard clears the tombstone; emit_completion re-reads get_done_mtime
         # (now empty) and emits NEITHER completed NOR any stale mtime.
         project_id = "demo-resume-done-reread"
         run_id = "run-reread-done"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         mtime = self._seed_done_tombstone(project_id, run_id)
         store = main_module._REVIEW_SESSION_STORE
+        scope = self._scope(project_id)
 
         async def call():
             class ConnectedRequest:
@@ -790,10 +879,10 @@ class WorkspaceApiTests(unittest.TestCase):
                     return False
 
             # the handler runs claim_resume (sees done) + releases the lock during this await.
-            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            response = await main_module.independent_review_stream_post(ConnectedRequest(), scope)
             # simulate a concurrent discard landing AFTER the handler resolved done_mtime but
-            # BEFORE the stream's emit_completion re-reads the tombstone.
-            store.discard(project_id, run_id)
+            # BEFORE the stream's emit_completion re-reads the tombstone (composite key).
+            store.discard(self._skey(project_id), run_id)
             return await _collect_streaming_chunks(response)
 
         chunks = asyncio.run(call())
@@ -805,15 +894,15 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertIn("data: [DONE]", text)
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_post_disconnect_emits_neither_completed_nor_done(self, mock_summary, mock_agent_cls):
+    def test_review_post_disconnect_emits_neither_completed_nor_done(self, mock_agent_cls):
         # codex C4-quality BLOCKER + NIT 1: a disconnected POST stream emits neither
         # review-completed nor [DONE], for BOTH the done short-circuit and the worker path.
         # Exercise the done short-circuit (a tombstone exists) under a disconnected request.
         project_id = "demo-post-disconnect"
         run_id = "run-disc"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         self._seed_done_tombstone(project_id, run_id)
+        scope = self._scope(project_id)
 
         async def call():
             class DisconnectedRequest:
@@ -823,7 +912,7 @@ class WorkspaceApiTests(unittest.TestCase):
                 async def is_disconnected(self_inner):
                     return True
 
-            response = await main_module.independent_review_stream_post(project_id, DisconnectedRequest())
+            response = await main_module.independent_review_stream_post(DisconnectedRequest(), scope)
             return await _collect_streaming_chunks(response)
 
         chunks = asyncio.run(call())
@@ -833,13 +922,12 @@ class WorkspaceApiTests(unittest.TestCase):
         # the agent never runs on a done-tombstone resume.
         mock_agent_cls.return_value.run.assert_not_called()
 
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_post_resume_reject_400(self, mock_summary):
+    def test_review_post_resume_reject_400(self):
         # resume against a missing / mismatched run_id is rejected (and the lock released).
         from backend.independent_review import get_independent_review_lock
 
         project_id = "demo-post-resume-reject"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
 
         response = self.client.post(
             f"/api/projects/{project_id}/independent-review/stream",
@@ -847,21 +935,21 @@ class WorkspaceApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("无可续审的会话", response.json()["detail"])
-        lock = get_independent_review_lock(project_id)
+        lock = get_independent_review_lock(self._skey(project_id))
         self.assertTrue(lock.acquire(blocking=False))
         lock.release()
 
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_resume_409_when_worker_finalizing(self, mock_summary):
+    def test_review_resume_409_when_worker_finalizing(self):
         # resume waits up to 3s for the review lock; if a worker holds it past the timeout the
         # endpoint returns 409 so the frontend backs off and retries.
         from backend.independent_review import get_independent_review_lock
 
         project_id = "demo-post-resume-busy"
-        mock_summary.return_value = {"stage_code": "S5"}
-        lock = get_independent_review_lock(project_id)
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
+        lock = get_independent_review_lock(self._skey(project_id))
         self.assertTrue(lock.acquire(blocking=False))
         self.addCleanup(lock.release)
+        scope = self._scope(project_id)
 
         async def call():
             class ConnectedRequest:
@@ -872,7 +960,7 @@ class WorkspaceApiTests(unittest.TestCase):
                     return False
 
             with self.assertRaises(HTTPException) as ctx:
-                await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+                await main_module.independent_review_stream_post(ConnectedRequest(), scope)
             return ctx.exception
 
         # patch the 3.0s blocking acquire down to a tiny timeout so the test is fast but still
@@ -890,17 +978,17 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertIn("正在收尾", exc.detail)
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_resume_uses_to_thread_not_blocking_loop(self, mock_summary, mock_agent_cls):
+    def test_review_resume_uses_to_thread_not_blocking_loop(self, mock_agent_cls):
         # the blocking lock.acquire for resume must go through asyncio.to_thread so the event
         # loop is never blocked.
         project_id = "demo-post-resume-tothread"
         run_id = "run-tt-1"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         self._seed_errored(project_id, run_id)
         mock_agent_cls.return_value.run.return_value = iter(
             [{"type": "progress", "message": "ok"}]
         )
+        scope = self._scope(project_id)
 
         async def call():
             class ConnectedRequest:
@@ -910,7 +998,7 @@ class WorkspaceApiTests(unittest.TestCase):
                 async def is_disconnected(self_inner):
                     return False
 
-            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            response = await main_module.independent_review_stream_post(ConnectedRequest(), scope)
             return await _collect_streaming_chunks(response)
 
         real_to_thread = asyncio.to_thread
@@ -926,16 +1014,17 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertGreaterEqual(to_thread_calls["n"], 2)
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_resume_rereads_store_after_lock(self, mock_summary, mock_agent_cls):
+    def test_review_resume_rereads_store_after_lock(self, mock_agent_cls):
         # the record is errored at request time but flips to done while waiting for the lock;
         # after acquiring the lock claim_resume re-reads and reports the post-wait done state
         # (review-completed, no worker run).
         project_id = "demo-post-resume-reread"
         run_id = "run-reread-1"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         store = main_module._REVIEW_SESSION_STORE
+        key = self._skey(project_id)
         self._seed_errored(project_id, run_id)
+        scope = self._scope(project_id)
 
         # simulate "worker finished while we waited": flip the record to done inside the
         # to_thread(lock.acquire) call, before claim_resume re-reads it.
@@ -951,7 +1040,7 @@ class WorkspaceApiTests(unittest.TestCase):
                 async def is_disconnected(self_inner):
                     return False
 
-            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            response = await main_module.independent_review_stream_post(ConnectedRequest(), scope)
             return await _collect_streaming_chunks(response)
 
         real_to_thread = asyncio.to_thread
@@ -959,20 +1048,20 @@ class WorkspaceApiTests(unittest.TestCase):
         async def flipping_to_thread(func, *args, **kwargs):
             result = await real_to_thread(func, *args, **kwargs)
             # after the blocking lock.acquire succeeds, convert errored -> done so the
-            # subsequent claim_resume sees done.
+            # subsequent claim_resume sees done. store keyed by composite key.
             if args and args[:1] == (True,) and flip["done_mtime"] is None:
                 # we need the record running for atomic_commit; emulate the worker's commit:
                 # set running via direct CAS then commit. The record is currently errored
                 # (from _seed_errored); move it to running by claim_resume-ing under a temp
                 # cancel event, then commit to done.
-                kind, _payload = store.claim_resume(project_id, run_id, threading.Event())
+                kind, _payload = store.claim_resume(key, run_id, threading.Event())
                 self.assertEqual(kind, "errored")  # now running
                 canonical = os.path.join(tmpdir.name, "independent-review.md")
                 fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     fh.write("done while waiting")
                 flip["done_mtime"] = store.atomic_commit_report(
-                    project_id, run_id, temp_path, canonical, {"messages": []}
+                    key, run_id, temp_path, canonical, {"messages": []}
                 )
             return result
 
@@ -984,12 +1073,12 @@ class WorkspaceApiTests(unittest.TestCase):
         mock_agent_cls.return_value.run.assert_not_called()
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_lock_released_on_done_and_reject_and_exception(self, mock_summary, mock_agent_cls):
+    def test_review_lock_released_on_done_and_reject_and_exception(self, mock_agent_cls):
         from backend.independent_review import get_independent_review_lock
 
-        mock_summary.return_value = {"stage_code": "S5"}
-        lock_owner = get_independent_review_lock
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
+        # locks/store keyed by composite key; resolve via _skey.
+        lock_owner = lambda pid: get_independent_review_lock(self._skey(pid))
 
         # (a) resume done -> lock released.
         p_done = "demo-lockrel-done"
@@ -1020,11 +1109,10 @@ class WorkspaceApiTests(unittest.TestCase):
         )
         self.assertTrue(lock_owner(p_exc).acquire(blocking=False))
         lock_owner(p_exc).release()
-        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, p_exc, "run-e")
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(p_exc), "run-e")
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_lock_released_even_if_response_generator_never_consumed(self, mock_summary, mock_agent_cls):
+    def test_review_lock_released_even_if_response_generator_never_consumed(self, mock_agent_cls):
         # codex C5 red-team B3: Starlette runs stream_response + listen_for_disconnect concurrently
         # and cancels the task group when either finishes (starlette/responses.py). If the client
         # already disconnected, the disconnect listener can win before stream_response is scheduled,
@@ -1037,9 +1125,10 @@ class WorkspaceApiTests(unittest.TestCase):
 
         project_id = "demo-b3-no-consume"
         run_id = "run-b3"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         mock_agent_cls.return_value.run.return_value = iter([{"type": "progress", "message": "ok"}])
-        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(project_id), run_id)
+        scope = self._scope(project_id)
 
         async def call():
             class ConnectedRequest:
@@ -1049,13 +1138,13 @@ class WorkspaceApiTests(unittest.TestCase):
                 async def is_disconnected(self_inner):
                     return False
 
-            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            response = await main_module.independent_review_stream_post(ConnectedRequest(), scope)
             # Emulate Starlette cancelling before the body is ever iterated: close the generator
             # WITHOUT consuming it. generate()'s body never runs; only the body-created worker can
             # release the lock.
             await response.body_iterator.aclose()
             # Wait (in-loop) for the worker thread to finish and release the lock.
-            lock = get_independent_review_lock(project_id)
+            lock = get_independent_review_lock(self._skey(project_id))
             for _ in range(200):
                 if lock.acquire(blocking=False):
                     lock.release()
@@ -1071,26 +1160,27 @@ class WorkspaceApiTests(unittest.TestCase):
         )
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_completed_emitted_after_lock_release(self, mock_summary, mock_agent_cls):
+    def test_review_completed_emitted_after_lock_release(self, mock_agent_cls):
         # when review-completed is emitted, the review lock is already free (the wrapper emits
         # it only after worker_task finished + run_worker finally released the lock).
         from backend.independent_review import CANONICAL_REVIEW_PATH, get_independent_review_lock
 
         project_id = "demo-completed-after-release"
         run_id = "run-after-rel"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
-        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(project_id), run_id)
+        scope = self._scope(project_id)
 
-        def fake_run(project_id_arg, run_id=None, store=None, **kwargs):
+        def fake_run(project_id_arg, run_id=None, store=None, store_key=None, **kwargs):
             del kwargs
             canonical = os.path.join(tmpdir.name, "independent-review.md")
             fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write("body")
-            mtime = store.atomic_commit_report(project_id_arg, run_id, temp_path, canonical, {"messages": []})
+            # commit under the composite store_key (matches the endpoint's get_done_mtime key).
+            mtime = store.atomic_commit_report(store_key, run_id, temp_path, canonical, {"messages": []})
             yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": mtime}
 
         mock_agent_cls.return_value.run.side_effect = fake_run
@@ -1103,12 +1193,12 @@ class WorkspaceApiTests(unittest.TestCase):
                 async def is_disconnected(self_inner):
                     return False
 
-            response = await main_module.independent_review_stream_post(project_id, ConnectedRequest())
+            response = await main_module.independent_review_stream_post(ConnectedRequest(), scope)
             chunks = []
             lock_free_at_completion = {"value": None}
             async for chunk in response.body_iterator:
                 if "review-completed" in chunk:
-                    lk = get_independent_review_lock(project_id)
+                    lk = get_independent_review_lock(self._skey(project_id))
                     acquired = lk.acquire(blocking=False)
                     lock_free_at_completion["value"] = acquired
                     if acquired:
@@ -1135,25 +1225,25 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertNotIn("path", completed[0])
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_completed_carries_run_id_and_mtime(self, mock_summary, mock_agent_cls):
+    def test_review_completed_carries_run_id_and_mtime(self, mock_agent_cls):
         from backend.independent_review import CANONICAL_REVIEW_PATH
 
         project_id = "demo-completed-payload"
         run_id = "run-payload"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
-        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(project_id), run_id)
         holder = {}
 
-        def fake_run(project_id_arg, run_id=None, store=None, **kwargs):
+        def fake_run(project_id_arg, run_id=None, store=None, store_key=None, **kwargs):
             del kwargs
             canonical = os.path.join(tmpdir.name, "independent-review.md")
             fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write("body")
-            holder["mtime"] = store.atomic_commit_report(project_id_arg, run_id, temp_path, canonical, {"messages": []})
+            # commit under the composite store_key (matches the endpoint's get_done_mtime key).
+            holder["mtime"] = store.atomic_commit_report(store_key, run_id, temp_path, canonical, {"messages": []})
             yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": holder["mtime"]}
 
         mock_agent_cls.return_value.run.side_effect = fake_run
@@ -1174,13 +1264,12 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(completed["report_mtime_ns"], holder["mtime"])
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_worker_error_does_not_emit_completed(self, mock_summary, mock_agent_cls):
+    def test_review_worker_error_does_not_emit_completed(self, mock_agent_cls):
         project_id = "demo-post-worker-error"
         run_id = "run-werr"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         mock_agent_cls.return_value.run.side_effect = RuntimeError("agent exploded")
-        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(project_id), run_id)
 
         response = self.client.post(
             f"/api/projects/{project_id}/independent-review/stream",
@@ -1193,14 +1282,13 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertIn("data: [DONE]", response.text)
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_atomic_commit_failure_does_not_emit_completed(self, mock_summary, mock_agent_cls):
+    def test_atomic_commit_failure_does_not_emit_completed(self, mock_agent_cls):
         # agent yields an error after a failed atomic replace (no done tombstone) -> the
         # wrapper must NOT synthesize review-completed.
         project_id = "demo-post-commit-fail"
         run_id = "run-commitfail"
-        mock_summary.return_value = {"stage_code": "S5"}
-        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, project_id, run_id)
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(project_id), run_id)
 
         def fake_run(project_id_arg, run_id=None, store=None, **kwargs):
             del project_id_arg, run_id, store, kwargs
@@ -1217,13 +1305,12 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertNotIn("review-completed", response.text)
 
     @mock.patch("backend.main.IndependentReviewAgent")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_review_worker_exception_leaves_no_running_record(self, mock_summary, mock_agent_cls):
+    def test_review_worker_exception_leaves_no_running_record(self, mock_agent_cls):
         # codex R2 BLOCKER 4: an uncaught worker exception must converge via finally
         # finalize_orphan_running, leaving no stuck running record (first-claim succeeds again).
         project_id = "demo-post-exc-norun"
         run_id = "run-exc"
-        mock_summary.return_value = {"stage_code": "S5"}
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
         mock_agent_cls.return_value.run.side_effect = RuntimeError("boom mid-run")
 
         response = self.client.post(
@@ -1233,11 +1320,11 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('"type": "error"', response.text)
         # no dead running record: a brand-new first-claim succeeds (first-run, no resume_snapshot
-        # so finalize cleared the record entirely).
+        # so finalize cleared the record entirely). store keyed by composite key.
         self.assertTrue(
-            main_module._REVIEW_SESSION_STORE.claim_first(project_id, "fresh-after-exc", threading.Event())
+            main_module._REVIEW_SESSION_STORE.claim_first(self._skey(project_id), "fresh-after-exc", threading.Event())
         )
-        main_module._REVIEW_SESSION_STORE.discard(project_id, "fresh-after-exc")
+        main_module._REVIEW_SESSION_STORE.discard(self._skey(project_id), "fresh-after-exc")
 
     def test_review_structured_timeout_kwargs(self):
         # Task 4.2 Step 3: the review client uses a structured httpx.Timeout (not a flat float),
@@ -1282,8 +1369,9 @@ class WorkspaceApiTests(unittest.TestCase):
         project_id = "demo-discard-match"
         run_id = "run-discard-1"
         store = main_module._REVIEW_SESSION_STORE
+        key = self._skey(project_id)
         cancel_event = threading.Event()
-        self.assertTrue(store.claim_first(project_id, run_id, cancel_event))
+        self.assertTrue(store.claim_first(key, run_id, cancel_event))
 
         response = self.client.post(
             f"/api/projects/{project_id}/independent-review/discard",
@@ -1293,16 +1381,17 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertTrue(response.json()["cancelled"])
         # cancel event set and record cleared (a fresh first-claim succeeds).
         self.assertTrue(cancel_event.is_set())
-        self.assertTrue(store.claim_first(project_id, "after-discard", threading.Event()))
-        store.discard(project_id, "after-discard")
+        self.assertTrue(store.claim_first(key, "after-discard", threading.Event()))
+        store.discard(key, "after-discard")
 
     def test_discard_no_op_on_mismatch(self):
         project_id = "demo-discard-mismatch"
         run_id = "run-current"
         store = main_module._REVIEW_SESSION_STORE
+        key = self._skey(project_id)
         cancel_event = threading.Event()
-        self.assertTrue(store.claim_first(project_id, run_id, cancel_event))
-        self.addCleanup(store.discard, project_id, run_id)
+        self.assertTrue(store.claim_first(key, run_id, cancel_event))
+        self.addCleanup(store.discard, key, run_id)
 
         response = self.client.post(
             f"/api/projects/{project_id}/independent-review/discard",
@@ -1320,9 +1409,10 @@ class WorkspaceApiTests(unittest.TestCase):
         project_id = "demo-discard-nolock"
         run_id = "run-nolock"
         store = main_module._REVIEW_SESSION_STORE
+        key = self._skey(project_id)
         cancel_event = threading.Event()
-        self.assertTrue(store.claim_first(project_id, run_id, cancel_event))
-        lock = get_independent_review_lock(project_id)
+        self.assertTrue(store.claim_first(key, run_id, cancel_event))
+        lock = get_independent_review_lock(key)
         self.assertTrue(lock.acquire(blocking=False))  # emulate a long-running worker
         self.addCleanup(lock.release)
 
@@ -1340,8 +1430,9 @@ class WorkspaceApiTests(unittest.TestCase):
         project_id = "demo-discard-stale"
         run_id = "run-stale"
         store = main_module._REVIEW_SESSION_STORE
+        key = self._skey(project_id)
         cancel_event = threading.Event()
-        self.assertTrue(store.claim_first(project_id, run_id, cancel_event))
+        self.assertTrue(store.claim_first(key, run_id, cancel_event))
 
         # user discards.
         self.assertTrue(
@@ -1351,26 +1442,17 @@ class WorkspaceApiTests(unittest.TestCase):
             ).json()["cancelled"]
         )
         # the old worker tries to land an errored snapshot — must be a no-op.
-        self.assertFalse(store.set_errored(project_id, run_id, {"messages": [], "iteration": 4}))
-        self.assertFalse(store.finalize_orphan_running(project_id, run_id, {"messages": []}))
+        self.assertFalse(store.set_errored(key, run_id, {"messages": [], "iteration": 4}))
+        self.assertFalse(store.finalize_orphan_running(key, run_id, {"messages": []}))
         # nothing running remains: a fresh first-claim succeeds.
-        self.assertTrue(store.claim_first(project_id, "fresh-stale", threading.Event()))
-        store.discard(project_id, "fresh-stale")
+        self.assertTrue(store.claim_first(key, "fresh-stale", threading.Event()))
+        store.discard(key, "fresh-stale")
 
     @mock.patch("backend.main.export_reviewable_draft")
-    @mock.patch("backend.main.skill_engine.ensure_output_dir")
-    @mock.patch("backend.main.skill_engine.get_script_path")
-    @mock.patch("backend.main.skill_engine.get_primary_report_path")
-    def test_export_draft_endpoint_returns_output_path(
-        self,
-        mock_report_path,
-        mock_script_path,
-        mock_output_dir,
-        mock_export_draft,
-    ):
-        mock_report_path.return_value = "D:/tmp/report.md"
-        mock_script_path.return_value = "D:/skill/scripts/export_draft.ps1"
-        mock_output_dir.return_value = "D:/tmp/output"
+    def test_export_draft_endpoint_returns_output_path(self, mock_export_draft):
+        self.engine.get_primary_report_path.return_value = "D:/tmp/report.md"
+        self.engine.get_script_path.return_value = "D:/skill/scripts/export_draft.ps1"
+        self.engine.ensure_output_dir.return_value = "D:/tmp/output"
         mock_export_draft.return_value = {
             "status": "ok",
             "output": "已生成可审草稿: D:/tmp/output/report.docx",
@@ -1585,20 +1667,16 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(forwarded["report_mtime_ns"], big_mtime)
 
 
-class GetConversationSanitizeTests(unittest.TestCase):
+class GetConversationSanitizeTests(_LocalMockEngineMixin, unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main_module.app)
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.project_path = Path(self.tmpdir.name) / "demo-project"
         self.project_path.mkdir(parents=True, exist_ok=True)
-        self.patcher = mock.patch.object(
-            main_module.skill_engine,
-            "get_project_path",
-            return_value=self.project_path,
-        )
-        self.mock_get_project_path = self.patcher.start()
-        self.addCleanup(self.patcher.stop)
+        self.engine = self._install_mock_engine()
+        self.engine.get_project_path.return_value = self.project_path
+        self.mock_get_project_path = self.engine.get_project_path
 
     def _write_conversation(self, messages):
         (self.project_path / "conversation.json").write_text(
@@ -1707,9 +1785,9 @@ class R3FileApiTests(unittest.TestCase):
         self.project_dir = Path(project["project_dir"])
         (self.project_dir / "content").mkdir(parents=True, exist_ok=True)
         (self.project_dir / "content" / "report_draft_v1.md").write_text("初稿", encoding="utf-8")
-        self._patch = mock.patch.object(main_module, "skill_engine", self.engine)
-        self._patch.start()
-        self.addCleanup(self._patch.stop)
+        # W2-B: install the real engine as the 'local' tenant (auth off) so require_project resolves
+        # the real project and the endpoints exercise the real engine, like the old global singleton.
+        self.addCleanup(_install_local_engine(self.engine))
 
     def test_list_files_returns_structured_array(self):
         r = self.client.get(f"/api/projects/{self.pid}/files")
@@ -1923,9 +2001,8 @@ class MaterialConversionStatusApiTests(unittest.TestCase):
             "expected_length": "3000 words", "notes": "n",
         })
         self.pid = project["id"]
-        self._patch = mock.patch.object(main_module, "skill_engine", self.engine)
-        self._patch.start()
-        self.addCleanup(self._patch.stop)
+        # W2-B: install the real engine as the 'local' tenant (auth off), like the old global singleton.
+        self.addCleanup(_install_local_engine(self.engine))
 
     def _add_text_material(self, name="note.txt", body="some-content"):
         src = Path(self._tmp.name) / name
@@ -2065,3 +2142,43 @@ class MaterialConversionStatusApiTests(unittest.TestCase):
         self.assertEqual(by_id2[mat["id"]]["conversion_status"], "not_parsed")
         r = self.client.get(f"/api/projects/{self.pid}/materials")
         self.assertEqual(r.status_code, 200)
+
+
+class CrossTenantApiTests(AuthApiTestBase):
+    """W2-B (T11c): real end-to-end tenant isolation — two authenticated users, each driving the
+    full HTTP stack (auth ON, real per-uid engines). B must get 404 on A's project both by id and
+    by name, and B's project list must not leak A's project."""
+
+    def setUp(self):
+        super().setUp()  # auth_required=True + heal mock + singleton reset + self.client (=A's client)
+        from fastapi.testclient import TestClient
+
+        self.A = self.client
+        self.B = TestClient(self.m.app)
+        for c, u in ((self.A, "alice"), (self.B, "bob")):
+            c.post("/api/auth/register", json={"username": u, "password": "pw-123456", "invite_code": "JOIN"})
+            c.post("/api/auth/login", json={"username": u, "password": "pw-123456"})
+
+    def _create(self, c, name):
+        return c.post(
+            "/api/projects",
+            json={
+                "name": name,
+                "project_type": "strategy",
+                "theme": "t",
+                "deadline": "2026-12-31",
+                "expected_length": "1万字",
+            },
+        ).json()["project_id"]
+
+    def test_b_cannot_read_a(self):
+        pid = self._create(self.A, "A机密")
+        # A owns the project (200); B is a different tenant (404 + empty project list).
+        self.assertEqual(self.A.get(f"/api/projects/{pid}/workspace").status_code, 200)
+        self.assertEqual(self.B.get(f"/api/projects/{pid}/workspace").status_code, 404)
+        self.assertEqual(self.B.get("/api/projects").json(), [])
+
+    def test_name_ref_no_leak(self):
+        # require_project accepts a name alias; B must NOT resolve A's project by its display name.
+        self._create(self.A, "A机密")
+        self.assertEqual(self.B.get("/api/projects/A机密/workspace").status_code, 404)
