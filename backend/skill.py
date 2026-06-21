@@ -354,10 +354,10 @@ class SkillEngine:
             f"请先让助手写入 `{REPORT_DRAFT_PATH}`，再开始审查。",
         ),
         "review_passed_at": (
-            "_has_effective_review_reports",
-            "plan/independent-review.md, plan/lint-report.md",
-            "需要先完成独立审查和 AI 味自查，才能标记审查通过。",
-            "请先在 S5 阶段点击上方'独立审查'和'AI 味自查'按钮，再确认审查通过。",
+            "_has_effective_independent_review",
+            "plan/independent-review.md",
+            "需要先完成独立审查，才能标记审查通过。",
+            "请先在 S5 阶段点击上方'独立审查'按钮完成审查，再确认审查通过。",
         ),
         "presentation_ready_at": (
             "_has_effective_presentation_plan",
@@ -680,8 +680,6 @@ class SkillEngine:
         missing_for_review_pass = list(stage_four_state["missing_for_stage_four"])
         if not independent_review_ready:
             missing_for_review_pass.append("independent-review.md（请先点'独立审查'按钮）")
-        if not lint_report_ready:
-            missing_for_review_pass.append("lint-report.md（请先点'AI 味自查'按钮）")
 
         missing_for_stage_five = list(missing_for_review_pass)
         if not review_passed:
@@ -1980,15 +1978,10 @@ class SkillEngine:
         with lock:
             if key == "review_passed_at" and action == "set":
                 from backend.independent_review import get_independent_review_lock
-                from backend.report_tools import get_lint_report_lock
 
                 review_lock = get_independent_review_lock(project_id)
                 if review_lock.locked():
                     raise ValueError("独立审查正在进行中，请等待完成后再标记审查通过")
-
-                lint_lock = get_lint_report_lock(project_id)
-                if lint_lock.locked():
-                    raise ValueError("AI 味自查正在进行中，请等待完成后再标记审查通过")
 
             if action == "set":
                 self._validate_stage_checkpoint_transition(project_path, key)
@@ -2570,30 +2563,23 @@ class SkillEngine:
             return False
         return self._has_substantive_body(lint_text)
 
-    def _has_effective_review_reports(self, project_path: Path) -> bool:
-        return (
-            self._has_effective_independent_review(project_path)
-            and self._has_effective_lint_report(project_path)
-        )
-
     def _is_report_review_stale(self, project_path: Path) -> bool:
-        """R3 D6 advisory: both review reports are EFFECTIVE (substantive, not the scaffolded
-        template — BLOCKER 1) AND the draft is newer than the OLDER report. NOT gated on
-        review_passed_at — covers the window where reports exist, the draft was edited, but the
-        user hasn't clicked 审查通过 yet (review_passed_at unset; record_stage_checkpoint only
-        checks report structure, not whether they cover the current draft)."""
+        """R3 D6 advisory: the independent-review report is EFFECTIVE (substantive, not the
+        scaffolded template — BLOCKER 1) AND the draft is newer than the report. NOT gated on
+        review_passed_at — covers the window where the report exists, the draft was edited, but
+        the user hasn't clicked 审查通过 yet (review_passed_at unset; record_stage_checkpoint only
+        checks report structure, not whether it covers the current draft)."""
         draft_path = project_path / self.REPORT_DRAFT_PATH
         if not draft_path.exists():
             return False
-        # Templates only (new-project scaffold of independent-review.md / lint-report.md) don't
-        # count — both must be effective reports, reusing the production gate.
-        if not self._has_effective_review_reports(project_path):
+        # Template only (new-project scaffold of independent-review.md) doesn't count — must be
+        # an effective report, reusing the production gate.
+        if not self._has_effective_independent_review(project_path):
             return False
         ir_path = project_path / "plan" / "independent-review.md"
-        lint_path = project_path / "plan" / "lint-report.md"
         draft_mtime = draft_path.stat().st_mtime_ns
-        oldest_report_mtime = min(ir_path.stat().st_mtime_ns, lint_path.stat().st_mtime_ns)
-        return draft_mtime > oldest_report_mtime
+        report_mtime = ir_path.stat().st_mtime_ns
+        return draft_mtime > report_mtime
 
     def _has_effective_review_notes(self, project_path: Path) -> bool:
         review_text = self._read_plan_file(project_path, "review.md")
