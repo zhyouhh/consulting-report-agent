@@ -348,12 +348,20 @@ class WorkspaceApiTests(unittest.TestCase):
 
     def test_deleted_lint_endpoints_are_gone(self):
         # N7: the /quality-check and /lint-report POST routes were removed entirely.
-        # The SPA catch-all serves GET for any path, so a POST to a gone route yields
-        # 405 (path matches the catch-all, no POST handler); 404 if no catch-all matches.
-        # Either proves there is no live POST endpoint here.
-        for path in ("/api/projects/demo/quality-check", "/api/projects/demo/lint-report"):
-            resp = self.client.post(path)
-            self.assertIn(resp.status_code, (404, 405), f"{path} should be gone")
+        # Assert directly against the route table — a status-code check is too weak
+        # (a live handler returning 404 for a missing project would also pass).
+        import backend.main as main_module
+        deleted = {
+            ("/api/projects/{project_id}/quality-check", "POST"),
+            ("/api/projects/{project_id}/lint-report", "POST"),
+        }
+        live = {
+            (getattr(route, "path", None), method)
+            for route in main_module.app.routes
+            for method in (getattr(route, "methods", None) or ())
+        }
+        for path, method in deleted:
+            self.assertNotIn((path, method), live, f"{method} {path} should be gone")
 
     @mock.patch("backend.main.skill_engine.get_project_path")
     def test_clear_conversation_removes_new_and_legacy_sidecars(self, mock_get_project_path):

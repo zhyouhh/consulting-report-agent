@@ -148,20 +148,25 @@ class IndependentReviewAgentTests(unittest.TestCase):
         self.assertNotIn("quality_check", p)
 
     def test_prompt_dimension5_blacklist_is_complete_per_spec(self):
-        # spec §3.3 要求把逐字中文黑名单完整誊入 prompt（防被压缩成精简版）。
+        # spec §3.3 要求把逐字中文黑名单 + 反向拦截完整誊入 prompt（防被压缩成精简版）。
         from backend.independent_review import INDEPENDENT_REVIEW_SYSTEM_PROMPT as p
         for trigger in (
-            "见证了", "是……的体现/证明", "不可磨灭的印记",  # §3.3.1
+            "见证了", "是……的体现/证明", "凸显/彰显了其重要性", "不可磨灭的印记",  # §3.3.1
             "确保了",  # §3.3.2
             "著名的",  # §3.3.3
             "多个来源/观察者指出",  # §3.3.4
             "复杂性",  # §3.3.5
             "代表/标志着",  # §3.3.6
-            "由于……的事实", "在这个时间点",  # §3.3.8
+            "由于……的事实", "在这个时间点 → 现在", "值得注意的是数据显示 → 数据显示",  # §3.3.8
             "迈出重要一步",  # §3.3.10
+            "—",  # §3.3.11 揭示前破折号 literal
+            "人/流程/技术", "两项优于三项",  # §3.3.12
+            "同一实体反复换称呼",  # §3.3.13
             "截至[日期]",  # §3.3.14
+            # ❌ 反向拦截逐字例
+            "个性 / 灵魂", "这令人印象深刻但有点不安", "个人嗓音", "允许混乱", "维基百科/新闻稿",
         ):
-            self.assertIn(trigger, p, f"维度⑤黑名单缺 spec §3.3 的 trigger 词：{trigger}")
+            self.assertIn(trigger, p, f"维度⑤黑名单/反向拦截缺 spec §3.3 的 literal：{trigger}")
 
     # ---- Task 2.1: system prompt narration ----
 

@@ -1690,7 +1690,7 @@ class SkillEngineTests(unittest.TestCase):
         project_dir = self._make_project_past_s4()
         self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
 
-        with self.assertRaisesRegex(ValueError, "独立审查|AI 味自查|按钮"):
+        with self.assertRaisesRegex(ValueError, "独立审查|按钮"):
             self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
 
         self.assertNotIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
