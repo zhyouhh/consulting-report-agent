@@ -112,8 +112,8 @@ class WorkspaceMaterialTests(unittest.TestCase):
             "审查结论: 数据口径一致。\n"
             "## 4. 建议可执行性\n"
             "审查结论: 建议可执行。\n"
-            "## 5. 目标读者匹配\n"
-            "审查结论: 表达匹配目标读者。\n\n"
+            "## 5. 语言专业性与去 AI 味\n"
+            "审查结论: 语言客观专业、无明显 AI 写作痕迹。\n\n"
             f"{SkillEngine.INDEPENDENT_REVIEW_COMPLETION_MARKER}\n",
             encoding="utf-8",
         )

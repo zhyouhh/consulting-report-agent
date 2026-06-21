@@ -122,15 +122,30 @@ class IndependentReviewAgentTests(unittest.TestCase):
         return iter(chunks)
 
     def _complete_review_text(self):
+        body = "".join(f"{a}\n未发现问题\n" for a in SkillEngine.INDEPENDENT_REVIEW_ANCHORS)
         return (
             "# 独立审查报告\n\n"
-            "## 1. 结论-证据一致性\n未发现问题\n"
-            "## 2. 关键假设与逻辑链\n未发现问题\n"
-            "## 3. 数据口径一致性\n未发现问题\n"
-            "## 4. 建议可执行性\n未发现问题\n"
-            "## 5. 目标读者匹配\n未发现问题\n\n"
+            f"{body}\n"
             f"{INDEPENDENT_REVIEW_COMPLETION_MARKER}\n"
         )
+
+    # ---- N7: anchors + dimension 5 replacement ----
+
+    def test_anchors_dropped_reader_added_deai(self):
+        from backend.skill import SkillEngine
+        anchors = SkillEngine.INDEPENDENT_REVIEW_ANCHORS
+        self.assertEqual(len(anchors), 5)
+        self.assertNotIn("## 5. 目标读者匹配", anchors)
+        self.assertIn("## 5. 语言专业性与去 AI 味", anchors)
+
+    def test_prompt_dimension5_is_deai_not_reader(self):
+        from backend.independent_review import INDEPENDENT_REVIEW_SYSTEM_PROMPT as p
+        self.assertNotIn("目标读者匹配", p)
+        self.assertIn("语言专业性与去 AI 味", p)
+        self.assertIn("空洞拔高", p)
+        self.assertIn("模糊归因", p)
+        self.assertIn("第一人称", p)
+        self.assertNotIn("quality_check", p)
 
     # ---- Task 2.1: system prompt narration ----
 

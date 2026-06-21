@@ -334,7 +334,7 @@ class SkillEngine:
         "## 2. 关键假设与逻辑链",
         "## 3. 数据口径一致性",
         "## 4. 建议可执行性",
-        "## 5. 目标读者匹配",
+        "## 5. 语言专业性与去 AI 味",
     )
     INDEPENDENT_REVIEW_COMPLETION_MARKER = "<!-- independent-review:complete -->"
     LINT_REPORT_ANCHORS = ("## 按章节排列", "## 总览")
