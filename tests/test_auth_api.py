@@ -81,3 +81,66 @@ class FactoryAndScopeTests(AuthApiTestBase):
         with self.assertRaises(self.m.HTTPException) as ctx:
             self.m.get_current_admin(user_uid)                            # non-admin -> 403
         self.assertEqual(ctx.exception.status_code, 403)
+
+
+class AuthFlowTests(AuthApiTestBase):
+    def _reg(self, u="alice", p="pw-123456", code="JOIN"):
+        return self.client.post("/api/auth/register", json={"username": u, "password": p, "invite_code": code})
+    def test_invite_gate(self):
+        self.assertEqual(self._reg(code="X").status_code, 403); self.assertEqual(self._reg().status_code, 200)
+    def test_login_me_logout(self):
+        self._reg(); r = self.client.post("/api/auth/login", json={"username":"alice","password":"pw-123456"})
+        self.assertEqual(r.status_code, 200); self.assertIn("cra_session", r.cookies)
+        self.assertEqual(self.client.get("/api/auth/me").json()["username"], "alice")
+        self.client.post("/api/auth/logout"); self.assertEqual(self.client.get("/api/auth/me").status_code, 401)
+    def test_wrong_password(self):
+        # use a length-valid but wrong password so it reaches the 401 path (not 422 length-validation)
+        self._reg(); self.assertEqual(self.client.post("/api/auth/login", json={"username":"alice","password":"wrong-pw"}).status_code, 401)
+    def test_change_password_keeps_current_session(self):
+        self._reg(); self.client.post("/api/auth/login", json={"username":"alice","password":"pw-123456"})
+        r = self.client.post("/api/auth/change-password", json={"old_password":"pw-123456","new_password":"new-123456"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.client.get("/api/auth/me").status_code, 200)  # current session still valid
+
+    def test_duplicate_register_409(self):
+        self._reg(); self.assertEqual(self._reg().status_code, 409)
+
+    def test_disabled_user_login_403(self):
+        from backend import accounts
+        self._reg()
+        uid = accounts.get_user_by_username("alice")["uid"]
+        accounts.set_user_disabled(uid, True)
+        self.assertEqual(self.client.post("/api/auth/login", json={"username":"alice","password":"pw-123456"}).status_code, 403)
+
+    def test_login_sets_secure_cookie_flags(self):
+        self._reg()
+        r = self.client.post("/api/auth/login", json={"username":"alice","password":"pw-123456"})
+        sc = r.headers.get("set-cookie", "").lower()
+        self.assertIn("httponly", sc); self.assertIn("samesite=lax", sc); self.assertIn("max-age", sc)
+
+    def test_login_validation_422(self):
+        self._reg()
+        self.assertEqual(self.client.post("/api/auth/login", json={"username":"alice","password":"x"}).status_code, 422)
+
+    def test_logout_idempotent_without_session(self):
+        # no cookie -> still 200, still clears
+        r = self.client.post("/api/auth/logout")
+        self.assertEqual(r.status_code, 200)
+
+    def test_change_password_revokes_other_sessions(self):
+        from backend import accounts
+        self._reg()
+        uid = accounts.get_user_by_username("alice")["uid"]
+        other = accounts.create_session(uid)            # a second device's session
+        self.client.post("/api/auth/login", json={"username":"alice","password":"pw-123456"})  # current session
+        self.client.post("/api/auth/change-password", json={"old_password":"pw-123456","new_password":"new-123456"})
+        self.assertEqual(self.client.get("/api/auth/me").status_code, 200)   # current kept
+        self.assertIsNone(accounts.get_session_uid(other))                   # other revoked
+
+
+class DesktopLocalTests(AuthApiTestBase):
+    def setUp(self):
+        super().setUp(); self.m.app.state.auth_required = False
+    def test_me_returns_synthetic_local(self):
+        r = self.client.get("/api/auth/me")
+        self.assertEqual(r.status_code, 200); self.assertEqual(r.json()["uid"], "local")

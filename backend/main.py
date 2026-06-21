@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import uvicorn
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -166,6 +166,85 @@ def require_desktop_bridge():
 
 @app.get("/api/health")
 async def health():
+    return {"status": "ok"}
+
+
+class RegisterPayload(BaseModel):
+    username: str = Field(..., min_length=3, max_length=40)
+    password: str = Field(..., min_length=6, max_length=200)
+    invite_code: str
+
+class LoginPayload(BaseModel):
+    username: str = Field(..., min_length=3, max_length=40)
+    password: str = Field(..., min_length=6, max_length=200)
+
+class ChangePwPayload(BaseModel):
+    old_password: str = Field(..., min_length=6, max_length=200)
+    new_password: str = Field(..., min_length=6, max_length=200)
+
+
+@app.post("/api/auth/register")
+@limiter.limit("10/minute")
+def auth_register(request: Request, payload: RegisterPayload):
+    if not secrets.compare_digest(payload.invite_code, accounts.get_config("invite_code", "")):
+        raise HTTPException(status_code=403, detail="邀请码无效")
+    try:
+        uid = accounts.create_user(payload.username, payload.password)
+    except accounts.UsernameTakenError:
+        raise HTTPException(status_code=409, detail="用户名已被占用")
+    ensure_user_dirs(uid)
+    return {"status": "ok"}
+
+
+@app.post("/api/auth/login")
+@limiter.limit("10/minute")
+def auth_login(request: Request, payload: LoginPayload, response: Response):
+    if not accounts.verify_user_password(payload.username, payload.password):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    rec = accounts.get_user_by_username(payload.username)
+    if rec["disabled"]:
+        raise HTTPException(status_code=403, detail="账号已停用")
+    token = accounts.create_session(rec["uid"], ip=request.client.host if request.client else "",
+                                    ua=request.headers.get("user-agent", ""))
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                        secure=bool(getattr(request.app.state, "cookie_secure", False)),
+                        max_age=30 * 24 * 3600, path="/")
+    return {"status": "ok"}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        accounts.delete_session(token)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"status": "ok"}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request, uid: str = Depends(get_current_uid)):
+    if uid == "local" and not getattr(request.app.state, "auth_required", True):
+        return {"uid": "local", "username": "本地用户", "is_admin": False, "must_change_password": False}
+    rec = accounts.get_user_by_uid(uid)
+    if not rec:
+        raise HTTPException(status_code=401, detail="未登录")
+    return {"uid": uid, "username": rec["username"], "is_admin": rec["is_admin"],
+            "must_change_password": rec["must_change_password"]}
+
+
+@app.post("/api/auth/change-password")
+def auth_change_password(request: Request, payload: ChangePwPayload, uid: str = Depends(get_current_uid)):
+    rec = accounts.get_user_by_uid(uid)
+    if not rec:
+        raise HTTPException(status_code=400, detail="当前账号不支持改密")
+    if not accounts.verify_user_password(rec["username"], payload.old_password):
+        raise HTTPException(status_code=401, detail="原密码错误")
+    accounts.set_user_password(uid, payload.new_password)
+    cur = request.cookies.get(SESSION_COOKIE)
+    if cur:
+        accounts.delete_other_user_sessions(uid, cur)   # keep current session, revoke others
+    else:
+        accounts.delete_user_sessions(uid)
     return {"status": "ok"}
 
 
