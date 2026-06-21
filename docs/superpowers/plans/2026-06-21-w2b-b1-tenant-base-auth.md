@@ -11,6 +11,7 @@
 **验收门（B1 完成判据）**：跨租户隔离回归全绿——A 建项目、B 用该 project_id/项目名访问任一接口都 404；未登录所有 `/api/*`(白名单除外)→401；同项目 id 与 name 不产生双锁；A 的 custom settings 不串到 B。
 
 **Codex R1 已修（8 BLOCKER）**：① per-uid settings 纳入 B1(Task8) ② 复合键贯彻 skill.py record_stage_checkpoint(Task6) ③ 前端创建闭环(Task15) ④ 既有测试迁移给具体配方(Task11) ⑤ 重排：创建闭环(Task10) 先于跨租户接线(Task11) ⑥ 桌面 /me 返回合成 local(Task9) ⑦ search 路径接 data_root + quota 隔离测(Task2/13) ⑧ Field import(Task7)。NIT：复合键统一 JSON-safe 字符串(够用且消毒)、change-password 保当前会话、chat_stream 不变式写清。
+**Codex R2 已修（4 BLOCKER）**：① test_settings_api 迁移改用模块级 save_settings + 具体配方(Task8 端点去函数内 import / Task8 Step4) ② review 锁/store 既有测试迁移规则补齐(Task11 Step4) ③ Task13 补真 quota 隔离测试 + 改掉假 TDD 标签 ④ `reload(main)` 隔离：AuthApiTestBase mock heal + 重置 chat/review 模块级单例(Task7/11)。NIT：custom 不可用至 B3 写进 cutover、models/list 归类修正、record_stage_checkpoint 复合键源码守卫(Task6)。
 
 ---
 
@@ -433,6 +434,13 @@ class CompositeLockKeyTests(unittest.TestCase):
         import tempfile, os
         eng = SkillEngine(__import__("pathlib").Path(os.path.realpath(tempfile.mkdtemp())), __import__("pathlib").Path("."))
         self.assertEqual(getattr(eng, "uid", None), "local")
+
+    def test_record_stage_checkpoint_uses_composite_key(self):
+        # Codex R2-NIT3：锁住 record_stage_checkpoint 用复合键取 request/review 锁（否则审查跑着时门禁误放行）
+        import inspect
+        from backend.skill import SkillEngine
+        src = inspect.getsource(SkillEngine.record_stage_checkpoint)
+        self.assertIn("tenant_project_key(self.uid", src)
 ```
 - [ ] **Step 2: 跑确认 FAIL** — `.venv/bin/python -m pytest tests/test_tenant_isolation.py::CompositeLockKeyTests -v` → FAIL（`SkillEngine` 无 `uid` 属性）
 - [ ] **Step 3: 实现**
@@ -496,12 +504,23 @@ class AuthApiTestBase(unittest.TestCase):
         self._env.start()
         from backend import accounts, config
         importlib.reload(config); importlib.reload(accounts)
+        # Codex R2-B4: reload(main) 会跑 heal_stale_managed_model（可能发真实 /models 请求并 timeout）→ mock 掉
+        self._heal = mock.patch("backend.config.heal_stale_managed_model", side_effect=lambda s: (s, None))
+        self._heal.start()
         import backend.main as m; importlib.reload(m)
         self.m = m; m.app.state.auth_required = True
+        self._reset_module_singletons()
         self.client = TestClient(m.app)
 
+    def _reset_module_singletons(self):
+        # chat/independent_review 不随 reload(main) 重置，逐测试清干净防串扰（Codex R2-B4）
+        from backend import chat as cm, independent_review as im
+        cm._PROJECT_REQUEST_LOCKS.clear(); cm._CONVERSATION_STATE_LOCKS.clear()
+        cm._SEARCH_ROUTER_SINGLETON = None
+        im._INDEPENDENT_REVIEW_LOCKS.clear(); im._REVIEW_SESSION_STORE._records.clear()
+
     def tearDown(self):
-        self._env.stop(); shutil.rmtree(self._tmp, ignore_errors=True)
+        self._heal.stop(); self._env.stop(); shutil.rmtree(self._tmp, ignore_errors=True)
 
 
 class UnauthedTests(AuthApiTestBase):
@@ -546,7 +565,8 @@ def get_skill_engine(uid: str) -> SkillEngine:
 
 
 def get_chat_handler(uid: str, project_id: str) -> ChatHandler:
-    from .config import load_settings
+    # load_settings/save_settings 已在 main.py 顶部从 .config import（行30）——用模块级名字，
+    # 不要函数内再 import，否则测试 `mock.patch.object(main_module, "save_settings")` 拦不到（Codex R2-B1）
     with _settings_lock:
         key = (uid, project_id)
         if key not in _chat_handlers:
@@ -646,9 +666,9 @@ def save_settings(settings: Settings, uid: str | None = None):
 ```
 `backend/main.py` `GET /api/settings`（行 103）+ `POST /api/settings`（行 125）改 per-uid：GET 加 `uid: str = Depends(get_current_uid)`、用 `load_settings(uid)` 取代全局 `settings` 读；POST 加 `uid: str = Depends(get_current_uid)`、对 `load_settings(uid)` 改字段后 `save_settings(s, uid=uid)`、并 `with _settings_lock: _chat_handlers = {k:v for k,v in _chat_handlers.items() if k[0]!=uid}`（只清该用户的 handler 缓存）。具体：
 ```python
+# 注意：load_settings/save_settings 用 main.py 顶部已有的模块级 import（行30），端点内不要再 import（Codex R2-B1）
 @app.get("/api/settings")
 async def get_settings(uid: str = Depends(get_current_uid)):
-    from .config import load_settings
     data = load_settings(uid).model_dump(exclude={"managed_client_token"})
     data["api_key"] = "***" if data["api_key"] else ""
     data["custom_api_key"] = "***" if data.get("custom_api_key") else ""
@@ -657,7 +677,6 @@ async def get_settings(uid: str = Depends(get_current_uid)):
 
 @app.post("/api/settings")
 async def update_settings(update: SettingsUpdate, uid: str = Depends(get_current_uid)):
-    from .config import load_settings, save_settings
     with _settings_lock:
         s = load_settings(uid)
         s.mode = update.mode; s.managed_base_url = update.managed_base_url; s.managed_model = update.managed_model
@@ -676,8 +695,15 @@ async def update_settings(update: SettingsUpdate, uid: str = Depends(get_current
             _chat_handlers.pop(k, None)
     return {"status": "ok"}
 ```
-- [ ] **Step 4: 跑确认 PASS** — `.venv/bin/python -m pytest tests/test_settings_api.py -v`（既有 settings 测试需在 setUp 设 `auth_required=False` 走 uid=local，断言语义不变；见 Task 11 测试迁移配方）→ PASS
-- [ ] **Step 5: Commit** — `git add backend/config.py backend/main.py tests/test_settings_api.py && git commit -m "feat(w2b-b1): per-uid settings storage + isolated settings endpoints"`
+- [ ] **Step 4: 迁移既有 `test_settings_api.py`（Codex R2-B1，具体配方）**
+
+既有测试改 `main_module.settings` + patch `main_module.save_settings`，现端点不再读全局 settings、改读 `load_settings(uid)`。逐项改：
+- setUp 设 `main_module.app.state.auth_required = False`（uid=local），并 mock heal（同 AuthApiTestBase）。
+- GET 断言：先 `from backend.config import save_settings, Settings; save_settings(Settings(), uid="local")` 预置，再断言 `client.get("/api/settings")` 读到的字段。
+- POST「save 被调用」断言：patch **`backend.main.save_settings`**（main 顶部 import 的模块级名字，现已可拦截）→ `save_settings_mock.assert_called_once()`（不校验参数，签名已变 `(settings, uid=...)`）。
+- 删掉对 `main_module.settings.model_dump()` 的 save/restore（端点不再用全局 settings）。
+- [ ] **Step 5: 跑确认 PASS** — `.venv/bin/python -m pytest tests/test_settings_api.py -v` → PASS
+- [ ] **Step 6: Commit** — `git add backend/config.py backend/main.py tests/test_settings_api.py && git commit -m "feat(w2b-b1): per-uid settings storage + isolated settings endpoints"`
 
 ---
 
@@ -855,26 +881,20 @@ async def create_project(info: ProjectInfo, request: Request, uid: str = Depends
 - uid-scoped：`GET /api/projects`(行206)、`POST /api/projects`(已 Task10)、`GET/POST /api/settings`(已 Task8)、`POST /api/models/list`、`/api/auth/{logout,me,change-password}`。
 - require_project（路径 `{project_id}`）：materials(list/select/upload/delete)、files(list/read/write)、workspace、independent-review(stream/discard)、export-draft、`DELETE /api/projects/{id}`、checkpoints、conversation(get/clear) —— 行 220/223/228/238/246/284/293/328/336-338/361/372/406/431/612-614/623/659/668/693。
 - body-project_id：`POST /api/chat`、`POST /api/chat/stream` —— 函数体先 `require_project(chat_request.project_id, uid)`。
-- desktop-only（web 503，前端隐藏）：`select-workspace-*`、`materials/select-from-workspace`、`models/list` 仍 uid。
+- desktop-only（web 503，前端隐藏）：`select-workspace-folder/files`、`materials/select-from-workspace`。（✦ Codex R2-NIT2：`POST /api/models/list` 属 **uid-scoped**，非 desktop-only。）
 
-- [ ] **Step 1: 写失败测试**（追加 `CrossTenantApiTests` 到 test_tenant_isolation.py；setUp 同 AuthApiTestBase 风格起 2 个 TestClient 各登录 alice/bob）：
+- [ ] **Step 1: 写失败测试**（追加 `CrossTenantApiTests` 到 test_tenant_isolation.py；**继承 `AuthApiTestBase`** 复用 heal mock + 单例 reset，再起第二个 client）：
 ```python
-class CrossTenantApiTests(unittest.TestCase):
+from tests.test_auth_api import AuthApiTestBase
+
+class CrossTenantApiTests(AuthApiTestBase):
     def setUp(self):
-        import os, tempfile, importlib
-        from unittest import mock
-        from pathlib import Path
-        self._tmp = Path(os.path.realpath(tempfile.mkdtemp()))
-        self._env = mock.patch.dict(os.environ, {"CRA_DATA_ROOT": str(self._tmp), "CRA_INVITE_CODE": "JOIN"}); self._env.start()
-        from backend import accounts, config; importlib.reload(config); importlib.reload(accounts)
-        import backend.main as m; importlib.reload(m); m.app.state.auth_required = True
+        super().setUp()   # heal mock + 单例 reset + auth_required=True + self.client(=A)
         from fastapi.testclient import TestClient
-        self.A = TestClient(m.app); self.B = TestClient(m.app)
+        self.A = self.client; self.B = TestClient(self.m.app)
         for c, u in ((self.A, "alice"), (self.B, "bob")):
             c.post("/api/auth/register", json={"username":u,"password":"pw-123456","invite_code":"JOIN"})
             c.post("/api/auth/login", json={"username":u,"password":"pw-123456"})
-    def tearDown(self):
-        import shutil; self._env.stop(); shutil.rmtree(self._tmp, ignore_errors=True)
     def _create(self, c, name):
         return c.post("/api/projects", json={"name":name,"project_type":"strategy","theme":"t",
             "deadline":"2026-12-31","expected_length":"1万字"}).json()["project_id"]
@@ -925,7 +945,9 @@ def test_checkpoint_set_delegates(self):
   （所有 patch `backend.main.skill_engine.*` → `mock.patch.object(main_module.get_skill_engine("local"), "*")`；凡走 `{project_id}` 路径的测试都加 `get_project_record` mock 返回 `{"id": <pid>, ...}` 让 require_project 过。）
 - `test_stream_api.py`：`main_module.get_chat_handler = lambda project_id: handler` → `lambda uid, project_id: handler`；并 `mock.patch.object(main_module.get_skill_engine("local"), "get_project_record", return_value={"id": <pid>, "name": <pid>})` 让 require_project 过；setUp 设 `auth_required=False`。
 - `test_project_create_api.py`：`@mock.patch("backend.main.skill_engine.create_project")` → `mock.patch.object(main_module.get_skill_engine("local"), "create_project", ...)`；setUp `auth_required=False`（桌面分支接受 workspace_dir，旧断言不变）。
-- `test_settings_api.py`：setUp `auth_required=False`；`mock.patch.object(main_module, "save_settings")` 仍可（save_settings 现 `(settings, uid=...)`，断言改 `assert_called_once()` 不校验参数即可）。
+- `test_settings_api.py`：见 Task 8 Step 4 具体配方（auth_required=False + patch `backend.main.save_settings` + 预置 `save_settings(Settings(), uid="local")`）。
+- **✦ Codex R2-B2：review 锁/store 的既有测试**（如 `test_chat_runtime.py` 用 `_REVIEW_SESSION_STORE`/`get_independent_review_lock(project_id)` 的用例、`test_main_api.py` 直接操作 review store 的用例）：复合键后默认 local 的键变成 `tenant_project_key("local", project_id)`。统一迁移规则——**所有 direct review store/lock 测试操作**（`get_done_mtime`/`claim_first`/`discard`/`cleanup`/lock acquire/`_records[...]`）把裸 `project_id` 换成 `tenant_project_key("local", project_id)`。grep 定位：`grep -rn "_REVIEW_SESSION_STORE\|get_independent_review_lock\|_INDEPENDENT_REVIEW_LOCKS" tests/`。
+- **✦ 通用（reload 隔离）**：任何 setUp 里 `importlib.reload(main)` 的测试基类，都要像 `AuthApiTestBase` 那样：reload 前 mock `backend.config.heal_stale_managed_model`，reload 后清 `chat._PROJECT_REQUEST_LOCKS/_CONVERSATION_STATE_LOCKS/_SEARCH_ROUTER_SINGLETON` + `independent_review._INDEPENDENT_REVIEW_LOCKS/_REVIEW_SESSION_STORE._records`（Codex R2-B4）。
 - [ ] **Step 5: 跑确认 PASS + 全接口回归** — `.venv/bin/python -m pytest tests/test_tenant_isolation.py tests/test_main_api.py tests/test_stream_api.py tests/test_project_create_api.py tests/test_settings_api.py -v` → PASS
 - [ ] **Step 6: Commit** — `git add backend/main.py tests/ && git commit -m "feat(w2b-b1): wire 23 endpoints via require_project/uid; migrate legacy tests; cross-tenant 404"`
 
@@ -976,18 +998,35 @@ def assert_safe_startup(auth_required: bool, host: str) -> None:
 
 **Files:** Modify `backend/chat.py`(search 调用处)；Test `tests/test_tenant_isolation.py`
 
-- [ ] **Step 1: 写失败测试**（追加）：
+- [ ] **Step 1: 写测试**（✦ Codex R2-B3：补真 quota 隔离测试，直接验证 state store 按传入键隔离 project-minute 配额 + cache）：
 ```python
 class SearchCompositeKeyTests(unittest.TestCase):
-    def test_cache_key_and_quota_isolated(self):
+    def _store(self):
+        import os, tempfile
+        from pathlib import Path
+        from backend.search_state import SearchStateStore
+        d = Path(os.path.realpath(tempfile.mkdtemp()))
+        return SearchStateStore(runtime_state_path=d / "rs.json", cache_path=d / "c.json")
+
+    def test_cache_key_isolated(self):
         from backend.tenant import tenant_project_key
-        from backend import search_state
-        store = search_state.SearchStateStore.__new__(search_state.SearchStateStore)
-        self.assertNotEqual(store._make_cache_key("q", tenant_project_key("uA", "proj-x")),
-                            store._make_cache_key("q", tenant_project_key("uB", "proj-x")))
+        s = self._store()
+        self.assertNotEqual(s._make_cache_key("q", tenant_project_key("uA", "proj-x")),
+                            s._make_cache_key("q", tenant_project_key("uB", "proj-x")))
+
+    def test_project_minute_quota_isolated_by_composite_key(self):
+        from backend.tenant import tenant_project_key
+        s = self._store()
+        kA = tenant_project_key("uA", "proj-x"); kB = tenant_project_key("uB", "proj-x")
+        kw = dict(project_window_seconds=60, project_limit=2, global_window_seconds=60, global_limit=100)
+        # 注：try_acquire_search_slot 返回 None=取到 slot、返回 str(scope)=被某限额挡。实施前先到
+        # backend/search_state.py 核对该返回语义，按真实语义调整断言。
+        self.assertIsNone(s.try_acquire_search_slot(project_id=kA, **kw))
+        self.assertIsNone(s.try_acquire_search_slot(project_id=kA, **kw))
+        self.assertIsNotNone(s.try_acquire_search_slot(project_id=kA, **kw))  # uA 第3次被 project 限额挡
+        self.assertIsNone(s.try_acquire_search_slot(project_id=kB, **kw))     # uB 同裸 proj-x 不受影响
 ```
-（quota：`try_acquire_search_slot(project_id=...)` 的 `usage["projects"][project_id]` 键随传入复合键天然隔离；调用方传复合键即覆盖。）
-- [ ] **Step 2: 跑确认 PASS（机制）** — `.venv/bin/python -m pytest tests/test_tenant_isolation.py::SearchCompositeKeyTests -v` → PASS
+- [ ] **Step 2: 跑确认 PASS（回归保护，非 fails-first）** — `.venv/bin/python -m pytest tests/test_tenant_isolation.py::SearchCompositeKeyTests -v` → PASS。这两条**直接锁住 state store 按传入键隔离**（cache + project quota）；实际接通靠 Step 3 让调用方传复合键，由 Step 4 既有 search 回归套保护不回退。
 - [ ] **Step 3: 调用方传复合键** — `backend/chat.py` grep `self._get_search_router().search(`，把 `project_id=<var>` 改 `project_id=tenant_project_key(self.uid, <var>)`：
 ```bash
 grep -n "_get_search_router().search\|\.search(" backend/chat.py | grep project_id
@@ -1198,7 +1237,7 @@ test('Sidebar account block', () => {
 - [ ] **Step 1: 后端全量** — `.venv/bin/python -m pytest tests/ -q`（mac 上 4 个 realpath 环境差异除外）
 - [ ] **Step 2: 前端全量 + build** — `cd frontend && node --test tests/ && npm run build`
 - [ ] **Step 3: 手动 smoke** — `CRA_DATA_ROOT=$(mktemp -d) CRA_INVITE_CODE=JOIN .venv/bin/python run_web.py` → 浏览器注册→登录→建项目→无痕窗口注册第二账号验隔离→登出。
-- [ ] **Step 4: cutover** — Create `docs/superpowers/cutover_report_2026-06-21_w2b-b1.md`（18 task、回归、偏离、B2/B3 衔接点）。
+- [ ] **Step 4: cutover** — Create `docs/superpowers/cutover_report_2026-06-21_w2b-b1.md`（18 task、回归、偏离、B2/B3 衔接点）。**必写清（Codex R2-NIT1）**：B1 后 `normalize_settings_payload` 仍强制 `mode="managed"`，**custom 模式尚不可用**（per-uid 已隔离存储、但激活 + SSRF 防护归 B3），别误以为 B1 后能切 custom。
 - [ ] **Step 5: Commit** — `git add docs/superpowers/cutover_report_2026-06-21_w2b-b1.md && git commit -m "docs(w2b-b1): cutover report"`
 
 ---
