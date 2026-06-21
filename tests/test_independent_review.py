@@ -122,15 +122,51 @@ class IndependentReviewAgentTests(unittest.TestCase):
         return iter(chunks)
 
     def _complete_review_text(self):
+        body = "".join(f"{a}\n未发现问题\n" for a in SkillEngine.INDEPENDENT_REVIEW_ANCHORS)
         return (
             "# 独立审查报告\n\n"
-            "## 1. 结论-证据一致性\n未发现问题\n"
-            "## 2. 关键假设与逻辑链\n未发现问题\n"
-            "## 3. 数据口径一致性\n未发现问题\n"
-            "## 4. 建议可执行性\n未发现问题\n"
-            "## 5. 目标读者匹配\n未发现问题\n\n"
+            f"{body}\n"
             f"{INDEPENDENT_REVIEW_COMPLETION_MARKER}\n"
         )
+
+    # ---- N7: anchors + dimension 5 replacement ----
+
+    def test_anchors_dropped_reader_added_deai(self):
+        from backend.skill import SkillEngine
+        anchors = SkillEngine.INDEPENDENT_REVIEW_ANCHORS
+        self.assertEqual(len(anchors), 5)
+        self.assertNotIn("## 5. 目标读者匹配", anchors)
+        self.assertIn("## 5. 语言专业性与去 AI 味", anchors)
+
+    def test_prompt_dimension5_is_deai_not_reader(self):
+        from backend.independent_review import INDEPENDENT_REVIEW_SYSTEM_PROMPT as p
+        self.assertNotIn("目标读者匹配", p)
+        self.assertIn("语言专业性与去 AI 味", p)
+        self.assertIn("空洞拔高", p)
+        self.assertIn("模糊归因", p)
+        self.assertIn("第一人称", p)
+        self.assertNotIn("quality_check", p)
+
+    def test_prompt_dimension5_blacklist_is_complete_per_spec(self):
+        # spec §3.3 要求把逐字中文黑名单 + 反向拦截完整誊入 prompt（防被压缩成精简版）。
+        from backend.independent_review import INDEPENDENT_REVIEW_SYSTEM_PROMPT as p
+        for trigger in (
+            "见证了", "是……的体现/证明", "凸显/彰显了其重要性", "不可磨灭的印记",  # §3.3.1
+            "确保了",  # §3.3.2
+            "著名的",  # §3.3.3
+            "多个来源/观察者指出",  # §3.3.4
+            "复杂性",  # §3.3.5
+            "代表/标志着",  # §3.3.6
+            "由于……的事实", "在这个时间点 → 现在", "值得注意的是数据显示 → 数据显示",  # §3.3.8
+            "迈出重要一步",  # §3.3.10
+            "—",  # §3.3.11 揭示前破折号 literal
+            "人/流程/技术", "两项优于三项",  # §3.3.12
+            "同一实体反复换称呼",  # §3.3.13
+            "截至[日期]",  # §3.3.14
+            # ❌ 反向拦截逐字例
+            "个性 / 灵魂", "这令人印象深刻但有点不安", "个人嗓音", "允许混乱", "维基百科/新闻稿",
+        ):
+            self.assertIn(trigger, p, f"维度⑤黑名单/反向拦截缺 spec §3.3 的 literal：{trigger}")
 
     # ---- Task 2.1: system prompt narration ----
 
@@ -1321,6 +1357,104 @@ class IndependentReviewAgentTests(unittest.TestCase):
         status, snapshot = store.claim_resume(project["id"], run_id, threading.Event())
         self.assertEqual(status, "errored")
         self.assertIsInstance(snapshot.get("messages"), list)
+
+
+    # ---- Task 4: placeholder grounding injection ----
+
+    def _make_agent_with_draft(self, draft_content: str):
+        """Helper: create engine+project+agent with a custom draft body.
+        Returns (agent, store, run_id, project_id).
+        Modelled on _make_engine_project_and_agent + _claim_store.
+        """
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        projects_dir = Path(tmpdir.name) / "projects"
+        workspace_dir = Path(tmpdir.name) / "workspace"
+        engine = SkillEngine(projects_dir, self.repo_skill_dir)
+        project = engine.create_project(
+            {
+                "name": "placeholder-test",
+                "workspace_dir": str(workspace_dir),
+                "project_type": "strategy-consulting",
+                "theme": "placeholder grounding test",
+                "target_audience": "test audience",
+                "deadline": "2026-12-01",
+                "expected_length": "1000 words",
+                "notes": "",
+            }
+        )
+        project_dir = Path(project["project_dir"])
+        draft_path = project_dir / "content" / "report_draft_v1.md"
+        draft_path.write_text(draft_content, encoding="utf-8")
+        settings = self._make_settings(projects_dir)
+        agent = IndependentReviewAgent(skill_engine=engine, settings=settings)
+        store = ReviewSessionStore()
+        run_id = "run-ph-1"
+        self.assertTrue(store.claim_first(project["id"], run_id, threading.Event()))
+        return agent, store, run_id, project["id"]
+
+    def _capture_first_request_messages(
+        self,
+        agent,
+        project_id: str,
+        store,
+        run_id: str,
+        resume_snapshot=None,
+    ) -> list:
+        """Run the agent just enough to capture the first LLM create() call's messages.
+        The mock raises StopIteration after the first call so run() exits cleanly.
+        Modelled on how test_run_resume_continues_from_snapshot_not_restart reads
+        call_args_list[0].kwargs["messages"].
+        """
+        # A single valid narration response (no tool calls) that ends the loop cleanly.
+        responses = [self._stream_text("审查告一段落")]
+
+        with mock.patch("backend.independent_review.OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.side_effect = responses
+            # Consume all events (run() is a generator; must iterate to drive it).
+            list(
+                agent.run(
+                    project_id,
+                    draft_word_count=50,
+                    store=store,
+                    run_id=run_id,
+                    resume_snapshot=resume_snapshot,
+                )
+            )
+            first_call_args = mock_openai.return_value.chat.completions.create.call_args_list
+            if not first_call_args:
+                return []
+            kwargs = first_call_args[0].kwargs
+            return list(kwargs.get("messages", []))
+
+    def test_placeholder_injected_first_run_only(self):
+        # 正文含占位符 → 首轮 messages 出现 UNTRUSTED_DATA 块 + 行号
+        agent, store, run_id, project_id = self._make_agent_with_draft("结论 TBD 待补\n正文")
+        msgs = self._capture_first_request_messages(agent, project_id, store, run_id)
+        joined = "\n".join(m.get("content", "") for m in msgs if isinstance(m.get("content"), str))
+        self.assertIn("UNTRUSTED_DATA", joined)
+        self.assertIn("行 1", joined)
+
+    def test_placeholder_not_reinjected_on_resume(self):
+        agent, store, run_id, project_id = self._make_agent_with_draft("X TBD")
+        snap = {"messages": [{"role": "system", "content": "sys"}], "iteration": 2}
+        msgs = self._capture_first_request_messages(agent, project_id, store, run_id, resume_snapshot=snap)
+        self.assertEqual(sum("UNTRUSTED_DATA" in (m.get("content") or "") for m in msgs), 0)
+
+    def test_no_placeholder_injects_clean_note(self):
+        agent, store, run_id, project_id = self._make_agent_with_draft("干净正文，无占位")
+        msgs = self._capture_first_request_messages(agent, project_id, store, run_id)
+        joined = "\n".join(m.get("content", "") for m in msgs if isinstance(m.get("content"), str))
+        self.assertIn("未发现占位符", joined)
+
+    def test_scan_exception_does_not_abort(self):
+        # monkeypatch scan_placeholders to raise → 审查继续（注入降级为空），不抛
+        agent, store, run_id, project_id = self._make_agent_with_draft("结论 TBD")
+        with mock.patch("backend.independent_review.scan_placeholders", side_effect=RuntimeError("boom")):
+            msgs = self._capture_first_request_messages(agent, project_id, store, run_id)
+        joined = "\n".join(m.get("content", "") for m in msgs if isinstance(m.get("content"), str))
+        self.assertNotIn("UNTRUSTED_DATA", joined)  # 降级未注入
+        # 关键：run() 未因扫描异常崩溃（capture 正常返回即证明）
 
 
 class ReviewSessionStoreTests(unittest.TestCase):

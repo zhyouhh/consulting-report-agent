@@ -300,7 +300,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
       {/* review_stale advisory（仅正文页显示） */}
       {isDraft && reviewStale && (
         <div className="px-4 py-2 text-xs text-[#c8a060] bg-[#2a1e10] border-b border-[#5a3a10]" role="note">
-          正文已改动，建议重新审查（独立审查 / AI 味自查报告可能已过期）。
+          正文已改动，建议重新审查（独立审查报告可能已过期）。
         </div>
       )}
 

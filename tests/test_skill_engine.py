@@ -382,7 +382,7 @@ class SkillEngineTests(unittest.TestCase):
 
     def _make_project_past_s5(self) -> Path:
         project_dir = self._make_project_past_s4()
-        self._write_independent_review_and_lint_report(project_dir)
+        self._write_independent_review(project_dir)
         self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
         self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
         return project_dir
@@ -444,10 +444,6 @@ class SkillEngineTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def _write_independent_review_and_lint_report(self, project_dir: Path):
-        self._write_independent_review(project_dir)
-        self._write_lint_report(project_dir)
-
     def _write_independent_review(
         self,
         project_dir: Path,
@@ -469,30 +465,6 @@ class SkillEngineTests(unittest.TestCase):
         if include_marker:
             lines.append(SkillEngine.INDEPENDENT_REVIEW_COMPLETION_MARKER)
         (project_dir / "plan" / "independent-review.md").write_text(
-            "\n".join(lines).strip() + "\n",
-            encoding="utf-8",
-        )
-
-    def _write_lint_report(
-        self,
-        project_dir: Path,
-        *,
-        include_marker: bool = True,
-    ):
-        lines = [
-            "# AI 味自查",
-            "",
-            "## 总览",
-            "结论: 已完成全文表达检查并识别优先修改项。",
-            "预计修改时间: 30 分钟。",
-            "",
-            "## 按章节排列",
-            "- 执行摘要: 删除空泛形容词，补充业务含义。",
-            "- 建议章节: 将笼统动词改为可执行动作。",
-        ]
-        if include_marker:
-            lines.append(SkillEngine.LINT_REPORT_COMPLETION_MARKER)
-        (project_dir / "plan" / "lint-report.md").write_text(
             "\n".join(lines).strip() + "\n",
             encoding="utf-8",
         )
@@ -553,7 +525,6 @@ class SkillEngineTests(unittest.TestCase):
                 "data-log.md",
                 "analysis-notes.md",
                 "independent-review.md",
-                "lint-report.md",
                 "presentation-plan.md",
                 "delivery-log.md",
             }
@@ -561,6 +532,7 @@ class SkillEngineTests(unittest.TestCase):
             self.assertTrue(expected_files.issubset(created_file_names))
             self.assertNotIn("review-checklist.md", created_file_names)
             self.assertNotIn("project-info.md", created_file_names)
+            self.assertNotIn("lint-report.md", created_file_names)
 
     def test_create_project_without_target_audience_does_not_crash(self):
         # 目标读者已从新建表单移除：省略该字段（→ None）必须正常建项目、不触发
@@ -741,7 +713,7 @@ class SkillEngineTests(unittest.TestCase):
         self.assertIn("data-log.md 更新", template_text)
         self.assertIn("analysis-notes.md 创建/更新", template_text)
         self.assertIn("独立审查完成（plan/independent-review.md）", template_text)
-        self.assertIn("AI 味自查完成（plan/lint-report.md）", template_text)
+        self.assertNotIn("AI 味自查完成（plan/lint-report.md）", template_text)
         self.assertIn("事实、逻辑与语言质量审查完成", template_text)
         self.assertNotIn("review-checklist.md 完成", template_text)
         self.assertIn("content/report_draft_v1.md 形成有效草稿", template_text)
@@ -1574,9 +1546,9 @@ class SkillEngineTests(unittest.TestCase):
             self.assertEqual(summary["stage_code"], "S5")
             self._assert_items_include(summary["completed_items"], "report_draft_v1.md")
             self._assert_items_include(summary["next_actions"], "独立审查")
-            self._assert_items_include(summary["next_actions"], "AI 味自查")
+            self._assert_items_exclude(summary["next_actions"], "AI 味自查")
 
-    def test_workspace_summary_keeps_stage_at_s5_until_both_review_reports_exist(self):
+    def test_workspace_summary_keeps_stage_at_s5_until_review_passed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
@@ -1591,7 +1563,8 @@ class SkillEngineTests(unittest.TestCase):
 
             self.assertEqual(summary["stage_code"], "S5")
             self._assert_items_include(summary["completed_items"], "独立审查完成")
-            self._assert_items_include(summary["next_actions"], "AI 味自查")
+            self._assert_items_exclude(summary["next_actions"], "AI 味自查")
+            self._assert_items_include(summary["next_actions"], "确认通过")
 
     def test_has_effective_independent_review_rejects_template_stub(self):
         project_dir = self._make_project()
@@ -1636,128 +1609,48 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertTrue(self.engine._has_effective_independent_review(project_dir))
 
-    def test_has_effective_lint_report_rejects_template_and_missing_marker(self):
-        project_dir = self._make_project()
-        (project_dir / "plan" / "lint-report.md").write_text(
-            "[等待运行 - 请在 S5 阶段点击工作区“AI 味自查”按钮]\n",
-            encoding="utf-8",
-        )
-
-        self.assertFalse(self.engine._has_effective_lint_report(project_dir))
-
-        self._write_lint_report(project_dir, include_marker=False)
-
-        self.assertFalse(self.engine._has_effective_lint_report(project_dir))
-
-    def test_has_effective_lint_report_rejects_partial_anchors(self):
-        project_dir = self._make_project()
-        (project_dir / "plan" / "lint-report.md").write_text(
-            "# AI 味自查\n\n"
-            "## 总览\n"
-            "- AI 腔：0 处\n"
-            "- 内容缺失：0 处\n"
-            "- 缺标注：0 处\n"
-            "- 章节 So What 偏少：0 章\n\n"
-            f"{self.engine.LINT_REPORT_COMPLETION_MARKER}\n",
-            encoding="utf-8",
-        )
-
-        self.assertFalse(self.engine._has_effective_lint_report(project_dir))
-
-    def test_has_effective_lint_report_rejects_when_body_blank_despite_anchors(self):
-        project_dir = self._make_project()
-        (project_dir / "plan" / "lint-report.md").write_text(
-            "# AI 味自查\n\n"
-            "## 按章节排列\n\n"
-            "## 总览\n\n"
-            f"{self.engine.LINT_REPORT_COMPLETION_MARKER}\n",
-            encoding="utf-8",
-        )
-
-        self.assertFalse(self.engine._has_effective_lint_report(project_dir))
-
     def test_read_plan_file_returns_empty_when_file_decode_fails(self):
         project_dir = self._make_project()
         (project_dir / "plan" / "broken.md").write_bytes(b"\xff\xfe\x00")
 
         self.assertEqual(self.engine._read_plan_file(project_dir, "broken.md"), "")
 
-    def test_has_effective_review_reports_requires_both(self):
-        project_dir = self._make_project()
-        self._write_independent_review(project_dir)
-
-        self.assertFalse(self.engine._has_effective_review_reports(project_dir))
-
-        self._write_lint_report(project_dir)
-
-        self.assertTrue(self.engine._has_effective_review_reports(project_dir))
-
     # ── R3 D6: review_stale advisory ────────────────────────────────────────
 
     def _set_mtime_ns(self, path, ns):
         os.utime(path, ns=(ns, ns))
 
-    def test_review_stale_true_when_draft_newer_than_oldest_report(self):
+    def test_review_stale_true_when_draft_newer_than_report(self):
         project_dir = self._make_project()
         engine = self.engine
         (project_dir / "content").mkdir(parents=True, exist_ok=True)
         draft = project_dir / "content" / "report_draft_v1.md"
         draft.write_text("正文", encoding="utf-8")
         self._write_independent_review(project_dir)
-        self._write_lint_report(project_dir)
         self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
-        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 1_500)
-        self._set_mtime_ns(draft, 2_000)  # newer than both
+        self._set_mtime_ns(draft, 2_000)  # newer than the independent-review report
         self.assertTrue(engine._is_report_review_stale(project_dir))
 
-    def test_review_stale_true_when_draft_between_two_reports(self):
-        # NIT 2: spec判定是 draft > min(report mtimes)，不要求比两份都新。
+    def test_review_stale_false_when_draft_older_than_report(self):
         project_dir = self._make_project()
         engine = self.engine
         (project_dir / "content").mkdir(parents=True, exist_ok=True)
         draft = project_dir / "content" / "report_draft_v1.md"
         draft.write_text("正文", encoding="utf-8")
         self._write_independent_review(project_dir)
-        self._write_lint_report(project_dir)
-        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
-        self._set_mtime_ns(draft, 1_500)  # between the two reports
-        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 2_000)
-        self.assertTrue(engine._is_report_review_stale(project_dir))
-
-    def test_review_stale_false_when_draft_older_than_both(self):
-        project_dir = self._make_project()
-        engine = self.engine
-        (project_dir / "content").mkdir(parents=True, exist_ok=True)
-        draft = project_dir / "content" / "report_draft_v1.md"
-        draft.write_text("正文", encoding="utf-8")
-        self._write_independent_review(project_dir)
-        self._write_lint_report(project_dir)
         self._set_mtime_ns(draft, 500)
         self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
-        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 1_500)
         self.assertFalse(engine._is_report_review_stale(project_dir))
 
-    def test_review_stale_false_when_reports_are_only_templates(self):
-        # BLOCKER 1: create_project scaffolds independent-review.md / lint-report.md templates;
+    def test_review_stale_false_when_report_is_only_template(self):
+        # BLOCKER 1: create_project scaffolds independent-review.md template;
         # template-only (non-effective) + draft update must NOT set stale.
         project_dir = self._make_project()
         engine = self.engine
         (project_dir / "content").mkdir(parents=True, exist_ok=True)
         draft = project_dir / "content" / "report_draft_v1.md"
         draft.write_text("正文", encoding="utf-8")
-        # Do NOT write effective reports — keep the scaffolded templates as-is
-        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
-        self._set_mtime_ns(project_dir / "plan" / "lint-report.md", 1_000)
-        self._set_mtime_ns(draft, 2_000)
-        self.assertFalse(engine._is_report_review_stale(project_dir))
-
-    def test_review_stale_false_when_only_one_effective_report(self):
-        project_dir = self._make_project()
-        engine = self.engine
-        (project_dir / "content").mkdir(parents=True, exist_ok=True)
-        draft = project_dir / "content" / "report_draft_v1.md"
-        draft.write_text("正文", encoding="utf-8")
-        self._write_independent_review(project_dir)  # only one effective, lint still template
+        # Do NOT write an effective report — keep the scaffolded template as-is
         self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
         self._set_mtime_ns(draft, 2_000)
         self.assertFalse(engine._is_report_review_stale(project_dir))
@@ -1780,28 +1673,32 @@ class SkillEngineTests(unittest.TestCase):
     def test_formal_plan_files_no_longer_includes_review_checklist(self):
         self.assertNotIn("review-checklist.md", SkillEngine.FORMAL_PLAN_FILES)
         self.assertIn("independent-review.md", SkillEngine.FORMAL_PLAN_FILES)
-        self.assertIn("lint-report.md", SkillEngine.FORMAL_PLAN_FILES)
+        # N7: lint-report.md is retired — not a formal plan file, not in FILE_SEMANTICS,
+        # and listed under RETIRED_WORKSPACE_FILES (full posix path).
+        self.assertNotIn("lint-report.md", SkillEngine.FORMAL_PLAN_FILES)
+        self.assertIn("plan/lint-report.md", SkillEngine.RETIRED_WORKSPACE_FILES)
+        self.assertNotIn("plan/lint-report.md", SkillEngine.FILE_SEMANTICS)
 
     def test_checkpoint_prereq_review_passed_at_uses_new_helper(self):
         prereq = SkillEngine.CHECKPOINT_PREREQ["review_passed_at"]
 
-        self.assertEqual(prereq[0], "_has_effective_review_reports")
-        self.assertIn("independent-review.md", prereq[1])
-        self.assertIn("lint-report.md", prereq[1])
+        self.assertEqual(prereq[0], "_has_effective_independent_review")
+        self.assertEqual(prereq[1], "plan/independent-review.md")
+        self.assertNotIn("lint-report.md", prereq[1])
 
     def test_advance_stage_review_passed_at_rejects_missing_reports(self):
         project_dir = self._make_project_past_s4()
         self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
 
-        with self.assertRaisesRegex(ValueError, "独立审查|AI 味自查|按钮"):
+        with self.assertRaisesRegex(ValueError, "独立审查|按钮"):
             self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
 
         self.assertNotIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
 
-    def test_advance_stage_review_passed_at_accepts_when_both_reports_ready(self):
+    def test_advance_stage_review_passed_at_accepts_when_independent_review_ready(self):
         project_dir = self._make_project_past_s4()
         self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
-        self._write_independent_review_and_lint_report(project_dir)
+        self._write_independent_review(project_dir)
 
         result = self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
 
@@ -1824,8 +1721,6 @@ class SkillEngineTests(unittest.TestCase):
                 "report_ready": True,
                 "review_checklist_ready": False,
                 "independent_review_ready": True,
-                "lint_report_ready": False,
-                "review_reports_ready": False,
                 "review_notes_ready": False,
                 "review_ready": False,
                 "presentation_ready": False,
@@ -1846,40 +1741,78 @@ class SkillEngineTests(unittest.TestCase):
     def test_stage_five_completion_state_includes_new_fields(self):
         project_dir = self._make_project_past_s4()
         self.engine._save_stage_checkpoint(project_dir, "review_started_at")
-        self._write_review_checklist(project_dir)
 
         state = self.engine._stage_five_completion_state(project_dir)
         inferred_flags = self.engine._infer_stage_state(project_dir)["flags"]
 
         self.assertFalse(state["review_checklist_ready"])
         self.assertFalse(state["independent_review_ready"])
-        self.assertFalse(state["lint_report_ready"])
-        self.assertFalse(state["review_reports_ready"])
+        self.assertNotIn("lint_report_ready", state)
+        self.assertNotIn("review_reports_ready", state)
         self.assertFalse(inferred_flags["independent_review_ready"])
-        self.assertFalse(inferred_flags["lint_report_ready"])
-        self.assertFalse(inferred_flags["review_reports_ready"])
+        self.assertNotIn("lint_report_ready", inferred_flags)
+        self.assertNotIn("review_reports_ready", inferred_flags)
         self.assertIn("independent-review.md", "\n".join(state["missing_for_review_pass"]))
-        self.assertIn("lint-report.md", "\n".join(state["missing_for_review_pass"]))
+        self.assertNotIn("lint-report.md", "\n".join(state["missing_for_review_pass"]))
 
-    def test_stage_five_completion_state_review_reports_ready_requires_both(self):
+    def test_stage_five_completion_state_single_review_gates_pass(self):
+        project_dir = self._make_project_past_s4()
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+
+        state = self.engine._stage_five_completion_state(project_dir)
+
+        self.assertFalse(state["independent_review_ready"])
+        self.assertIn("independent-review.md", "\n".join(state["missing_for_review_pass"]))
+
+        self._write_independent_review(project_dir)
+        state = self.engine._stage_five_completion_state(project_dir)
+        inferred_flags = self.engine._infer_stage_state(project_dir)["flags"]
+
+        self.assertTrue(state["independent_review_ready"])
+        self.assertTrue(inferred_flags["independent_review_ready"])
+        self.assertTrue(state["review_pass_prerequisites_complete"])
+        self.assertNotIn("independent-review.md", "\n".join(state["missing_for_review_pass"]))
+
+    def test_s5_checklist_two_items(self):
+        from backend.skill import SkillEngine
+
+        items = SkillEngine.STAGE_CHECKLIST_ITEMS["S5"]
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0], "独立审查完成")
+        self.assertNotIn("AI 味自查完成", items)
+
+    def test_stage_state_no_lint_flags(self):
         project_dir = self._make_project_past_s4()
         self.engine._save_stage_checkpoint(project_dir, "review_started_at")
         self._write_independent_review(project_dir)
 
-        state = self.engine._stage_five_completion_state(project_dir)
+        flags = self.engine._infer_stage_state(project_dir)["flags"]
 
-        self.assertTrue(state["independent_review_ready"])
-        self.assertFalse(state["lint_report_ready"])
-        self.assertFalse(state["review_reports_ready"])
+        self.assertNotIn("lint_report_ready", flags)
+        self.assertNotIn("review_reports_ready", flags)
+        self.assertTrue(flags["independent_review_ready"])
 
-        self._write_lint_report(project_dir)
-        state = self.engine._stage_five_completion_state(project_dir)
-        inferred_flags = self.engine._infer_stage_state(project_dir)["flags"]
+    def test_completed_items_s5_single_review(self):
+        project_dir = self._make_project_past_s4()
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+        self._write_independent_review(project_dir)
+        self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
 
-        self.assertTrue(state["review_reports_ready"])
-        self.assertTrue(inferred_flags["review_reports_ready"])
-        self.assertNotIn("independent-review.md", "\n".join(state["missing_for_review_pass"]))
-        self.assertNotIn("lint-report.md", "\n".join(state["missing_for_review_pass"]))
+        state = self.engine._infer_stage_state(project_dir)
+
+        self.assertIn("独立审查完成", state["completed_items"])
+        self.assertTrue(state["flags"]["review_ready"])
+
+    def test_s5_next_actions_single_review(self):
+        project_dir = self._make_project_past_s4()
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+
+        # 无独立审查 → 提示点独立审查、不含 AI 味自查
+        self.engine.get_workspace_summary("demo")
+        progress = (project_dir / "plan" / "progress.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("AI 味自查", progress)
+        self.assertIn("独立审查", progress)
 
     def test_workspace_summary_keeps_stage_at_s0_when_project_overview_is_invalid_even_with_later_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2195,7 +2128,7 @@ class SkillEngineTests(unittest.TestCase):
 
     def test_record_stage_checkpoint_rejects_review_pass_without_review_started_checkpoint(self):
         project_dir = self._make_project_past_outline_confirm()
-        self._write_independent_review_and_lint_report(project_dir)
+        self._write_independent_review(project_dir)
 
         with self.assertRaisesRegex(ValueError, "review_started_at"):
             self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
@@ -2206,7 +2139,7 @@ class SkillEngineTests(unittest.TestCase):
         from backend.independent_review import get_independent_review_lock
 
         project_dir = self._make_project_past_s4()
-        self._write_independent_review_and_lint_report(project_dir)
+        self._write_independent_review(project_dir)
         self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
         lock = get_independent_review_lock("demo")
         self.assertTrue(lock.acquire(blocking=False))
@@ -2218,46 +2151,26 @@ class SkillEngineTests(unittest.TestCase):
 
         self.assertNotIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
 
-    def test_record_stage_checkpoint_rejects_review_passed_when_lint_lock_held(self):
-        from backend.report_tools import get_lint_report_lock
-
-        project_dir = self._make_project_past_s4()
-        self._write_independent_review_and_lint_report(project_dir)
-        self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
-        lock = get_lint_report_lock("demo")
-        self.assertTrue(lock.acquire(blocking=False))
-        try:
-            with self.assertRaisesRegex(ValueError, "AI 味自查正在进行中"):
-                self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
-        finally:
-            lock.release()
-
-        self.assertNotIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
-
     def test_record_stage_checkpoint_review_passed_succeeds_when_no_lock_held(self):
         from backend.independent_review import get_independent_review_lock
-        from backend.report_tools import get_lint_report_lock
 
         project_dir = self._make_project_past_s4()
-        self._write_independent_review_and_lint_report(project_dir)
+        self._write_independent_review(project_dir)
         self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
-        for lock in (
-            get_independent_review_lock("demo"),
-            get_lint_report_lock("demo"),
-        ):
-            self.assertTrue(lock.acquire(blocking=False))
-            lock.release()
+        lock = get_independent_review_lock("demo")
+        self.assertTrue(lock.acquire(blocking=False))
+        lock.release()
 
         result = self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
 
-    def test_record_stage_checkpoint_checks_review_locks_inside_project_request_lock(self):
+    def test_record_stage_checkpoint_checks_review_lock_inside_project_request_lock(self):
         from backend.chat import _get_project_request_lock
 
         project_dir = self._make_project_past_s4()
-        self._write_independent_review_and_lint_report(project_dir)
+        self._write_independent_review(project_dir)
         self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
         project_lock = _get_project_request_lock("demo")
         observations: list[bool] = []
@@ -2271,14 +2184,37 @@ class SkillEngineTests(unittest.TestCase):
         with mock.patch(
             "backend.independent_review.get_independent_review_lock",
             return_value=_ObservedUnlockedLock(),
-        ), mock.patch(
-            "backend.report_tools.get_lint_report_lock",
-            return_value=_ObservedUnlockedLock(),
         ):
             result = self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(observations, [True, True])
+        self.assertEqual(observations, [True])
+
+    def test_review_passed_gate_requires_only_independent_review(self):
+        # 只放有效 independent-review.md（无 lint-report）→ 门禁放行
+        project_dir = self._make_project_past_s4()
+        self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
+        self._write_independent_review(project_dir)
+        self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")  # 不应抛
+        self.assertIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_record_checkpoint_no_lint_lock_dependency(self):
+        project_dir = self._make_project_past_s4()
+        self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
+        self._write_independent_review(project_dir)
+        self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")  # 不应 import 崩
+        self.assertIn("review_passed_at", self.engine._load_stage_checkpoints(project_dir))
+
+    def test_review_stale_single_report(self):
+        project_dir = self._make_project_past_s4()
+        self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
+        self._write_independent_review(project_dir)
+        draft = project_dir / "content" / "report_draft_v1.md"
+        draft.write_text("更新", encoding="utf-8")
+        # 报告先写、草稿后改 → 草稿更新 → stale；显式 mtime 防同秒落盘不确定性
+        self._set_mtime_ns(project_dir / "plan" / "independent-review.md", 1_000)
+        self._set_mtime_ns(draft, 2_000)
+        self.assertTrue(self.engine._is_report_review_stale(project_dir))
 
     def test_record_stage_checkpoint_rejects_presentation_ready_without_review_passed_checkpoint(self):
         project_dir = self._make_project_past_s4()
@@ -2298,7 +2234,7 @@ class SkillEngineTests(unittest.TestCase):
 
     def test_record_delivery_archived_report_only_requires_review_passed(self):
         project_dir = self._make_project_past_s4()
-        self._write_independent_review_and_lint_report(project_dir)
+        self._write_independent_review(project_dir)
         self.engine.record_stage_checkpoint("demo", "review_started_at", "set")
         self._write_delivery_log(project_dir)
 

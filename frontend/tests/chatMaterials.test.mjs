@@ -155,7 +155,7 @@ test("buildChatRequest omits metadata fields when triggerMetadata is null", () =
   const req = buildChatRequest({
     projectId: "demo",
     messageText: "",
-    systemTrigger: "lint_report_done",
+    systemTrigger: "independent_review_done",
     triggerMetadata: null,
   });
 

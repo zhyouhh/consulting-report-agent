@@ -112,18 +112,9 @@ class WorkspaceMaterialTests(unittest.TestCase):
             "审查结论: 数据口径一致。\n"
             "## 4. 建议可执行性\n"
             "审查结论: 建议可执行。\n"
-            "## 5. 目标读者匹配\n"
-            "审查结论: 表达匹配目标读者。\n\n"
+            "## 5. 语言专业性与去 AI 味\n"
+            "审查结论: 语言客观专业、无明显 AI 写作痕迹。\n\n"
             f"{SkillEngine.INDEPENDENT_REVIEW_COMPLETION_MARKER}\n",
-            encoding="utf-8",
-        )
-        (project_dir / "plan" / "lint-report.md").write_text(
-            "# AI 味自查\n\n"
-            "## 按章节排列\n"
-            "- 执行摘要: 未发现占位符。\n\n"
-            "## 总览\n"
-            "结论: 已完成全文机械自查。\n\n"
-            f"{SkillEngine.LINT_REPORT_COMPLETION_MARKER}\n",
             encoding="utf-8",
         )
         (project_dir / "plan" / "review.md").write_text(
@@ -243,7 +234,6 @@ class WorkspaceMaterialTests(unittest.TestCase):
                 "review_started_at",
             )
             (project_dir / "plan" / "independent-review.md").unlink(missing_ok=True)
-            (project_dir / "plan" / "lint-report.md").unlink(missing_ok=True)
             (project_dir / "content" / "report_draft_v1.md").write_text("# Draft\n\n" + ("报" * 2200) + "\n", encoding="utf-8")
             (project_dir / "plan" / "delivery-log.md").write_text(
                 "# Delivery log\n\n"
@@ -257,7 +247,7 @@ class WorkspaceMaterialTests(unittest.TestCase):
             stage_gates_text = (project_dir / "plan" / "stage-gates.md").read_text(encoding="utf-8")
 
             self.assertEqual(summary["stage_code"], "S5")
-            self.assertIn("请点击上方'独立审查'和'AI 味自查'按钮", summary["next_actions"])
+            self.assertIn("请点击上方'独立审查'按钮完成审查", summary["next_actions"])
             self.assertNotIn("delivery-log.md 鏇存柊", summary["completed_items"])
             self.assertNotIn("- [/] presentation-plan.md 瀹屾垚", stage_gates_text)
 
@@ -468,13 +458,11 @@ class WorkspaceMaterialTests(unittest.TestCase):
             )
             (project_dir / "plan" / "review.md").unlink()
             (project_dir / "plan" / "independent-review.md").unlink(missing_ok=True)
-            (project_dir / "plan" / "lint-report.md").unlink(missing_ok=True)
 
             summary = engine.get_workspace_summary(project["id"])
 
             self.assertEqual(summary["stage_code"], "S5")
             self.assertIn("独立审查", " ".join(summary["next_actions"]))
-            self.assertIn("AI 味自查", " ".join(summary["next_actions"]))
             self.assertNotIn("delivery-log.md 更新", summary["completed_items"])
 
     def test_workspace_summary_template_like_review_notes_do_not_block_report_only_s7(self):

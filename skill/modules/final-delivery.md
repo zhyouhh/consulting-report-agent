@@ -69,7 +69,7 @@ bash scripts/export_draft.sh report.md output
 
 建议顺序为：
 
-1. 先运行 `quality_check`
+1. 先在工作区点"独立审查"按钮跑一次独立审查
 2. 再执行导出
 3. 导出后做一次人工抽查
 

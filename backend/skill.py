@@ -55,7 +55,6 @@ class SkillEngine:
         "data-log.md",
         "analysis-notes.md",
         "independent-review.md",
-        "lint-report.md",
         "presentation-plan.md",
         "delivery-log.md",
     }
@@ -72,7 +71,6 @@ class SkillEngine:
         "plan/analysis-notes.md": {"group": "analysis", "stage": "S3"},
         "content/report_draft_v1.md": {"group": "draft", "stage": "S4"},
         "plan/independent-review.md": {"group": "review", "stage": "S5"},
-        "plan/lint-report.md": {"group": "review", "stage": "S5"},
         "plan/presentation-plan.md": {"group": "delivery", "stage": "S6"},
         "plan/delivery-log.md": {"group": "delivery", "stage": "S7"},
         "plan/stage-gates.md": {"group": "tracking", "stage": None},
@@ -98,6 +96,7 @@ class SkillEngine:
     RETIRED_WORKSPACE_FILES = {
         "plan/project-info.md",
         "plan/review-checklist.md",
+        "plan/lint-report.md",
     }
 
     STAGE_CHECKPOINTS_FILENAME = "stage_checkpoints.json"
@@ -212,7 +211,6 @@ class SkillEngine:
         ],
         "S5": [
             "独立审查完成",
-            "AI 味自查完成",
             "\u4e8b\u5b9e\u3001\u903b\u8f91\u4e0e\u8bed\u8a00\u8d28\u91cf\u5ba1\u67e5\u5b8c\u6210",
         ],
         "S6": [
@@ -334,11 +332,9 @@ class SkillEngine:
         "## 2. 关键假设与逻辑链",
         "## 3. 数据口径一致性",
         "## 4. 建议可执行性",
-        "## 5. 目标读者匹配",
+        "## 5. 语言专业性与去 AI 味",
     )
     INDEPENDENT_REVIEW_COMPLETION_MARKER = "<!-- independent-review:complete -->"
-    LINT_REPORT_ANCHORS = ("## 按章节排列", "## 总览")
-    LINT_REPORT_COMPLETION_MARKER = "<!-- lint-report:complete -->"
     CHECKPOINT_PREREQ = {
         "s0_interview_done_at": None,
         "outline_confirmed_at": (
@@ -354,10 +350,10 @@ class SkillEngine:
             f"请先让助手写入 `{REPORT_DRAFT_PATH}`，再开始审查。",
         ),
         "review_passed_at": (
-            "_has_effective_review_reports",
-            "plan/independent-review.md, plan/lint-report.md",
-            "需要先完成独立审查和 AI 味自查，才能标记审查通过。",
-            "请先在 S5 阶段点击上方'独立审查'和'AI 味自查'按钮，再确认审查通过。",
+            "_has_effective_independent_review",
+            "plan/independent-review.md",
+            "需要先完成独立审查，才能标记审查通过。",
+            "请先在 S5 阶段点击上方'独立审查'按钮完成审查，再确认审查通过。",
         ),
         "presentation_ready_at": (
             "_has_effective_presentation_plan",
@@ -673,15 +669,11 @@ class SkillEngine:
         )
 
         independent_review_ready = self._has_effective_independent_review(project_path)
-        lint_report_ready = self._has_effective_lint_report(project_path)
-        review_reports_ready = independent_review_ready and lint_report_ready
         review_passed = "review_passed_at" in checkpoints
 
         missing_for_review_pass = list(stage_four_state["missing_for_stage_four"])
         if not independent_review_ready:
             missing_for_review_pass.append("independent-review.md（请先点'独立审查'按钮）")
-        if not lint_report_ready:
-            missing_for_review_pass.append("lint-report.md（请先点'AI 味自查'按钮）")
 
         missing_for_stage_five = list(missing_for_review_pass)
         if not review_passed:
@@ -690,8 +682,6 @@ class SkillEngine:
         return {
             "review_checklist_ready": False,
             "independent_review_ready": independent_review_ready,
-            "lint_report_ready": lint_report_ready,
-            "review_reports_ready": review_reports_ready,
             "review_passed": review_passed,
             "review_pass_prerequisites_complete": not missing_for_review_pass,
             "stage_five_complete": not missing_for_stage_five,
@@ -1496,7 +1486,7 @@ class SkillEngine:
     def validate_user_write(self, project_ref: str, file_path: str) -> str:
         """R3: independent whitelist gate for USER (HTTP) writes — NOT validate_plan_write
         (that carries the LLM-only pre-outline evidence gate and does not itself deny
-        independent-review/lint-report; those live in the chat tool layer the HTTP endpoint
+        independent-review; that lives in the chat tool layer the HTTP endpoint
         never reaches). Whitelist = default-deny.
         Path traversal → ValueError (endpoint 400). Not whitelisted → UserWriteForbiddenError
         (403) — a distinct type, NOT PermissionError, so a filesystem PermissionError from the
@@ -1881,14 +1871,8 @@ class SkillEngine:
         ]
         if stage_code == "S5":
             flags = stage_state.get("flags", {})
-            independent_ready = bool(flags.get("independent_review_ready"))
-            lint_ready = bool(flags.get("lint_report_ready"))
-            if not independent_ready and not lint_ready:
-                next_actions = ["请点击上方'独立审查'和'AI 味自查'按钮"]
-            elif independent_ready and not lint_ready:
-                next_actions = ["还差'AI 味自查'，请点击上方按钮"]
-            elif lint_ready and not independent_ready:
-                next_actions = ["还差'独立审查'，请点击上方按钮"]
+            if not bool(flags.get("independent_review_ready")):
+                next_actions = ["请点击上方'独立审查'按钮完成审查"]
             else:
                 next_actions = ["等主代理跟你讨论审查结果，确认通过后说'审查通过'"]
         status = "进行中"
@@ -1980,15 +1964,10 @@ class SkillEngine:
         with lock:
             if key == "review_passed_at" and action == "set":
                 from backend.independent_review import get_independent_review_lock
-                from backend.report_tools import get_lint_report_lock
 
                 review_lock = get_independent_review_lock(project_id)
                 if review_lock.locked():
                     raise ValueError("独立审查正在进行中，请等待完成后再标记审查通过")
-
-                lint_lock = get_lint_report_lock(project_id)
-                if lint_lock.locked():
-                    raise ValueError("AI 味自查正在进行中，请等待完成后再标记审查通过")
 
             if action == "set":
                 self._validate_stage_checkpoint_transition(project_path, key)
@@ -2143,8 +2122,6 @@ class SkillEngine:
         analysis_quality_ok = stage_four_state["analysis_quality_ok"]
         report_ready = stage_four_state["report_ready"]
         independent_review_ready = stage_five_state["independent_review_ready"]
-        lint_report_ready = stage_five_state["lint_report_ready"]
-        review_reports_ready = stage_five_state["review_reports_ready"]
         presentation_ready = stage_six_state["presentation_ready"]
         delivery_ready = self._has_effective_delivery_log(project_path)
         presentation_required = stage_six_state["presentation_required"]
@@ -2206,10 +2183,8 @@ class SkillEngine:
             "report_ready": report_ready,
             "review_checklist_ready": False,
             "independent_review_ready": independent_review_ready,
-            "lint_report_ready": lint_report_ready,
-            "review_reports_ready": review_reports_ready,
             "review_notes_ready": self._has_effective_review_notes(project_path),
-            "review_ready": review_reports_ready and review_passed,
+            "review_ready": independent_review_ready and review_passed,
             "presentation_ready": presentation_ready,
             "delivery_ready": delivery_ready and delivery_archived,
             "presentation_required": presentation_required,
@@ -2239,9 +2214,7 @@ class SkillEngine:
             if stage == "S5":
                 if flags["independent_review_ready"]:
                     completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][0])
-                if flags["lint_report_ready"]:
-                    completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
-                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][2])
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
                 continue
             completed.extend(self.STAGE_CHECKLIST_ITEMS[stage])
 
@@ -2267,10 +2240,8 @@ class SkillEngine:
         elif stage_code == "S5":
             if flags["independent_review_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][0])
-            if flags["lint_report_ready"]:
+            if flags["independent_review_ready"] and flags["review_passed"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
-            if flags["independent_review_ready"] and flags["lint_report_ready"]:
-                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][2])
         elif stage_code == "S6":
             completed.append(self.STAGE_CHECKLIST_ITEMS["S6"][0])
             if flags["presentation_ready"]:
@@ -2560,40 +2531,23 @@ class SkillEngine:
             return False
         return self._has_substantive_body(review_text)
 
-    def _has_effective_lint_report(self, project_path: Path) -> bool:
-        lint_text = self._read_plan_file(project_path, "lint-report.md")
-        if not lint_text or self._is_template_content(lint_text, "lint-report.md"):
-            return False
-        if not all(anchor in lint_text for anchor in self.LINT_REPORT_ANCHORS):
-            return False
-        if self.LINT_REPORT_COMPLETION_MARKER not in lint_text:
-            return False
-        return self._has_substantive_body(lint_text)
-
-    def _has_effective_review_reports(self, project_path: Path) -> bool:
-        return (
-            self._has_effective_independent_review(project_path)
-            and self._has_effective_lint_report(project_path)
-        )
-
     def _is_report_review_stale(self, project_path: Path) -> bool:
-        """R3 D6 advisory: both review reports are EFFECTIVE (substantive, not the scaffolded
-        template — BLOCKER 1) AND the draft is newer than the OLDER report. NOT gated on
-        review_passed_at — covers the window where reports exist, the draft was edited, but the
-        user hasn't clicked 审查通过 yet (review_passed_at unset; record_stage_checkpoint only
-        checks report structure, not whether they cover the current draft)."""
+        """R3 D6 advisory: the independent-review report is EFFECTIVE (substantive, not the
+        scaffolded template — BLOCKER 1) AND the draft is newer than the report. NOT gated on
+        review_passed_at — covers the window where the report exists, the draft was edited, but
+        the user hasn't clicked 审查通过 yet (review_passed_at unset; record_stage_checkpoint only
+        checks report structure, not whether it covers the current draft)."""
         draft_path = project_path / self.REPORT_DRAFT_PATH
         if not draft_path.exists():
             return False
-        # Templates only (new-project scaffold of independent-review.md / lint-report.md) don't
-        # count — both must be effective reports, reusing the production gate.
-        if not self._has_effective_review_reports(project_path):
+        # Template only (new-project scaffold of independent-review.md) doesn't count — must be
+        # an effective report, reusing the production gate.
+        if not self._has_effective_independent_review(project_path):
             return False
         ir_path = project_path / "plan" / "independent-review.md"
-        lint_path = project_path / "plan" / "lint-report.md"
         draft_mtime = draft_path.stat().st_mtime_ns
-        oldest_report_mtime = min(ir_path.stat().st_mtime_ns, lint_path.stat().st_mtime_ns)
-        return draft_mtime > oldest_report_mtime
+        report_mtime = ir_path.stat().st_mtime_ns
+        return draft_mtime > report_mtime
 
     def _has_effective_review_notes(self, project_path: Path) -> bool:
         review_text = self._read_plan_file(project_path, "review.md")

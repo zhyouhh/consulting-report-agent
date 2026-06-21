@@ -39,7 +39,6 @@
 
 ### S5 质量审查 ⬜
 - [ ] 独立审查完成（plan/independent-review.md）
-- [ ] AI 味自查完成（plan/lint-report.md）
 - [ ] 事实、逻辑与语言质量审查完成
 
 ### S6 演示准备（可选） ⬜

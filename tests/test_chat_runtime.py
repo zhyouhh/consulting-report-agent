@@ -6058,29 +6058,6 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("只能由独立审查代理生成", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_write_file_rejects_main_agent_lint_report(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
-
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_tool_call(
-                "write_file",
-                json.dumps(
-                    {
-                        "file_path": "plan/lint-report.md",
-                        "content": "# AI 味自查\n\n主代理伪造机械脚本结果。\n",
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
-        )
-
-        self.assertEqual(result["status"], "error")
-        self.assertIn("只能由 AI 味自查脚本生成", result["message"])
-
-    @mock.patch("backend.chat.OpenAI")
     def test_edit_file_rejects_main_agent_independent_review_report(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
@@ -6107,34 +6084,6 @@ class ChatRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("只能由独立审查代理生成", result["message"])
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_edit_file_rejects_main_agent_lint_report(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        (self.project_dir / "plan" / "lint-report.md").write_text(
-            "# AI 味自查\n\n旧内容。\n",
-            encoding="utf-8",
-        )
-        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
-
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_tool_call(
-                "edit_file",
-                json.dumps(
-                    {
-                        "file_path": "plan/lint-report.md",
-                        "old_string": "旧内容",
-                        "new_string": "新内容",
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
-        )
-
-        self.assertEqual(result["status"], "error")
-        self.assertIn("只能由 AI 味自查脚本生成", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_rejects_inline_placeholder_feedback(self, mock_openai):
@@ -6634,36 +6583,6 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertNotIn("advance_stage", notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_main_agent_cannot_write_lint_report_md(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
-
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_tool_call(
-                "write_file",
-                json.dumps(
-                    {
-                        "file_path": "plan/lint-report.md",
-                        "content": "# AI 味自查报告\n\n伪造自查。\n",
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
-        )
-
-        self.assertEqual(result["status"], "error")
-        self.assertIn("只能由 AI 味自查脚本生成", result["message"])
-        self.assertIn("AI 味自查", result["message"])
-        self.assertNotIn("run_lint_report", result["message"])
-        notices = handler._turn_context.get("pending_system_notices", [])
-        self.assertEqual(notices[0]["category"], "stage_write_blocked")
-        self.assertIn("AI 味自查", notices[0]["user_action"])
-        self.assertIn("按钮", notices[0]["user_action"])
-        self.assertNotIn("advance_stage", notices[0]["user_action"])
-
-    @mock.patch("backend.chat.OpenAI")
     def test_main_agent_cannot_edit_independent_review_md(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
@@ -6693,38 +6612,6 @@ class ChatRuntimeTests(unittest.TestCase):
         notices = handler._turn_context.get("pending_system_notices", [])
         self.assertEqual(notices[0]["category"], "stage_write_blocked")
         self.assertIn("独立审查", notices[0]["user_action"])
-        self.assertNotIn("advance_stage", notices[0]["user_action"])
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_main_agent_cannot_edit_lint_report_md(self, mock_openai):
-        del mock_openai
-        handler = self._make_handler_with_project()
-        (self.project_dir / "plan" / "lint-report.md").write_text(
-            "# AI 味自查报告\n\n旧内容。\n",
-            encoding="utf-8",
-        )
-        handler._turn_context = {"can_write_non_plan": True, "web_search_disabled": False}
-
-        result = handler._execute_tool(
-            self.project_id,
-            self._make_tool_call(
-                "edit_file",
-                json.dumps(
-                    {
-                        "file_path": "plan/lint-report.md",
-                        "old_string": "旧内容",
-                        "new_string": "新内容",
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
-        )
-
-        self.assertEqual(result["status"], "error")
-        self.assertIn("只能由 AI 味自查脚本生成", result["message"])
-        notices = handler._turn_context.get("pending_system_notices", [])
-        self.assertEqual(notices[0]["category"], "stage_write_blocked")
-        self.assertIn("AI 味自查", notices[0]["user_action"])
         self.assertNotIn("advance_stage", notices[0]["user_action"])
 
     @mock.patch("backend.chat.OpenAI")
@@ -10990,43 +10877,18 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         return self._independent_run_metadata
 
     def _trigger_metadata_for(self, system_trigger: str):
-        """Return the run-bound trigger metadata for independent review, None for lint
-        (lint has no run_id and stays on the generic ready path)."""
+        """Return the run-bound trigger metadata for the independent review."""
         if system_trigger == "independent_review_done":
             return getattr(self, "_independent_run_metadata", None)
         return None
 
-    def _write_effective_lint_report(self, *, body: str | None = None):
-        from backend.skill import SkillEngine
-
-        lines = [
-            "# AI 味自查",
-            "",
-            "## 总览",
-            "结论: 已完成全文表达检查并识别优先修改项。",
-            "预计修改时间: 30 分钟。",
-            "",
-            "## 按章节排列",
-            "- 执行摘要: 删除空泛形容词，补充业务含义。",
-            "- 建议章节: 将笼统动词改为可执行动作。",
-        ]
-        if body:
-            lines.extend(["", body])
-        lines.append(SkillEngine.LINT_REPORT_COMPLETION_MARKER)
-        (self.project_dir / "plan" / "lint-report.md").write_text(
-            "\n".join(lines).strip() + "\n",
-            encoding="utf-8",
-        )
-
     def _write_effective_report_for(self, system_trigger: str, *, body: str | None = None):
         if system_trigger == "independent_review_done":
             self._write_effective_independent_review(body=body)
-        elif system_trigger == "lint_report_done":
-            self._write_effective_lint_report(body=body)
         else:  # pragma: no cover - guard for test typos
             raise ValueError(f"unknown system_trigger: {system_trigger}")
 
-    SYSTEM_TRIGGER_CASES = ("independent_review_done", "lint_report_done")
+    SYSTEM_TRIGGER_CASES = ("independent_review_done",)
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_with_system_trigger_skips_user_message(self, mock_openai):
@@ -11073,27 +10935,6 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
 
         messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
         self.assertTrue(any("独立审查已完成" in message.get("content", "") for message in messages))
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_chat_stream_lint_report_system_trigger_injects_correct_prompt(self, mock_openai):
-        handler = self._make_handler_with_project()
-        self._mark_s0_confirmation_completed(handler)
-        self._write_effective_lint_report()
-        mock_openai.return_value.chat.completions.create.return_value = iter([
-            self._make_chunk(content="AI 味自查摘要。"),
-        ])
-
-        list(
-            handler.chat_stream(
-                self.project_id,
-                "",
-                system_trigger="lint_report_done",
-                max_iterations=1,
-            )
-        )
-
-        messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
-        self.assertTrue(any("AI 味自查已完成" in message.get("content", "") for message in messages))
 
     def test_system_trigger_prompts_keyset_matches_type(self):
         from typing import get_args
@@ -11444,24 +11285,9 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
                 ),
             ),
         )
-        lint_result = handler._execute_tool(
-            self.project_id,
-            self._make_tool_call(
-                "write_file",
-                json.dumps(
-                    {
-                        "file_path": "plan/lint-report.md",
-                        "content": "# AI 味自查\n\n主代理伪造机械脚本结果。\n",
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
-        )
 
         self.assertEqual(review_result["status"], "error")
         self.assertIn("只能由独立审查代理生成", review_result["message"])
-        self.assertEqual(lint_result["status"], "error")
-        self.assertIn("只能由 AI 味自查脚本生成", lint_result["message"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_trigger_no_tools_drops_upstream_tool_call_with_content(self, mock_openai):
@@ -11746,30 +11572,6 @@ class SystemTriggerRunBoundTests(SystemTriggerStreamTests):
         # literal so it never depends on the filesystem's exact mtime round-trip (which is what made
         # the previous version flaky).
         self.assertNotEqual(str(int(float(1893456000123456700))), "1893456000123456700")
-
-    @mock.patch("backend.chat.OpenAI")
-    def test_lint_trigger_stays_generic_no_run_id(self, mock_openai):
-        handler = self._make_handler_with_project()
-        self._mark_s0_confirmation_completed(handler)
-        self._write_effective_lint_report()
-        mock_openai.return_value.chat.completions.create.return_value = iter([
-            self._make_chunk(content="已转述 AI 味自查。"),
-        ])
-
-        # lint has no run_id/tombstone; with trigger_metadata=None it still injects via the
-        # generic ready path (the run-bound branch is independent-review only).
-        events = list(
-            handler.chat_stream(
-                self.project_id,
-                "",
-                system_trigger="lint_report_done",
-                trigger_metadata=None,
-                max_iterations=1,
-            )
-        )
-        self.assertTrue(any(e.get("type") == "content" for e in events))
-        messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
-        self.assertTrue(any("AI 味自查已完成" in m.get("content", "") for m in messages))
 
     # ---- review lock released on EVERY exit path ----
 
@@ -13063,9 +12865,9 @@ class AppendReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         self._setup_outline_confirmed_s4(handler)
         # 设置多个 secondary action families（bypass 实现细节，直接 patch）
         original = handler._secondary_action_families_in_message
-        handler._secondary_action_families_in_message = lambda msg: ["export", "quality_check"]
-        handler._build_turn_context(self.project_id, "写完之后导出并质检")
-        handler._secondary_action_families_in_message = lambda msg: ["export", "quality_check"]
+        handler._secondary_action_families_in_message = lambda msg: ["export", "inspect_file"]
+        handler._build_turn_context(self.project_id, "写完之后导出并查看文件")
+        handler._secondary_action_families_in_message = lambda msg: ["export", "inspect_file"]
         result = handler._tool_append_report_draft(
             self.project_id, content=self._VALID_APPEND_CONTENT,
         )
@@ -14203,7 +14005,7 @@ class EditFileCanonicalInvariantRejectTests(_EditFileDispatcherTestMixin, ChatRu
         with mock.patch.object(
             handler,
             "_secondary_action_families_in_message",
-            return_value=["export", "quality_check"],
+            return_value=["export", "inspect_file"],
         ):
             result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
 

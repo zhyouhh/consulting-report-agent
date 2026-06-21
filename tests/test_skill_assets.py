@@ -1,6 +1,4 @@
 import unittest
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -10,17 +8,19 @@ class SkillAssetTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         required_files = [
             root / "skill" / "evals" / "capability-map.json",
-            root / "skill" / "scripts" / "quality_check.sh",
             root / "skill" / "scripts" / "export_draft.sh",
         ]
 
         for file_path in required_files:
             self.assertTrue(file_path.exists(), f"缺少运行资产: {file_path}")
 
+        # N7: lint / quality_check scripts are deleted — must not be present.
+        self.assertFalse((root / "skill" / "scripts" / "quality_check.sh").exists())
+        self.assertFalse((root / "skill" / "scripts" / "quality_check.ps1").exists())
+
     def test_windows_powershell_scripts_use_utf8_bom(self):
         root = Path(__file__).resolve().parents[1]
         ps1_files = [
-            root / "skill" / "scripts" / "quality_check.ps1",
             root / "skill" / "scripts" / "export_draft.ps1",
         ]
 
@@ -34,7 +34,6 @@ class SkillAssetTests(unittest.TestCase):
     def test_windows_powershell_scripts_force_utf8_stdout(self):
         root = Path(__file__).resolve().parents[1]
         ps1_files = [
-            root / "skill" / "scripts" / "quality_check.ps1",
             root / "skill" / "scripts" / "export_draft.ps1",
         ]
 
@@ -43,49 +42,19 @@ class SkillAssetTests(unittest.TestCase):
             self.assertIn("[Console]::OutputEncoding", text)
             self.assertIn("$OutputEncoding", text)
 
-    def test_quality_check_ps1_runs_directly_with_windows_powershell(self):
-        powershell = shutil.which("powershell")
-        if not powershell:
-            self.skipTest("Windows PowerShell is not available")
-
-        root = Path(__file__).resolve().parents[1]
-        script_path = root / "skill" / "scripts" / "quality_check.ps1"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            report_path = Path(tmpdir) / "report.md"
-            report_path.write_text("# 测试报告\n\n数据来源：内部测试。\n", encoding="utf-8")
-
-            result = subprocess.run(
-                [
-                    powershell,
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(script_path),
-                    "-FilePath",
-                    str(report_path),
-                ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
-
-        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
-
-    def test_formal_plan_files_includes_new_review_outputs(self):
+    def test_formal_plan_files_includes_independent_review_output(self):
         from backend.skill import SkillEngine
 
         self.assertIn("independent-review.md", SkillEngine.FORMAL_PLAN_FILES)
-        self.assertIn("lint-report.md", SkillEngine.FORMAL_PLAN_FILES)
+        # N7: lint-report.md is retired — no longer an official plan file.
+        self.assertNotIn("lint-report.md", SkillEngine.FORMAL_PLAN_FILES)
 
     def test_formal_plan_files_no_longer_includes_review_checklist_after_cutover(self):
         from backend.skill import SkillEngine
 
         self.assertNotIn("review-checklist.md", SkillEngine.FORMAL_PLAN_FILES)
 
-    def test_initialize_project_creates_new_review_output_stubs(self):
+    def test_initialize_project_creates_independent_review_stub_only(self):
         from backend.skill import SkillEngine
 
         root = Path(__file__).resolve().parents[1]
@@ -108,11 +77,11 @@ class SkillAssetTests(unittest.TestCase):
             plan_dir = Path(project["project_dir"]) / "plan"
 
             self.assertTrue((plan_dir / "independent-review.md").exists())
-            self.assertTrue((plan_dir / "lint-report.md").exists())
             self.assertIn("independent-review:pending", (plan_dir / "independent-review.md").read_text(encoding="utf-8"))
-            self.assertIn("lint-report:pending", (plan_dir / "lint-report.md").read_text(encoding="utf-8"))
+            # N7: lint-report.md is retired — never generated for new projects.
+            self.assertFalse((plan_dir / "lint-report.md").exists())
 
-    def test_new_review_output_stubs_are_template_content(self):
+    def test_independent_review_stub_is_template_content(self):
         from backend.skill import SkillEngine
 
         root = Path(__file__).resolve().parents[1]
@@ -132,14 +101,11 @@ class SkillAssetTests(unittest.TestCase):
             )
             project_dir = Path(project["project_dir"])
             independent_text = (project_dir / "plan" / "independent-review.md").read_text(encoding="utf-8")
-            lint_text = (project_dir / "plan" / "lint-report.md").read_text(encoding="utf-8")
 
             self.assertTrue(engine._is_template_content(independent_text, "independent-review.md"))
-            self.assertTrue(engine._is_template_content(lint_text, "lint-report.md"))
             self.assertFalse(engine._has_effective_independent_review(project_dir))
-            self.assertFalse(engine._has_effective_lint_report(project_dir))
 
-    def test_validate_plan_write_accepts_new_review_output_files(self):
+    def test_validate_plan_write_accepts_independent_review_rejects_lint_report(self):
         from backend.skill import SkillEngine
 
         root = Path(__file__).resolve().parents[1]
@@ -162,10 +128,9 @@ class SkillAssetTests(unittest.TestCase):
                 engine.validate_plan_write(project["id"], "plan/independent-review.md"),
                 "plan/independent-review.md",
             )
-            self.assertEqual(
-                engine.validate_plan_write(project["id"], "plan/lint-report.md"),
-                "plan/lint-report.md",
-            )
+            # N7: lint-report.md is retired — no longer an official plan file, so it is rejected.
+            with self.assertRaises(ValueError):
+                engine.validate_plan_write(project["id"], "plan/lint-report.md")
 
     def test_export_draft_ps1_prefers_bundled_pandoc_before_system_path(self):
         root = Path(__file__).resolve().parents[1]

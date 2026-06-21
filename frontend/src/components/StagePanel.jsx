@@ -114,14 +114,11 @@ function QualityProgressBar({ qualityProgress, stalledSince, stageCode }) {
 export default function StagePanel({
   projectId,
   workspace,
-  qualityResult,
   onRunIndependentReview,
-  onRunLintReport,
   onExportDraft,
   onCheckpointSet,
   onInsertPrompt,
   reviewRunning = false,
-  lintRunning = false,
 }) {
   const summary = summarizeWorkspace(workspace)
   const {
@@ -140,13 +137,7 @@ export default function StagePanel({
     'independent_review',
     stageCode,
     summary.flags,
-    { reviewRunning, lintRunning },
-  )
-  const lintReportButton = getStageButtonState(
-    'lint_report',
-    stageCode,
-    summary.flags,
-    { reviewRunning, lintRunning },
+    { reviewRunning },
   )
   const exportButton = getStageButtonState('export_draft', stageCode, summary.flags)
   const s5ToolButtonClass = (state) => [
@@ -197,7 +188,7 @@ export default function StagePanel({
           summary={summary}
           onCheckpointSet={onCheckpointSet}
           onInsertPrompt={onInsertPrompt}
-          stageToolsRunning={reviewRunning || lintRunning}
+          stageToolsRunning={reviewRunning}
         />
 
         {/* S5 tools and export button */}
@@ -210,16 +201,6 @@ export default function StagePanel({
               className={s5ToolButtonClass(independentReviewButton)}
             >
               独立审查
-            </button>
-          )}
-          {lintReportButton.visible && (
-            <button
-              type="button"
-              onClick={onRunLintReport}
-              disabled={lintReportButton.disabled}
-              className={s5ToolButtonClass(lintReportButton)}
-            >
-              AI 味自查
             </button>
           )}
           {exportButton.visible && (
@@ -255,20 +236,6 @@ export default function StagePanel({
           </div>
         </div>
       </div>
-
-      {qualityResult && (
-        <div className="rounded-2xl border border-[#2f3158] bg-[#171a31] p-5">
-          <div className="text-sm font-medium text-[#64ffda] mb-3">质检结果</div>
-          <div className={`inline-flex px-2 py-1 rounded text-xs mb-3 ${
-            qualityResult.status === 'ok' ? 'bg-[#173a2d] text-[#8ef0c3]' : 'bg-[#4a2121] text-[#ffb6b6]'
-          }`}>
-            {qualityResult.status === 'ok' ? '检查完成' : '检查失败'}
-          </div>
-          <pre className="whitespace-pre-wrap text-sm leading-6 text-[#d9dcf5] bg-[#0e1020] border border-[#252846] rounded-xl p-4 overflow-x-auto">
-            {qualityResult.output || '暂无输出'}
-          </pre>
-        </div>
-      )}
     </div>
   )
 }

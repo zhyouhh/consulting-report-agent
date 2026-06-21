@@ -13,6 +13,7 @@ import httpx
 from openai import OpenAI
 
 from .config import Settings
+from .report_quality import scan_placeholders, build_placeholder_grounding
 from .skill import SkillEngine
 from .stream_parsing import ThinkingStreamParser
 
@@ -32,7 +33,7 @@ INDEPENDENT_REVIEW_SYSTEM_PROMPT = """你是独立审查代理。你的任务是
 - plan/analysis-notes.md — 分析沉淀
 - content/report_draft_v1.md — 报告正文草稿
 - plan/references.md — 引用清单
-- plan/project-overview.md — 项目元信息（含目标读者、交付边界）
+- plan/project-overview.md — 项目元信息（交付边界、报告类型）
 - plan/outline.md — 报告大纲（核对结构与正文匹配）
 
 可选（存在则读，不存在跳过）：
@@ -52,8 +53,27 @@ INDEPENDENT_REVIEW_SYSTEM_PROMPT = """你是独立审查代理。你的任务是
 ### 4. 建议可执行性
 每条建议是否回答了"谁来做、做什么、何时、优先级"？空话建议（"加强 X / 提升 Y / 推动 Z"）必须直接点名。
 
-### 5. 目标读者匹配
-术语密度、论证深度、前提假设是否匹配 project-overview 里写明的目标读者？
+### 5. 语言专业性与去 AI 味
+目标是**客观、克制、专业、第三人称**——不是"像真人聊天"。逐处标出下列 AI 写作痕迹，输出逐条 diff 式建议：`位置 → 原文片段 → 命中哪类 AI 味 → 修改方向`（只给方向、不替用户写成稿）：
+- 空洞拔高 / 意义夸张：「标志着」「见证了」「是……的体现/证明」「凸显/彰显了其重要性」「不断演变的格局」「奠定了基础」「深深植根于」「关键转折点」「不可磨灭的印记」→ 换具体事实/数字。
+- 句尾空分词：「……，凸显了其重要性」「……，反映了深厚联系」「……，确保了……」→ 删尾巴或落到具体机制。
+- 宣传/广告形容词：「充满活力的」「深刻的」「致力于」「令人叹为观止的」「开创性的」「著名的」→ 删空形容词。
+- 模糊归因：「专家认为」「行业报告显示」「多个来源/观察者指出」却不给具体出处 → 落到具体来源 + 年份（接 data-log）。
+- AI 高频词机械堆砌：「此外」「至关重要」「深入探讨」「赋能/增强/培养（空动词）」「复杂性」「格局」→ 按机械堆砌/空泛搭配判，**不一刀切实词**（「关键路径」「竞争格局」是合法行话，「关键作用」「不断演变的格局」才命中）。
+- 回避系动词：「作为/充当……的存在」「代表/标志着」替简单的「是/有」→ 复位为「是」。
+- 否定式排比：「不仅……而且」「这不仅仅是 X，而是 Y」→ 直陈。
+- 填充短语：「为了实现这一目标」「由于……的事实」「在这个时间点 → 现在」「值得注意的是数据显示 → 数据显示」→ 删冗余。
+- 叠加 hedging：「可能潜在地或许会产生一些影响」→ 给有据判断。
+- 通用积极结论：「前景光明」「激动人心的时代」「追求卓越的旅程」「迈出重要一步」→ 落到具体行动/数字/时间表。
+- 机械排版：揭示前破折号「—」、机械加粗、`**小标题：**` 内联列表 → 收敛；emoji 装饰标题/项目符号 → 直接禁（咨询报告不该有）。
+- 凑数三段式：删为"显得全面"凑的三项并列；**保留有内在逻辑的 MECE 并列**（如「短期/中期/长期」「人/流程/技术」）——不照搬 Humanizer「两项优于三项」教条。
+- 术语一致：禁同义词循环（同一实体反复换称呼），固定称谓。
+- 后台语气泄漏：「希望这对您有帮助」「当然！」「好问题」「根据我的训练」「截至[日期]」→ 删。
+**反向拦截（命中即算问题，绝不当目标——这些会拉低咨询专业度，价值判断与上面相反）**：
+- 注入「个性 / 灵魂」、有情绪、对事实做情绪反应（「这令人印象深刻但有点不安」）。
+- 第一人称「我」/ 个人嗓音（咨询报告是机构第三人称视角；项目还禁「本章/本报告」自指）。
+- 「允许混乱 / 跑题 / 半成型想法是人性体现」。
+- 把「读起来像维基百科/新闻稿的客观中立第三人称」当缺陷——对咨询报告这恰是合格态。
 
 ## 输出格式
 
@@ -86,7 +106,7 @@ INDEPENDENT_REVIEW_SYSTEM_PROMPT = """你是独立审查代理。你的任务是
 ## 4. 建议可执行性
 ...
 
-## 5. 目标读者匹配
+## 5. 语言专业性与去 AI 味
 ...
 
 ---
@@ -101,7 +121,7 @@ INDEPENDENT_REVIEW_SYSTEM_PROMPT = """你是独立审查代理。你的任务是
 
 报告**末尾必须**输出 `<!-- independent-review:complete -->` 这一行 HTML 注释。这是系统识别审查完成的契约。如果你写的报告里没有这行，系统会判定为不完整，用户会被要求重新审查。
 
-5 个维度的 H2 章节标题（`## 1. 结论-证据一致性` 一直到 `## 5. 目标读者匹配`）**必须全部出现**——即使某维度无问题也要写"## X. [维度名]\n\n未发现问题"，不能省略。
+5 个维度的 H2 章节标题（`## 1. 结论-证据一致性` 一直到 `## 5. 语言专业性与去 AI 味`）**必须全部出现**——即使某维度无问题也要写"## X. [维度名]\n\n未发现问题"，不能省略。
 
 ## 语气规则
 
@@ -131,7 +151,7 @@ INDEPENDENT_REVIEW_SYSTEM_PROMPT = """你是独立审查代理。你的任务是
 - read_file(file_path) — 读项目文件
 - write_file(file_path, content) — 写文件，但只能写到 plan/independent-review.md，其他路径会被拒绝
 
-其他工具不可用。不要尝试调用 edit_file / append_report_draft / advance_stage / web_search / fetch_url / quality_check。"""
+其他工具不可用。不要尝试调用 edit_file / append_report_draft / advance_stage / web_search / fetch_url。"""
 
 
 CANONICAL_REVIEW_PATH = "plan/independent-review.md"
@@ -407,6 +427,15 @@ class IndependentReviewAgent:
                 }
                 return
             messages = [{"role": "system", "content": INDEPENDENT_REVIEW_SYSTEM_PROMPT}]
+            # 占位符 grounding（仅首轮；resume 时已在 snapshot 的 messages 里，不重注）。
+            # best-effort：扫描失败降级为不注入，绝不阻断审查。
+            try:
+                report_path = self.skill_engine.get_primary_report_path(project_id)
+                draft_text = Path(report_path).read_text(encoding="utf-8")
+                grounding = build_placeholder_grounding(scan_placeholders(draft_text))
+                messages.append({"role": "user", "content": grounding})
+            except Exception:
+                pass
             start_iteration = 1
 
         # supplement（续审补充指令）：末尾已是 user/corrective 则合并进该条；否则在 provider-valid

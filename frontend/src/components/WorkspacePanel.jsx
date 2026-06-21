@@ -4,7 +4,6 @@ import StagePanel from './StagePanel'
 import FilePreviewPanel from './FilePreviewPanel'
 import IndependentReviewDrawer from './IndependentReviewDrawer'
 import { showError, showSuccess } from '../utils/toast'
-import { getNextQualityResult } from '../utils/workspacePanelState'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { getDefaultPreviewFile } from '../utils/workspaceFiles'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
@@ -47,10 +46,8 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   const [files, setFiles] = useState([])
   const [currentFile, setCurrentFile] = useState('plan/project-overview.md')
   const [content, setContent] = useState('')
-  const [qualityResult, setQualityResult] = useState(null)
   const [reviewDrawerOpen, setReviewDrawerOpen] = useState(false)
   const [reviewRunning, setReviewRunning] = useState(false)
-  const [lintRunning, setLintRunning] = useState(false)
   const previousProjectRef = useRef(projectId)
   const activeProjectRef = useRef(projectId)
   // 最新文件请求标记：丢弃乱序返回的旧 GET，防它覆盖更新的预览内容（codex 前端 quality NIT）。
@@ -137,30 +134,13 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   }, [projectId, refreshToken, loadFiles])
 
   useEffect(() => {
-    setQualityResult(currentResult => getNextQualityResult({
-      currentResult,
-      previousProject: previousProjectRef.current,
-      nextProject: projectId,
-    }))
     setReviewDrawerOpen(false)
     setReviewRunning(false)
-    setLintRunning(false)
     previousProjectRef.current = projectId
   }, [projectId])
 
-  const runQualityCheck = async () => {
-    if (!projectId) return
-    try {
-      const res = await axios.post(`/api/projects/${encodeURIComponent(projectId)}/quality-check`)
-      setQualityResult(res.data)
-      onProjectMutated?.()
-    } catch (error) {
-      showError('质量检查失败: ' + (error.response?.data?.detail || error.message))
-    }
-  }
-
   const runIndependentReview = () => {
-    if (!projectId || reviewRunning || lintRunning) return
+    if (!projectId || reviewRunning) return
     // A new run supersedes any older pending independent_review_done for this project: drop it NOW,
     // before the new run's claim_first overwrites the store's done tombstone. Otherwise the stale
     // pending's later flush is run-bound-rejected and the older successful review surfaces as an
@@ -202,53 +182,6 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     }
     setReviewRunning(false)
   }, [projectId, onProjectMutated, onTriggerSystemTurn])
-
-  const runLintReport = async () => {
-    const requestProject = projectId
-    if (!requestProject || lintRunning || reviewRunning) return
-    setLintRunning(true)
-    try {
-      const res = await axios.post(`/api/projects/${encodeURIComponent(requestProject)}/lint-report`)
-      if (!shouldApplyProjectResponse({
-        requestProject,
-        activeProject: activeProjectRef.current,
-      })) {
-        return
-      }
-      if (res.data.status !== 'ok') {
-        showError(res.data.detail || 'AI 味自查失败，请重试')
-        return
-      }
-      const ws = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/workspace`)
-      if (!shouldApplyProjectResponse({
-        requestProject,
-        activeProject: activeProjectRef.current,
-      })) {
-        return
-      }
-      onProjectMutated?.()
-      if (ws.data.flags?.lint_report_ready) {
-        onTriggerSystemTurn?.('lint_report_done')
-      } else {
-        showError('AI 味自查报告未通过服务端校验，请重试')
-      }
-    } catch (error) {
-      if (!shouldApplyProjectResponse({
-        requestProject,
-        activeProject: activeProjectRef.current,
-      })) {
-        return
-      }
-      showError('AI 味自查失败: ' + (error.response?.data?.detail || error.message))
-    } finally {
-      if (shouldApplyProjectResponse({
-        requestProject,
-        activeProject: activeProjectRef.current,
-      })) {
-        setLintRunning(false)
-      }
-    }
-  }
 
   const handleSaveFile = useCallback(async (filePath, nextContent, baseMtimeNs) => {
     const requestProject = projectId
@@ -354,14 +287,11 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
         <StagePanel
           projectId={projectId}
           workspace={workspace}
-          qualityResult={qualityResult}
           onRunIndependentReview={runIndependentReview}
-          onRunLintReport={runLintReport}
           onExportDraft={exportDraft}
           onCheckpointSet={onCheckpointSet}
           onInsertPrompt={onInsertPrompt}
           reviewRunning={reviewRunning}
-          lintRunning={lintRunning}
         />
       ) : activeTab === 'files' ? (
         <FilePreviewPanel
