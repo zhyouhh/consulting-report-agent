@@ -54,7 +54,7 @@ def init_db() -> None:
                 token_hash TEXT PRIMARY KEY, uid TEXT NOT NULL, created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL, created_ip TEXT, user_agent TEXT, last_seen TEXT);
             CREATE INDEX IF NOT EXISTS idx_sessions_uid ON sessions(uid);
-            CREATE TABLE IF NOT EXISTS app_config(key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS app_config(key TEXT PRIMARY KEY NOT NULL, value TEXT);
             """
         )
 
@@ -171,3 +171,19 @@ def set_user_disabled(uid, disabled: bool) -> None:
         conn.execute("UPDATE users SET disabled=? WHERE uid=?", (int(disabled), uid))
         if disabled:
             conn.execute("DELETE FROM sessions WHERE uid=?", (uid,))
+
+
+def get_config(key, default=None):
+    with _db() as conn:
+        row = conn.execute("SELECT value FROM app_config WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_config(key, value) -> None:
+    with _db() as conn:
+        conn.execute("INSERT INTO app_config(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def seed_config_if_absent(key, value) -> None:
+    with _db() as conn:
+        conn.execute("INSERT OR IGNORE INTO app_config(key,value) VALUES(?,?)", (key, value))

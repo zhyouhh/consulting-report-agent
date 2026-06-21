@@ -89,3 +89,27 @@ class AccountsSessionTests(unittest.TestCase):
     def test_session_for_unknown_uid_raises(self):
         with self.assertRaises(accounts.InactiveUserError):
             accounts.create_session("no-such-uid")
+
+
+class AccountsConfigTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = Path(os.path.realpath(tempfile.mkdtemp()))
+        self._env = mock.patch.dict(os.environ, {"CRA_DATA_ROOT": str(self._tmp)})
+        self._env.start(); accounts.init_db()
+
+    def tearDown(self):
+        self._env.stop(); shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_get_set_default(self):
+        self.assertEqual(accounts.get_config("invite_code", "fb"), "fb")
+        accounts.set_config("invite_code", "JOIN"); self.assertEqual(accounts.get_config("invite_code"), "JOIN")
+
+    def test_seed_idempotent(self):
+        accounts.seed_config_if_absent("invite_code", "S1"); accounts.seed_config_if_absent("invite_code", "S2")
+        self.assertEqual(accounts.get_config("invite_code"), "S1")
+
+    def test_set_config_updates_existing(self):
+        # 锁住 upsert 的 UPDATE 分支：坏成 INSERT OR IGNORE 会在此处失败
+        accounts.set_config("invite_code", "A")
+        accounts.set_config("invite_code", "B")
+        self.assertEqual(accounts.get_config("invite_code"), "B")
