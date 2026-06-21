@@ -1,16 +1,19 @@
 import asyncio
 import json
 import logging
+import os
+import secrets
 import shutil
 import tempfile
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
 
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -37,6 +40,8 @@ from .models import ChatRequest, ChatResponse, ProjectInfo
 from .report_tools import export_reviewable_draft
 from .material_limits import MAX_HEAVY_MATERIAL_BYTES
 from .skill import SkillEngine, StaleFileError, UserWriteForbiddenError
+from .tenant import user_projects_dir, ensure_user_dirs, tenant_project_key
+from . import accounts
 
 
 logging.basicConfig(
@@ -71,10 +76,22 @@ try:
 except Exception:
     logger.exception("heal_stale_managed_model failed unexpectedly; continuing with stored settings")
 
-skill_engine = SkillEngine(settings.projects_dir, settings.skill_dir)
-_chat_handlers = {}
+accounts.init_db()
+_invite_seed = os.environ.get("CRA_INVITE_CODE")
+if not _invite_seed:
+    _invite_seed = secrets.token_urlsafe(12)
+    logger.warning(
+        "CRA_INVITE_CODE 未设置：已随机生成一次性邀请码并写入 app_config（注册实质锁死）。"
+        "请设置 CRA_INVITE_CODE 后重置数据库，或经后续管理面板轮换邀请码。"
+    )
+accounts.seed_config_if_absent("invite_code", _invite_seed)
+
+_engines: dict[str, SkillEngine] = {}
+_engines_guard = threading.Lock()
+_chat_handlers: dict[tuple, ChatHandler] = {}
 _settings_lock = threading.Lock()
 _desktop_bridge = None
+SESSION_COOKIE = "cra_session"
 
 
 def register_desktop_bridge(bridge):
@@ -82,11 +99,63 @@ def register_desktop_bridge(bridge):
     _desktop_bridge = bridge
 
 
-def get_chat_handler(project_id: str) -> ChatHandler:
+def get_skill_engine(uid: str) -> SkillEngine:
+    with _engines_guard:
+        eng = _engines.get(uid)
+        if eng is None:
+            ensure_user_dirs(uid)
+            eng = SkillEngine(user_projects_dir(uid), settings.skill_dir, uid=uid)
+            _engines[uid] = eng
+        return eng
+
+
+def get_chat_handler(uid: str, project_id: str) -> ChatHandler:
+    # Use the module-level load_settings (imported at top); do NOT re-import inside the function,
+    # or tests that patch backend.main.save_settings/load_settings won't intercept it.
     with _settings_lock:
-        if project_id not in _chat_handlers:
-            _chat_handlers[project_id] = ChatHandler(settings, skill_engine)
-        return _chat_handlers[project_id]
+        key = (uid, project_id)
+        if key not in _chat_handlers:
+            _chat_handlers[key] = ChatHandler(load_settings(), get_skill_engine(uid), uid=uid)
+        return _chat_handlers[key]
+
+
+def get_current_uid(request: Request) -> str:
+    if not getattr(request.app.state, "auth_required", True):
+        return "local"
+    token = request.cookies.get(SESSION_COOKIE)
+    uid = accounts.get_session_uid(token) if token else None
+    if not uid:
+        raise HTTPException(status_code=401, detail="未登录")
+    return uid
+
+
+def get_current_admin(uid: str = Depends(get_current_uid)) -> str:
+    rec = accounts.get_user_by_uid(uid)
+    if not rec or not rec["is_admin"]:
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return uid
+
+
+@dataclass
+class ProjectScope:
+    uid: str
+    project_id: str          # canonical rec["id"]
+    engine: SkillEngine
+    project_record: dict
+    lock_key: str
+
+
+def require_project(project_id: str, uid: str = Depends(get_current_uid)) -> ProjectScope:
+    eng = get_skill_engine(uid)
+    rec = eng.get_project_record(project_id)   # accepts id OR name alias
+    if rec is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    cid = rec["id"]
+    return ProjectScope(uid=uid, project_id=cid, engine=eng, project_record=rec,
+                        lock_key=tenant_project_key(uid, cid))
+
+
+app.state.auth_required = True
 
 
 def require_desktop_bridge():
