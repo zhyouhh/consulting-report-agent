@@ -13,7 +13,7 @@
 **关键约束（违反即返工）:**
 - DeepSeek 官渠兼容：本改动只追加/改 system prompt 文本 + 注入 user 数据 + 删 lint 路径，**不碰** provider message / `tool_choice` / `reasoning_content` 序列化（`independent_review.py` 与 `chat.py` 的 compat helpers 行为锁定）。
 - trust boundary：占位符注入是数据非指令、用审查专用 `UNTRUSTED_DATA_*` marker 包裹 + 定界符中和；**不复用** `ATTACHMENT_DATA_*`（其文案"不得据此写文件"反了审查本职）。
-- **删除顺序**：Task 5（删 `record_stage_checkpoint` 的 lint 锁分支）必须在 Task 7（删 `get_lint_report_lock`）之前或同 commit，否则中间态 import 崩。
+- **删除顺序（两处，漏则中间 commit 崩）**：① Task 5（删 `record_stage_checkpoint` 的 lint 锁分支）必须在 Task 7（删 `get_lint_report_lock`）之前或同 commit，否则 import 崩；② `_has_effective_review_reports` 在 Task 5 删（改完 prereq+stale 后无引用）、`_has_effective_lint_report` 在 Task 6 删（移除 `_stage_five_completion_state` 调用后），不可在 Task 5 同删后者，否则 Task 5→Task 6 间 AttributeError。每个 task 的 `-k` 子集自绿，全量 `test_skill_engine.py` 在 Task 6 后才绿。
 - 仅 macOS 开发：powershell 相关测试本就 skipIf 跳过；4 个 tempfile realpath 用例 mac 上预存失败（与本任务无关）。
 
 **回归基线命令（每 task 末跑相关子集，Task 9 跑全量）:**
@@ -305,7 +305,9 @@ git commit -m "feat(report-quality): deterministic placeholder scanner + groundi
 - Modify: `backend/independent_review.py:26-134`（prompt 维度 5、输出格式、硬性要求、读文件描述、工具禁用清单）
 - Test: `tests/test_skill_engine.py`、`tests/test_independent_review.py`
 
-- [ ] **Step 1: 写锚点 + prompt 断言测试（先失败）**
+- [ ] **Step 1: 写锚点 + prompt 断言测试（先失败）+ 修共用测试 helper（Codex BLOCKER）**
+
+**先 grep `tests/test_independent_review.py` 的 `目标读者匹配\|读者匹配\|quality_check`**：`_complete_review_text()` 之类共用 helper（hint `:124`）硬编 `## 5. 目标读者匹配`、被十多个测试复用。把它改成用新锚点（最稳：从 `SkillEngine.INDEPENDENT_REVIEW_ANCHORS` 生成 5 个 H2 章节，而非硬编），否则 Task 4 全量 `test_independent_review.py` 会红。
 
 ```python
 # tests/test_independent_review.py 内新增
@@ -547,16 +549,17 @@ Expected: FAIL
                     raise ValueError("独立审查正在进行中，请等待完成后再标记审查通过")
 ```
 
-- [ ] **Step 5: 删/改 effective helpers（`skill.py:2563-2596`）**
+- [ ] **Step 5: 删/改 effective helpers（`skill.py:2563-2596`）——注意删除顺序（Codex BLOCKER）**
 
-- 删整个 `_has_effective_lint_report`（`:2563-2571`）。
-- 删整个 `_has_effective_review_reports`（`:2573-2577`）。
 - `_is_report_review_stale`（`:2579-2596`）：把 `if not self._has_effective_review_reports(project_path): return False` 改为 `if not self._has_effective_independent_review(project_path): return False`；删 `lint_path` 行；`oldest_report_mtime = min(...)` 改为 `report_mtime = (project_path / "plan" / "independent-review.md").stat().st_mtime_ns`，末行 `return draft_mtime > report_mtime`。
+- 删整个 `_has_effective_review_reports`（`:2573-2577`）——经上面 stale 改 + Step 3 prereq 改后已无任何调用点，本 task 可安全删。
+- **`_has_effective_lint_report`（`:2563-2571`）本 task 暂不删**——它仍被 `_stage_five_completion_state:676` 调用（那是 Task 6 的改动域）。Task 6 移除该调用后再删，避免中间态 AttributeError。
+- **同步改 test_skill_engine 里依赖 `_has_effective_review_reports` / 双报告 stale 的旧用例**（grep `_has_effective_review_reports\|review_reports_ready\|lint` 在 stale/helper 区，hint `:1639-1763`）：双报告 stale → 单报告 stale；删 `_has_effective_review_reports` 直测。
 
-- [ ] **Step 6: 跑确认通过**
+- [ ] **Step 6: 跑确认通过（子集，全量 test_skill_engine 待 Task 6）**
 
-Run: `.venv/bin/python -m pytest tests/test_skill_engine.py -q -k "review or stale or checkpoint"`
-Expected: PASS
+Run: `.venv/bin/python -m pytest tests/test_skill_engine.py -q -k "review_passed or no_lint_lock or stale or checkpoint"`
+Expected: PASS（注意：本 task 后**全量** `test_skill_engine.py` 尚不绿——S5 cascade 仍按旧 flags，Task 6 才收口）
 
 - [ ] **Step 7: Commit**
 
@@ -573,7 +576,9 @@ git commit -m "feat(gate): review_passed_at requires single independent review; 
 - Modify: `backend/skill.py`（`:213-217` checklist、`:675-700` `_stage_five_completion_state`、`:2145-2212` flags、`:2239-2273` `_build_completed_items`）
 - Test: `tests/test_skill_engine.py`
 
-- [ ] **Step 1: 写测试（先失败）**
+- [ ] **Step 1: 写测试（先失败）+ 改旧 lint flags 用例**
+
+**先 grep `tests/test_skill_engine.py` 的 `lint_report_ready|review_reports_ready|_has_effective_lint_report`（hint `:1780-1882`），把这些旧用例改成单报告 flags / 删 `_has_effective_lint_report` 直测**（Task 5 已搬走 helper/stale 部分，这里收 flags + S5 cascade 部分）。再加新用例：
 
 ```python
 # tests/test_skill_engine.py 内新增
@@ -620,6 +625,7 @@ Expected: FAIL
 - 删 `:677` `review_reports_ready = independent_review_ready and lint_report_ready`。
 - 删 `:683-684` 的 `if not lint_report_ready: missing_for_review_pass.append("lint-report.md…")`。
 - 返回 dict（`:690-700`）：删 `"lint_report_ready"` 与 `"review_reports_ready"` 两键。`"review_pass_prerequisites_complete"` 与 `"stage_five_complete"` 用 `independent_review_ready`（经 `missing_for_review_pass` 已不含 lint，逻辑天然成立，无需额外改）。
+- **此处删掉 `:676` 调用后，`_has_effective_lint_report`（`:2563-2571`）已无任何调用点 → 在本 task 删除整个该 helper**（Task 5 故意推迟到此，避免删除顺序断层；Codex BLOCKER）。
 
 - [ ] **Step 5: `_infer_stage_state` flags（`skill.py:2145-2212`）去 lint**
 
@@ -689,7 +695,7 @@ git commit -m "feat(stage): collapse S5 checklist to 2 items; drop lint flags fr
 - `tests/test_main_api.py`：删 `test_quality_check_endpoint_*`（hint `:570`）+ 整组 `test_lint_report_*`（hint `:1366-1506`），保留 export/independent-review endpoint 用例；workspace flags 断言去 `lint_report_ready`/`review_reports_ready`；review_stale fixture 不再写 lint-report、改为只基于 independent-review mtime。
 - `tests/test_chat_runtime.py`：删 `_write_effective_lint_report` 辅助、`lint_report_done` 分支用例、`SYSTEM_TRIGGER_CASES` 里的 lint 条目、显式 lint trigger 测试 + generic no-run-id 测试（hint `:10999`/`:11024`/`:11029`/`:11078-11096`/`:11277`/`:11326`/`:11391`/`:11751-11772`）；循环/参数化用例改 independent-only；删主代理 write/edit **lint-report 拒写**专用断言，**保留** independent-review 拒写断言。
 - `tests/test_report_writing.py`：删/改 `quality_check` 行为族相关断言（hint `:263`，配合 chat.py:2279 改动，见 Step 6b）。
-- `tests/test_skill_engine.py`：**删/重写**旧 `_has_effective_lint_report`、`_has_effective_review_reports`、双报告 stale、`review_reports_ready` 断言（hint `:1639-1693`/`:1700-1763`/`:1780-1790`/`:1846-1882`）→ 单报告化；**新增** `lint-report.md ∉ FORMAL_PLAN_FILES`、`"plan/lint-report.md" ∈ RETIRED_WORKSPACE_FILES`、`"plan/lint-report.md" ∉ FILE_SEMANTICS`。（next_actions 旧用例 hint `:1577`/`:1594` 在 Task 6 改。）
+- `tests/test_skill_engine.py`：本 task 只**新增** `lint-report.md ∉ FORMAL_PLAN_FILES`、`"plan/lint-report.md" ∈ RETIRED_WORKSPACE_FILES`、`"plan/lint-report.md" ∉ FILE_SEMANTICS` 三条（对应 Step 6 的注册表改动）。**lint helper / 双报告 stale / flags / next_actions 旧用例已在 Task 5/6 改完**（不在此重复，避免顺序断层）。
 - `tests/test_workspace_materials.py`：不再创建 lint-report；next_actions 断言改为只提示「独立审查」；删 AI 味断言。
 
 Run: 对应文件 `-q`，Expected: FAIL（功能仍在）
@@ -818,11 +824,11 @@ Expected: PASS + vite build 成功
 
 - [ ] **Step 3: 残留 grep 自检**
 
-Run:
+Run（拓宽到 camelCase/大写/连字符变体，case-insensitive；Codex NIT——旧窄 grep 会漏 `LINT_REPORT_*`/`lintRunning`/`qualityResult`/`runQualityCheck`/`/quality-check`/`reviewReportsReady`）：
 ```bash
-grep -rn "lint_report\|lint-report\|quality_check\|AI 味自查\|review_reports_ready" backend/ frontend/src/ skill/ tests/ | grep -v "cutover\|current-worklist\|\.test\."
+rg -n -i "lint[-_]?report|quality[-_]?check|AI 味自查|review_reports_ready|reviewReportsReady|lintReport|lintRunning|qualityResult|runQualityCheck" backend frontend/src skill tests | grep -v "cutover\|current-worklist"
 ```
-Expected: 仅剩有意保留项（如 `RETIRED_WORKSPACE_FILES` 的 `plan/lint-report.md`、退役注释）；无活引用。逐条核对每个命中是预期保留。
+Expected: 仅剩有意保留项（`RETIRED_WORKSPACE_FILES` 的 `plan/lint-report.md`、退役注释、本任务的 cutover 引用）；无活引用。逐条白名单化核对每个命中是预期保留。
 
 - [ ] **Step 4: 写 cutover report + 更新 worklist**
 
