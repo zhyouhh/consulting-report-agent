@@ -1,6 +1,6 @@
 # Current Worklist
 
-最后更新：2026-06-21（**N7 统一审查 + 去 AI 味（= W2-A）spec + plan 双双 Codex APPROVED（spec 5 轮 / plan 9 轮），待实施**——brainstorm 定「两审查合并成一个『独立审查』+ 新增维度⑤语言专业性·去 AI 味（吸收 Humanizer-zh 18 类可迁移规则）+ 占位符纯 Python 扫描 grounding + 删整条 lint/PowerShell 路径」；spec `docs/superpowers/specs/2026-06-21-n7-unified-review-deai-design.md`、plan `docs/superpowers/plans/2026-06-21-n7-unified-review-deai.md`（9 TDD task，真值源）；**分支 `feat/n7-unified-review-deai`（13 commits、未 push、未实施）**。plan 关键决策：Task 7+8 删 lint 为一个原子 commit（删接口与删消费者不可分）、`_has_effective_lint_report` 按 grep 引用图在 Task 5/6/7 分步删。**下一步：实施（subagent-driven，每 task commit 后 Codex review）**。详见下方 N7 条。
+最后更新：2026-06-21（**N7 统一审查 + 去 AI 味（= W2-A）✅ 实施完成**——两审查合并成一个「独立审查」+ 维度⑤语言专业性·去 AI 味（吸收 Humanizer-zh 可迁移规则）+ 占位符纯 Python 扫描 grounding + 删整条 lint/PowerShell 审查路径，审查路径自此纯 Python、零 PowerShell；**subagent-driven 7 个实现 commit、每 commit 后 Codex 双轨独立 review 全 APPROVED**（含 Task 5 计划内偏离被 Codex 独立判定 valid & necessary、Task 7+8 原子删 41 文件 −1797 行）；后端 **1208 passed / 4 mac-realpath 环境差异**、前端 **327 passed**、`npm run build` 绿；**分支 `feat/n7-unified-review-deai` 未 push / 未 merge main**。cutover：`docs/superpowers/cutover_report_2026-06-21_n7-unified-review-deai.md`。**下一步：用户决定 push/merge；之后 W2-B 多租户 + W2-C 部署/剩余去 Windows 化**。详见下方 N7 条。
 
 上一次更新：2026-06-21（**N6 + W1 技术标 + R5 硬卡修复 均已 merge main + push origin（HEAD `06eec26`，已核实 local==origin/main）；轮 1 全收口**——W1 subagent-driven（预检砍掉 N6 已覆盖的 Task 5/6，10→8 task）+ Codex 双轨独立 + 整 branch 综合审全 APPROVED（quality 红队挖出 Task7 半假绿并修）；**真模型 GUI E2E（deepseek-v4-pro）亲跑通过**：bid 方法论注入/RFP 评分点结构/后置两表/字数护栏全落地，并暴露一个 pre-existing R5 硬卡（方法论声明放 `## 确认状态` 之下 parser 扫不到 → 确认大纲门对全 7 类硬卡），**同分支已修**（outline 模板内置声明槽位 + 指令点明位置，不碰 trust-boundary parser；Codex APPROVED）。后端 1207 passed / 4 mac-realpath 环境差异、前端 331 passed、token 注入块 1712≤2000。已 **merge main（`9e9a869` --no-ff，分支 `feat/w1-technical-bid-type` 保留）+ push origin（HEAD `06eec26`）**。N6 详情见下——N6 走 subagent-driven 实施，A–E+F1+F3 每阶段 codex/opus 红队 review 全 APPROVED + 整 branch 综合审 APPROVED（红队累计挖出 sentinel 越狱/压缩边界泄漏/缓存投毒 TOCTOU/客户端 id 注入等真安全洞，全修）；F4 薄网关白名单透传 + 视觉模型已上线 jp-app-01 并实测转写 200。分支 `feat/n6-attachment-pipeline` 已 **merge main（`95949ab`）+ push origin**；仅剩 F2（Windows 打包 smoke + 删 legacy 解析器；**2026-06-21 用户决定推迟到 W2 服务器化一起做**——W2 去 Windows 化本就要改解析层）。**下一步：W2 服务器化 + 多用户 Web（待设计，brainstorm 进行中）**。详见下方 N6/W1 条。
 > 设计期历史（2026-06-20）：N6 spec(5 轮)+plan(7 轮·红队)、W1 spec(4 轮)+plan(2 轮·红队) 均 codex APPROVED；上机只读核实 jp-app-01 拓扑后把 N6 proxy 设计从「自建 per-model 路由」简化为「透传+SELECTABLE_MODELS」。）
@@ -42,7 +42,7 @@
   - **登录 + 鉴权**：登录页 + 会话（cookie/JWT 待定）；每个项目 / 文件接口**校验调用者归属**；账号邀请制 / 管理员建（非自助注册）。
   - **进程内单例 / 锁按 uid 键化**：`_SEARCH_ROUTER_SINGLETON`、`ReviewSessionStore`、各 RLock（现为单用户假设）。
   - **文件导入**：`DesktopBridge` 原生选择器（web 模式本就 503）→ 浏览器上传。
-  - **去 Windows 化**：`quality_check.ps1` / `export_draft.ps1` 改 Python（或 Linux 跑 pwsh），`pandoc.exe` 换 Linux 版。
+  - **去 Windows 化**：`export_draft.ps1` 改 Python（或 Linux 跑 pwsh），`pandoc.exe` 换 Linux 版（`quality_check.ps1` 部分已由 N7 删除/合并进独立审查维度⑤，审查路径已纯 Python）。
   - **账号存储**：元数据 SQLite 起步；**项目工作区仍走文件系统**（按 uid 隔离），不把文件驱动引擎搬进 DB。
   - **部署**：venv 跑 uvicorn + Cloudflare 域名 / HTTPS。
 - **安全红线（web 新增威胁面，桌面版只绑 127.0.0.1 没有）**：① 每接口校验资源归属（A 不能读 B）；② `custom` 模式自填 API base 堵 SSRF；③ LLM / 搜索 per-user 日配额防滥用；④ 上传文件类型 / 大小 / 内容校验；⑤ 沿用报告内容 trust boundary（数据非指令）。
@@ -97,10 +97,11 @@
 - **薄网关已上机核实拓扑（2026-06-20 SSH 只读）**：薄网关 = `consulting-report-managed-proxy` 容器在 **jp-app-01**（`43.153.168.175:2233`，连接走 VPS-fix 库 `notes/jp-app-01.md`），上游指**本地 new-api**（`127.0.0.1:3000`）；**new-api 已按模型名路由**，**硅基流动渠道 id 60 已配已启用、含 Qwen3-VL 一批**。故 proxy 改 = **白名单透传 + 新 `MANAGED_PROXY_SELECTABLE_MODELS`**（`/v1/models` 仍只露 deepseek-v4-pro），**不需自建 per-model upstream**。**✅ F4 ops 已完成 2026-06-21**：proxy env 加 `ALLOWED_MODELS`(含 Qwen3-VL)+`SELECTABLE_MODELS`+重建容器；并发现 new-api 前置坑（上游 token model_limits 只准 deepseek + 渠道 60 group/abilities 缺 ds）一并配通；视觉转写 200 实测过。备份+回滚见 `VPS-fix-private/notes/jp-app-01.md`。
 - **N6 先于 W1**：N6 接管材料层 + size 守门 + 材料 trust boundary（W1 安全强边界依赖它）。
 
-**N7. S5 质量审查重做：合并成一个 LLM 独立审查 + 去 AI 味（吸收 Humanizer-zh）** — 状态：`✅ spec + plan 均 Codex APPROVED（spec 5 轮 / plan 9 轮），待实施`（属 W2 服务器化的 **W2-A**，先于 W2-B 多租户、W2-C 部署+剩余去 Windows 化）
+**N7. S5 质量审查重做：合并成一个 LLM 独立审查 + 去 AI 味（吸收 Humanizer-zh）** — 状态：`✅ 实施完成（2026-06-21，subagent-driven 7 实现 commit，每 commit 后 Codex 双轨独立 review 全 APPROVED；后端 1208 passed/4 mac-realpath、前端 327 passed、build 绿；分支 feat/n7-unified-review-deai 未 push/未 merge）`（属 W2 服务器化的 **W2-A**，先于 W2-B 多租户、W2-C 部署+剩余去 Windows 化）
 - **决策（brainstorm 定）**：两审查合并成**一个「独立审查」按钮**——独立审查 5 维度删「目标读者匹配」（N3 已删该输入字段、维度悬空）、加第 5 维「语言专业性与去 AI 味」（誊入 Humanizer-zh 18 类✅可迁移规则 + 黑名单，prompt 写死排除❌口语/第一人称/情绪自白）；删 `quality_check.{ps1,sh}` lint 脚本 + lint-report 路径；加十几行纯 Python 占位符扫描作 grounding 注入（首轮、对用户隐形）。审查路径自此纯 Python、零 PowerShell。
 - **关键设计**：扩展 `IndependentReviewAgent`（不新建）；抽 `backend/trust_boundary.py`（解循环导入 + 新 `UNTRUSTED_DATA_*` marker）+ 新 `backend/report_quality.py`（占位符扫描）；门禁 `review_passed_at` 改单报告；S5 checklist 3→2 + cascade；Task 7+8 删 lint 路径为**一个原子 commit**（删接口与删消费者不可分）。
-- spec：`docs/superpowers/specs/2026-06-21-n7-unified-review-deai-design.md`；plan：`docs/superpowers/plans/2026-06-21-n7-unified-review-deai.md`（9 TDD task，实施真值源）。分支 `feat/n7-unified-review-deai`。
+- spec：`docs/superpowers/specs/2026-06-21-n7-unified-review-deai-design.md`；plan：`docs/superpowers/plans/2026-06-21-n7-unified-review-deai.md`（9 TDD task）；**cutover：`docs/superpowers/cutover_report_2026-06-21_n7-unified-review-deai.md`**。分支 `feat/n7-unified-review-deai`。
+- **实施记录**：trust_boundary.py 叶子模块（解循环导入 + UNTRUSTED_DATA marker）+ report_quality.py 占位符扫描已落地；门禁/checklist/cascade 全改单报告；lint 全路径（后端/前端/脚本/模板/9 处文档/根 CLAUDE+AGENTS.md）原子删除。残留 grep 仅退役条目 + 负向守卫，无 live 引用。
 - Humanizer-zh（op7418）实证为**纯 prompt skill**（无脚本/词表），可借的就是 prompt 内容本身。
 - 关联：W2-C 去 Windows 化只剩 `export_draft.ps1` + Linux pandoc（quality_check 部分本 N7 已删/合并）。
 
@@ -118,7 +119,7 @@ R1. **S5 子代理「独立审查」重做为迷你聊天界面 + 断点续审**
   - ✅ C6 回归矩阵核对 spec §6 零缺口（codex R1 必补三类 os.replace/staged-write-resume/mtime 大整数全已有测试）+ cutover report
   - 测试全绿：后端 test_main_api+independent_review+skill_engine **253 pass**、chat_runtime `-k` targeted **31 pass**、前端 `node --test` **253 pass**、vite build 通过。mtime/run_id 全程 str 无 Number 强转。
   - **剩**：真实 GUI 手工 E2E（用户·非阻塞，见 cutover report「手工验收待办」：流式旁白 / 模拟断连续审 / 点审查后立刻切项目不卡死该项目审查）。merge+push 已完成（f111f0e，origin/main==main），本地 feat 分支已删。
-  - 预存无关 bug（收尾后查）：`tests/test_lint_report.py` 截断测试在本机 PowerShell 即失败（`skill/scripts/quality_check.ps1` 截断逻辑本地环境问题，与 R1+R2 无关）。
+  - ~~预存无关 bug（收尾后查）：`tests/test_lint_report.py` 截断测试在本机 PowerShell 即失败~~ → **已被 N7 消解**：`tests/test_lint_report.py` 与 `skill/scripts/quality_check.ps1` 均在 N7 整删（lint 路径合并进独立审查），该 bug 不再存在。
 - 现象（demo 暴露）：① 审查跑很久时只能看到子代理"调用了哪些工具"，**看不到它输出的文字**，体感像死机；② 后端一抖/断连就报错，抽屉 3 秒自动关，**活全丢、无法从断处继续**；③ 抽屉只能 ESC 关，不能拖/缩/关，无进度。
 - 目标形态：把 `IndependentReviewDrawer` 重做成**迷你版主代理聊天界面**——实时显示子代理文字输出 + 工具调用（复用主聊天面板的渲染）。
 - 交互：正常审查时**输入框锁定**（自动跑）；**仅报错/断开时解锁输入框**，用户在断掉处输入、让子代理**带累计上下文从断处继续审**（非重头跑）。
