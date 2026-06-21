@@ -144,3 +144,39 @@ class DesktopLocalTests(AuthApiTestBase):
     def test_me_returns_synthetic_local(self):
         r = self.client.get("/api/auth/me")
         self.assertEqual(r.status_code, 200); self.assertEqual(r.json()["uid"], "local")
+
+
+class BootstrapSafetyTests(AuthApiTestBase):
+    def test_bootstrap_admin_from_env(self):
+        import importlib
+        with mock.patch.dict(os.environ, {"CRA_BOOTSTRAP_ADMIN_USERNAME": "root", "CRA_BOOTSTRAP_ADMIN_PASSWORD": "admin-pw"}):
+            import backend.main as m; importlib.reload(m)
+            from backend import accounts
+            rec = accounts.get_user_by_username("root")
+            self.assertIsNotNone(rec); self.assertTrue(rec["is_admin"]); self.assertTrue(rec["must_change_password"])
+            # idempotent: a second reload doesn't create a duplicate / second admin
+            importlib.reload(m)
+            self.assertIsNotNone(accounts.get_user_by_username("root"))
+
+    def test_env_invite_code_is_authoritative(self):
+        from backend import accounts
+        accounts.set_config("invite_code", "OLD-RANDOM")          # simulate a prior random seed
+        import importlib
+        with mock.patch.dict(os.environ, {"CRA_INVITE_CODE": "OPERATOR-CODE"}):
+            import backend.main as m; importlib.reload(m)
+            self.assertEqual(accounts.get_config("invite_code"), "OPERATOR-CODE")
+
+    def test_assert_safe_startup(self):
+        # auth off (desktop) must be loopback
+        with self.assertRaises(SystemExit):
+            self.m.assert_safe_startup(auth_required=False, host="0.0.0.0")
+        self.m.assert_safe_startup(auth_required=False, host="127.0.0.1")  # loopback OK
+        # auth on (web) on 0.0.0.0 is allowed (CRA_INVITE_CODE=JOIN is set by the base)
+        self.m.assert_safe_startup(auth_required=True, host="0.0.0.0")
+
+    def test_assert_safe_startup_web_requires_invite_code(self):
+        # web mode (auth on) with NO CRA_INVITE_CODE must refuse to start
+        # Use empty-string patch: assert_safe_startup treats empty as missing
+        with mock.patch.dict(os.environ, {"CRA_INVITE_CODE": ""}):
+            with self.assertRaises(SystemExit):
+                self.m.assert_safe_startup(auth_required=True, host="0.0.0.0")

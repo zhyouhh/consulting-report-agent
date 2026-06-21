@@ -77,14 +77,37 @@ except Exception:
     logger.exception("heal_stale_managed_model failed unexpectedly; continuing with stored settings")
 
 accounts.init_db()
-_invite_seed = os.environ.get("CRA_INVITE_CODE")
-if not _invite_seed:
-    _invite_seed = secrets.token_urlsafe(12)
+_env_invite = (os.environ.get("CRA_INVITE_CODE") or "").strip()
+if _env_invite:
+    accounts.set_config("invite_code", _env_invite)   # 运维显式设的邀请码每次启动都生效（权威）
+else:
+    accounts.seed_config_if_absent("invite_code", secrets.token_urlsafe(12))  # 未设→随机锁死(fail-closed)
     logger.warning(
         "CRA_INVITE_CODE 未设置：已随机生成一次性邀请码并写入 app_config（注册实质锁死）。"
-        "请设置 CRA_INVITE_CODE 后重置数据库，或经后续管理面板轮换邀请码。"
+        "请设置 CRA_INVITE_CODE 后重启，或经后续管理面板轮换邀请码。"
     )
-accounts.seed_config_if_absent("invite_code", _invite_seed)
+
+
+def _bootstrap_admin():
+    u = os.environ.get("CRA_BOOTSTRAP_ADMIN_USERNAME")
+    p = os.environ.get("CRA_BOOTSTRAP_ADMIN_PASSWORD")
+    if u and p and accounts.get_user_by_username(u) is None:
+        ensure_user_dirs(accounts.create_user(u, p, is_admin=True, must_change_password=True))
+
+
+_bootstrap_admin()
+
+
+# host 在 import 期未知，无法集中化；必须由受支持的入口（run_web.py / app.py）显式调用作早退检查。
+def assert_safe_startup(auth_required: bool, host: str) -> None:
+    if not auth_required and host not in {"127.0.0.1", "::1", "localhost"}:
+        raise SystemExit(f"拒绝启动：auth 关闭时 host 必须 loopback，当前 {host!r}")
+    if auth_required and not (os.environ.get("CRA_INVITE_CODE") or "").strip():
+        raise SystemExit(
+            "拒绝启动：web 模式（鉴权开启）必须显式设置 CRA_INVITE_CODE 环境变量"
+            "（否则邀请码被随机锁死、无人能注册）。示例：CRA_INVITE_CODE=你的邀请码"
+        )
+
 
 _engines: dict[str, SkillEngine] = {}
 _engines_guard = threading.Lock()

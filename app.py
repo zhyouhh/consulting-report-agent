@@ -49,7 +49,7 @@ _setup_app_log()
 
 import webview
 
-from backend.main import register_desktop_bridge, settings, start_server
+from backend.main import app, assert_safe_startup, register_desktop_bridge, settings, start_server
 
 
 class DesktopBridge:
@@ -73,6 +73,9 @@ class DesktopBridge:
 
 def main():
     """启动应用"""
+    app.state.auth_required = False
+    app.state.cookie_secure = False
+    assert_safe_startup(False, settings.host)
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
 
