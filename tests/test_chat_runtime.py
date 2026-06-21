@@ -3849,6 +3849,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_module_and_instance_level_project_locks_share_identity(self, mock_openai):
         del mock_openai
         from backend.chat import _get_project_request_lock as module_lock
+        from backend.tenant import tenant_project_key
 
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
@@ -3858,7 +3859,10 @@ class ChatRuntimeTests(unittest.TestCase):
             "set",
         )
 
-        module_obj = module_lock(self.project_id)
+        # W2-B 多租户：实例 helper / record_stage_checkpoint 都用复合键 (uid, project_id)，
+        # 故模块级 registry 取同一把锁须用同样的复合键（uid 默认 "local"）。
+        composite_key = tenant_project_key("local", self.project_id)
+        module_obj = module_lock(composite_key)
         instance_obj = handler._get_project_request_lock(self.project_id)
         with mock.patch("backend.main.get_chat_handler") as mock_get_chat_handler:
             handler.skill_engine.record_stage_checkpoint(
@@ -3866,7 +3870,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "outline_confirmed_at",
                 "set",
             )
-            checkpoint_obj = module_lock(self.project_id)
+            checkpoint_obj = module_lock(composite_key)
 
         self.assertIs(module_obj, instance_obj)
         self.assertIs(module_obj, checkpoint_obj)
@@ -10861,6 +10865,7 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         the chat route would forward. Returns {run_id, report_mtime_ns}."""
         from backend.independent_review import _REVIEW_SESSION_STORE
 
+        # 审查 store 键迁移整体留 T11；T6 审查侧仍裸键，seed 用裸 project_id（与 chat 读、端点 worker 一致）。
         report_path = self.project_dir / "plan" / "independent-review.md"
         if mtime_ns is None:
             mtime_ns = str(report_path.stat().st_mtime_ns)
@@ -11451,6 +11456,7 @@ class SystemTriggerRunBoundTests(SystemTriggerStreamTests):
     def _review_lock(self):
         from backend.independent_review import get_independent_review_lock
 
+        # 审查锁键迁移整体留 T11；T6 审查侧仍裸键，断言取裸 project_id 锁（与 chat 读、端点 worker 一致）。
         return get_independent_review_lock(self.project_id)
 
     def _assert_review_lock_free(self):

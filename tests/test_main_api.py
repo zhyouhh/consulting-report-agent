@@ -1808,7 +1808,10 @@ class R3FileApiTests(unittest.TestCase):
         # 持有与聊天同一把 per-project 锁时，POST 必须阻塞到锁释放（CAS 串行化、不丢写）。
         import backend.chat as chat_mod
         import threading as _t
-        lock = chat_mod._get_project_request_lock(self.pid)
+        from backend.tenant import tenant_project_key
+        # W2-B 多租户：文件写端点经 handler._get_project_request_lock 取复合键 (uid, project_id) 锁，
+        # 模拟「持同一把锁」须用同样的复合键（uid 默认 "local"），否则锁错把、测不到串行化。
+        lock = chat_mod._get_project_request_lock(tenant_project_key("local", self.pid))
         base = self._mtime("content/report_draft_v1.md")
         done = {"status": None}
 
@@ -1840,10 +1843,12 @@ class R3FileApiTests(unittest.TestCase):
         # mtime 前移；POST 拿到锁后 stat 复校应检出 stale → 409，绝不用旧 base 覆盖 AI 的写入。
         import backend.chat as chat_mod
         import threading as _t
+        from backend.tenant import tenant_project_key
         rel = "content/report_draft_v1.md"
         full = self.project_dir / "content" / "report_draft_v1.md"
         base = self._mtime(rel)
-        lock = chat_mod._get_project_request_lock(self.pid)
+        # W2-B 多租户：文件写端点取复合键 (uid, project_id) 锁；模拟须用同样复合键（uid 默认 "local"）。
+        lock = chat_mod._get_project_request_lock(tenant_project_key("local", self.pid))
         done = {"status": None}
 
         def _save():
