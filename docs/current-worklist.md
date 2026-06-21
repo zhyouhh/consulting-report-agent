@@ -95,10 +95,12 @@
 - **薄网关已上机核实拓扑（2026-06-20 SSH 只读）**：薄网关 = `consulting-report-managed-proxy` 容器在 **jp-app-01**（`43.153.168.175:2233`，连接走 VPS-fix 库 `notes/jp-app-01.md`），上游指**本地 new-api**（`127.0.0.1:3000`）；**new-api 已按模型名路由**，**硅基流动渠道 id 60 已配已启用、含 Qwen3-VL 一批**。故 proxy 改 = **白名单透传 + 新 `MANAGED_PROXY_SELECTABLE_MODELS`**（`/v1/models` 仍只露 deepseek-v4-pro），**不需自建 per-model upstream**。**✅ F4 ops 已完成 2026-06-21**：proxy env 加 `ALLOWED_MODELS`(含 Qwen3-VL)+`SELECTABLE_MODELS`+重建容器；并发现 new-api 前置坑（上游 token model_limits 只准 deepseek + 渠道 60 group/abilities 缺 ds）一并配通；视觉转写 200 实测过。备份+回滚见 `VPS-fix-private/notes/jp-app-01.md`。
 - **N6 先于 W1**：N6 接管材料层 + size 守门 + 材料 trust boundary（W1 安全强边界依赖它）。
 
-**N7. S5 质量审查重做：AI 味自查太生硬 / 考虑与独立审查合并** — 状态：`待设计`
-- 现状：「AI 味自查」是 PowerShell 脚本 `skill/scripts/quality_check.ps1`（4 机械维度，写 `plan/lint-report.md`）；「独立审查」是 LLM 会话 `IndependentReviewAgent`（5 维度，写 `plan/independent-review.md`）。脚本式生硬 + 去 Windows 化本就要把它改 Python。
-- 想法：参考 Humanizer-zh skill（https://github.com/op7418/Humanizer-zh）重做 AI 味判断，或**直接和独立审查合并成「一个审查」**。brainstorm 时定：合并 vs 并存、用 LLM 替脚本后两按钮要不要并一个。
-- 关联：去 Windows 化（W2，`quality_check.ps1`/`export_draft.ps1` 改 Python）。
+**N7. S5 质量审查重做：合并成一个 LLM 独立审查 + 去 AI 味（吸收 Humanizer-zh）** — 状态：`✅ spec + plan 均 Codex APPROVED（spec 5 轮 / plan 9 轮），待实施`（属 W2 服务器化的 **W2-A**，先于 W2-B 多租户、W2-C 部署+剩余去 Windows 化）
+- **决策（brainstorm 定）**：两审查合并成**一个「独立审查」按钮**——独立审查 5 维度删「目标读者匹配」（N3 已删该输入字段、维度悬空）、加第 5 维「语言专业性与去 AI 味」（誊入 Humanizer-zh 18 类✅可迁移规则 + 黑名单，prompt 写死排除❌口语/第一人称/情绪自白）；删 `quality_check.{ps1,sh}` lint 脚本 + lint-report 路径；加十几行纯 Python 占位符扫描作 grounding 注入（首轮、对用户隐形）。审查路径自此纯 Python、零 PowerShell。
+- **关键设计**：扩展 `IndependentReviewAgent`（不新建）；抽 `backend/trust_boundary.py`（解循环导入 + 新 `UNTRUSTED_DATA_*` marker）+ 新 `backend/report_quality.py`（占位符扫描）；门禁 `review_passed_at` 改单报告；S5 checklist 3→2 + cascade；Task 7+8 删 lint 路径为**一个原子 commit**（删接口与删消费者不可分）。
+- spec：`docs/superpowers/specs/2026-06-21-n7-unified-review-deai-design.md`；plan：`docs/superpowers/plans/2026-06-21-n7-unified-review-deai.md`（9 TDD task，实施真值源）。分支 `feat/n7-unified-review-deai`。
+- Humanizer-zh（op7418）实证为**纯 prompt skill**（无脚本/词表），可借的就是 prompt 内容本身。
+- 关联：W2-C 去 Windows 化只剩 `export_draft.ps1` + Linux pandoc（quality_check 部分本 N7 已删/合并）。
 
 ### 🔴 领导评审反馈整改（2026-06-05，高优先簇 · 整体高于下方「UI 重构」一档）
 
