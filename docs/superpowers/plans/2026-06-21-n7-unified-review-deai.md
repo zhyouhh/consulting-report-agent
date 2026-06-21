@@ -788,6 +788,7 @@ git rm skill/scripts/quality_check.ps1 skill/scripts/quality_check.sh skill/plan
 - `skill/modules/consulting-lifecycle.md`（~`:20`）
 - `skill/modules/quality-review.md`（~`:112` 跑脚本指引、~`:136` `bash scripts/quality_check.sh`、~`:139` powershell 行——删或标退役）
 - `skill/modules/final-delivery.md`（~`:72`）
+- **根级硬约束文档 `CLAUDE.md` + `AGENTS.md`（Codex r7 BLOCKER——否则仓库级维护指令变反向约束）**：整段「## S5 用户触发审查」（`CLAUDE.md:102-148` / `AGENTS.md:102-140`）重写为单「独立审查」路径——删两按钮表/`plan/lint-report.md`/`_has_effective_review_reports`/`_LINT_REPORT_LOCKS`/双报告 `review_stale`/「StagePanel S5 显两按钮」；`review_passed_at` 门禁改 `_has_effective_independent_review`、`review_stale` 改单报告；新增维度⑤「语言专业性·去 AI 味」+ 占位符扫描 + `trust_boundary.py`/`report_quality.py` 说明。CLAUDE.md:273 macOS 注脚的「S5 两个按钮」改为「『导出可审草稿』」（AI 味自查已并入独立审查、不再是 PowerShell）。
 
 - [ ] **Step 4: 前端去 lint 按钮 + `/quality-check` 死路径**
 
@@ -797,6 +798,7 @@ git rm skill/scripts/quality_check.ps1 skill/scripts/quality_check.sh skill/plan
 - `utils/stagePanelButtons.js`：去 `lint_report_ready` 高亮 + `lintRunning` 互斥（S5 只剩独立审查按钮）。
 - `utils/workspaceSummary.js:39`：去 `review_reports_ready` 消费、用 `independent_review_ready`。
 - `utils/fileTree.js:26`：删 `FILE_DISPLAY_NAMES` 的 `"plan/lint-report.md": "AI 味自查报告"` 映射（Codex NIT，否则 final grep 残留活前端文案）。
+- **`git rm frontend/src/utils/workspacePanelState.js` + `frontend/tests/workspacePanelState.test.mjs`**（Codex r7 BLOCKER：该模块只有 `getNextQualityResult()`、专为 `qualityResult` 跨项目保存/清空；删 qualityResult 后整模块死）；同步删 `WorkspacePanel.jsx` 里对它的 import + 调用。
 - `backend/skill.py:1496-1500`：`validate_user_write` docstring 提到 `independent-review/lint-report` 的旧说明改为只 independent-review + 退役文件默认拒写（Codex NIT，非运行时问题，顺手清）。
 
 - [ ] **Step 5: 跑确认通过（Task 7+8 合并后的首次全量——原子 lint 删除完成）**
@@ -836,8 +838,9 @@ Expected: PASS + vite build 成功
 
 Run（拓宽到 camelCase/大写/连字符变体，case-insensitive；Codex NIT——旧窄 grep 会漏 `LINT_REPORT_*`/`lintRunning`/`qualityResult`/`runQualityCheck`/`/quality-check`/`reviewReportsReady`）：
 ```bash
-rg -n -i "lint[-_]?report|quality[-_]?check|AI 味自查|review_reports_ready|reviewReportsReady|lintReport|lintRunning|qualityResult|runQualityCheck" backend frontend/src skill tests | grep -v "cutover\|current-worklist"
+rg -n -i "lint[-_]?report|quality[-_]?check|AI 味自查|review_reports_ready|reviewReportsReady|lintReport|lintRunning|qualityResult|runQualityCheck|_has_effective_lint_report|_LINT_REPORT_LOCKS|_has_effective_review_reports" backend frontend/src frontend/tests skill tests CLAUDE.md AGENTS.md | grep -v "cutover\|current-worklist"
 ```
+（**搜索路径含 `frontend/tests` + 根级 `CLAUDE.md`/`AGENTS.md`**——Codex r7：前者藏 workspacePanelState 测试、后者是硬约束文档残留点。）
 Expected: 仅剩有意保留项（`RETIRED_WORKSPACE_FILES` 的 `plan/lint-report.md`、退役注释、本任务的 cutover 引用）；无活引用。逐条白名单化核对每个命中是预期保留。
 
 - [ ] **Step 4: 写 cutover report + 更新 worklist**
