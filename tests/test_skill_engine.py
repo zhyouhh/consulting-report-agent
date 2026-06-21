@@ -1574,9 +1574,9 @@ class SkillEngineTests(unittest.TestCase):
             self.assertEqual(summary["stage_code"], "S5")
             self._assert_items_include(summary["completed_items"], "report_draft_v1.md")
             self._assert_items_include(summary["next_actions"], "独立审查")
-            self._assert_items_include(summary["next_actions"], "AI 味自查")
+            self._assert_items_exclude(summary["next_actions"], "AI 味自查")
 
-    def test_workspace_summary_keeps_stage_at_s5_until_both_review_reports_exist(self):
+    def test_workspace_summary_keeps_stage_at_s5_until_review_passed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine, project_dir = self._create_engine_and_project(tmpdir)
             self._write_stage_two_prerequisites(project_dir)
@@ -1591,7 +1591,8 @@ class SkillEngineTests(unittest.TestCase):
 
             self.assertEqual(summary["stage_code"], "S5")
             self._assert_items_include(summary["completed_items"], "独立审查完成")
-            self._assert_items_include(summary["next_actions"], "AI 味自查")
+            self._assert_items_exclude(summary["next_actions"], "AI 味自查")
+            self._assert_items_include(summary["next_actions"], "确认通过")
 
     def test_has_effective_independent_review_rejects_template_stub(self):
         project_dir = self._make_project()
@@ -1806,40 +1807,78 @@ class SkillEngineTests(unittest.TestCase):
     def test_stage_five_completion_state_includes_new_fields(self):
         project_dir = self._make_project_past_s4()
         self.engine._save_stage_checkpoint(project_dir, "review_started_at")
-        self._write_review_checklist(project_dir)
 
         state = self.engine._stage_five_completion_state(project_dir)
         inferred_flags = self.engine._infer_stage_state(project_dir)["flags"]
 
         self.assertFalse(state["review_checklist_ready"])
         self.assertFalse(state["independent_review_ready"])
-        self.assertFalse(state["lint_report_ready"])
-        self.assertFalse(state["review_reports_ready"])
+        self.assertNotIn("lint_report_ready", state)
+        self.assertNotIn("review_reports_ready", state)
         self.assertFalse(inferred_flags["independent_review_ready"])
-        self.assertFalse(inferred_flags["lint_report_ready"])
-        self.assertFalse(inferred_flags["review_reports_ready"])
+        self.assertNotIn("lint_report_ready", inferred_flags)
+        self.assertNotIn("review_reports_ready", inferred_flags)
         self.assertIn("independent-review.md", "\n".join(state["missing_for_review_pass"]))
-        self.assertIn("lint-report.md", "\n".join(state["missing_for_review_pass"]))
+        self.assertNotIn("lint-report.md", "\n".join(state["missing_for_review_pass"]))
 
-    def test_stage_five_completion_state_review_reports_ready_requires_both(self):
+    def test_stage_five_completion_state_single_review_gates_pass(self):
+        project_dir = self._make_project_past_s4()
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+
+        state = self.engine._stage_five_completion_state(project_dir)
+
+        self.assertFalse(state["independent_review_ready"])
+        self.assertIn("independent-review.md", "\n".join(state["missing_for_review_pass"]))
+
+        self._write_independent_review(project_dir)
+        state = self.engine._stage_five_completion_state(project_dir)
+        inferred_flags = self.engine._infer_stage_state(project_dir)["flags"]
+
+        self.assertTrue(state["independent_review_ready"])
+        self.assertTrue(inferred_flags["independent_review_ready"])
+        self.assertTrue(state["review_pass_prerequisites_complete"])
+        self.assertNotIn("independent-review.md", "\n".join(state["missing_for_review_pass"]))
+
+    def test_s5_checklist_two_items(self):
+        from backend.skill import SkillEngine
+
+        items = SkillEngine.STAGE_CHECKLIST_ITEMS["S5"]
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0], "独立审查完成")
+        self.assertNotIn("AI 味自查完成", items)
+
+    def test_stage_state_no_lint_flags(self):
         project_dir = self._make_project_past_s4()
         self.engine._save_stage_checkpoint(project_dir, "review_started_at")
         self._write_independent_review(project_dir)
 
-        state = self.engine._stage_five_completion_state(project_dir)
+        flags = self.engine._infer_stage_state(project_dir)["flags"]
 
-        self.assertTrue(state["independent_review_ready"])
-        self.assertFalse(state["lint_report_ready"])
-        self.assertFalse(state["review_reports_ready"])
+        self.assertNotIn("lint_report_ready", flags)
+        self.assertNotIn("review_reports_ready", flags)
+        self.assertTrue(flags["independent_review_ready"])
 
-        self._write_lint_report(project_dir)
-        state = self.engine._stage_five_completion_state(project_dir)
-        inferred_flags = self.engine._infer_stage_state(project_dir)["flags"]
+    def test_completed_items_s5_single_review(self):
+        project_dir = self._make_project_past_s4()
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+        self._write_independent_review(project_dir)
+        self.engine.record_stage_checkpoint("demo", "review_passed_at", "set")
 
-        self.assertTrue(state["review_reports_ready"])
-        self.assertTrue(inferred_flags["review_reports_ready"])
-        self.assertNotIn("independent-review.md", "\n".join(state["missing_for_review_pass"]))
-        self.assertNotIn("lint-report.md", "\n".join(state["missing_for_review_pass"]))
+        state = self.engine._infer_stage_state(project_dir)
+
+        self.assertIn("独立审查完成", state["completed_items"])
+        self.assertTrue(state["flags"]["review_ready"])
+
+    def test_s5_next_actions_single_review(self):
+        project_dir = self._make_project_past_s4()
+        self.engine._save_stage_checkpoint(project_dir, "review_started_at")
+
+        # 无独立审查 → 提示点独立审查、不含 AI 味自查
+        self.engine.get_workspace_summary("demo")
+        progress = (project_dir / "plan" / "progress.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("AI 味自查", progress)
+        self.assertIn("独立审查", progress)
 
     def test_workspace_summary_keeps_stage_at_s0_when_project_overview_is_invalid_even_with_later_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:

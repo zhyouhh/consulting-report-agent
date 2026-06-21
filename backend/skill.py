@@ -212,7 +212,6 @@ class SkillEngine:
         ],
         "S5": [
             "独立审查完成",
-            "AI 味自查完成",
             "\u4e8b\u5b9e\u3001\u903b\u8f91\u4e0e\u8bed\u8a00\u8d28\u91cf\u5ba1\u67e5\u5b8c\u6210",
         ],
         "S6": [
@@ -673,8 +672,6 @@ class SkillEngine:
         )
 
         independent_review_ready = self._has_effective_independent_review(project_path)
-        lint_report_ready = self._has_effective_lint_report(project_path)
-        review_reports_ready = independent_review_ready and lint_report_ready
         review_passed = "review_passed_at" in checkpoints
 
         missing_for_review_pass = list(stage_four_state["missing_for_stage_four"])
@@ -688,8 +685,6 @@ class SkillEngine:
         return {
             "review_checklist_ready": False,
             "independent_review_ready": independent_review_ready,
-            "lint_report_ready": lint_report_ready,
-            "review_reports_ready": review_reports_ready,
             "review_passed": review_passed,
             "review_pass_prerequisites_complete": not missing_for_review_pass,
             "stage_five_complete": not missing_for_stage_five,
@@ -1879,14 +1874,8 @@ class SkillEngine:
         ]
         if stage_code == "S5":
             flags = stage_state.get("flags", {})
-            independent_ready = bool(flags.get("independent_review_ready"))
-            lint_ready = bool(flags.get("lint_report_ready"))
-            if not independent_ready and not lint_ready:
-                next_actions = ["请点击上方'独立审查'和'AI 味自查'按钮"]
-            elif independent_ready and not lint_ready:
-                next_actions = ["还差'AI 味自查'，请点击上方按钮"]
-            elif lint_ready and not independent_ready:
-                next_actions = ["还差'独立审查'，请点击上方按钮"]
+            if not bool(flags.get("independent_review_ready")):
+                next_actions = ["请点击上方'独立审查'按钮完成审查"]
             else:
                 next_actions = ["等主代理跟你讨论审查结果，确认通过后说'审查通过'"]
         status = "进行中"
@@ -2136,8 +2125,6 @@ class SkillEngine:
         analysis_quality_ok = stage_four_state["analysis_quality_ok"]
         report_ready = stage_four_state["report_ready"]
         independent_review_ready = stage_five_state["independent_review_ready"]
-        lint_report_ready = stage_five_state["lint_report_ready"]
-        review_reports_ready = stage_five_state["review_reports_ready"]
         presentation_ready = stage_six_state["presentation_ready"]
         delivery_ready = self._has_effective_delivery_log(project_path)
         presentation_required = stage_six_state["presentation_required"]
@@ -2199,10 +2186,8 @@ class SkillEngine:
             "report_ready": report_ready,
             "review_checklist_ready": False,
             "independent_review_ready": independent_review_ready,
-            "lint_report_ready": lint_report_ready,
-            "review_reports_ready": review_reports_ready,
             "review_notes_ready": self._has_effective_review_notes(project_path),
-            "review_ready": review_reports_ready and review_passed,
+            "review_ready": independent_review_ready and review_passed,
             "presentation_ready": presentation_ready,
             "delivery_ready": delivery_ready and delivery_archived,
             "presentation_required": presentation_required,
@@ -2232,9 +2217,7 @@ class SkillEngine:
             if stage == "S5":
                 if flags["independent_review_ready"]:
                     completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][0])
-                if flags["lint_report_ready"]:
-                    completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
-                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][2])
+                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
                 continue
             completed.extend(self.STAGE_CHECKLIST_ITEMS[stage])
 
@@ -2260,10 +2243,8 @@ class SkillEngine:
         elif stage_code == "S5":
             if flags["independent_review_ready"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][0])
-            if flags["lint_report_ready"]:
+            if flags["independent_review_ready"] and flags["review_passed"]:
                 completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][1])
-            if flags["independent_review_ready"] and flags["lint_report_ready"]:
-                completed.append(self.STAGE_CHECKLIST_ITEMS["S5"][2])
         elif stage_code == "S6":
             completed.append(self.STAGE_CHECKLIST_ITEMS["S6"][0])
             if flags["presentation_ready"]:
