@@ -147,6 +147,22 @@ class IndependentReviewAgentTests(unittest.TestCase):
         self.assertIn("第一人称", p)
         self.assertNotIn("quality_check", p)
 
+    def test_prompt_dimension5_blacklist_is_complete_per_spec(self):
+        # spec §3.3 要求把逐字中文黑名单完整誊入 prompt（防被压缩成精简版）。
+        from backend.independent_review import INDEPENDENT_REVIEW_SYSTEM_PROMPT as p
+        for trigger in (
+            "见证了", "是……的体现/证明", "不可磨灭的印记",  # §3.3.1
+            "确保了",  # §3.3.2
+            "著名的",  # §3.3.3
+            "多个来源/观察者指出",  # §3.3.4
+            "复杂性",  # §3.3.5
+            "代表/标志着",  # §3.3.6
+            "由于……的事实", "在这个时间点",  # §3.3.8
+            "迈出重要一步",  # §3.3.10
+            "截至[日期]",  # §3.3.14
+        ):
+            self.assertIn(trigger, p, f"维度⑤黑名单缺 spec §3.3 的 trigger 词：{trigger}")
+
     # ---- Task 2.1: system prompt narration ----
 
     def test_review_system_prompt_requires_narration_and_forbids_conclusions(self):
