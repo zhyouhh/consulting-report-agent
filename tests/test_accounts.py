@@ -39,3 +39,53 @@ class AccountsUserTests(unittest.TestCase):
         self.assertFalse(accounts.verify_user_password("carol", "old"))
         self.assertTrue(accounts.verify_user_password("carol", "new"))
         self.assertEqual(accounts.get_user_by_uid(uid)["username"], "carol")
+
+
+class AccountsSessionTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = Path(os.path.realpath(tempfile.mkdtemp()))
+        self._env = mock.patch.dict(os.environ, {"CRA_DATA_ROOT": str(self._tmp)})
+        self._env.start(); accounts.init_db()
+        self.uid = accounts.create_user("dave", "pw")
+
+    def tearDown(self):
+        self._env.stop(); shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_roundtrip(self):
+        t = accounts.create_session(self.uid, ttl_days=30, ip="1.2.3.4", ua="ua")
+        self.assertEqual(accounts.get_session_uid(t), self.uid)
+
+    def test_stored_as_hash(self):
+        t = accounts.create_session(self.uid)
+        with accounts._db() as c:
+            rows = c.execute("SELECT token_hash FROM sessions").fetchall()
+        self.assertTrue(all(t not in r["token_hash"] for r in rows))
+
+    def test_expired_rejected(self):
+        self.assertIsNone(accounts.get_session_uid(accounts.create_session(self.uid, ttl_days=-1)))
+
+    def test_delete_and_delete_all(self):
+        t1 = accounts.create_session(self.uid); t2 = accounts.create_session(self.uid)
+        accounts.delete_session(t1)
+        self.assertIsNone(accounts.get_session_uid(t1)); self.assertEqual(accounts.get_session_uid(t2), self.uid)
+        accounts.delete_user_sessions(self.uid); self.assertIsNone(accounts.get_session_uid(t2))
+
+    def test_disabled_user_rejected(self):
+        t = accounts.create_session(self.uid); accounts.set_user_disabled(self.uid, True)
+        self.assertIsNone(accounts.get_session_uid(t))
+
+    def test_disable_revokes_and_survives_reenable(self):
+        t = accounts.create_session(self.uid)
+        accounts.set_user_disabled(self.uid, True)
+        self.assertIsNone(accounts.get_session_uid(t))          # rejected while disabled
+        accounts.set_user_disabled(self.uid, False)
+        self.assertIsNone(accounts.get_session_uid(t))          # still dead after re-enable (row was deleted)
+
+    def test_disabled_user_cannot_get_new_session(self):
+        accounts.set_user_disabled(self.uid, True)
+        with self.assertRaises(accounts.InactiveUserError):
+            accounts.create_session(self.uid)
+
+    def test_session_for_unknown_uid_raises(self):
+        with self.assertRaises(accounts.InactiveUserError):
+            accounts.create_session("no-such-uid")

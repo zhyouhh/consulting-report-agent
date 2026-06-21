@@ -1,7 +1,7 @@
 """SQLite 账号层（叶子模块；只依赖 tenant）。"""
-import sqlite3, uuid
+import hashlib, secrets, sqlite3, uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError, InvalidHashError
@@ -11,6 +11,11 @@ _PH = PasswordHasher()
 
 
 class UsernameTakenError(Exception):
+    pass
+
+
+class InactiveUserError(Exception):
+    """目标 uid 不存在或已停用——拒绝签发会话。"""
     pass
 
 
@@ -48,6 +53,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS sessions(
                 token_hash TEXT PRIMARY KEY, uid TEXT NOT NULL, created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL, created_ip TEXT, user_agent TEXT, last_seen TEXT);
+            CREATE INDEX IF NOT EXISTS idx_sessions_uid ON sessions(uid);
             CREATE TABLE IF NOT EXISTS app_config(key TEXT PRIMARY KEY, value TEXT);
             """
         )
@@ -107,3 +113,61 @@ def set_user_password(uid, new_password) -> None:
     with _db() as conn:
         conn.execute("UPDATE users SET password_hash=?, must_change_password=0 WHERE uid=?",
                      (_PH.hash(new_password), uid))
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_session(uid, ttl_days=30, ip="", ua="") -> str:
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc); exp = now + timedelta(days=ttl_days)
+    with _db() as conn:
+        # last_seen 仅创建时写一次，read 路径不更新（避热路径 WAL 膨胀；B3 审计保留列）
+        cur = conn.execute(
+            "INSERT INTO sessions(token_hash,uid,created_at,expires_at,created_ip,user_agent,last_seen) "
+            "SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM users WHERE uid=? AND disabled=0)",
+            (_hash_token(token), uid, now.isoformat(timespec="seconds"),
+             exp.isoformat(timespec="seconds"), ip, ua, now.isoformat(timespec="seconds"), uid))
+        if cur.rowcount != 1:
+            raise InactiveUserError(uid)
+    return token
+
+
+def get_session_uid(token) -> Optional[str]:
+    if not token:
+        return None
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT s.uid uid, s.expires_at expires_at, u.disabled disabled "
+            "FROM sessions s JOIN users u ON u.uid=s.uid WHERE s.token_hash=?",
+            (_hash_token(token),)).fetchone()
+    if not row or row["disabled"]:
+        return None
+    if datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
+        return None
+    return row["uid"]
+
+
+def delete_session(token) -> None:
+    with _db() as conn:
+        conn.execute("DELETE FROM sessions WHERE token_hash=?", (_hash_token(token),))
+
+
+def delete_user_sessions(uid) -> None:
+    with _db() as conn:
+        conn.execute("DELETE FROM sessions WHERE uid=?", (uid,))
+
+
+def delete_other_user_sessions(uid, keep_token) -> None:
+    with _db() as conn:
+        conn.execute("DELETE FROM sessions WHERE uid=? AND token_hash<>?",
+                     (uid, _hash_token(keep_token)))
+
+
+def set_user_disabled(uid, disabled: bool) -> None:
+    # 停用与撤销会话必须同一事务：否则中途崩溃/锁会留下会话行，重新启用即复活（Codex review）。
+    with _db() as conn:
+        conn.execute("UPDATE users SET disabled=? WHERE uid=?", (int(disabled), uid))
+        if disabled:
+            conn.execute("DELETE FROM sessions WHERE uid=?", (uid,))
