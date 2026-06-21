@@ -579,7 +579,7 @@ git commit -m "feat(gate): review_passed_at requires single independent review; 
 
 - [ ] **Step 1: 写测试（先失败）+ 改旧 lint flags 用例**
 
-**先 grep `tests/test_skill_engine.py` 的 `lint_report_ready|review_reports_ready|_has_effective_lint_report`（hint `:1780-1882`），把这些旧用例改成单报告 flags / 删 `_has_effective_lint_report` 直测**（Task 5 已搬走 helper/stale 部分，这里收 flags + S5 cascade 部分）。再加新用例：
+**先 grep `tests/test_skill_engine.py` 的 `lint_report_ready|review_reports_ready`（hint `:1780-1882`），把这些 flags/cascade 旧用例改成单报告**（Task 5 已搬走 helper/stale/prereq 部分；`_has_effective_lint_report` 4 个**直测保留到 Task 7** 随 helper 一起删——本 task 不动它们）。再加新用例：
 
 ```python
 # tests/test_skill_engine.py 内新增
@@ -695,6 +695,7 @@ git commit -m "feat(stage): collapse S5 checklist to 2 items; drop lint flags fr
 
 **方法（grep 驱动，避免行号漂移——Codex plan-review r1/r2 实证我硬编的测试行号不准）**：对下列每个文件先 `grep -n "lint_report\|lint-report\|quality_check\|review_reports_ready\|lint_report_ready\|lint_report_done\|AI 味自查" <file>`，再按"类别"删/改**所有**命中。下方括号里的行号是 2026-06-21 的 hint、非真值；以 grep 实际命中为准。Task 9 Step 3 的全仓 grep 是完整性闸。
 
+- **`git rm tests/test_lint_report.py`**（Codex r5 BLOCKER：该文件 import `run_lint_report`，本 task 删该函数 → 必须同 task/commit 删此测试文件，**不能拖到 Task 8**，否则 Task 7 commit 后全量 pytest collect 即 import 已删符号炸）。
 - `tests/test_report_tools.py`：删 `run_quality_check`/`run_lint_report` 相关用例，保留 `export_reviewable_draft` 用例。
 - `tests/test_main_api.py`：删 `test_quality_check_endpoint_*`（hint `:570`）+ 整组 `test_lint_report_*`（hint `:1366-1506`），保留 export/independent-review endpoint 用例；workspace flags 断言去 `lint_report_ready`/`review_reports_ready`；review_stale fixture 不再写 lint-report、改为只基于 independent-review mtime。
 - `tests/test_chat_runtime.py`：删 `_write_effective_lint_report` 辅助、`lint_report_done` 分支用例、`SYSTEM_TRIGGER_CASES` 里的 lint 条目、显式 lint trigger 测试 + generic no-run-id 测试（hint `:10999`/`:11024`/`:11029`/`:11078-11096`/`:11277`/`:11326`/`:11391`/`:11751-11772`）；循环/参数化用例改 independent-only；删主代理 write/edit **lint-report 拒写**专用断言，**保留** independent-review 拒写断言。
@@ -746,8 +747,8 @@ Expected: PASS（注意 macOS realpath 4 用例预存失败、与本任务无关
 - [ ] **Step 8: Commit**
 
 ```bash
-git add backend/ tests/test_report_tools.py tests/test_main_api.py tests/test_chat_runtime.py tests/test_skill_engine.py tests/test_workspace_materials.py
-git commit -m "feat(lint-removal): delete lint backend path (report_tools/models/endpoints/chat/FILE registry)"
+git add -A   # 含 git rm tests/test_lint_report.py + backend/ + 改动的测试（test_report_tools/main_api/chat_runtime/skill_engine/skill_assets[helper断言]/workspace_materials/report_writing）
+git commit -m "feat(lint-removal): delete lint backend path (report_tools/models/endpoints/chat/FILE registry + _has_effective_lint_report)"
 ```
 
 ---
@@ -762,7 +763,7 @@ git commit -m "feat(lint-removal): delete lint backend path (report_tools/models
 
 - [ ] **Step 1: 改测试预期（先失败）——全枚举（Codex BLOCKER）**
 
-- **`git rm tests/test_lint_report.py`**（spec §6 要求删整文件；删 `run_lint_report` 后必炸——这是之前漏的关键删除）。
+- （`git rm tests/test_lint_report.py` 已前移到 Task 7——与 `run_lint_report` 删除同 commit，避免中间态 import 崩。）
 - `tests/test_skill_assets.py`：`quality_check.{sh,ps1}`（`:13`/`:23`/`:37`）改断言**不存在**、删 ps1-runs 测试（`:46-52`）、`lint-report.md ∉ FORMAL_PLAN_FILES`（`:81` 反断言）、lint-report 模板不存在（`:111` 反断言）、**新项目 lint stub 与 `validate_plan_write("plan/lint-report.md")` 接受测试（`:115-168`）改为：只断言 independent-review stub 存在、lint-report 不生成/退役、`validate_plan_write` 对 lint-report 拒绝**。**`export_draft.{sh,ps1}` 存在断言（`:14`/`:24`/`:38`）+ export ps1 编码测试一律保留不动。**
 - **`tests/smoke_packaged_app.py`**：删 lint smoke——`lint-report.md` 模板 / `quality_check.ps1` / `/lint-report` endpoint（hint `:55`/`:184-195`/`:299-307`）**及 `/quality-check` 打包烟测块（hint `:334-339`）+ `:202` 的 quality_check 日志文案**，保留 independent-review / export-draft smoke。（grep `lint\|quality_check` 该文件确认全删。）
 - `tests/test_packaging_docs.py`：SKILL/stage-gates/tasks/progress/consulting-lifecycle/quality-review/final-delivery 锁两按钮旧句的断言改为单审查表述。
