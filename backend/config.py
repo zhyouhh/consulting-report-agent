@@ -338,19 +338,28 @@ def normalize_settings_payload(data: dict) -> dict:
     return normalized
 
 
-def load_settings() -> Settings:
+def _config_path_for(uid: str | None) -> Path:
+    """uid=None → 旧全局位置（向后兼容：模块级 settings 全局 + heal 块）；
+    否则 → 每用户隔离的 data_root/users/<uid>/config.json。"""
+    if uid is None:
+        return get_user_config_dir() / "config.json"
+    from .tenant import user_config_path
+    return user_config_path(uid)
+
+
+def load_settings(uid: str | None = None) -> Settings:
     """加载配置"""
-    config_file = get_user_config_dir() / "config.json"
+    config_file = _config_path_for(uid)
     if config_file.exists():
         with open(config_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return Settings(**normalize_settings_payload(data))
+            return Settings(**normalize_settings_payload(json.load(f)))
     return Settings()
 
 
-def save_settings(settings: Settings):
+def save_settings(settings: Settings, uid: str | None = None):
     """保存配置"""
-    config_file = get_user_config_dir() / "config.json"
+    config_file = _config_path_for(uid)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
     data = normalize_settings_payload(settings.model_dump())
     for key in [
         "mode",
@@ -362,8 +371,20 @@ def save_settings(settings: Settings):
         "managed_client_token",
     ]:
         data.pop(key, None)
-    with open(config_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    # 原子写：同目录 temp + os.replace（与 R3 用户写一致），避免 GET 无锁 load_settings 读到半截。
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(config_file.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, config_file)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _default_managed_models_fetch(url: str, headers: dict[str, str], timeout: float) -> bytes:

@@ -115,7 +115,7 @@ def get_chat_handler(uid: str, project_id: str) -> ChatHandler:
     with _settings_lock:
         key = (uid, project_id)
         if key not in _chat_handlers:
-            _chat_handlers[key] = ChatHandler(load_settings(), get_skill_engine(uid), uid=uid)
+            _chat_handlers[key] = ChatHandler(load_settings(uid), get_skill_engine(uid), uid=uid)
         return _chat_handlers[key]
 
 
@@ -170,8 +170,8 @@ async def health():
 
 
 @app.get("/api/settings")
-async def get_settings():
-    data = settings.model_dump(exclude={"managed_client_token"})
+async def get_settings(uid: str = Depends(get_current_uid)):
+    data = load_settings(uid).model_dump(exclude={"managed_client_token"})
     data["api_key"] = "***" if data["api_key"] else ""
     data["custom_api_key"] = "***" if data.get("custom_api_key") else ""
     return data
@@ -192,36 +192,27 @@ class SettingsUpdate(BaseModel):
 
 
 @app.post("/api/settings")
-async def update_settings(update: SettingsUpdate):
-    global settings, _chat_handlers
+async def update_settings(update: SettingsUpdate, uid: str = Depends(get_current_uid)):
     with _settings_lock:
-        settings.mode = update.mode
-        settings.managed_base_url = update.managed_base_url
-        settings.managed_model = update.managed_model
+        s = load_settings(uid)
+        s.mode = update.mode
+        s.managed_base_url = update.managed_base_url
+        s.managed_model = update.managed_model
         if "managed_vision_model" in update.model_fields_set and update.managed_vision_model is not None:
-            settings.managed_vision_model = update.managed_vision_model
+            s.managed_vision_model = update.managed_vision_model
         if "vision_enabled" in update.model_fields_set and update.vision_enabled is not None:
-            settings.vision_enabled = update.vision_enabled
-        settings.custom_api_base = update.custom_api_base
+            s.vision_enabled = update.vision_enabled
+        s.custom_api_base = update.custom_api_base
         if update.custom_api_key != "***":
-            settings.custom_api_key = update.custom_api_key
-        settings.custom_model = update.custom_model
+            s.custom_api_key = update.custom_api_key
+        s.custom_model = update.custom_model
         if "custom_context_limit_override" in update.model_fields_set:
-            settings.custom_context_limit_override = clamp_custom_context_limit_override(
+            s.custom_context_limit_override = clamp_custom_context_limit_override(
                 update.custom_context_limit_override
             )
-
-        if update.mode == "managed":
-            settings.api_base = update.managed_base_url
-            settings.model = update.managed_model
-            settings.api_key = settings.managed_client_token
-        else:
-            settings.api_base = update.custom_api_base
-            settings.model = update.custom_model
-            settings.api_key = settings.custom_api_key
-
-        save_settings(settings)
-        _chat_handlers.clear()
+        save_settings(s, uid=uid)
+        for k in [k for k in _chat_handlers if k[0] == uid]:
+            _chat_handlers.pop(k, None)
     return {"status": "ok"}
 
 
