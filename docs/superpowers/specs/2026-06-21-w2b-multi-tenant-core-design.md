@@ -43,8 +43,8 @@
 ```
 <data-root>/                         ← 默认 ~/.consulting-report，新增 env CRA_DATA_ROOT 可覆盖（服务器用）
   app.db                             ← SQLite：users / sessions / usage_daily / app_config（全局元数据）
-  search_runtime_state.json          ← 搜索池状态/限额计数：保持全局（见 §4.2；D9 不做 per-user 搜索配额）
-  search_cache.json                  ← 搜索结果缓存：全局共享（跨用户复用更省；✦ NIT4 仅服务端内部、绝不回显跨用户）
+  search_runtime_state.json          ← 文件全局；global-minute 用全局键、**project-minute 按复合 tenant_project_key 键**（§4.3）
+  search_cache.json                  ← 文件全局；现为 project 级缓存（`pid::query`），**键改复合 tenant_project_key**（撞 id 会泄漏，见 §4.3）；仅服务端内部、绝不回显
   users/
     <uid>/                           ← uid = 注册时生成的 uuid（非用户名，用户名可改）
       config.json                    ← 该用户 per-user Settings（mode + custom api 配置）
@@ -73,7 +73,7 @@ def get_skill_engine(uid: str) -> SkillEngine: ...      # 缺则 SkillEngine(use
 def get_chat_handler(uid: str, project_id: str) -> ChatHandler: ...   # 缓存键 (uid, project_id)
 ```
 
-**✦ 进程级锁/store 改复合键 `(uid, project_id)`（Codex R1-B2）**：`_PROJECT_REQUEST_LOCKS`、`_INDEPENDENT_REVIEW_LOCKS`、`_CONVERSATION_STATE_LOCKS`、`ReviewSessionStore._records`、`_chat_handlers` 一律按 `f"{uid}:{project_id}"` 键化。原因：现 project_id 仅 `proj-`+12hex、per-uid registry 不保证跨用户唯一，单键会让两用户撞同 id 时跨租户互锁、污染审查 tombstone/discard。复合键是廉价字符串拼接、机械改动，彻底消除「依赖全局唯一」的隐含前提。键里 uid 由服务端鉴权得来（绝不取客户端值）。
+**✦ 进程级锁/store 改复合键 `(uid, project_id)`（Codex R1-B2）**：`_PROJECT_REQUEST_LOCKS`、`_INDEPENDENT_REVIEW_LOCKS`、`_CONVERSATION_STATE_LOCKS`、`ReviewSessionStore._records`、`_chat_handlers`、**搜索 project 级状态/缓存**（§4.3）一律按复合键。原因：现 project_id 仅 `proj-`+12hex、per-uid registry 不保证跨用户唯一，单键会让两用户撞同 id 时跨租户互锁、污染审查 tombstone/discard、串扰搜索配额/缓存。✦（R2-NIT1）复合键由**单一中央 helper `tenant_project_key(uid, project_id)`** 生成（tuple，或对 uid/pid 分隔符消毒后的字符串），全仓唯一来源；`ProjectScope.lock_key` 即其产物，任何地方禁止手拼 `f"{uid}:{pid}"`。键里 uid 由服务端鉴权得来（绝不取客户端值）。
 
 **✦ 统一归属卡点 `require_project`（Codex R1-B3）**：定义单一依赖
 
@@ -101,7 +101,7 @@ def require_project(uid, project_id) -> ProjectScope:   # ProjectScope = {engine
 - **Web 模式**（`run_web.py`）：鉴权中间件生效，`auth_required=true` **恒定**，无条件登录。
 - **桌面模式**（`app.py`，已不再维护）：注入隐式 `uid="local"`、`<data-root>/users/local/`。**安全边界硬约束**：① `auth_required=false` 只能由 `app.py` 入口设置；② 桌面入口强制 host=`127.0.0.1`；③ **启动断言：若 `auth_required=false` 且 host 非 loopback → 拒绝启动**（防误绑 `0.0.0.0` 变无鉴权全数据入口）。
 
-`backend/search_pool.py` 的 `SearchRouter` 保持**全局单例**（D9 不做 per-user 搜索配额、`global_minute_limit` 本就池子级、缓存跨用户共享更省）；`project_minute_limit` 按 project_id 计仍正确。
+`backend/search_pool.py` 的 `SearchRouter` 保持**全局单例**（实例、`global_minute_limit`、provider cooldown 全局共享）。但 ✦（Codex R2-B1）**project 级搜索状态必须按复合键隔离**：现 `search(...)`、`try_acquire_search_slot(project_id=...)`、`_make_cache_key→"{project_id}::{query}"` 都以裸 `project_id` 键化（`usage["projects"][project_id]` 配额 + project 级缓存）—— project_id 非全局唯一，撞 id 会跨租户串扰搜索配额、泄漏缓存结果。改为调用方传 `scope.lock_key`（=`tenant_project_key(uid, project_id)`，§4.2）代替裸 project_id；`global_minute_limit` 与 provider cooldown 仍全局。跨用户纯 query 复用缓存=另设 query 级 cache，本 spec 不做（§14）。
 
 ## 5. 鉴权与账号
 
@@ -150,21 +150,22 @@ app_config(key TEXT PRIMARY KEY, value TEXT)                 -- invite_code、gl
 
 ### 6.1 计费口径（上机实测确认）
 2026-06-21 jp-app-01 实测 deepseek-v4-pro 经真实路径（公网 `newapi.z0y0h.work/client/v1`→薄网关→new-api→官渠）返回 `usage`：非流式冷 `hit=0/miss=1289`、非流式热 `hit=1280/miss=9`、**流式(`stream_options.include_usage`) 同样带完整缓存明细且官渠未拒**。故按三档精确计费可行：
+✦（R2-NIT2）单价单位**锁定为「元/百万 token」**（与用户所报一致：命中 0.025 / 未命中 3 / 输出 6）。因 token×(元/百万token)=微元，公式天然落在整数微元：
 ```
-单次成本(微元) = round( hit×单价_命中 + miss×单价_未命中 + completion×单价_输出 )   # 单价 = 元/token × 1e6
+cost_micro_yuan = round( hit×p_hit + miss×p_miss + completion×p_out )   # p_* 单位=元/百万token
 ```
 `completion_tokens` 已含 `reasoning_tokens`，不另算。
 
 ### 6.2 中央计费客户端（覆盖所有 managed 调用）
 **不在 chat/review 两处零散插桩**，而是建中央 `backend/metering.py:MeteredManagedClient` —— **所有 managed provider 调用唯一出口**，每次调用必带 `uid` + `model`：
 - 覆盖面：主聊天工具循环每次 iteration、post-turn compaction 摘要、**视觉转写**（`MaterialConverter` 的 Qwen3-VL）、独立审查每轮流式。任何新 managed 调用都必须走它（source-guard 测试锁死「禁止直接 new OpenAI client 发 managed 请求」）。
-- 按模型计价：config 存**每模型单价表**（deepseek-v4-pro 三档；vision model 单价占位、可后填）。custom 模式不经此客户端、不计费。
+- 按模型计价：config 存**每模型单价表**（单位 元/百万 token，§6.1；deepseek-v4-pro 三档；vision model 单价占位、可后填）。custom 模式不经此客户端、不计费。
 - 流式：managed 请求注入 `stream_options.include_usage`（仅 managed），末包取 usage。
 
 ### 6.3 门禁、累计与降级
 - **门禁（reserve）**：每次 managed 调用前查 `usage_daily(uid, 今日).cost ≥ cap` → 拒绝并回友好提示（「今日已用 ¥X/上限 ¥Y，明日 0 点(Asia/Shanghai)恢复」），不打断进行中调用、只挡下一次。
 - **累计（settle）**：调用拿到 usage 后按 §6.1 算微元，`usage_daily` 原子累加。
-- **✦ usage 缺失 = fail-closed**：流式中断/多模态等拿不到 usage 时，**保守封顶**（按该模型上下文长度上限 × 未命中价估上界并计入），**不**用 tiktoken 乐观低估放行；连续失败则拒绝继续。tiktoken 仅作非多模态文本调用的兜底估算、且按未命中保守。
+- **✦ usage 缺失 = fail-closed**：流式中断/多模态等拿不到 usage 时，**保守封顶**（按该模型上下文上限 × 未命中价估上界并计入），**不**用 tiktoken 乐观低估放行。✦（R2-NIT3）维护 **per-(uid, model) 连续缺失计数：默认连续 3 次缺失 → 暂停该用户该模型 managed 调用**（回友好提示），下一次成功 settle 或次日 0 点清零。tiktoken 仅作非多模态文本调用兜底、按未命中保守。
 - 跨日：`day` 按 Asia/Shanghai，新日写新行 = 自动重置。
 
 ### 6.4 覆盖与隔离
@@ -184,7 +185,7 @@ app_config(key TEXT PRIMARY KEY, value TEXT)                 -- invite_code、gl
 ## 8. 安全红线
 1. **归属校验**：统一 `require_project`（§4.2）+ 复合键锁；绝不信任客户端 uid/路径。
 2. ✦ **CSRF（Codex R1-B4）**：所有状态变更（POST/DELETE）接口除 SameSite=Lax 外，**强制 Origin/Referer 校验**（不匹配配置允许源即 403）；admin/删项目/checkpoint 等副作用接口须有「跨站请求被拒」回归测试。**CORS** `allow_origins` 改精确域名白名单，`allow_credentials=true` 下禁 `*`。
-3. ✦ **SSRF（Codex R1-B6，请求时挡）**：新增 `backend/url_guard.py` + **守门 HTTP 传输层**——校验**不在保存时一次性做**，而在**每次实际外连时解析并把连接 pin 到已校验的公网 IP**（防 DNS rebinding 二次解析）。覆盖 `POST /api/settings`（custom_api_base）、`POST /api/models/list`、chat/review client 构建。仅 http(s)；禁私网段/loopback/link-local/`169.254.169.254`。**managed_base_url 改服务端只读**（不进 per-user settings、用户不可覆盖）。
+3. ✦ **SSRF（Codex R1-B6，请求时挡）**：新增 `backend/url_guard.py` + **守门 HTTP 传输层**——校验**不在保存时一次性做**，而在**每次实际外连时解析并把连接 pin 到已校验的公网 IP**（防 DNS rebinding 二次解析）。覆盖 `POST /api/settings`（custom_api_base）、`POST /api/models/list`、chat/review client 构建。仅 http(s)；禁私网段/loopback/link-local/`169.254.169.254`。**managed_base_url 改服务端只读**（不进 per-user settings、用户不可覆盖）。✦（R2-NIT4）守门传输 `trust_env=False`（忽略 HTTP(S)_PROXY 环境代理）+ **不跟随重定向**（或每跳重校验 IP），杜绝经代理/重定向绕过实际连接校验。
 4. **cookie**：HttpOnly + SameSite=Lax + Secure(prod)；session 存 hash（§5.1）。
 5. ✦ **限流**：登录失败按 username+IP 退避；注册按 IP 限流（slowapi 现按 IP，补 per-username 计数）。
 6. **密码**：argon2id 哈希；改密码/禁用即时吊销会话。
@@ -205,7 +206,7 @@ app_config(key TEXT PRIMARY KEY, value TEXT)                 -- invite_code、gl
 - `config.py`：`CRA_DATA_ROOT`；✦ **拆分**全局服务器配置 vs per-user LLM 配置（NIT5，避免 per-user settings 误用成全局单例）；managed_base_url 归全局只读；每模型单价表 + 配额常量；per-user Settings 读写走 `user_config_path(uid)`。
 - 新 `backend/tenant.py`（路径）、`backend/accounts.py`（DB）、`backend/metering.py`（中央计费）、`backend/url_guard.py`（SSRF + 守门传输）。
 - `main.py`：CORS 收紧 + CSRF 校验；全局单例→uid 工厂；`require_project` + 接口归类表逐项接入（§4.2）；✦ 项目创建闭环（拒客户端路径）；`/api/auth/*`、`/api/admin/*`；鉴权中间件 + 桌面 loopback 启动断言；建议按域拆 `APIRouter`（auth/projects/chat/admin）。
-- `chat.py`：managed 调用改走 `MeteredManagedClient`（含工具循环/压缩）；接门禁；`_get_search_router` 全局单例不变；DeepSeek 官渠兼容不破。
+- `chat.py`：managed 调用改走 `MeteredManagedClient`（含工具循环/压缩）；接门禁；`_get_search_router` 全局单例不变，但**搜索 project 级状态/缓存改传 `scope.lock_key`**（§4.3）；DeepSeek 官渠兼容不破。
 - `independent_review.py`：managed 调用走 `MeteredManagedClient` + 门禁；`ReviewSessionStore`/锁改复合键；兼容 helpers 与 chat 锁定一致。
 - `skill.py`/`material_conversion.py`：视觉转写经 `MeteredManagedClient`；项目创建 web 分支按 uid 分配工作区。
 
@@ -221,7 +222,7 @@ app_config(key TEXT PRIMARY KEY, value TEXT)                 -- invite_code、gl
 后端 `unittest`+`pytest`、mock 外部 HTTP：
 - 账号：注册（邀请码对/错、重名、弱密码、IP 限流）、登录（成功/失败退避）、登出、改密码吊销会话、`me`；session 存 hash。
 - 中间件/卡点：无 cookie/过期/disabled→401；白名单放行；桌面 uid=local + ✦ 非 loopback 拒启动；`require_project` 对他人 project_id→404；body-project_id 接口先校验后拿 handler/锁。
-- 隔离：A 建项目 B 访问→404；复合键锁两用户同 project_id 不互锁；per-uid 路径/Settings 隔离。
+- 隔离：A 建项目 B 访问→404；复合键锁两用户同 project_id 不互锁；per-uid 路径/Settings 隔离；✦ 搜索两用户同 project_id 的 project-minute 配额/缓存不串扰（按 tenant_project_key 隔离）、global-minute 仍全局。
 - ✦ 项目创建：web 传 `workspace_dir`/本地材料路径→400/忽略、工作区落 `users/<uid>/`。
 - 配额：三档成本（含实测数值）、中央客户端覆盖（vision/压缩/审查都计）、门禁拦截、跨日重置、custom 不计、✦ usage 缺失 fail-closed 保守封顶、微元整数累计无漂移。
 - ✦ CSRF：跨站 Origin 的 POST/DELETE（含 admin）被拒。
@@ -243,3 +244,4 @@ W2-C（部署、域名/HTTPS、去 Windows 化）；浏览器上传重做（仅�
 ## 15. 变更记录
 - 2026-06-21 初稿（brainstorm + 上机实测拍板）。
 - 2026-06-21 Codex R1（CHANGES-REQUESTED 8 BLOCKER）全修：B1 项目创建闭环(§4.1/D11)、B2 复合键锁(§4.2/D4)、B3 `require_project`+归类表(§4.2)、B4 CSRF(§8.2)、B5 中央计费(§6/§10)、B6 请求时 SSRF+IP-pin(§8.3)、B7 桌面 loopback 断言(§4.3)、B8 拆 3 plan(§13)；NIT1-5 纳入(§5.1/§5.4/§5.6/§4.1/§10)。
+- 2026-06-21 Codex R2（CHANGES-REQUESTED 1 BLOCKER）全修：搜索 project 级状态/缓存遗留裸 project_id → 改复合 `tenant_project_key`(§4.1/§4.2/§4.3/§10/§12)；R2-NIT1 中央 key helper、NIT2 单价单位锁定元/百万token、NIT3 fail-closed 连续 3 次缺失阈值、NIT4 守门传输 trust_env=False+不跟随重定向。
