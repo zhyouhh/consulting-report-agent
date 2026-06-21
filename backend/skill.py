@@ -55,7 +55,6 @@ class SkillEngine:
         "data-log.md",
         "analysis-notes.md",
         "independent-review.md",
-        "lint-report.md",
         "presentation-plan.md",
         "delivery-log.md",
     }
@@ -72,7 +71,6 @@ class SkillEngine:
         "plan/analysis-notes.md": {"group": "analysis", "stage": "S3"},
         "content/report_draft_v1.md": {"group": "draft", "stage": "S4"},
         "plan/independent-review.md": {"group": "review", "stage": "S5"},
-        "plan/lint-report.md": {"group": "review", "stage": "S5"},
         "plan/presentation-plan.md": {"group": "delivery", "stage": "S6"},
         "plan/delivery-log.md": {"group": "delivery", "stage": "S7"},
         "plan/stage-gates.md": {"group": "tracking", "stage": None},
@@ -98,6 +96,7 @@ class SkillEngine:
     RETIRED_WORKSPACE_FILES = {
         "plan/project-info.md",
         "plan/review-checklist.md",
+        "plan/lint-report.md",
     }
 
     STAGE_CHECKPOINTS_FILENAME = "stage_checkpoints.json"
@@ -336,8 +335,6 @@ class SkillEngine:
         "## 5. 语言专业性与去 AI 味",
     )
     INDEPENDENT_REVIEW_COMPLETION_MARKER = "<!-- independent-review:complete -->"
-    LINT_REPORT_ANCHORS = ("## 按章节排列", "## 总览")
-    LINT_REPORT_COMPLETION_MARKER = "<!-- lint-report:complete -->"
     CHECKPOINT_PREREQ = {
         "s0_interview_done_at": None,
         "outline_confirmed_at": (
@@ -1489,7 +1486,7 @@ class SkillEngine:
     def validate_user_write(self, project_ref: str, file_path: str) -> str:
         """R3: independent whitelist gate for USER (HTTP) writes — NOT validate_plan_write
         (that carries the LLM-only pre-outline evidence gate and does not itself deny
-        independent-review/lint-report; those live in the chat tool layer the HTTP endpoint
+        independent-review; that lives in the chat tool layer the HTTP endpoint
         never reaches). Whitelist = default-deny.
         Path traversal → ValueError (endpoint 400). Not whitelisted → UserWriteForbiddenError
         (403) — a distinct type, NOT PermissionError, so a filesystem PermissionError from the
@@ -2533,16 +2530,6 @@ class SkillEngine:
         if self.INDEPENDENT_REVIEW_COMPLETION_MARKER not in review_text:
             return False
         return self._has_substantive_body(review_text)
-
-    def _has_effective_lint_report(self, project_path: Path) -> bool:
-        lint_text = self._read_plan_file(project_path, "lint-report.md")
-        if not lint_text or self._is_template_content(lint_text, "lint-report.md"):
-            return False
-        if not all(anchor in lint_text for anchor in self.LINT_REPORT_ANCHORS):
-            return False
-        if self.LINT_REPORT_COMPLETION_MARKER not in lint_text:
-            return False
-        return self._has_substantive_body(lint_text)
 
     def _is_report_review_stale(self, project_path: Path) -> bool:
         """R3 D6 advisory: the independent-review report is EFFECTIVE (substantive, not the

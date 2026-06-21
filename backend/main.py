@@ -34,12 +34,7 @@ from .independent_review import (
     get_independent_review_lock,
 )
 from .models import ChatRequest, ChatResponse, ProjectInfo
-from .report_tools import (
-    export_reviewable_draft,
-    get_lint_report_lock,
-    run_lint_report,
-    run_quality_check,
-)
+from .report_tools import export_reviewable_draft
 from .material_limits import MAX_HEAVY_MATERIAL_BYTES
 from .skill import SkillEngine, StaleFileError, UserWriteForbiddenError
 
@@ -413,16 +408,6 @@ async def get_workspace(project_id: str):
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@app.post("/api/projects/{project_id}/quality-check")
-async def quality_check(project_id: str):
-    try:
-        report_path = skill_engine.get_primary_report_path(project_id)
-        script_path = skill_engine.get_script_path("quality_check.ps1")
-        return run_quality_check(report_path, script_path)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
 @app.post("/api/projects/{project_id}/independent-review/stream")
 async def independent_review_stream_post(project_id: str, request: Request):
     """POST stream with frontend-stable run_id + resume/discard support.
@@ -619,34 +604,6 @@ async def independent_review_discard(project_id: str, request: Request):
         raise HTTPException(status_code=400, detail="run_id required")
     cancelled = _REVIEW_SESSION_STORE.discard(project_id, run_id)
     return {"cancelled": cancelled}
-
-
-@app.post("/api/projects/{project_id}/lint-report")
-async def lint_report(project_id: str):
-    try:
-        workspace = skill_engine.get_workspace_summary(project_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    if workspace.get("stage_code") != "S5":
-        raise HTTPException(status_code=400, detail="AI 味自查只能在 S5 阶段使用")
-
-    lock = get_lint_report_lock(project_id)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="上一次 AI 味自查仍在进行中，请等待")
-    try:
-        try:
-            report_path = skill_engine.get_primary_report_path(project_id)
-            output_path = str(skill_engine.get_project_path(project_id) / "plan" / "lint-report.md")
-            script_path = skill_engine.get_script_path("quality_check.ps1")
-        except (ValueError, FileNotFoundError, OSError) as e:
-            raise HTTPException(status_code=404, detail=str(e))
-
-        try:
-            return run_lint_report(report_path, output_path, script_path)
-        except Exception as e:
-            return {"status": "error", "detail": f"AI 味自查失败：{str(e)}"}
-    finally:
-        lock.release()
 
 
 @app.post("/api/projects/{project_id}/export-draft")

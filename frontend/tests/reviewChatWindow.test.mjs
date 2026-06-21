@@ -154,13 +154,13 @@ test("parseDrawerEvent passes report_mtime_ns through as a string", () => {
 test("pending queue holds multiple items FIFO", () => {
   let q = [];
   q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "independent_review_done", runId: "r1", reportMtimeNs: "10", projectId: "p" }));
-  q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "lint_report_done", projectId: "p" }));
+  q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "other_trigger", projectId: "p" }));
   assert.equal(q.length, 2);
   const first = dequeuePendingTrigger(q, "p");
   assert.equal(first.item.triggerType, "independent_review_done");
   assert.equal(first.item.run_id, "r1");
   const second = dequeuePendingTrigger(first.queue, "p");
-  assert.equal(second.item.triggerType, "lint_report_done");
+  assert.equal(second.item.triggerType, "other_trigger");
   const third = dequeuePendingTrigger(second.queue, "p");
   assert.equal(third.item, null);
 });
@@ -197,10 +197,10 @@ test("a new run for a DIFFERENT project does not discard the other project's pen
 test("dequeue scopes to the active project (project switch discards cross-project items)", () => {
   let q = [];
   q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "independent_review_done", runId: "a", reportMtimeNs: "1", projectId: "pa" }));
-  q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "lint_report_done", projectId: "pb" }));
+  q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "other_trigger", projectId: "pb" }));
   // Active project is pb: the pa item is skipped/discarded, the pb item is returned.
   const { item, queue } = dequeuePendingTrigger(q, "pb");
-  assert.equal(item.triggerType, "lint_report_done");
+  assert.equal(item.triggerType, "other_trigger");
   assert.equal(item.projectId, "pb");
   // The skipped pa item is not left lingering ahead of pb.
   assert.equal(queue.length, 0);
@@ -209,7 +209,7 @@ test("dequeue scopes to the active project (project switch discards cross-projec
 test("scopePendingQueueToProject drops items from other projects", () => {
   const q = [
     createPendingTriggerItem({ triggerType: "independent_review_done", runId: "a", reportMtimeNs: "1", projectId: "pa" }),
-    createPendingTriggerItem({ triggerType: "lint_report_done", projectId: "pb" }),
+    createPendingTriggerItem({ triggerType: "other_trigger", projectId: "pb" }),
   ];
   assert.deepEqual(scopePendingQueueToProject(q, "pa").map(i => i.projectId), ["pa"]);
 });
@@ -217,11 +217,11 @@ test("scopePendingQueueToProject drops items from other projects", () => {
 test("dropPendingTriggersByType removes same-type same-project pending (new run supersedes; B2)", () => {
   let q = [];
   q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "independent_review_done", runId: "old", reportMtimeNs: "1", projectId: "p" }));
-  q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "lint_report_done", projectId: "p" }));
+  q = enqueuePendingTrigger(q, createPendingTriggerItem({ triggerType: "other_trigger", projectId: "p" }));
   // Starting a new independent review drops the stale independent_review_done pending, keeps lint.
   const after = dropPendingTriggersByType(q, "independent_review_done", "p");
   assert.equal(after.length, 1);
-  assert.equal(after[0].triggerType, "lint_report_done");
+  assert.equal(after[0].triggerType, "other_trigger");
 });
 
 test("dropPendingTriggersByType only affects the given project (B2)", () => {

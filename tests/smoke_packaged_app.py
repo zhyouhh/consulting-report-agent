@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import socket
 import subprocess
@@ -52,11 +51,10 @@ REQUIRED_PLAN_FILES = {
     "data-log.md",
     "analysis-notes.md",
     "independent-review.md",
-    "lint-report.md",
     "presentation-plan.md",
     "delivery-log.md",
 }
-FORBIDDEN_PLAN_FILES = {"project-info.md", "gate-control.md"}
+FORBIDDEN_PLAN_FILES = {"project-info.md", "gate-control.md", "lint-report.md"}
 REQUIRED_POOL_PROVIDER_FIELDS = {"weight", "minute_limit", "daily_soft_limit", "cooldown_seconds"}
 REQUIRED_POOL_LIMIT_FIELDS = {
     "per_turn_searches",
@@ -181,25 +179,23 @@ def check_private_files(bundle_internal: Path) -> None:
     if not (bundle_internal / "skill" / "SKILL.md").exists():
         raise SmokeFailure("skill/SKILL.md 未打入 _internal/skill/")
     independent_review_template = bundle_internal / "skill" / "plan-template" / "independent-review.md"
-    lint_report_template = bundle_internal / "skill" / "plan-template" / "lint-report.md"
     if not independent_review_template.exists():
         raise SmokeFailure(f"independent-review.md 模板未打入: {independent_review_template}")
-    if not lint_report_template.exists():
-        raise SmokeFailure(f"lint-report.md 模板未打入: {lint_report_template}")
-
+    # N7: lint-report template + quality_check.ps1 are deleted — must NOT be bundled.
+    lint_report_template = bundle_internal / "skill" / "plan-template" / "lint-report.md"
+    if lint_report_template.exists():
+        raise SmokeFailure(f"lint-report.md 模板应已删除却仍被打入: {lint_report_template}")
     quality_script = bundle_internal / "skill" / "scripts" / "quality_check.ps1"
-    if not quality_script.exists():
-        raise SmokeFailure(f"quality_check.ps1 未打入: {quality_script}")
-    quality_script_text = quality_script.read_text(encoding="utf-8-sig")
-    if not re.search(r"^\s*\[string\]\$OutputPath\b", quality_script_text, re.MULTILINE):
-        raise SmokeFailure(f"quality_check.ps1 缺 -OutputPath 参数: {quality_script}")
+    if quality_script.exists():
+        raise SmokeFailure(f"quality_check.ps1 应已删除却仍被打入: {quality_script}")
+
     if not (bundle_internal / "frontend" / "dist").exists():
         raise SmokeFailure("frontend/dist 未打入 _internal/frontend/dist/")
     pandoc_path = bundle_internal / "pandoc.exe"
     if not pandoc_path.exists() or not pandoc_path.stat().st_size:
         raise SmokeFailure(f"pandoc.exe 缺失或为空: {pandoc_path}")
     log_step("skill/、frontend/dist/ 与 pandoc.exe 注入", True)
-    log_step("S5 review 模板与新版 quality_check.ps1 注入", True)
+    log_step("S5 independent-review 模板注入（lint 路径已删）", True)
 
 
 def wait_for_server(port: int, timeout: int) -> None:
@@ -298,15 +294,6 @@ def check_project_scaffolding(port: int, temp_workspace: Path) -> tuple[str, Pat
 
 def check_s5_endpoint_guards(port: int, project_id: str) -> None:
     status, payload = http_request_json(
-        f"/api/projects/{project_id}/lint-report",
-        port,
-        method="POST",
-    )
-    if status != 400 or "S5" not in str(payload.get("detail", "")):
-        raise SmokeFailure(f"lint-report S0 拒绝不符合预期: status={status}, payload={payload}")
-    log_step("S0 下 lint-report endpoint 拒绝", True)
-
-    status, payload = http_request_json(
         f"/api/projects/{project_id}/independent-review/stream",
         port,
         method="POST",
@@ -330,13 +317,6 @@ def check_review_tools(port: int, project_id: str, project_dir: Path) -> None:
         "建议继续补齐真实业务材料，并在交付前完成人工复核。\n",
         encoding="utf-8",
     )
-
-    quality = http_post(f"/api/projects/{project_id}/quality-check", port)
-    if quality.get("status") != "ok":
-        raise SmokeFailure(f"quality-check 失败: {quality}")
-    if "检查摘要" not in (quality.get("output") or ""):
-        raise SmokeFailure(f"quality-check 输出缺检查摘要: {quality}")
-    log_step("打包态 quality-check 脚本", True)
 
     exported = http_post(f"/api/projects/{project_id}/export-draft", port, timeout=20.0)
     if exported.get("status") != "ok":

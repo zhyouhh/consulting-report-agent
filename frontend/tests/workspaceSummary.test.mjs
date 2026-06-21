@@ -90,19 +90,18 @@ test("summarizeWorkspace uses safe defaults when new fields are absent", () => {
   assert.deepEqual(summary.checkpoints, {});
 });
 
-test("summarizeWorkspace maps independent review readiness flags", () => {
+test("summarizeWorkspace maps independent review readiness flag", () => {
   const summary = summarizeWorkspace({
     stage_code: "S5",
     flags: {
       independent_review_ready: true,
-      lint_report_ready: false,
-      review_reports_ready: false,
     },
   });
 
   assert.equal(summary.flags.independentReviewReady, true);
-  assert.equal(summary.flags.lintReportReady, false);
-  assert.equal(summary.flags.reviewReportsReady, false);
+  // N7: lint / dual-report flags are no longer surfaced.
+  assert.equal(summary.flags.lintReportReady, undefined);
+  assert.equal(summary.flags.reviewReportsReady, undefined);
 });
 
 test("isS4ReviewButtonVisible returns false when no lengthTargets", () => {

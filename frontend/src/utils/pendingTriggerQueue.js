@@ -1,6 +1,6 @@
 // Pending system-trigger queue for the main chat.
 //
-// When a review/lint report finishes while the main chat is busy (streaming another turn or
+// When an independent-review report finishes while the main chat is busy (streaming another turn or
 // uploading), the trigger that would report it must NOT be silently dropped — the user would
 // then never hear the finding. These pure helpers hold pending triggers FIFO until the current
 // stream ends, then the component flushes them (re-issuing each with its ORIGINAL metadata).

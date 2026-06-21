@@ -13,10 +13,10 @@ test("buildChatStreamRequest passes system_trigger in body", () => {
   const req = buildChatRequest({
     projectId: "demo",
     messageText: "",
-    systemTrigger: "lint_report_done",
+    systemTrigger: "independent_review_done",
   });
 
-  assert.equal(req.system_trigger, "lint_report_done");
+  assert.equal(req.system_trigger, "independent_review_done");
 });
 
 test("buildChatStreamRequest empty messageText when system_trigger set", () => {
@@ -57,12 +57,11 @@ test("ChatPanel.triggerSystemTurn queues triggers when busy and forwards metadat
   assert.match(src, /triggerMetadata: \{ run_id: item\.run_id, report_mtime_ns: item\.report_mtime_ns \}/);
 });
 
-test("WorkspacePanel.runLintReport awaits workspace GET before onTriggerSystemTurn", () => {
+test("WorkspacePanel no longer references the removed lint-report path (N7)", () => {
   const src = readSrc("../src/components/WorkspacePanel.jsx");
-  assert.match(src, /axios\.post\(`\/api\/projects\/\$\{encodeURIComponent\(requestProject\)\}\/lint-report`\)/);
-  assert.match(src, /axios\.get\(`\/api\/projects\/\$\{encodeURIComponent\(requestProject\)\}\/workspace`\)/);
-  assert.match(src, /lint_report_ready|lintReportReady/);
-  assert.match(src, /onTriggerSystemTurn\?\.\(['"]lint_report_done['"]\)/);
+  assert.doesNotMatch(src, /runLintReport/);
+  assert.doesNotMatch(src, /lint-report/);
+  assert.doesNotMatch(src, /lint_report_done/);
 });
 
 test("ReviewChatWindow onCompleted fires the system turn from the run-bound result", () => {

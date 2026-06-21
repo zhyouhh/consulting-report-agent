@@ -333,8 +333,6 @@ class WorkspaceApiTests(unittest.TestCase):
             "flags": {
                 "review_checklist_ready": True,
                 "independent_review_ready": False,
-                "lint_report_ready": False,
-                "review_reports_ready": False,
             },
         }
 
@@ -344,8 +342,18 @@ class WorkspaceApiTests(unittest.TestCase):
         flags = response.json()["flags"]
         self.assertIn("review_checklist_ready", flags)
         self.assertIs(flags["independent_review_ready"], False)
-        self.assertIs(flags["lint_report_ready"], False)
-        self.assertIs(flags["review_reports_ready"], False)
+        # N7: lint / dual-report flags are gone.
+        self.assertNotIn("lint_report_ready", flags)
+        self.assertNotIn("review_reports_ready", flags)
+
+    def test_deleted_lint_endpoints_are_gone(self):
+        # N7: the /quality-check and /lint-report POST routes were removed entirely.
+        # The SPA catch-all serves GET for any path, so a POST to a gone route yields
+        # 405 (path matches the catch-all, no POST handler); 404 if no catch-all matches.
+        # Either proves there is no live POST endpoint here.
+        for path in ("/api/projects/demo/quality-check", "/api/projects/demo/lint-report"):
+            resp = self.client.post(path)
+            self.assertIn(resp.status_code, (404, 405), f"{path} should be gone")
 
     @mock.patch("backend.main.skill_engine.get_project_path")
     def test_clear_conversation_removes_new_and_legacy_sidecars(self, mock_get_project_path):
@@ -566,28 +574,6 @@ class WorkspaceApiTests(unittest.TestCase):
             finally:
                 import shutil as _sh
                 _sh.rmtree(real_tmpdir, ignore_errors=True)
-
-    @mock.patch("backend.main.run_quality_check")
-    @mock.patch("backend.main.skill_engine.get_script_path")
-    @mock.patch("backend.main.skill_engine.get_primary_report_path")
-    def test_quality_check_endpoint_returns_script_output(
-        self,
-        mock_report_path,
-        mock_script_path,
-        mock_quality_check,
-    ):
-        mock_report_path.return_value = "D:/tmp/report.md"
-        mock_script_path.return_value = "D:/skill/scripts/quality_check.ps1"
-        mock_quality_check.return_value = {"status": "ok", "output": "高风险: 0"}
-
-        response = self.client.post("/api/projects/demo/quality-check")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
-        mock_quality_check.assert_called_once_with(
-            "D:/tmp/report.md",
-            "D:/skill/scripts/quality_check.ps1",
-        )
 
     # ------------------------------------------------------------------
     # C4: POST /independent-review/stream (run-bound, resume) + discard
@@ -1363,148 +1349,6 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertTrue(store.claim_first(project_id, "fresh-stale", threading.Event()))
         store.discard(project_id, "fresh-stale")
 
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_lint_report_endpoint_requires_s5(self, mock_summary):
-        mock_summary.return_value = {"stage_code": "S4"}
-
-        response = self.client.post("/api/projects/demo/lint-report")
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("AI 味自查只能在 S5 阶段使用", response.json()["detail"])
-
-    @mock.patch("backend.main.run_lint_report")
-    @mock.patch("backend.main.skill_engine.get_script_path")
-    @mock.patch("backend.main.skill_engine.get_project_path")
-    @mock.patch("backend.main.skill_engine.get_primary_report_path")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_lint_report_endpoint_returns_summary(
-        self,
-        mock_summary,
-        mock_report_path,
-        mock_project_path,
-        mock_script_path,
-        mock_run_lint,
-    ):
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_report_path.return_value = "D:/tmp/report.md"
-        mock_project_path.return_value = Path("D:/tmp/project")
-        mock_script_path.return_value = "D:/skill/scripts/quality_check.ps1"
-        mock_run_lint.return_value = {
-            "status": "ok",
-            "path": "D:/tmp/project/plan/lint-report.md",
-            "summary": {"ai_style": 2},
-        }
-
-        response = self.client.post("/api/projects/demo-lint/lint-report")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["summary"]["ai_style"], 2)
-        mock_run_lint.assert_called_once_with(
-            "D:/tmp/report.md",
-            str(Path("D:/tmp/project") / "plan" / "lint-report.md"),
-            "D:/skill/scripts/quality_check.ps1",
-        )
-
-    @mock.patch("backend.main.skill_engine.get_primary_report_path")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_lint_report_returns_error_when_report_missing(
-        self,
-        mock_summary,
-        mock_report_path,
-    ):
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_report_path.side_effect = FileNotFoundError("正文不存在")
-
-        response = self.client.post("/api/projects/demo-lint-missing-report/lint-report")
-
-        self.assertEqual(response.status_code, 404)
-        self.assertIn("正文不存在", response.json()["detail"])
-
-    @mock.patch("backend.main.skill_engine.get_script_path")
-    @mock.patch("backend.main.skill_engine.get_project_path")
-    @mock.patch("backend.main.skill_engine.get_primary_report_path")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_lint_report_returns_error_when_script_path_missing(
-        self,
-        mock_summary,
-        mock_report_path,
-        mock_project_path,
-        mock_script_path,
-    ):
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_report_path.return_value = "D:/tmp/report.md"
-        mock_project_path.return_value = Path("D:/tmp/project")
-        mock_script_path.side_effect = FileNotFoundError("脚本不存在")
-
-        response = self.client.post("/api/projects/demo-lint-missing-script/lint-report")
-
-        self.assertEqual(response.status_code, 404)
-        self.assertIn("脚本不存在", response.json()["detail"])
-
-    @mock.patch("backend.main.run_lint_report")
-    @mock.patch("backend.main.skill_engine.get_script_path")
-    @mock.patch("backend.main.skill_engine.get_project_path")
-    @mock.patch("backend.main.skill_engine.get_primary_report_path")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_lint_report_returns_error_when_run_lint_report_fails(
-        self,
-        mock_summary,
-        mock_report_path,
-        mock_project_path,
-        mock_script_path,
-        mock_run_lint,
-    ):
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_report_path.return_value = "D:/tmp/report.md"
-        mock_project_path.return_value = Path("D:/tmp/project")
-        mock_script_path.return_value = "D:/skill/scripts/quality_check.ps1"
-        mock_run_lint.return_value = {"status": "error", "detail": "脚本失败"}
-
-        response = self.client.post("/api/projects/demo-lint-error-shape/lint-report")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "error", "detail": "脚本失败"})
-
-    @mock.patch("backend.main.run_lint_report")
-    @mock.patch("backend.main.skill_engine.get_script_path")
-    @mock.patch("backend.main.skill_engine.get_project_path")
-    @mock.patch("backend.main.skill_engine.get_primary_report_path")
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_lint_report_returns_error_when_run_lint_report_raises(
-        self,
-        mock_summary,
-        mock_report_path,
-        mock_project_path,
-        mock_script_path,
-        mock_run_lint,
-    ):
-        mock_summary.return_value = {"stage_code": "S5"}
-        mock_report_path.return_value = "D:/tmp/report.md"
-        mock_project_path.return_value = Path("D:/tmp/project")
-        mock_script_path.return_value = "D:/skill/scripts/quality_check.ps1"
-        mock_run_lint.side_effect = RuntimeError("powershell crashed")
-
-        response = self.client.post("/api/projects/demo-lint-raises/lint-report")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "error")
-        self.assertIn("powershell crashed", response.json()["detail"])
-
-    @mock.patch("backend.main.skill_engine.get_workspace_summary")
-    def test_lint_report_endpoint_409_when_concurrent(self, mock_summary):
-        from backend.report_tools import get_lint_report_lock
-
-        project_id = "demo-lint-concurrent"
-        mock_summary.return_value = {"stage_code": "S5"}
-        lock = get_lint_report_lock(project_id)
-        self.assertTrue(lock.acquire(blocking=False))
-        self.addCleanup(lock.release)
-
-        response = self.client.post(f"/api/projects/{project_id}/lint-report")
-
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("上一次 AI 味自查仍在进行中", response.json()["detail"])
-
     @mock.patch("backend.main.export_reviewable_draft")
     @mock.patch("backend.main.skill_engine.ensure_output_dir")
     @mock.patch("backend.main.skill_engine.get_script_path")
@@ -1670,9 +1514,9 @@ class WorkspaceApiTests(unittest.TestCase):
             "system_notices": [
                 {
                     "category": "write_blocked",
-                    "path": "plan/independent-review.md, plan/lint-report.md",
-                    "reason": "需要先完成独立审查和 AI 味自查，才能标记审查通过。",
-                    "user_action": "请先在 S5 阶段点击上方'独立审查'和'AI 味自查'按钮，再确认审查通过。",
+                    "path": "plan/independent-review.md",
+                    "reason": "需要先完成独立审查，才能标记审查通过。",
+                    "user_action": "请先在 S5 阶段点击上方'独立审查'按钮，再确认审查通过。",
                     "surface_to_user": True,
                 }
             ],
@@ -2028,8 +1872,8 @@ class R3FileApiTests(unittest.TestCase):
         self.assertNotIn("run_in_threadpool(_write_under_lock)", main_src)
 
     def _write_effective_reports(self):
-        # review_stale gate is _has_effective_review_reports; write reports with
-        # anchors + completion marker + substantive body.
+        # N7: review_stale gate is _has_effective_independent_review (single report);
+        # write the independent review with anchors + completion marker + substantive body.
         eng = self.engine
         ir_lines = ["# Independent review", ""]
         for anchor in eng.INDEPENDENT_REVIEW_ANCHORS:
@@ -2037,21 +1881,12 @@ class R3FileApiTests(unittest.TestCase):
         ir_lines.append(eng.INDEPENDENT_REVIEW_COMPLETION_MARKER)
         (self.project_dir / "plan" / "independent-review.md").write_text(
             "\n".join(ir_lines).strip() + "\n", encoding="utf-8")
-        lint_lines = [
-            "# AI 味自查", "", "## 总览", "结论: 已完成全文表达检查。", "预计修改时间: 30 分钟。",
-            "", "## 按章节排列", "- 执行摘要: 删除空泛形容词。", "- 建议章节: 改为可执行动作。",
-            eng.LINT_REPORT_COMPLETION_MARKER,
-        ]
-        (self.project_dir / "plan" / "lint-report.md").write_text(
-            "\n".join(lint_lines).strip() + "\n", encoding="utf-8")
 
     def test_workspace_review_stale_after_draft_edit(self):
         self._write_effective_reports()
         ir = self.project_dir / "plan" / "independent-review.md"
-        lint = self.project_dir / "plan" / "lint-report.md"
         draft = self.project_dir / "content" / "report_draft_v1.md"
         os.utime(ir, ns=(1000, 1000))
-        os.utime(lint, ns=(1500, 1500))
         os.utime(draft, ns=(2000, 2000))
         r = self.client.get(f"/api/projects/{self.pid}/workspace")
         self.assertEqual(r.status_code, 200)

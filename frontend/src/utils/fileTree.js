@@ -23,7 +23,6 @@ export const FILE_DISPLAY_NAMES = {
   "plan/analysis-notes.md": "分析记录",
   "content/report_draft_v1.md": "报告正文",
   "plan/independent-review.md": "独立审查报告",
-  "plan/lint-report.md": "AI 味自查报告",
   "plan/presentation-plan.md": "演示计划",
   "plan/delivery-log.md": "交付记录",
   "plan/stage-gates.md": "阶段门禁（系统）",

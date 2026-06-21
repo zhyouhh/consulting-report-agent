@@ -260,8 +260,8 @@ class CheckNoMixedIntentInTurnTests(unittest.TestCase):
         self.assertIsNone(check_no_mixed_intent_in_turn(handler, "重写第二章并导出"))
 
     def test_two_secondary_actions_reject(self):
-        handler = _FakeHandler(["export", "quality_check"])
-        msg = check_no_mixed_intent_in_turn(handler, "重写并导出并质检")
+        handler = _FakeHandler(["export", "inspect_file"])
+        msg = check_no_mixed_intent_in_turn(handler, "重写并导出并查看文件")
         self.assertIsNotNone(msg)
         self.assertIn("拆", msg)
 

@@ -109,7 +109,7 @@
 
 **执行人**：撰写人  
 **动作**：
-- 跑一次 `quality_check` 脚本
+- 在工作区点"独立审查"按钮跑一次独立审查
 - 先清高风险，再收中风险
 - 标记仍待核实的数据和来源
 
@@ -131,12 +131,6 @@
 
 ## 六、快速审查工具
 
-```bash
-# Linux/macOS
-bash scripts/quality_check.sh report.md
-
-# Windows PowerShell
-powershell -ExecutionPolicy Bypass -File scripts/quality_check.ps1 -FilePath report.md
-```
+在工作区点"独立审查"按钮即可触发一次独立审查代理，它会读 data-log / analysis-notes / 正文 / references / outline，按 5 个维度（含「语言专业性·去 AI 味」）审查并落 `plan/independent-review.md`。
 
 如需导出 `docx` 预审版本，可结合 `modules/final-delivery.md` 使用导出脚本。

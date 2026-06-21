@@ -39,6 +39,6 @@
 | S2 | 资料采集 | `data-log.md` | | |
 | S3 | 分析沉淀 | `analysis-notes.md` | | |
 | S4 | 报告撰写 | `content/report_draft_v1.md` | | |
-| S5 | 质量审查 | `independent-review.md` / `lint-report.md` | | |
+| S5 | 质量审查 | `independent-review.md` | | |
 | S6 | 演示准备 | `presentation-plan.md` | | |
 | S7 | 交付归档 | `delivery-log.md` | | |

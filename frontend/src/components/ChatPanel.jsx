@@ -74,7 +74,7 @@ const ChatPanel = forwardRef(function ChatPanel({
   const pendingAttachmentsRef = useRef([])
   const pendingContentRef = useRef(new Map())
   const contentFlushTimersRef = useRef(new Map())
-  // C5: queued system triggers (review/lint completions that arrived while the chat was busy).
+  // C5: queued system triggers (independent-review completions that arrived while the chat was busy).
   const pendingTriggerQueueRef = useRef([])
   const connection = describeConnectionMode(settings || {})
   const workspaceSummary = summarizeWorkspace(workspace || {})
@@ -646,7 +646,7 @@ const ChatPanel = forwardRef(function ChatPanel({
   startStreamRef.current = startStream
 
   // triggerSystemTurn(triggerType, metadata): if the chat is busy, queue the trigger (FIFO,
-  // scoped to this project) so a finished review/lint is never silently dropped; otherwise fire
+  // scoped to this project) so a finished independent review is never silently dropped; otherwise fire
   // it now. metadata = { run_id, report_mtime_ns } (opaque strings, threaded verbatim).
   const triggerSystemTurn = useCallback((triggerType, metadata = null) => {
     if (loading || uploading) {

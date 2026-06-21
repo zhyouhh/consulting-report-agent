@@ -131,7 +131,7 @@ test("ReviewChatWindow only starts a review on the isOpen rising edge (no restar
 
 test("WorkspacePanel completion fires the system turn from the run-bound result, not generic ready", () => {
   const src = workspaceSrc();
-  const reviewCompletion = sectionBetween(src, "const onIndependentReviewCompleted", "const runLintReport");
+  const reviewCompletion = sectionBetween(src, "const onIndependentReviewCompleted", "const handleSaveFile");
   // Fires on the {run_id, report_mtime_ns} returned by the window.
   assert.match(reviewCompletion, /completion\?\.run_id/);
   assert.match(reviewCompletion, /completion\?\.report_mtime_ns/);
@@ -144,28 +144,17 @@ test("WorkspacePanel completion fires the system turn from the run-bound result,
 
 test("WorkspacePanel does not strip run-bound metadata before triggering", () => {
   const src = workspaceSrc();
-  const reviewCompletion = sectionBetween(src, "const onIndependentReviewCompleted", "const runLintReport");
+  const reviewCompletion = sectionBetween(src, "const onIndependentReviewCompleted", "const handleSaveFile");
   // The metadata object reaches onTriggerSystemTurn intact (run_id + report_mtime_ns).
   assert.match(reviewCompletion, /run_id:\s*runId/);
   assert.match(reviewCompletion, /report_mtime_ns:\s*reportMtimeNs/);
 });
 
-test("WorkspacePanel lint completion stays generic (no run-bound metadata)", () => {
+test("WorkspacePanel no longer references the removed lint-report path (N7)", () => {
   const src = workspaceSrc();
-  const lintReport = sectionBetween(src, "const runLintReport", "const exportDraft");
-  assert.match(lintReport, /lint_report_ready|lintReportReady/);
-  assert.match(lintReport, /onTriggerSystemTurn\?\.\(['"]lint_report_done['"]\)/);
-  assert.match(lintReport, /shouldApplyProjectResponse/);
-});
-
-test("WorkspacePanel surfaces lint-report non-ok responses to the user", () => {
-  const src = workspaceSrc();
-  const lintReport = sectionBetween(src, "const runLintReport", "const exportDraft");
-
-  assert.match(lintReport, /res\.data\.status\s*!==\s*['"]ok['"]/);
-  assert.match(lintReport, /showError\(/);
-  assert.match(lintReport, /res\.data\.detail/);
-  assert.match(lintReport, /AI 味自查失败，请重试/);
+  assert.doesNotMatch(src, /runLintReport/);
+  assert.doesNotMatch(src, /lint-report/);
+  assert.doesNotMatch(src, /lint_report_done|lintReportReady|lint_report_ready/);
 });
 
 test("WorkspacePanel drops stale pending review triggers when starting a new run (red-team B2)", () => {

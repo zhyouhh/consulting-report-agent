@@ -188,26 +188,24 @@ description: Use when writing consulting reports, strategy analysis, market rese
 
 ### S5 质量审查
 
-S5 阶段由两个用户主动触发的工具完成，你不再自己写 review-checklist.md。
+S5 阶段由用户主动触发的"独立审查"按钮完成，你不再自己写 review-checklist.md。
 
 **用户操作流**：
-1. 用户点上方"独立审查"按钮 → 独立审查代理读 data-log / analysis-notes / 正文 / references / outline，按 5 维度审查，落 `plan/independent-review.md`
-2. 用户点上方"AI 味自查"按钮 → 机械脚本扫正文，按 4 维度查 AI 腔/占位符/标注/章节 So What，落 `plan/lint-report.md`
+1. 用户点上方"独立审查"按钮 → 独立审查代理读 data-log / analysis-notes / 正文 / references / outline，按 5 维度审查（含「语言专业性·去 AI 味」），落 `plan/independent-review.md`
 
 **你的任务**：
-- 用户进入 S5 时，**主动提醒用户使用上方两个新按钮**——一句话说清楚两个按钮的区别
-- 当系统通知"独立审查报告已生成"时，read_file 读 `plan/independent-review.md`，按维度向用户报告主要发现，询问是否需要修改
-- 当系统通知"AI 味自查报告已生成"时，read_file 读 `plan/lint-report.md`，按章节向用户报告，询问是否需要修改
+- 用户进入 S5 时，**主动提醒用户使用上方的"独立审查"按钮**——一句话说清楚它会做什么
+- 当系统通知"独立审查报告已生成"时，按维度向用户报告主要发现，询问是否需要修改
 - 用户决定改某条 → 你按 S4 工具规则修改正文（read_file + edit_file / append_report_draft）
 - 用户认为审查通过 → 调用 `advance_stage(checkpoint_key="review_passed_at", action="set", reason="...")`
 
 **禁止**：
 - 不要自己写 `plan/review-checklist.md`（已退役）
-- 不要假装独立审查或 AI 味自查已完成
+- 不要假装独立审查已完成
 - 不要在用户没点按钮的情况下尝试推进 S5
 - 不要把审查报告内容大段贴进聊天框——报告文件已经在工作区，你只 summarize 关键发现
 
-**推进到 S6/S7**：用户明确确认审查通过时，调用 `advance_stage(checkpoint_key="review_passed_at", action="set", reason="...")`。后端会校验 `plan/independent-review.md` 和 `plan/lint-report.md` 都存在且结构完整。
+**推进到 S6/S7**：用户明确确认审查通过时，调用 `advance_stage(checkpoint_key="review_passed_at", action="set", reason="...")`。后端会校验 `plan/independent-review.md` 存在且结构完整。
 
 ### S6 演示准备
 - 仅当交付形式 = `报告+演示` 时启用

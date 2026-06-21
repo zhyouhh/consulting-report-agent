@@ -47,7 +47,7 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 已修复并打包验证：
 
 - 打包态 GUI 启动崩溃：`settings.mode` null 不再触发首页 error boundary。
-- `_internal\skill\scripts\quality_check.ps1` / `export_draft.ps1` 在 Windows PowerShell 下的源码解析和 stdout 编码问题。
+- `_internal\skill\scripts\export_draft.ps1` 在 Windows PowerShell 下的源码解析和 stdout 编码问题。
 - `export_draft.ps1` 优先使用包内 `pandoc.exe`，`consulting_report.spec` 会把 Pandoc 打入 `_internal`。
 - checkpoint endpoint 越级推进 / stage desync / legacy `<stage-ack>` runtime side effect。
 - 聊天气泡 Markdown GFM 表格渲染。
@@ -99,35 +99,36 @@ S4 阶段（大纲已确认）报告正文唯一规范路径是 `content/report_
 
 **历史背景**：原 `<draft-action>` tag system + classifier + gate + scope enforcement 整套（含 fix4 v5 amendment）已于 2026-05-06 删除；4 专用工具中的 3 个旧工具与 gemini 时代 obligation / family-lock 控制层已于 2026-05-09 DeepSeek migration 删除。详见 `docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md`。
 
-## S5 用户触发审查（2026-05-22 两按钮重做 → 2026-06-07 R1+R2 迷你聊天 + 断点续审）
+## S5 用户触发审查（2026-05-22 重做 → 2026-06-07 R1+R2 迷你聊天 + 断点续审 → N7 统一为单一独立审查）
 
-S5 阶段审查由**两个用户主动触发按钮**驱动：
+S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI 味自查"机械脚本路径整条删除，去 AI 味并入独立审查维度⑤）：
 
 | 入口 | 路径 | 写入者 |
 |---|---|---|
-| 工作区"独立审查"按钮 | `plan/independent-review.md` | `backend/independent_review.py:IndependentReviewAgent`（独立 LLM 会话，5 维度判断）|
-| 工作区"AI 味自查"按钮 | `plan/lint-report.md` | `skill/scripts/quality_check.ps1`（PowerShell 脚本，4 机械维度）|
+| 工作区"独立审查"按钮 | `plan/independent-review.md` | `backend/independent_review.py:IndependentReviewAgent`（独立 LLM 会话，5 维度判断，含「语言专业性·去 AI 味」）|
 
-报告就绪后前端自动起一轮主代理 turn（`ChatRequest.system_trigger` 协议 + `_chat_stream_unlocked` 内 `if system_trigger:` 分支）。
+报告就绪后前端自动起一轮主代理 turn（`ChatRequest.system_trigger` 协议 + `_chat_stream_unlocked` 内 `if system_trigger:` 分支；现仅 `independent_review_done` 一种 trigger）。
 
-**R2（2026-06-07）改了汇报轮注入方式**：不再"让主代理 `read_file` 自己读报告"，而是**把报告全文作为本轮临时 user/context 数据消息注入**（trust boundary：数据非指令、绝不入 system），且**汇报轮禁工具**（请求层 pop tools + 响应层硬拦截 `_execute_tool`）——主代理必基于注入内容回复，恶意报告无法诱导工具调用 / 阶段推进。`system_triggered` 轮只持久化 assistant（报告全文不落 `conversation.json`）。
+**去 AI 味（N7 Humanizer-zh）**：独立审查维度⑤=「语言专业性·去 AI 味」，规则在 review prompt 内置；辅以确定性占位符扫描 `backend/report_quality.py:scan_placeholders`/`build_placeholder_grounding`（首轮把命中清单作 grounding 注入审查会话，`UNTRUSTED_DATA` 包裹 + 定界符中和）。trust boundary 标记/中和器抽到 leaf 模块 `backend/trust_boundary.py`（`UNTRUSTED_DATA_OPEN/CLOSE`）。
 
-**R1（2026-06-07）把独立审查从"闷头读→一次性 write→结束"改造成流式迷你聊天窗口 + 断点续审**：
+**R2（2026-06-07）汇报轮注入方式**：不"让主代理 `read_file` 自己读报告"，而是**把报告全文作为本轮临时 user/context 数据消息注入**（trust boundary：数据非指令、绝不入 system），且**汇报轮禁工具**（请求层 pop tools + 响应层硬拦截 `_execute_tool`）——主代理必基于注入内容回复，恶意报告无法诱导工具调用 / 阶段推进。`system_triggered` 轮只持久化 assistant（报告全文不落 `conversation.json`）。
 
-- **流式会说话 agent**：`IndependentReviewAgent.run()` 从非流式改为流式，content 增量作 `content_delta` SSE 事件推前端渲染；`<think>` 三路径剥离由 `backend/stream_parsing.py:ThinkingStreamParser` 负责（chat.py 主循环与 independent_review 共享 import，解循环导入），**前端永不收到 thinking**。
-- **`ReviewSessionStore`（`independent_review.py` 内新增）**：进程内续审存档，两锁（review lock / store guard）+ `run_id` + tombstone（done/errored）+ candidate staging + 锁内原子替换（`os.replace`）+ 校验失败自修 ≤2 次后降级 errored 留 snapshot。candidate 从 messages 重建、不私存。
+**R1（2026-06-07）独立审查=流式迷你聊天窗口 + 断点续审**：
+
+- **流式会说话 agent**：`IndependentReviewAgent.run()` 流式，content 增量作 `content_delta` SSE 事件推前端渲染；`<think>` 三路径剥离由 `backend/stream_parsing.py:ThinkingStreamParser` 负责（chat.py 主循环与 independent_review 共享 import，解循环导入），**前端永不收到 thinking**。
+- **`ReviewSessionStore`（`independent_review.py` 内）**：进程内续审存档，两锁（review lock / store guard）+ `run_id` + tombstone（done/errored）+ candidate staging + 锁内原子替换（`os.replace`）+ 校验失败自修 ≤2 次后降级 errored 留 snapshot。candidate 从 messages 重建、不私存。
 - **endpoint**：`POST /api/projects/{id}/independent-review/stream {resume,run_id,supplement?}` + `POST .../discard`（**旧 GET stream 已删**）。**worker（agent.run + review lock 释放）在 endpoint 函数体创建、不在 `generate()` 内**——Starlette `StreamingResponse` 用 task group 并发 stream_response + listen_for_disconnect、disconnect 抢先 cancel 时 `generate()` 可能一行未执行；worker 在函数体保证 review lock 必释放（否则该项目审查 409 到重启，codex C5 红队 B3）。completion 仅在 lock 释放后 + 重读 done tombstone 才发 `review-completed`。
-- **run-bound 注入**：汇报轮绑定本次 run 的 tombstone，绝不汇报旧报告。`trigger_metadata={run_id, report_mtime_ns}`（**opaque 字符串、全程禁转 Number/int**，避 JS 2^53 失精）端到端透传：前端 `buildChatRequest` → `ChatRequest` → `/api/chat/stream` → chat.py tombstone 校验 + 读报告后 re-stat `mtime_ns` 复校（TOCTOU）。lint 路径无 run_id 维持 generic ready。
+- **run-bound 注入**：汇报轮绑定本次 run 的 tombstone，绝不汇报旧报告。`trigger_metadata={run_id, report_mtime_ns}`（**opaque 字符串、全程禁转 Number/int**，避 JS 2^53 失精）端到端透传：前端 `buildChatRequest` → `ChatRequest` → `/api/chat/stream` → chat.py tombstone 校验 + 读报告后 re-stat `mtime_ns` 复校（TOCTOU）。
 
-**关键约束**（baseline + R1/R2 叠加）：
-- `_has_effective_review_reports()` 是 `CHECKPOINT_PREREQ.review_passed_at` 生产门禁；要求两份报告 marker + anchor + substantive body 全部命中
-- 主代理 `write_file` / `edit_file` 对 `plan/independent-review.md` / `plan/lint-report.md` **显式拒绝**（独立性硬约束）；这两份报告只能由 IndependentReviewAgent / lint 脚本写入
+**关键约束**（baseline + R1/R2 + N7）：
+- `_has_effective_independent_review()` 是 `CHECKPOINT_PREREQ.review_passed_at` 生产门禁；要求 marker + anchor + substantive body 全部命中（单份独立审查报告）
+- 主代理 `write_file` / `edit_file` 对 `plan/independent-review.md` **显式拒绝**（独立性硬约束）；这份报告只能由 IndependentReviewAgent 写入
 - DeepSeek 兼容 helpers（`_should_send_explicit_tool_choice` / `_extract_reasoning_content_from_message` / `_serialize_assistant_tool_call_message`）在 `independent_review.py` 与 `chat.py` 行为锁定一致（`test_deepseek_compat_helpers_match_chat_helpers`）；流式改造不破坏官渠兼容
-- per-project lock（`_INDEPENDENT_REVIEW_LOCKS` / `_LINT_REPORT_LOCKS`）：同项目同时只能跑一次审查 / 一次 lint，409 拒并发
+- per-project lock（`_INDEPENDENT_REVIEW_LOCKS`）：同项目同时只能跑一次审查，409 拒并发
 
-**前端**：`IndependentReviewDrawer.jsx` 重做为流式 `ReviewChatWindow`（前端生成 `run_id` 全程不变 + content_delta 聚合连续 assistant 气泡 + 可拖动/关闭按钮/进度；running 锁输入 / errored 留存解锁 supplement 续审 / completed 自动关窗不调 discard；open-effect 守 isOpen 上升沿防切项目误启动[红队 B1]）；`triggerSystemTurn` 忙时入 pending 队列（`utils/pendingTriggerQueue.js` FIFO + projectId 隔离），发起新审查剪同类型旧 pending[红队 B2]。无 jsdom→`utils/` 纯函数测 + 组件 source-guard。
+**前端**：`IndependentReviewDrawer.jsx` 重做为流式 `ReviewChatWindow`（前端生成 `run_id` 全程不变 + content_delta 聚合连续 assistant 气泡 + 可拖动/关闭按钮/进度；running 锁输入 / errored 留存解锁 supplement 续审 / completed 自动关窗不调 discard；open-effect 守 isOpen 上升沿防切项目误启动[红队 B1]）；`triggerSystemTurn` 忙时入 pending 队列（`utils/pendingTriggerQueue.js` FIFO + projectId 隔离），发起新审查剪同类型旧 pending[红队 B2]。`StagePanel.jsx`：S5 才显"独立审查"按钮（唯一审查按钮）+ 高亮；S6/S7/done 才显"导出可审草稿"。无 jsdom→`utils/` 纯函数测 + 组件 source-guard。
 
-详见 `docs/superpowers/cutover_report_2026-05-22_s5-redesign.md`（baseline）+ `docs/superpowers/cutover_report_2026-06-07_s5-review-mini-chat.md`（R1+R2）。
+详见 `docs/superpowers/cutover_report_2026-05-22_s5-redesign.md`（baseline）+ `docs/superpowers/cutover_report_2026-06-07_s5-review-mini-chat.md`（R1+R2）。N7 统一审查 + 去 AI 味见 `docs/current-worklist.md` 与 N7 cutover。
 
 ## 工作区文件栏 + 可编辑预览（R3，2026-06-09）
 
@@ -137,7 +138,7 @@ S5 阶段审查由**两个用户主动触发按钮**驱动：
 - `validate_user_write` 是**独立于** `validate_plan_write` 的用户写门禁（白名单制，天然拒审查报告/追踪文件/退役/checkpoint）：穿越→`ValueError`(400)、非白名单→**`UserWriteForbiddenError`**(403)。**用专属异常而非内建 `PermissionError`**（os.replace 文件被占用也抛 PermissionError，端点要把领域拒写 403 与 OS 写失败 500 分开；异常顺序 `UserWriteForbiddenError`→`StaleFileError`→`FileNotFoundError`→`ValueError`→`OSError`）。
 - 写接口 `POST /api/projects/{id}/files/{path}` `{content, base_mtime_ns}`：mtime CAS（不匹配 `StaleFileError`→409）+ 同目录 temp + `os.replace` 原子写；`base_mtime_ns` 全程 **opaque str**（pydantic 拒 number→422）。**临界区跑专用 `_USER_WRITE_EXECUTOR`，不是 `run_in_threadpool`**——`chat_stream` 同步 generator 被 anyio 默认池迭代、`with request_lock:`(RLock) owner 是 anyio worker，保存若用默认池可能复用 owner 线程→RLock 重入绕过 CAS。**别改回 `run_in_threadpool`**（有 source-guard 守）。
 - 读接口 `GET /files/{path}` 返回 `{content, mtime_ns, editable}`，**不持锁**（chat_stream 整轮持锁，读进锁会冻预览）：先 stat 再 read。AI 写可编辑文件全经原子 `write_file`（temp+os.replace），无锁读不会读半截。`GET /files` 给结构化 `[{path,group,stage,editable,mtime_ns}]`。
-- `get_workspace_summary().flags.review_stale`（D6 advisory）：两份审查报告**有效**（`_has_effective_review_reports`）且 `draft_mtime > min(report mtimes)` 即标，**不** gate 在 `review_passed_at`，不硬阻 S6/S7。
+- `get_workspace_summary().flags.review_stale`（D6 advisory）：独立审查报告**有效**（`_has_effective_independent_review`）且 `draft_mtime > report_mtime` 即标，**不** gate 在 `review_passed_at`，不硬阻 S6/S7。
 - 前端：`utils/fileTree.js`（分组/置顶/中文名；**2026-06-19 N4：当前阶段所在分组整组置顶**）、`utils/fileEditState.js`（双模式 + `guardLeave` 返 `allow/confirm/block`）、`FilePreviewPanel.jsx`（脏离开三按钮「保存/放弃修改/取消」延后动作弹窗）、`WorkspacePanel.jsx`/`App.jsx`（切 tab/项目/新建/收面板 dirty 守卫）。**`WorkspacePanel.loadFile` 同步 `setCurrentFile(path)` 再异步 GET**——消除「导航已发起、currentFile 未 commit」窗口。
 - **N4（2026-06-19）文件树/预览上下分栏**：高度 `treePct` state 驱动（默认三七分，去掉旧 `max-h-64`）+ 可拖动分隔条（`startTreeResize` + 卸载清理防泄漏）；拖动数学抽纯函数 `utils/filePanelLayout.js`（`clampTreePct`/`computeTreePct`）。
 - 回归：`tests/test_skill_engine.py`、`tests/test_main_api.py::R3FileApiTests`；前端 `fileTree`/`fileEditState`/`filePreviewPanel.source`/`workspacePanel.source`。详见 `docs/superpowers/cutover_report_2026-06-09_r3-file-tree-editing.md`。
