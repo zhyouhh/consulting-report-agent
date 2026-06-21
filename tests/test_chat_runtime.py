@@ -4079,9 +4079,11 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(result["provider"], "serper")
         self.assertIn("猪猪侠2025观察", result["results"])
         self.assertEqual(result["items"][0]["domain"], "example.com")
+        from backend.tenant import tenant_project_key
         fake_router.search.assert_called_once_with(
             "猪猪侠 2025",
-            project_id="demo",
+            # W2-B (T13): 搜索按复合键 (uid, project_id) 隔离；handler 默认 uid="local"。
+            project_id=tenant_project_key("local", "demo"),
             turn_search_count=0,
             native_search=handler._search_with_native_provider,
         )

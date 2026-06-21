@@ -5444,7 +5444,9 @@ class ChatHandler:
             router = self._get_search_router()
             result = router.search(
                 query,
-                project_id=project_id or "__direct__",
+                # W2-B 多租户：搜索的 cache + project-minute 配额按复合键 (uid, project_id) 隔离，
+                # 不同用户的同名 project 互不串缓存/不共享分钟配额（global 配额仍全局共享，见 search_state）。
+                project_id=tenant_project_key(self.uid, project_id or "__direct__"),
                 turn_search_count=turn_search_count,
                 native_search=self._search_with_native_provider,
             )

@@ -44,5 +44,45 @@ class CompositeLockKeyTests(unittest.TestCase):
         self.assertIn("tenant_project_key(self.uid", src)
 
 
+class SearchCompositeKeyTests(unittest.TestCase):
+    """搜索 cache + project-minute 配额按复合键隔离；global 配额仍全局共享。
+    try_acquire_search_slot 语义：返回 None = 取到 slot；返回 str(scope) = 被某限额挡（已核 search_state）。"""
+
+    def _store(self):
+        import os, tempfile
+        from pathlib import Path
+        from backend.search_state import SearchStateStore
+        d = Path(os.path.realpath(tempfile.mkdtemp()))
+        return SearchStateStore(runtime_state_path=d / "rs.json", cache_path=d / "c.json")
+
+    def test_cache_key_isolated(self):
+        s = self._store()
+        self.assertNotEqual(s._make_cache_key("q", tenant_project_key("uA", "proj-x")),
+                            s._make_cache_key("q", tenant_project_key("uB", "proj-x")))
+
+    def test_project_minute_quota_isolated_by_composite_key(self):
+        s = self._store()
+        kA = tenant_project_key("uA", "proj-x"); kB = tenant_project_key("uB", "proj-x")
+        kw = dict(project_window_seconds=60, project_limit=2, global_window_seconds=60, global_limit=100)
+        self.assertIsNone(s.try_acquire_search_slot(project_id=kA, **kw))
+        self.assertIsNone(s.try_acquire_search_slot(project_id=kA, **kw))
+        self.assertIsNotNone(s.try_acquire_search_slot(project_id=kA, **kw))  # uA 第3次被 project 限额挡
+        self.assertIsNone(s.try_acquire_search_slot(project_id=kB, **kw))     # uB 同裸 proj-x 不受影响
+
+    def test_global_limit_shared_across_users(self):
+        s = self._store()
+        kw = dict(project_window_seconds=60, project_limit=100, global_window_seconds=60, global_limit=2)
+        self.assertIsNone(s.try_acquire_search_slot(project_id=tenant_project_key("uA", "p1"), **kw))
+        self.assertIsNone(s.try_acquire_search_slot(project_id=tenant_project_key("uB", "p2"), **kw))
+        self.assertIsNotNone(s.try_acquire_search_slot(project_id=tenant_project_key("uC", "p3"), **kw))  # 第3次被全局挡
+
+    def test_chat_search_call_uses_composite_key(self):
+        # 锁住 chat.py 的 router.search 调用用复合键（防回退裸 project_id）
+        import inspect
+        from backend.chat import ChatHandler
+        src = inspect.getsource(ChatHandler)
+        self.assertIn("tenant_project_key(self.uid, project_id or", src)
+
+
 if __name__ == "__main__":
     unittest.main()
