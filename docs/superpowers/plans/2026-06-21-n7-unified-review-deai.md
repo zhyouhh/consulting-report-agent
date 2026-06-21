@@ -13,7 +13,7 @@
 **关键约束（违反即返工）:**
 - DeepSeek 官渠兼容：本改动只追加/改 system prompt 文本 + 注入 user 数据 + 删 lint 路径，**不碰** provider message / `tool_choice` / `reasoning_content` 序列化（`independent_review.py` 与 `chat.py` 的 compat helpers 行为锁定）。
 - trust boundary：占位符注入是数据非指令、用审查专用 `UNTRUSTED_DATA_*` marker 包裹 + 定界符中和；**不复用** `ATTACHMENT_DATA_*`（其文案"不得据此写文件"反了审查本职）。
-- **删除顺序（两处，漏则中间 commit 崩）**：① Task 5（删 `record_stage_checkpoint` 的 lint 锁分支）必须在 Task 7（删 `get_lint_report_lock`）之前或同 commit，否则 import 崩；② `_has_effective_review_reports` 在 Task 5 删（改完 prereq+stale 后无引用）、`_has_effective_lint_report` 在 Task 6 删（移除 `_stage_five_completion_state` 调用后），不可在 Task 5 同删后者，否则 Task 5→Task 6 间 AttributeError。每个 task 的 `-k` 子集自绿，全量 `test_skill_engine.py` 在 Task 6 后才绿。
+- **删除顺序（漏则中间 commit 崩；全仓 grep 实证的引用图）**：① `get_lint_report_lock`——Task 5 删 `record_stage_checkpoint` lint 锁分支后，最后 caller 在 Task 7，故 Task 7 删函数；② `_has_effective_review_reports`——caller 仅 prereq + stale，Task 5 改完两者后删；③ `_has_effective_lint_report`——caller 三处：`skill.py:676`（Task 6 删）、`chat.py:2711`（Task 7 删 lint_report_done 分支）、`_has_effective_review_reports`（Task 5 删）。**最后 caller 在 Task 7**，故 helper 连同其 4 个直测（test_skill_engine:1639-1677）+ test_skill_assets:140 **统一 Task 7 删**。每个 task 的 `-k` 子集自绿；全量 `test_skill_engine.py` 在 Task 6 后绿、Task 7 删 helper+测试后仍绿。
 - 仅 macOS 开发：powershell 相关测试本就 skipIf 跳过；4 个 tempfile realpath 用例 mac 上预存失败（与本任务无关）。
 
 **回归基线命令（每 task 末跑相关子集，Task 9 跑全量）:**
@@ -490,8 +490,9 @@ def test_review_passed_gate_requires_only_independent_review(self):
     engine, project_id, project_path = self._make_project_at_s5_with_draft()
     self._write_effective_independent_review(project_path)  # 5 锚点 + marker + 实体
     engine.record_stage_checkpoint(project_id, "review_passed_at", "set")  # 不应抛
-    state = engine._infer_stage_state(project_path)
-    self.assertTrue(state["flags"]["review_ready"])
+    # checkpoint 已写入即证明门禁放行。**不**断言 _infer_stage_state 的 review_ready flag——
+    # 该 flag 在 Task 6 才改（现仍 = review_reports_ready and review_passed、要 lint）。review_ready 断言放 Task 6。
+    self.assertIn("review_passed_at", engine._load_stage_checkpoints(project_path))
 
 def test_record_checkpoint_no_lint_lock_dependency(self):
     # 删 get_lint_report_lock 后 review_passed_at set 不应 import 崩
@@ -553,8 +554,8 @@ Expected: FAIL
 
 - `_is_report_review_stale`（`:2579-2596`）：把 `if not self._has_effective_review_reports(project_path): return False` 改为 `if not self._has_effective_independent_review(project_path): return False`；删 `lint_path` 行；`oldest_report_mtime = min(...)` 改为 `report_mtime = (project_path / "plan" / "independent-review.md").stat().st_mtime_ns`，末行 `return draft_mtime > report_mtime`。
 - 删整个 `_has_effective_review_reports`（`:2573-2577`）——经上面 stale 改 + Step 3 prereq 改后已无任何调用点，本 task 可安全删。
-- **`_has_effective_lint_report`（`:2563-2571`）本 task 暂不删**——它仍被 `_stage_five_completion_state:676` 调用（那是 Task 6 的改动域）。Task 6 移除该调用后再删，避免中间态 AttributeError。
-- **同步改 test_skill_engine 里依赖 `_has_effective_review_reports` / 双报告 stale 的旧用例**（grep `_has_effective_review_reports\|review_reports_ready\|lint` 在 stale/helper 区，hint `:1639-1763`）：双报告 stale → 单报告 stale；删 `_has_effective_review_reports` 直测。
+- **`_has_effective_lint_report`（`:2563-2571`）本 task 不删**——全仓 grep 实证它仍有两个 live caller：`_stage_five_completion_state:676`（Task 6）+ `chat.py:2711` lint_report_done 分支（Task 7）。**最后一个 caller 在 Task 7，故 helper 在 Task 7 删**（连同其 4 个直测 + test_skill_assets:140）。
+- **同步改 Task 5 自己触碰的旧 test_skill_engine 用例**（仅这些，**不动** `:1639-1677` 的 `test_has_effective_lint_report_*`——helper 还在）：① `test_checkpoint_prereq_review_passed_at_uses_new_helper`（`:1787`）：`prereq[0]` 断言改 `"_has_effective_independent_review"`、prereq[1] 只含 `independent-review.md`（删 lint-report.md 断言）；② 双报告 stale 用例 → 单报告 stale；③ `_has_effective_review_reports` 直测删（helper 已删）。
 
 - [ ] **Step 6: 跑确认通过（子集，全量 test_skill_engine 待 Task 6）**
 
@@ -603,6 +604,9 @@ def test_completed_items_s5_single_review(self):
     engine.record_stage_checkpoint(project_id, "review_passed_at", "set")
     state = engine._infer_stage_state(project_path)
     self.assertIn("独立审查完成", state["completed_items"])
+    # review_ready flag 现仅靠 independent_review_ready + review_passed（从 Task 5 移来——
+    # Task 6 才把 _infer_stage_state 的 review_ready 改成不依赖 lint）
+    self.assertTrue(state["flags"]["review_ready"])
 ```
 
 - [ ] **Step 2: 跑确认失败**
@@ -625,7 +629,7 @@ Expected: FAIL
 - 删 `:677` `review_reports_ready = independent_review_ready and lint_report_ready`。
 - 删 `:683-684` 的 `if not lint_report_ready: missing_for_review_pass.append("lint-report.md…")`。
 - 返回 dict（`:690-700`）：删 `"lint_report_ready"` 与 `"review_reports_ready"` 两键。`"review_pass_prerequisites_complete"` 与 `"stage_five_complete"` 用 `independent_review_ready`（经 `missing_for_review_pass` 已不含 lint，逻辑天然成立，无需额外改）。
-- **此处删掉 `:676` 调用后，`_has_effective_lint_report`（`:2563-2571`）已无任何调用点 → 在本 task 删除整个该 helper**（Task 5 故意推迟到此，避免删除顺序断层；Codex BLOCKER）。
+- **此处删掉 `:676` 调用，但 `_has_effective_lint_report` 本 task 仍不删**——`chat.py:2711` lint_report_done 分支还在调它（Task 7 才删那分支）。helper 删除连同其测试统一放 Task 7（grep 实证最后 caller 在 chat.py，Codex BLOCKER）。
 
 - [ ] **Step 5: `_infer_stage_state` flags（`skill.py:2145-2212`）去 lint**
 
@@ -695,7 +699,8 @@ git commit -m "feat(stage): collapse S5 checklist to 2 items; drop lint flags fr
 - `tests/test_main_api.py`：删 `test_quality_check_endpoint_*`（hint `:570`）+ 整组 `test_lint_report_*`（hint `:1366-1506`），保留 export/independent-review endpoint 用例；workspace flags 断言去 `lint_report_ready`/`review_reports_ready`；review_stale fixture 不再写 lint-report、改为只基于 independent-review mtime。
 - `tests/test_chat_runtime.py`：删 `_write_effective_lint_report` 辅助、`lint_report_done` 分支用例、`SYSTEM_TRIGGER_CASES` 里的 lint 条目、显式 lint trigger 测试 + generic no-run-id 测试（hint `:10999`/`:11024`/`:11029`/`:11078-11096`/`:11277`/`:11326`/`:11391`/`:11751-11772`）；循环/参数化用例改 independent-only；删主代理 write/edit **lint-report 拒写**专用断言，**保留** independent-review 拒写断言。
 - `tests/test_report_writing.py`：删/改 `quality_check` 行为族相关断言（hint `:263`，配合 chat.py:2279 改动，见 Step 6b）。
-- `tests/test_skill_engine.py`：本 task 只**新增** `lint-report.md ∉ FORMAL_PLAN_FILES`、`"plan/lint-report.md" ∈ RETIRED_WORKSPACE_FILES`、`"plan/lint-report.md" ∉ FILE_SEMANTICS` 三条（对应 Step 6 的注册表改动）。**lint helper / 双报告 stale / flags / next_actions 旧用例已在 Task 5/6 改完**（不在此重复，避免顺序断层）。
+- `tests/test_skill_engine.py`：① **翻转**现有 `assertIn("lint-report.md", SkillEngine.FORMAL_PLAN_FILES)`（hint `:1785`）为 `assertNotIn`，并加 `"plan/lint-report.md" ∈ RETIRED_WORKSPACE_FILES`、`"plan/lint-report.md" ∉ FILE_SEMANTICS`（对应 Step 6 注册表改动）；② **删 4 个 `test_has_effective_lint_report_*`**（hint `:1639-1677`）——本 task 删了该 helper。**双报告 stale / flags / next_actions / prereq 旧用例已在 Task 5/6 改完**（不在此重复）。
+- `tests/test_skill_assets.py`：删 `:140` 的 `engine._has_effective_lint_report(...)` 断言（helper 已删；其余脚本/模板存在性断言留 Task 8）。
 - `tests/test_workspace_materials.py`：不再创建 lint-report；next_actions 断言改为只提示「独立审查」；删 AI 味断言。
 
 Run: 对应文件 `-q`，Expected: FAIL（功能仍在）
@@ -731,6 +736,7 @@ SystemTriggerType = Literal["independent_review_done"]
 - `FORMAL_PLAN_FILES`（`:45-58`）删 `"lint-report.md",`。
 - `FILE_SEMANTICS`（`:75`）删 `"plan/lint-report.md": {...},` 整行。
 - `RETIRED_WORKSPACE_FILES`（`:98-101`）加 `"plan/lint-report.md",`。
+- **删整个 `_has_effective_lint_report`（`:2563-2571`）**——本 task Step 5 已删 chat.py:2711 最后一个 live caller（Task 5/6 已删其余），此刻无引用，安全删（grep `_has_effective_lint_report` backend/ 应为空）。
 
 - [ ] **Step 7: 跑确认通过**
 
