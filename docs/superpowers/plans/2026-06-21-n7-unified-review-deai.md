@@ -788,7 +788,7 @@ git rm skill/scripts/quality_check.ps1 skill/scripts/quality_check.sh skill/plan
 - `skill/modules/consulting-lifecycle.md`（~`:20`）
 - `skill/modules/quality-review.md`（~`:112` 跑脚本指引、~`:136` `bash scripts/quality_check.sh`、~`:139` powershell 行——删或标退役）
 - `skill/modules/final-delivery.md`（~`:72`）
-- **根级硬约束文档 `CLAUDE.md` + `AGENTS.md`（Codex r7 BLOCKER——否则仓库级维护指令变反向约束）**：整段「## S5 用户触发审查」（`CLAUDE.md:102-148` / `AGENTS.md:102-140`）重写为单「独立审查」路径——删两按钮表/`plan/lint-report.md`/`_has_effective_review_reports`/`_LINT_REPORT_LOCKS`/双报告 `review_stale`/「StagePanel S5 显两按钮」；`review_passed_at` 门禁改 `_has_effective_independent_review`、`review_stale` 改单报告；新增维度⑤「语言专业性·去 AI 味」+ 占位符扫描 + `trust_boundary.py`/`report_quality.py` 说明。CLAUDE.md:273 macOS 注脚的「S5 两个按钮」改为「『导出可审草稿』」（AI 味自查已并入独立审查、不再是 PowerShell）。
+- **根级硬约束文档 `CLAUDE.md` + `AGENTS.md`（Codex r7 BLOCKER——否则仓库级维护指令变反向约束）**：整段「## S5 用户触发审查」（`CLAUDE.md:102-148` / `AGENTS.md:102-140`）重写为单「独立审查」路径——删两按钮表/`plan/lint-report.md`/`_has_effective_review_reports`/`_LINT_REPORT_LOCKS`/双报告 `review_stale`/「StagePanel S5 显两按钮」；`review_passed_at` 门禁改 `_has_effective_independent_review`、`review_stale` 改单报告；新增维度⑤「语言专业性·去 AI 味」+ 占位符扫描 + `trust_boundary.py`/`report_quality.py` 说明。CLAUDE.md:273 macOS 注脚的「S5 两个按钮」改为「『导出可审草稿』」（AI 味自查已并入独立审查、不再是 PowerShell）。**另**：`CLAUDE.md:50` / `AGENTS.md:50` 的「已修复并打包验证」历史 bullet 仍提 `_internal\skill\scripts\quality_check.ps1`——删 `quality_check.ps1`、只留 `export_draft.ps1` 的历史说明（quality_check 脚本本 task 已整删，Task 9 grep 搜根文档会命中此处）。
 
 - [ ] **Step 4: 前端去 lint 按钮 + `/quality-check` 死路径**
 
