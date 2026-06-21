@@ -13,6 +13,7 @@ import httpx
 from openai import OpenAI
 
 from .config import Settings
+from .report_quality import scan_placeholders, build_placeholder_grounding
 from .skill import SkillEngine
 from .stream_parsing import ThinkingStreamParser
 
@@ -421,6 +422,15 @@ class IndependentReviewAgent:
                 }
                 return
             messages = [{"role": "system", "content": INDEPENDENT_REVIEW_SYSTEM_PROMPT}]
+            # 占位符 grounding（仅首轮；resume 时已在 snapshot 的 messages 里，不重注）。
+            # best-effort：扫描失败降级为不注入，绝不阻断审查。
+            try:
+                report_path = self.skill_engine.get_primary_report_path(project_id)
+                draft_text = Path(report_path).read_text(encoding="utf-8")
+                grounding = build_placeholder_grounding(scan_placeholders(draft_text))
+                messages.append({"role": "user", "content": grounding})
+            except Exception:
+                pass
             start_iteration = 1
 
         # supplement（续审补充指令）：末尾已是 user/corrective 则合并进该条；否则在 provider-valid
