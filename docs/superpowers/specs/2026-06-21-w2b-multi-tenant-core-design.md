@@ -73,18 +73,20 @@ def get_skill_engine(uid: str) -> SkillEngine: ...      # 缺则 SkillEngine(use
 def get_chat_handler(uid: str, project_id: str) -> ChatHandler: ...   # 缓存键 (uid, project_id)
 ```
 
-**✦ 进程级锁/store 改复合键 `(uid, project_id)`（Codex R1-B2）**：`_PROJECT_REQUEST_LOCKS`、`_INDEPENDENT_REVIEW_LOCKS`、`_CONVERSATION_STATE_LOCKS`、`ReviewSessionStore._records`、`_chat_handlers`、**搜索 project 级状态/缓存**（§4.3）一律按复合键。原因：现 project_id 仅 `proj-`+12hex、per-uid registry 不保证跨用户唯一，单键会让两用户撞同 id 时跨租户互锁、污染审查 tombstone/discard、串扰搜索配额/缓存。✦（R2-NIT1）复合键由**单一中央 helper `tenant_project_key(uid, project_id)`** 生成（tuple，或对 uid/pid 分隔符消毒后的字符串），全仓唯一来源；`ProjectScope.lock_key` 即其产物，任何地方禁止手拼 `f"{uid}:{pid}"`。键里 uid 由服务端鉴权得来（绝不取客户端值）。
+**✦ 进程级锁/store 改复合键 `(uid, project_id)`（Codex R1-B2）**：`_PROJECT_REQUEST_LOCKS`、`_INDEPENDENT_REVIEW_LOCKS`、`_CONVERSATION_STATE_LOCKS`、`ReviewSessionStore._records`、`_chat_handlers`、**搜索 project 级状态/缓存**（§4.3）一律按复合键。原因：现 project_id 仅 `proj-`+12hex、per-uid registry 不保证跨用户唯一，单键会让两用户撞同 id 时跨租户互锁、污染审查 tombstone/discard、串扰搜索配额/缓存。✦（R2-NIT1）复合键由**单一中央 helper `tenant_project_key(uid, cid)`**（cid=canonical id）生成、全仓唯一来源；`ProjectScope.lock_key` 即其产物，任何地方禁止手拼。✦（R3-NIT1）helper 提供两形态：**内存** dict 键用 tuple `(uid, cid)`；**持久化 JSON**（search state/cache 的 object key）用稳定字符串 `f"{uid}::{cid}"`（消毒分隔符）。键里 uid 由服务端鉴权得来（绝不取客户端值）。
 
 **✦ 统一归属卡点 `require_project`（Codex R1-B3）**：定义单一依赖
 
 ```python
-def require_project(uid, project_id) -> ProjectScope:   # ProjectScope = {engine, settings, project_record, lock_key}
-    rec = get_skill_engine(uid).get_project_record(project_id)
+def require_project(uid, project_ref) -> ProjectScope:
+    rec = get_skill_engine(uid).get_project_record(project_ref)   # 现接受 id 或 name 别名
     if rec is None: raise HTTPException(404)
-    return ProjectScope(...)
+    cid = rec["id"]                                               # ✦ canonical id（R3-B1）
+    return ProjectScope(engine=..., settings=..., project_record=rec,
+                        project_id=cid, lock_key=tenant_project_key(uid, cid))
 ```
 
-**硬规则**：任何对某项目的 lock / chat_handler / review store / 文件路径 访问，**必须先过 `require_project` 拿到 `ProjectScope`**，再用其中的 `lock_key`/`engine`。特别地，**body 里带 project_id 的接口**（`/api/chat`、`/api/chat/stream`、独立审查）必须**先 `require_project` 校验、再 `get_chat_handler`/取锁**，不得先建 handler。`lock_key` 只能来自 `ProjectScope`，禁止任何地方自行 `f"{uid}:{pid}"` 拼键绕过。
+**硬规则**：任何对某项目的 lock / chat_handler / review store / 文件路径 / 搜索键 访问，**必须先过 `require_project` 拿到 `ProjectScope`**，再用其中的 `lock_key`/`project_id`/`engine`。特别地，**body 里带 project_id 的接口**（`/api/chat`、`/api/chat/stream`、独立审查）必须**先 `require_project` 校验、再 `get_chat_handler`/取锁**，不得先建 handler。`lock_key` 只能来自 `ProjectScope`，禁止任何地方自行拼键绕过。✦（R3-B1 canonicalization）`get_project_record` 同时认 id 与项目名别名 → 所有 lock/handler/store/search/文件键**只用 `ProjectScope.project_id`（canonical `rec["id"]`）**，绝不用客户端原始 ref（否则用名字访问会与用 id 访问产生两把锁/两份 store/搜索配额、绕过互斥）。API 层建议只收 canonical id（新增 `get_project_record_by_id`，name ref → 404）。
 
 **接口归类表（迁移真值，23 接口逐项）**：
 
@@ -174,7 +176,7 @@ cost_micro_yuan = round( hit×p_hit + miss×p_miss + completion×p_out )   # p_*
 
 ## 7. 后台管理面板（完整版）
 - 入口：左下角账号块内，`is_admin` 可见「👤 用户管理」。
-- 接口（全部 `Depends(get_current_admin)` + ✦ CSRF 校验 §8.1）：
+- 接口（全部 `Depends(get_current_admin)` + ✦ CSRF 校验 §8 第2条）：
   - `GET /api/admin/users` → `[{uid, username, created_at, today_cost_yuan, daily_cap_yuan, disabled, is_admin}]`
   - `POST /api/admin/users/{uid}/password {new_password}`（改密码 + 吊销其会话 + 置 must_change_password）
   - `POST /api/admin/users/{uid}/cap {daily_cost_yuan|null}`（内部转微元）
@@ -185,7 +187,7 @@ cost_micro_yuan = round( hit×p_hit + miss×p_miss + completion×p_out )   # p_*
 ## 8. 安全红线
 1. **归属校验**：统一 `require_project`（§4.2）+ 复合键锁；绝不信任客户端 uid/路径。
 2. ✦ **CSRF（Codex R1-B4）**：所有状态变更（POST/DELETE）接口除 SameSite=Lax 外，**强制 Origin/Referer 校验**（不匹配配置允许源即 403）；admin/删项目/checkpoint 等副作用接口须有「跨站请求被拒」回归测试。**CORS** `allow_origins` 改精确域名白名单，`allow_credentials=true` 下禁 `*`。
-3. ✦ **SSRF（Codex R1-B6，请求时挡）**：新增 `backend/url_guard.py` + **守门 HTTP 传输层**——校验**不在保存时一次性做**，而在**每次实际外连时解析并把连接 pin 到已校验的公网 IP**（防 DNS rebinding 二次解析）。覆盖 `POST /api/settings`（custom_api_base）、`POST /api/models/list`、chat/review client 构建。仅 http(s)；禁私网段/loopback/link-local/`169.254.169.254`。**managed_base_url 改服务端只读**（不进 per-user settings、用户不可覆盖）。✦（R2-NIT4）守门传输 `trust_env=False`（忽略 HTTP(S)_PROXY 环境代理）+ **不跟随重定向**（或每跳重校验 IP），杜绝经代理/重定向绕过实际连接校验。
+3. ✦ **SSRF（Codex R1-B6，请求时挡）**：新增 `backend/url_guard.py` + **守门 HTTP 传输层**——校验**不在保存时一次性做**，而在**每次实际外连时解析并把连接 pin 到已校验的公网 IP**（防 DNS rebinding 二次解析）。覆盖 `POST /api/settings`（custom_api_base）、`POST /api/models/list`、chat/review client 构建。仅 http(s)；禁私网段/loopback/link-local/`169.254.169.254`。**managed_base_url 改服务端只读**（不进 per-user settings、用户不可覆盖）。✦（R2-NIT4）守门传输 `trust_env=False`（忽略 HTTP(S)_PROXY 环境代理）+ **不跟随重定向**（或每跳重校验 IP），杜绝经代理/重定向绕过实际连接校验。✦（R3-NIT3 落地退路）若自定义 httpx transport 无法同时正确保持 TLS SNI/Host 与 pinned IP，则 custom API **退为「仅预配置域名白名单」或禁用 custom**，**不得退化成只做保存时 DNS 校验**；该取舍在 §13 B3 验收门明确。
 4. **cookie**：HttpOnly + SameSite=Lax + Secure(prod)；session 存 hash（§5.1）。
 5. ✦ **限流**：登录失败按 username+IP 退避；注册按 IP 限流（slowapi 现按 IP，补 per-username 计数）。
 6. **密码**：argon2id 哈希；改密码/禁用即时吊销会话。
@@ -221,7 +223,7 @@ cost_micro_yuan = round( hit×p_hit + miss×p_miss + completion×p_out )   # p_*
 ## 12. 测试策略
 后端 `unittest`+`pytest`、mock 外部 HTTP：
 - 账号：注册（邀请码对/错、重名、弱密码、IP 限流）、登录（成功/失败退避）、登出、改密码吊销会话、`me`；session 存 hash。
-- 中间件/卡点：无 cookie/过期/disabled→401；白名单放行；桌面 uid=local + ✦ 非 loopback 拒启动；`require_project` 对他人 project_id→404；body-project_id 接口先校验后拿 handler/锁。
+- 中间件/卡点：无 cookie/过期/disabled→401；白名单放行；桌面 uid=local + ✦ 非 loopback 拒启动；`require_project` 对他人 project_id→404；body-project_id 接口先校验后拿 handler/锁；✦ 同项目 id 与 name 两种 ref 不产生双锁（name ref→404/400、键只用 canonical id）。
 - 隔离：A 建项目 B 访问→404；复合键锁两用户同 project_id 不互锁；per-uid 路径/Settings 隔离；✦ 搜索两用户同 project_id 的 project-minute 配额/缓存不串扰（按 tenant_project_key 隔离）、global-minute 仍全局。
 - ✦ 项目创建：web 传 `workspace_dir`/本地材料路径→400/忽略、工作区落 `users/<uid>/`。
 - 配额：三档成本（含实测数值）、中央客户端覆盖（vision/压缩/审查都计）、门禁拦截、跨日重置、custom 不计、✦ usage 缺失 fail-closed 保守封顶、微元整数累计无漂移。
@@ -245,3 +247,4 @@ W2-C（部署、域名/HTTPS、去 Windows 化）；浏览器上传重做（仅�
 - 2026-06-21 初稿（brainstorm + 上机实测拍板）。
 - 2026-06-21 Codex R1（CHANGES-REQUESTED 8 BLOCKER）全修：B1 项目创建闭环(§4.1/D11)、B2 复合键锁(§4.2/D4)、B3 `require_project`+归类表(§4.2)、B4 CSRF(§8.2)、B5 中央计费(§6/§10)、B6 请求时 SSRF+IP-pin(§8.3)、B7 桌面 loopback 断言(§4.3)、B8 拆 3 plan(§13)；NIT1-5 纳入(§5.1/§5.4/§5.6/§4.1/§10)。
 - 2026-06-21 Codex R2（CHANGES-REQUESTED 1 BLOCKER）全修：搜索 project 级状态/缓存遗留裸 project_id → 改复合 `tenant_project_key`(§4.1/§4.2/§4.3/§10/§12)；R2-NIT1 中央 key helper、NIT2 单价单位锁定元/百万token、NIT3 fail-closed 连续 3 次缺失阈值、NIT4 守门传输 trust_env=False+不跟随重定向。
+- 2026-06-21 Codex R3（红队·CHANGES-REQUESTED 1 BLOCKER）全修：`require_project` canonicalization——`get_project_record` 认 id+name 别名，所有键改只用 `ProjectScope.project_id`=canonical `rec["id"]`，name ref 建议 404(§4.2/§12)；R3-NIT1 key helper 内存 tuple/持久化字符串两形态、NIT2 §8 编号修正、NIT3 IP-pin 落地退路（SNI/Host 冲突则 custom 退白名单或禁用，不退化成保存时校验）。
