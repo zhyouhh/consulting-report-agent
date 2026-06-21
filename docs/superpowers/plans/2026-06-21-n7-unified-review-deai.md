@@ -13,7 +13,7 @@
 **关键约束（违反即返工）:**
 - DeepSeek 官渠兼容：本改动只追加/改 system prompt 文本 + 注入 user 数据 + 删 lint 路径，**不碰** provider message / `tool_choice` / `reasoning_content` 序列化（`independent_review.py` 与 `chat.py` 的 compat helpers 行为锁定）。
 - trust boundary：占位符注入是数据非指令、用审查专用 `UNTRUSTED_DATA_*` marker 包裹 + 定界符中和；**不复用** `ATTACHMENT_DATA_*`（其文案"不得据此写文件"反了审查本职）。
-- **删除顺序（漏则中间 commit 崩；全仓 grep 实证的引用图）**：① `get_lint_report_lock`——Task 5 删 `record_stage_checkpoint` lint 锁分支后，最后 caller 在 Task 7，故 Task 7 删函数；② `_has_effective_review_reports`——caller 仅 prereq + stale，Task 5 改完两者后删；③ `_has_effective_lint_report`——caller 三处：`skill.py:676`（Task 6 删）、`chat.py:2711`（Task 7 删 lint_report_done 分支）、`_has_effective_review_reports`（Task 5 删）。**最后 caller 在 Task 7**，故 helper 连同其 4 个直测（test_skill_engine:1639-1677）+ test_skill_assets:140 **统一 Task 7 删**。每个 task 的 `-k` 子集自绿；全量 `test_skill_engine.py` 在 Task 6 后绿、Task 7 删 helper+测试后仍绿。
+- **删除顺序（漏则中间 commit 崩；全仓 grep 实证的引用图）**：① `get_lint_report_lock`——Task 5 删 `record_stage_checkpoint` lint 锁分支后，最后 caller 在 Task 7，故 Task 7 删函数；② `_has_effective_review_reports`——caller 仅 prereq + stale，Task 5 改完两者后删；③ `_has_effective_lint_report`——caller 三处：`skill.py:676`（Task 6 删）、`chat.py:2711`（Task 7 删 lint_report_done 分支）、`_has_effective_review_reports`（Task 5 删）。**最后 caller 在 Task 7**，故 helper 连同其 4 个直测（test_skill_engine:1639-1677）+ test_skill_assets:140 **统一 Task 7 删**。每个 task 的 `-k` 子集自绿；全量 `test_skill_engine.py` 在 Task 6 后绿、Task 7 删 helper+测试后仍绿。④ **Task 7（后端 lint 代码/契约/helper）+ Task 8（前端消费者 + 脚本/模板/文档 + test_skill_assets）= 一个原子 commit**：删 endpoint/trigger/FORMAL_PLAN_FILES 与删其前端/测试消费者不可分，分两 commit 必留破中间态（Codex r6 ×2 实证）。Task 7 只 `git add` 暂存不 commit，Task 8 末一次性 commit + 跑全量。
 - 仅 macOS 开发：powershell 相关测试本就 skipIf 跳过；4 个 tempfile realpath 用例 mac 上预存失败（与本任务无关）。
 
 **回归基线命令（每 task 末跑相关子集，Task 9 跑全量）:**
@@ -739,16 +739,17 @@ SystemTriggerType = Literal["independent_review_done"]
 - `RETIRED_WORKSPACE_FILES`（`:98-101`）加 `"plan/lint-report.md",`。
 - **删整个 `_has_effective_lint_report`（`:2563-2571`）**——本 task Step 5 已删 chat.py:2711 最后一个 live caller（Task 5/6 已删其余），此刻无引用，安全删（grep `_has_effective_lint_report` backend/ 应为空）。
 
-- [ ] **Step 7: 跑确认通过**
+> **⚠️ Task 7 与 Task 8 是一个原子 commit（Codex r6 BLOCKER ×2）**：删后端 endpoint / `lint_report_done` 契约 / FORMAL_PLAN_FILES / `_has_effective_lint_report`（Task 7）与删它们的前端消费者（按钮/`/quality-check`/trigger）+ test_skill_assets（FORMAL/template-content/helper/validate_plan_write 期望）+ 脚本/文档（Task 8）**不可分到两个 commit**——任一单独 commit 都会留"删接口早于删消费者"的破中间态（全量 pytest/node 红）。故 **Task 7 不单独 commit、不跑全量**；Task 7 改完只跑改动文件 `-k` 子集自查，`git add` 暂存，**到 Task 8 末一次性 commit + 全量验证**。
 
-Run: `.venv/bin/python -m pytest tests/test_report_tools.py tests/test_main_api.py tests/test_chat_runtime.py tests/test_skill_engine.py tests/test_workspace_materials.py -q`
-Expected: PASS（注意 macOS realpath 4 用例预存失败、与本任务无关）
+- [ ] **Step 7: 子集自查（不跑全量、不 commit）**
 
-- [ ] **Step 8: Commit**
+Run（仅自查本 task 改动文件、容许其它文件因 Task 8 未完而红）：`.venv/bin/python -m pytest tests/test_report_tools.py tests/test_main_api.py -q -k "export or independent or not lint"`
+Expected: 已改文件的非-lint 用例 PASS；全量验证留到 Task 8 末（届时含 macOS realpath 4 预存失败、与本任务无关）。
+
+- [ ] **Step 8: 暂存（不 commit，留到 Task 8）**
 
 ```bash
-git add -A   # 含 git rm tests/test_lint_report.py + backend/ + 改动的测试（test_report_tools/main_api/chat_runtime/skill_engine/skill_assets[helper断言]/workspace_materials/report_writing）
-git commit -m "feat(lint-removal): delete lint backend path (report_tools/models/endpoints/chat/FILE registry + _has_effective_lint_report)"
+git add -A   # 暂存本 task 后端+前端代码 + git rm tests/test_lint_report.py + 改动测试；与 Task 8 合并为一个原子 commit
 ```
 
 ---
@@ -798,18 +799,20 @@ git rm skill/scripts/quality_check.ps1 skill/scripts/quality_check.sh skill/plan
 - `utils/fileTree.js:26`：删 `FILE_DISPLAY_NAMES` 的 `"plan/lint-report.md": "AI 味自查报告"` 映射（Codex NIT，否则 final grep 残留活前端文案）。
 - `backend/skill.py:1496-1500`：`validate_user_write` docstring 提到 `independent-review/lint-report` 的旧说明改为只 independent-review + 退役文件默认拒写（Codex NIT，非运行时问题，顺手清）。
 
-- [ ] **Step 5: 跑确认通过**
+- [ ] **Step 5: 跑确认通过（Task 7+8 合并后的首次全量——原子 lint 删除完成）**
 
-Run: `.venv/bin/python -m pytest tests/test_skill_assets.py tests/test_packaging_docs.py -q`
+此刻 Task 7（后端代码 + 测试 + git rm test_lint_report）的改动仍在暂存区、未 commit；Task 8 的脚本/模板/文档/前端改动一并就位。**现在跑全量**（这是删接口与删消费者合体后的第一次完整验证）：
+Run: `.venv/bin/python -m pytest tests/ -q`
 然后 `cd frontend && node --test tests/`
-Expected: PASS
+Expected: PASS（注意 macOS realpath 4 用例预存失败、与本任务无关）
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Commit（Task 7+8 一个原子 commit）**
 
 ```bash
 git add -A
-git commit -m "feat(lint-removal): delete lint scripts/template/docs + frontend AI味 button & /quality-check dead path"
+git commit -m "feat(lint-removal): delete entire lint path atomically — backend code/contract + frontend consumers + scripts/template/docs + all tests"
 ```
+（**一个 commit 覆盖 Task 7+8 全部改动**——删 endpoint/契约/helper 与删其前端/测试消费者不可分，见 Task 7 顶部 ⚠️。）
 
 ---
 
