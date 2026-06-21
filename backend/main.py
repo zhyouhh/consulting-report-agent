@@ -346,9 +346,15 @@ async def list_projects():
 
 
 @app.post("/api/projects")
-async def create_project(info: ProjectInfo):
+async def create_project(info: ProjectInfo, request: Request, uid: str = Depends(get_current_uid)):
+    if getattr(request.app.state, "auth_required", True):   # web mode
+        # 按「字段是否发送」拒绝，而非按值真假——web 客户端根本不该带这两个字段（更清晰的契约）。
+        sent = info.model_fields_set
+        if "workspace_dir" in sent or "initial_material_paths" in sent:
+            raise HTTPException(status_code=400, detail="web 模式不接受客户端工作目录/本地材料路径")
+        info = info.model_copy(update={"workspace_dir": str(user_projects_dir(uid) / uuid.uuid4().hex)})
     try:
-        project = skill_engine.create_project(info)
+        project = get_skill_engine(uid).create_project(info)
         return {"status": "ok", "project_id": project["id"], "project": project}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
