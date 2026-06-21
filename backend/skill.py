@@ -1968,9 +1968,9 @@ class SkillEngine:
             if key == "review_passed_at" and action == "set":
                 from backend.independent_review import get_independent_review_lock
 
-                # 审查锁键迁移整体留 T11（连审查端点 worker + 端点测试，原子）；此处暂用裸 project_id，
-                # 与仍为裸键的审查 worker 一致——T11 同时把端点 + 此处 + chat 读改为复合键。
-                review_lock = get_independent_review_lock(project_id)
+                # W2-B 多租户（T11b）：审查锁键已迁为复合键 (uid, project_id)，与审查端点 worker +
+                # chat 汇报轮读同把锁——两用户同名 project_id 各拿独立审查锁，门禁互不串。
+                review_lock = get_independent_review_lock(tenant_project_key(self.uid, project_id))
                 if review_lock.locked():
                     raise ValueError("独立审查正在进行中，请等待完成后再标记审查通过")
 

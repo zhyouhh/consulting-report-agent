@@ -2665,9 +2665,9 @@ class ChatHandler:
                 # review lock 非阻塞获取；拿到后用 try/finally 包裹全部校验/读/再 stat，
                 # 每条退出路径（含成功）都必经 finally 释放锁——漏一条后续审查永久 409
                 # （与 C4 endpoint lock 全路径释放同模式）。
-                # T6: 审查锁/store 键迁移整体留给 T11（连同审查端点 worker + ~30 端点测试，原子迁移）；
-                # 此处暂保持裸 project_id，与仍为裸键的审查端点 worker 一致（单用户语义不破）。
-                review_lock = get_independent_review_lock(project_id)
+                # W2-B 多租户（T11b）：审查锁/store 键已迁为复合键 (uid, project_id)，与审查端点
+                # worker + checkpoint 门禁同把锁——两用户同名 project_id 各拿独立审查锁/tombstone。
+                review_lock = get_independent_review_lock(tenant_project_key(self.uid, project_id))
                 if not review_lock.acquire(blocking=False):
                     yield {"type": "error", "data": "审查状态变化，请稍后重试"}
                     return
@@ -2681,7 +2681,10 @@ class ChatHandler:
                         run_bound_error = "审查报告尚未就绪，请稍后重试"
                     else:
                         # done tombstone 必须存在且 run_id 匹配（防汇报别的 run 的报告）。
-                        done_mtime_ns = _REVIEW_SESSION_STORE.get_done_mtime(project_id, run_id)
+                        # 复合键 (uid, project_id)：与审查端点 worker 写 tombstone 同键（T11b）。
+                        done_mtime_ns = _REVIEW_SESSION_STORE.get_done_mtime(
+                            tenant_project_key(self.uid, project_id), run_id
+                        )
                         if done_mtime_ns is None or str(done_mtime_ns) != str(expected_mtime_ns):
                             run_bound_error = "审查状态变化，请稍后重试"
                         else:

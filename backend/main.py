@@ -556,7 +556,9 @@ async def get_workspace(scope: ProjectScope = Depends(require_project)):
 
 
 @app.post("/api/projects/{project_id}/independent-review/stream")
-async def independent_review_stream_post(project_id: str, request: Request):
+async def independent_review_stream_post(
+    request: Request, scope: ProjectScope = Depends(require_project)
+):
     """POST stream with frontend-stable run_id + resume/discard support.
 
     C5 cutover: the legacy GET endpoint was deleted and the front end now drives this POST
@@ -574,14 +576,19 @@ async def independent_review_stream_post(project_id: str, request: Request):
     if not run_id:
         raise HTTPException(status_code=400, detail="run_id required")
 
+    # W2-B 多租户（T11b）：lock/store 用复合键，engine/agent.run 用 canonical project id。
+    # 严格区分——混用是本任务要避免的 bug。
+    review_key = scope.lock_key          # composite key for lock + store
+    review_project_id = scope.project_id  # canonical id for engine / agent.run
+
     try:
-        workspace = skill_engine.get_workspace_summary(project_id)
+        workspace = scope.engine.get_workspace_summary(review_project_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     if workspace.get("stage_code") != "S5":
         raise HTTPException(status_code=400, detail="独立审查只能在 S5 阶段使用")
 
-    lock = get_independent_review_lock(project_id)
+    lock = get_independent_review_lock(review_key)
     store = _REVIEW_SESSION_STORE
     cancel_event = threading.Event()
     resume_snapshot = None
@@ -590,7 +597,7 @@ async def independent_review_stream_post(project_id: str, request: Request):
     if not resume:
         if not lock.acquire(blocking=False):
             raise HTTPException(status_code=409, detail="上一次独立审查仍在进行中，请等待")
-        if not store.claim_first(project_id, run_id, cancel_event):
+        if not store.claim_first(review_key, run_id, cancel_event):
             lock.release()  # CAS 失败必须 release（红队：防 lock 泄漏）
             raise HTTPException(status_code=409, detail="已有进行中的审查")
     else:
@@ -599,7 +606,7 @@ async def independent_review_stream_post(project_id: str, request: Request):
         if not got:
             raise HTTPException(status_code=409, detail="上一次审查正在收尾，请稍候")
         # 拿到锁后重读 store（等锁期间 worker 可能已 atomic_commit 收尾、状态翻 done）。
-        kind, payload = store.claim_resume(project_id, run_id, cancel_event)
+        kind, payload = store.claim_resume(review_key, run_id, cancel_event)
         if kind == "errored":
             resume_snapshot = payload
         elif kind == "done":
@@ -632,14 +639,15 @@ async def independent_review_stream_post(project_id: str, request: Request):
 
         def run_worker():
             try:
-                agent = IndependentReviewAgent(skill_engine, settings)
+                agent = IndependentReviewAgent(scope.engine, load_settings(scope.uid))
                 for event in agent.run(
-                    project_id,
+                    review_project_id,
                     run_id=run_id,
                     store=store,
                     resume_snapshot=resume_snapshot,
                     supplement=supplement,
                     cancel_event=cancel_event,
+                    store_key=review_key,
                 ):
                     if cancel_event.is_set():
                         break
@@ -656,7 +664,7 @@ async def independent_review_stream_post(project_id: str, request: Request):
                     # worker 退出兜底（codex R2 BLOCKER 4）：record 仍 running 则收敛——续审场景留
                     # snapshot 可再 resume，无则清 record。done/errored/被 discard → no-op。
                     # 先收敛 store，再释放 review lock。
-                    store.finalize_orphan_running(project_id, run_id, resume_snapshot)
+                    store.finalize_orphan_running(review_key, run_id, resume_snapshot)
                 finally:
                     try:
                         enqueue_event(None)
@@ -675,7 +683,7 @@ async def independent_review_stream_post(project_id: str, request: Request):
         async def emit_completion():
             if await request.is_disconnected():
                 return
-            final_mtime = store.get_done_mtime(project_id, run_id)
+            final_mtime = store.get_done_mtime(review_key, run_id)
             if final_mtime:
                 yield (
                     "data: "
@@ -737,7 +745,9 @@ async def independent_review_stream_post(project_id: str, request: Request):
 
 
 @app.post("/api/projects/{project_id}/independent-review/discard")
-async def independent_review_discard(project_id: str, request: Request):
+async def independent_review_discard(
+    request: Request, scope: ProjectScope = Depends(require_project)
+):
     """C4: cancel an in-flight (or finished) review session without acquiring the review lock.
 
     Uses only the store guard so it can cancel even while a long-running worker holds the
@@ -749,7 +759,7 @@ async def independent_review_discard(project_id: str, request: Request):
     run_id = body.get("run_id")
     if not run_id:
         raise HTTPException(status_code=400, detail="run_id required")
-    cancelled = _REVIEW_SESSION_STORE.discard(project_id, run_id)
+    cancelled = _REVIEW_SESSION_STORE.discard(scope.lock_key, run_id)
     return {"cancelled": cancelled}
 
 
