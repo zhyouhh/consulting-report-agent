@@ -845,7 +845,12 @@ Expected: 仅剩有意保留项（`RETIRED_WORKSPACE_FILES` 的 `plan/lint-repor
 
 - [ ] **Step 4: 写 cutover report + 更新 worklist**
 
-cutover 覆盖：合并设计、Humanizer 吸收范围、占位符扫描、删除清单、Codex 5 轮 spec review、回归结果。worklist N7 状态改 `✅ 实施完成`。
+cutover 覆盖：合并设计、Humanizer 吸收范围、占位符扫描、删除清单、Codex spec 5 轮 + plan 9 轮 review、回归结果。
+
+**更新 `docs/current-worklist.md`（Codex r9 BLOCKER——它是待办真值源、Task 9 grep 刻意排除它，活文档残留不会被闸住，须手动改）**：
+- N7 条目（hint `:98`）状态改 `✅ 实施完成`，正文从「两按钮 / AI 味自查 PowerShell / 4 机械维度」改写为「单『独立审查』+ 维度⑤语言专业性·去 AI 味 + 占位符扫描」。
+- W2「去 Windows 化」条（hint `:43`）：删 `quality_check.ps1 改 Python`（N7 已删该脚本/合并审查），只留 `export_draft.ps1 / Linux pandoc` 等剩余项；必要时标「quality_check 部分已由 N7 删除/合并」。
+- 顺带核对 worklist 其它 `quality_check`/`lint-report`/`AI 味自查` 提及（grep），活待办改写、历史记录标已处理。
 
 - [ ] **Step 5: Commit**
 
