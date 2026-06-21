@@ -789,7 +789,7 @@ def auth_login(request: Request, payload: LoginPayload, response: Response):
 
 
 @app.post("/api/auth/logout")
-def auth_logout(request: Request, response: Response):
+def auth_logout(request: Request, response: Response, uid: str = Depends(get_current_uid)):  # R5-NIT：uid-scoped 一致
     token = request.cookies.get(SESSION_COOKIE)
     if token:
         accounts.delete_session(token)
@@ -1205,7 +1205,7 @@ export default function Login({ onAuthed }) {
   )
 }
 ```
-`frontend/src/App.jsx`：import `Login` + `{ setUnauthedHandler } from './api'`；在 `App()` 加 `authUser`/`authChecked` state + 起手 effect：
+`frontend/src/App.jsx`：import `Login` + `{ setUnauthedHandler } from './api'`；在 `App()` 加 `authUser`/`authChecked` state + **替换**现有 `useEffect(() => { initializeApp() }, [])`（行约 44，✦ Codex R5-NIT：替换不是并存，否则未登录首屏先打 `/api/projects` 弹旧错误）为下面这个 auth-gated effect（`initializeApp` 只在认证确认后调）：
 ```jsx
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
