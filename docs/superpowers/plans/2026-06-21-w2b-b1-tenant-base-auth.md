@@ -12,6 +12,7 @@
 
 **Codex R1 已修（8 BLOCKER）**：① per-uid settings 纳入 B1(Task8) ② 复合键贯彻 skill.py record_stage_checkpoint(Task6) ③ 前端创建闭环(Task15) ④ 既有测试迁移给具体配方(Task11) ⑤ 重排：创建闭环(Task10) 先于跨租户接线(Task11) ⑥ 桌面 /me 返回合成 local(Task9) ⑦ search 路径接 data_root + quota 隔离测(Task2/13) ⑧ Field import(Task7)。NIT：复合键统一 JSON-safe 字符串(够用且消毒)、change-password 保当前会话、chat_stream 不变式写清。
 **Codex R2 已修（4 BLOCKER）**：① test_settings_api 迁移改用模块级 save_settings + 具体配方(Task8 端点去函数内 import / Task8 Step4) ② review 锁/store 既有测试迁移规则补齐(Task11 Step4) ③ Task13 补真 quota 隔离测试 + 改掉假 TDD 标签 ④ `reload(main)` 隔离：AuthApiTestBase mock heal + 重置 chat/review 模块级单例(Task7/11)。NIT：custom 不可用至 B3 写进 cutover、models/list 归类修正、record_stage_checkpoint 复合键源码守卫(Task6)。
+**Codex R3 已修（1 BLOCKER）**：`independent-review/stream` worker 的**裸变量** `IndependentReviewAgent(skill_engine, settings)` + `agent.run(project_id)` + review store/lock 裸 project_id → 改 `scope.engine`/`load_settings(scope.uid)`/`scope.project_id`/`scope.lock_key`，收尾 grep 用词边界 `\bskill_engine\b`/`\bsettings\b`(Task11)。NIT：Task13 加 global 共享断言、`_reset` 清 _records 持 guard、collection-time heal 注记。
 
 ---
 
@@ -517,7 +518,9 @@ class AuthApiTestBase(unittest.TestCase):
         from backend import chat as cm, independent_review as im
         cm._PROJECT_REQUEST_LOCKS.clear(); cm._CONVERSATION_STATE_LOCKS.clear()
         cm._SEARCH_ROUTER_SINGLETON = None
-        im._INDEPENDENT_REVIEW_LOCKS.clear(); im._REVIEW_SESSION_STORE._records.clear()
+        im._INDEPENDENT_REVIEW_LOCKS.clear()
+        with im._REVIEW_SESSION_STORE._guard:   # R3-NIT2：清 _records 持其自身 guard
+            im._REVIEW_SESSION_STORE._records.clear()
 
     def tearDown(self):
         self._heal.stop(); self._env.stop(); shutil.rmtree(self._tmp, ignore_errors=True)
@@ -529,7 +532,7 @@ class UnauthedTests(AuthApiTestBase):
     def test_projects_needs_auth(self):
         self.assertEqual(self.client.get("/api/projects").status_code, 401)
 ```
-> note：`importlib.reload(main)` 在本项目可行——main 模块级仅做 `load_settings()`+建工厂+`accounts.init_db()`，无网络/无未关资源；reload 让每个测试拿到隔离的 `CRA_DATA_ROOT`。reload 顺序 config→accounts→main（main import 它们）。
+> note：`importlib.reload(main)` 让每个测试拿到隔离的 `CRA_DATA_ROOT`；reload 顺序 config→accounts→main。main 模块级会跑 `heal_stale_managed_model`（**有网络**），故基类 reload 前已 mock 它（见上）。⚠️ Codex R3-NIT3：各测试文件**模块顶层** `import backend.main` 的**首次 collection import** 早于 setUp、mock 拦不住——若 CI/本地预检慢，建议加一个 `tests/conftest.py` autouse fixture 或 collection 前 env 关掉 heal 网络（可选、非阻塞，B1 不强制）。
 - [ ] **Step 2: 跑确认 FAIL** — `.venv/bin/python -m pytest tests/test_auth_api.py::UnauthedTests::test_projects_needs_auth -v` → FAIL（现 200）
 - [ ] **Step 3: 实现工厂 + 依赖**
 
@@ -923,7 +926,15 @@ def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(
             handler = get_chat_handler(scope.uid, scope.project_id)
             # ...（generate 体不变，把 chat_request.project_id 一律换 scope.project_id）
 ```
-其余 20 处：把 `skill_engine.X(project_id, ...)` 换 `scope.engine.X(scope.project_id, ...)`（接 `scope: ProjectScope = Depends(require_project)`）。`independent-review/stream`(行431) 用 `scope.engine.get_workspace_summary(scope.project_id)` + review 锁/store 用 `scope.lock_key`。`checkpoints`(行659) 用 `scope.engine.record_stage_checkpoint(scope.project_id, key, action)`。把全局 `skill_engine = SkillEngine(...)` 整行删除——编译期/grep `skill_engine\.` 抓漏网。
+其余 20 处：把 `skill_engine.X(project_id, ...)` 换 `scope.engine.X(scope.project_id, ...)`（接 `scope: ProjectScope = Depends(require_project)`）。`checkpoints`(行659) 用 `scope.engine.record_stage_checkpoint(scope.project_id, key, action)`。
+
+**✦ `independent-review/stream`（Codex R3-B1，裸变量陷阱）**：该 endpoint worker（行约 431/488）有**不带点的裸变量** `IndependentReviewAgent(skill_engine, settings)` + `agent.run(project_id, ...)` + review lock/store 用裸 project_id —— `grep skill_engine\.` 抓不到。明确改：
+- `agent = IndependentReviewAgent(scope.engine, load_settings(scope.uid))`
+- `agent.run(scope.project_id, ...)`
+- endpoint 内所有 review lock 取用、`_REVIEW_SESSION_STORE` 的 `get_done_mtime/claim_first/claim_resume/finalize/discard` 全用 **`scope.lock_key`**（不是裸 project_id）
+- `discard` endpoint(行592) 同样用 `scope.lock_key`
+
+删全局 `skill_engine = SkillEngine(...)` 整行后，**收尾 grep 用词边界** `rg "\bskill_engine\b" backend/main.py`（不是只 `skill_engine\.`），抓裸变量漏网；`rg "\bsettings\b" backend/main.py` 复核是否有 review/chat 路径仍用全局 settings 而非 `load_settings(uid)`。
 - [ ] **Step 4: 迁移既有测试（Codex R1-B4，必须做完才会绿）**
 
 既有测试假设全局 `skill_engine` + 无鉴权，逐文件改：
@@ -1025,6 +1036,14 @@ class SearchCompositeKeyTests(unittest.TestCase):
         self.assertIsNone(s.try_acquire_search_slot(project_id=kA, **kw))
         self.assertIsNotNone(s.try_acquire_search_slot(project_id=kA, **kw))  # uA 第3次被 project 限额挡
         self.assertIsNone(s.try_acquire_search_slot(project_id=kB, **kw))     # uB 同裸 proj-x 不受影响
+
+    def test_global_limit_shared_across_users(self):  # Codex R3-NIT1：global 仍共享、不按 tenant 拆
+        from backend.tenant import tenant_project_key
+        s = self._store()
+        kw = dict(project_window_seconds=60, project_limit=100, global_window_seconds=60, global_limit=2)
+        self.assertIsNone(s.try_acquire_search_slot(project_id=tenant_project_key("uA", "p1"), **kw))
+        self.assertIsNone(s.try_acquire_search_slot(project_id=tenant_project_key("uB", "p2"), **kw))
+        self.assertIsNotNone(s.try_acquire_search_slot(project_id=tenant_project_key("uC", "p3"), **kw))  # 第3次被全局挡
 ```
 - [ ] **Step 2: 跑确认 PASS（回归保护，非 fails-first）** — `.venv/bin/python -m pytest tests/test_tenant_isolation.py::SearchCompositeKeyTests -v` → PASS。这两条**直接锁住 state store 按传入键隔离**（cache + project quota）；实际接通靠 Step 3 让调用方传复合键，由 Step 4 既有 search 回归套保护不回退。
 - [ ] **Step 3: 调用方传复合键** — `backend/chat.py` grep `self._get_search_router().search(`，把 `project_id=<var>` 改 `project_id=tenant_project_key(self.uid, <var>)`：
