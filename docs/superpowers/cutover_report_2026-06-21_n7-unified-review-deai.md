@@ -55,18 +55,21 @@
 76491d1 feat(lint-removal): delete entire lint path atomically — backend code/contract + frontend consumers + scripts/template/docs + all tests
 ```
 
-## Codex review（每 commit 后双轨独立 + 红队）
+## Codex review（实施期逐 commit + 收尾期 spec/quality 双轨独立）
 
 - 设计阶段：spec 5 轮、plan 9 轮 APPROVED。
-- 实施阶段（codex-server MCP 单线程续轮，跨轮记上下文）：每个 commit 一轮对抗式 review。挖出并修复的真问题：
+- 实施阶段（codex-server MCP 续轮，跨轮记上下文）：每个 commit 一轮对抗式 review。挖出并修复的真问题：
   - Task 2：英文占位符标记子串误命中（`abcXXXdef`/`TODOLIST`）→ 加 ASCII token 边界。
   - Task 3：`test_workspace_materials.py` fixture 第 5 锚点漏改（旧 `目标读者匹配` → 锚点失配使报告失效）→ 同 task 修。
   - Task 5：独立判定「把 append 删除提前到 Task 5」valid & necessary，铁律完好。
-  - Task 7+8：补删除端点 404/405 负向守卫（实测 405——SPA catch-all 服务 GET、删的 POST 路由无 handler）+ 清死 flags 键 + 注释残留。
+  - Task 7+8：补删除端点负向守卫 + 清死 flags 键 + 注释残留。
+- **收尾期 spec + quality 双轨独立 review（铁律「不合并」，两条全新 Codex 线程互不知情、各自挣 APPROVED）**：
+  - **spec 合规轨** 逐条核 spec §1-§9，挖出真 under-build：维度⑤ prompt 把 Humanizer 黑名单**压缩**了，漏 spec §3.3 多个逐字 trigger（`凸显/彰显了其重要性`/`在这个时间点 → 现在`/`值得注意的是数据显示 → 数据显示`/em dash `—`/`人/流程/技术`/`同一实体反复换称呼` 及 4 条反向拦截逐字例）→ 改为**忠实转写** spec §3.3（14 类 + 4 反向拦截全 literal，commit 1c06df8→9ca67f7）+ 加 `test_..._blacklist_is_complete_per_spec` 锁死。两轮后 APPROVED。
+  - **code-quality 轨** 对抗式查注入/trust-boundary/cascade/测试质量，未发现注入越狱（snippet 已中和 + 命中词来自固定正则集 + lineno 整数状态，审查代理工具面仅 read_file + 限定 write_file）；1 NIT：删除端点守卫偏弱（status 404 也会因「项目不存在」误过）→ 改直接断言 `app.routes` 路由表无该 POST 路由。APPROVED。
 
-## 回归结果（最终 commit 76491d1）
+## 回归结果（最终 commit 9ca67f7）
 
-- 后端：`.venv/bin/python -m pytest tests/` → **1208 passed, 1 skipped, 4 failed**。4 个失败全部是 macOS `/private/var`↔`/var` realpath / GBK 路径环境差异（`test_create_project_*` / `test_primary_report_path_*` / `test_workspace_materials` 两例），Windows 上通过，与本任务无关。
+- 后端：`.venv/bin/python -m pytest tests/` → **1209 passed, 1 skipped, 4 failed**。4 个失败全部是 macOS `/private/var`↔`/var` realpath / GBK 路径环境差异（`test_create_project_*` / `test_primary_report_path_*` / `test_workspace_materials` 两例），Windows 上通过，与本任务无关。
 - 前端：`node --test tests/` → **327 passed / 0 failed**；`npm run build` 成功（仅预存 chunk-size 警告）。
 - 残留 grep 自检（含 docs、排除 cutover/worklist）：仅有意保留项（`RETIRED_WORKSPACE_FILES` 的 `plan/lint-report.md` + 负向守卫 + 退役注释），无 live 引用。
 - DeepSeek 官渠兼容：只追加/改 prompt 文本 + 注入 user 数据 + 删 lint 路径，不碰 provider message / `tool_choice` / `reasoning_content` 序列化；compat helper 用例不回归。
