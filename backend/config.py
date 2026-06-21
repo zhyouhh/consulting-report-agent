@@ -42,12 +42,19 @@ def get_managed_search_pool_path(base_path: Path | None = None) -> Path:
     return runtime_base / MANAGED_SEARCH_POOL_FILENAME
 
 
+def data_root() -> Path:
+    env = os.environ.get("CRA_DATA_ROOT")
+    root = Path(env).expanduser() if env else get_user_config_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def get_search_runtime_state_path(config_dir: Path | None = None) -> Path:
-    return (config_dir or get_user_config_dir()) / SEARCH_RUNTIME_STATE_FILENAME
+    return (config_dir or data_root()) / SEARCH_RUNTIME_STATE_FILENAME
 
 
 def get_search_cache_path(config_dir: Path | None = None) -> Path:
-    return (config_dir or get_user_config_dir()) / SEARCH_CACHE_FILENAME
+    return (config_dir or data_root()) / SEARCH_CACHE_FILENAME
 
 
 def get_default_managed_client_token(base_path: Path | None = None) -> str:
