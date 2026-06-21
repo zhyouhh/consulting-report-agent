@@ -13,6 +13,7 @@
 **Codex R1 已修（8 BLOCKER）**：① per-uid settings 纳入 B1(Task8) ② 复合键贯彻 skill.py record_stage_checkpoint(Task6) ③ 前端创建闭环(Task15) ④ 既有测试迁移给具体配方(Task11) ⑤ 重排：创建闭环(Task10) 先于跨租户接线(Task11) ⑥ 桌面 /me 返回合成 local(Task9) ⑦ search 路径接 data_root + quota 隔离测(Task2/13) ⑧ Field import(Task7)。NIT：复合键统一 JSON-safe 字符串(够用且消毒)、change-password 保当前会话、chat_stream 不变式写清。
 **Codex R2 已修（4 BLOCKER）**：① test_settings_api 迁移改用模块级 save_settings + 具体配方(Task8 端点去函数内 import / Task8 Step4) ② review 锁/store 既有测试迁移规则补齐(Task11 Step4) ③ Task13 补真 quota 隔离测试 + 改掉假 TDD 标签 ④ `reload(main)` 隔离：AuthApiTestBase mock heal + 重置 chat/review 模块级单例(Task7/11)。NIT：custom 不可用至 B3 写进 cutover、models/list 归类修正、record_stage_checkpoint 复合键源码守卫(Task6)。
 **Codex R3 已修（1 BLOCKER）**：`independent-review/stream` worker 的**裸变量** `IndependentReviewAgent(skill_engine, settings)` + `agent.run(project_id)` + review store/lock 裸 project_id → 改 `scope.engine`/`load_settings(scope.uid)`/`scope.project_id`/`scope.lock_key`，收尾 grep 用词边界 `\bskill_engine\b`/`\bsettings\b`(Task11)。NIT：Task13 加 global 共享断言、`_reset` 清 _records 持 guard、collection-time heal 注记。
+**Codex R4 红队已修（2 BLOCKER）**：① `get_chat_handler` 旧签名漏迁移点（`/api/chat`、`write_user_file`、`clear_conversation`、delete_project handler pop）全列 + grep `get_chat_handler\(`(Task11) ② Task10 `WebCreateTests` 跨文件继承缺 `from tests.test_auth_api import AuthApiTestBase`(Task10)。NIT：`materials/select-from-workspace` 先 require_project 再 desktop_bridge。
 
 ---
 
@@ -831,8 +832,11 @@ def auth_change_password(request: Request, payload: ChangePwPayload, uid: str = 
 
 > 先于 Task 11（跨租户接线用到无 workspace_dir 创建，须先把 model 改可选 + 创建端点闭环）。
 
-- [ ] **Step 1: 写失败测试**（追加，新建 `WebCreateTests(AuthApiTestBase)`，登录后取 uid）：
+- [ ] **Step 1: 写失败测试**（追加到 `tests/test_project_create_api.py`，跨文件复用基类，**顶部加 import**）：
 ```python
+from tests.test_auth_api import AuthApiTestBase   # ✦ Codex R4-B2：跨文件继承须显式 import
+
+
 class WebCreateTests(AuthApiTestBase):
     def _login(self):
         self.client.post("/api/auth/register", json={"username":"alice","password":"pw-123456","invite_code":"JOIN"})
@@ -884,7 +888,7 @@ async def create_project(info: ProjectInfo, request: Request, uid: str = Depends
 - uid-scoped：`GET /api/projects`(行206)、`POST /api/projects`(已 Task10)、`GET/POST /api/settings`(已 Task8)、`POST /api/models/list`、`/api/auth/{logout,me,change-password}`。
 - require_project（路径 `{project_id}`）：materials(list/select/upload/delete)、files(list/read/write)、workspace、independent-review(stream/discard)、export-draft、`DELETE /api/projects/{id}`、checkpoints、conversation(get/clear) —— 行 220/223/228/238/246/284/293/328/336-338/361/372/406/431/612-614/623/659/668/693。
 - body-project_id：`POST /api/chat`、`POST /api/chat/stream` —— 函数体先 `require_project(chat_request.project_id, uid)`。
-- desktop-only（web 503，前端隐藏）：`select-workspace-folder/files`、`materials/select-from-workspace`。（✦ Codex R2-NIT2：`POST /api/models/list` 属 **uid-scoped**，非 desktop-only。）
+- desktop-only（web 503，前端隐藏）：`select-workspace-folder/files`（无 project_id，仅 `Depends(get_current_uid)` + `require_desktop_bridge`）、`materials/select-from-workspace`（有 project_id：✦ Codex R4-NIT 先 `Depends(require_project)` 校验归属、**再** `require_desktop_bridge()` 返 503——不泄项目存在性又守桌面边界）。（✦ R2-NIT2：`POST /api/models/list` 属 **uid-scoped**，非 desktop-only。）
 
 - [ ] **Step 1: 写失败测试**（追加 `CrossTenantApiTests` 到 test_tenant_isolation.py；**继承 `AuthApiTestBase`** 复用 heal mock + 单例 reset，再起第二个 client）：
 ```python
@@ -934,7 +938,9 @@ def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(
 - endpoint 内所有 review lock 取用、`_REVIEW_SESSION_STORE` 的 `get_done_mtime/claim_first/claim_resume/finalize/discard` 全用 **`scope.lock_key`**（不是裸 project_id）
 - `discard` endpoint(行592) 同样用 `scope.lock_key`
 
-删全局 `skill_engine = SkillEngine(...)` 整行后，**收尾 grep 用词边界** `rg "\bskill_engine\b" backend/main.py`（不是只 `skill_engine\.`），抓裸变量漏网；`rg "\bsettings\b" backend/main.py` 复核是否有 review/chat 路径仍用全局 settings 而非 `load_settings(uid)`。
+**✦ `get_chat_handler` 全调用点（Codex R4-B1，旧签名 `(project_id)`→`(uid, project_id)`，漏一个就 TypeError）**：除 `/api/chat/stream` 外，真实还有 `/api/chat`(行304)、`write_user_file`(行364)、`clear_conversation`(行696)。逐个改：先 `scope: ProjectScope = Depends(require_project)`（body-project_id 的 `/api/chat` 在函数体 `scope=require_project(...)`），再 `get_chat_handler(scope.uid, scope.project_id)`，锁/写入用 `scope.project_id`/`scope.engine`。`delete_project` 清 handler 缓存用 `_chat_handlers.pop((scope.uid, scope.project_id), None)`。
+
+删全局 `skill_engine = SkillEngine(...)` 整行后，**收尾 grep 用词边界**：`rg "\bskill_engine\b" backend/main.py`（不是只 `skill_engine\.`，抓裸变量漏网）、`rg "get_chat_handler\(" backend/main.py`（核每个调用都是 `(uid, project_id)` 新签名）、`rg "\bsettings\b" backend/main.py`（复核 review/chat 路径用 `load_settings(uid)` 而非全局 settings）。
 - [ ] **Step 4: 迁移既有测试（Codex R1-B4，必须做完才会绿）**
 
 既有测试假设全局 `skill_engine` + 无鉴权，逐文件改：
