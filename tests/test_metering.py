@@ -167,3 +167,73 @@ class MeteredNonStreamTests(unittest.TestCase):
         c.chat.completions.create(model="Qwen/Qwen3-VL-8B-Instruct", messages=[], stream=False)
         row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
         self.assertEqual(row["cost_micro_yuan"], 32768 * 3)   # 32768 × p_miss(3) = 98304
+
+
+# tests/test_metering.py（追加，在 MeteredNonStreamTests 同夹具风格下新建类）
+class _Chunk:
+    def __init__(self, usage=None):
+        self.usage = usage
+        self.choices = []
+
+
+class MeteredStreamTests(MeteredNonStreamTests):  # 复用 setUp/tearDown/_FakeOpenAI 构造
+    def _stream_client(self, chunks):
+        class _StreamCompletions:
+            def __init__(self): self.calls = []
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                return iter(chunks)
+        class _Chat:
+            def __init__(self): self.completions = _StreamCompletions()
+        class _Raw:
+            def __init__(self): self.chat = _Chat()
+        from backend.config import DEFAULT_MANAGED_MODEL_PRICING
+        return self.m.MeteredManagedClient(_Raw(), uid="u1", model_pricing=DEFAULT_MANAGED_MODEL_PRICING)
+
+    def test_stream_passes_through_chunks_and_settles_on_completion(self):
+        usage = _FakeUsage(prompt_tokens=1289, prompt_cache_hit_tokens=0,
+                           prompt_cache_miss_tokens=1289, completion_tokens=500)
+        chunks = [_Chunk(), _Chunk(), _Chunk(usage=usage)]
+        c = self._stream_client(chunks)
+        out = list(c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=True))
+        self.assertEqual(len(out), 3)  # 原样透传所有 chunk
+        row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
+        self.assertEqual(row["cost_micro_yuan"], 6867)
+
+    def test_stream_fail_closed_when_no_usage_chunk(self):
+        c = self._stream_client([_Chunk(), _Chunk()])  # 无 usage 末包
+        list(c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=True))
+        row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
+        self.assertEqual(row["cost_micro_yuan"], 768000)  # 保守封顶 256000×3
+
+    def test_stream_provider_error_midstream_fail_closed(self):
+        # ✦ Codex BLOCKER：provider 流中途抛 → fail-closed，不当成主动中断而漏计。
+        def _boom():
+            yield _Chunk()
+            raise RuntimeError("provider dropped mid-stream")
+        class _SC:
+            def __init__(self): self.calls = []
+            def create(self, **kw): self.calls.append(kw); return _boom()
+        class _Ch:
+            def __init__(self): self.completions = _SC()
+        class _Raw:
+            def __init__(self): self.chat = _Ch()
+        from backend.config import DEFAULT_MANAGED_MODEL_PRICING
+        c = self.m.MeteredManagedClient(_Raw(), uid="u1", model_pricing=DEFAULT_MANAGED_MODEL_PRICING)
+        with self.assertRaises(RuntimeError):
+            list(c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=True))
+        row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
+        self.assertEqual(row["cost_micro_yuan"], 768000)  # fail-closed 计入、错误再抛
+
+    def test_stream_interrupt_before_usage_fail_closed(self):
+        # ✦ Codex BLOCKER：消费方在第一个 chunk 后中断（GeneratorExit，含「处理 chunk 时抛异常」场景）
+        # 且未见 usage → fail-closed，不漏计已起的 managed 流（spec §6.3）。
+        usage = _FakeUsage(prompt_tokens=10, prompt_cache_hit_tokens=0,
+                           prompt_cache_miss_tokens=10, completion_tokens=5)
+        chunks = [_Chunk(), _Chunk(usage=usage)]   # usage 在第二个，中断时尚未读到
+        c = self._stream_client(chunks)
+        gen = c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=True)
+        next(gen)          # 只取第一个就中断
+        gen.close()        # GeneratorExit → finally fail-closed
+        row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
+        self.assertEqual(row["cost_micro_yuan"], 768000)  # 未见 usage → fail-closed 保守封顶

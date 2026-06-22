@@ -162,7 +162,30 @@ class MeteredManagedClient:
         model = kwargs.get("model", "")
         self._reserve(model)
         if kwargs.get("stream"):
-            raise NotImplementedError("stream path implemented in Task 5")
+            raw_stream = raw_completions.create(**kwargs)
+            return self._metered_stream(model, raw_stream)
         response = raw_completions.create(**kwargs)
         self._settle(model, getattr(response, "usage", None))
         return response
+
+    def _metered_stream(self, model: str, raw_stream):
+        """透传每个 chunk + 记最后带 usage 的 chunk。无论**自然结束 / provider 异常 / 消费方中断
+        (GeneratorExit)**，`finally` 都结算恰好一次：last_usage 缺失 → fail-closed 保守封顶。
+        ✦ Codex BLOCKER（R1+R2）：① provider 中途抛不得漏计；② **消费方在处理已 yield 的 chunk 时抛异常，
+        经 gen.close()→GeneratorExit 到达此处**——与「用户主动放弃」无法从生成器内区分，故 spec §6.3
+        「流式中断 + usage 缺失 = fail-closed」对 GeneratorExit 也一律 fail-closed（不留漏计后门）。"""
+        last_usage = None
+        try:
+            for chunk in raw_stream:
+                u = getattr(chunk, "usage", None)
+                if u is not None:
+                    last_usage = u
+                yield chunk
+        finally:
+            self._settle(model, last_usage)   # 自然结束 / provider 异常 / GeneratorExit 都恰好结算一次
+            close = getattr(raw_stream, "close", None)   # 释放底层 provider 流（HTTP 连接）
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
