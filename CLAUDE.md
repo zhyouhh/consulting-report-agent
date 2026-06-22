@@ -235,6 +235,33 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **回归**：`tests/test_tenant.py`、`test_accounts.py`、`test_auth_api.py`（含 `AuthApiTestBase`：reload(main) + mock heal + 单例 reset）、`test_tenant_isolation.py`（复合键/搜索隔离/`CrossTenantApiTests` 跨租户 404）、`test_settings_api.py`、`test_project_create_api.py`；既有端点测试已迁移到租户作用域（`auth_required=False` → uid="local" + `get_project_record` mock + 复合 store 键）。**写端点测试**：`AuthApiTestBase` 起隔离 `CRA_DATA_ROOT`；非鉴权端点测试设 `app.state.auth_required=False` 跑 local。
 
+## W2-B/B2 中央计费 + per-user 配额（2026-06-22 实施完成；分支 `feat/w2b-b2-billing`，**未 merge/未 push**）
+
+所有 managed LLM/视觉调用经单一 `MeteredManagedClient` 出口计费。改计费 / usage 解析 / 调用点客户端构造 / 配额门禁前必读。详尽交付与红队修复见 `docs/superpowers/cutover_report_2026-06-22_w2b-b2.md`；plan `docs/superpowers/plans/2026-06-22-w2b-b2-central-billing-quota.md`。
+
+**新增叶子模块 `backend/metering.py`**（**只依赖 accounts/config/context_policy，绝不 import chat/skill/main/independent_review**）：
+- `price_micro_yuan(model,hit,miss,completion,pricing)` 三档计价（token×元每百万token=微元，`round`；未知模型 `FALLBACK_MODEL_PRICING`）。
+- `extract_billing_usage(usage)` → `BillingUsage|None`。读 deepseek `prompt_cache_hit/miss_tokens`+`completion_tokens`（miss 缺失回退 `prompt-hit`）。**fail-closed 契约（红队 4 轮锁死）**：单值经 `_coerce_token`——None（字段缺省）→0；present-but-malformed（非 int/float、bool、inf/nan、负、> `_MAX_PLAUSIBLE_TOKENS`=1e9）一律 raise→返回 None。**绝不静默归零**（归零会假记 0 费用 + 复位缺失计数、绕过暂停保护）。
+- `MeteredManagedClient(raw,uid,model_pricing)`：镜像 `.chat.completions.create`，调用前 `_reserve`（`used>=cap`→`QuotaExceededError`；缺失计数≥3→`ModelPausedError`），调用后/流末 `_settle`（`add_usage` 原子累加 + 成功清缺失计数）。**流式 `_metered_stream` 在 `finally` 恰好结算一次**（自然结束/provider 异常/GeneratorExit 一律 fail-closed），`finally` 内 settle 包独立内层 finally（settle 抛错不遮蔽在途异常、底层流必 `close()`，`sys.exc_info()` 判在途异常）。`__getattr__` 透传非 `.chat.completions.create` 调用面（如 `.responses`）。
+- `wrap_client_for_billing(raw,uid,settings)`：managed→`MeteredManagedClient`；custom→裸 client。
+- `today_shanghai()` UTC+8 日界；`_miss_counter` 进程级 per-(uid,model,**day**)（day 入键 → 暂停次日自动清零）。
+
+**accounts.py**：`usage_daily(uid,day,cost_micro_yuan,cache_hit/miss_tokens,output_tokens, PK(uid,day))` 原子 `ON CONFLICT DO UPDATE` 累加；`get_usage_today`/`add_usage`/`get_effective_daily_cap_micro`（user override `users.daily_cost_micro_yuan` → 全局 `app_config.global_daily_cap_micro_yuan` → 默认 `DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN`=5_000_000）/`set_user_daily_cap_micro`。
+
+**接线硬约束**：
+- chat.py / independent_review.py：managed 模式 `self.client = metering.wrap_client_for_billing(...)`，5 个调用点（主流式/sync/压缩/视觉/审查）调用语法零改动自动计费。**metering 引用必须模块限定**（`from . import metering` + `metering.QuotaExceededError`，**不用** `from .metering import` 拷贝名）——`importlib.reload(metering)` 在同模块对象内重建异常类、拷贝名变陈旧与 wrapper 实抛的活类 isinstance 失配（仅测试态 reload 触发，但保持模块限定使套件顺序无关）。
+- **被动 include_usage**：wrapper 不注入，调用点自报、**仅 managed**（`self.settings.mode=="managed"` 才发 `stream_options={"include_usage":True}`）；chat.py 既有 `_should_retry_stream_without_usage` 回退保留。
+- **消费侧 `finally: response.close()`**：chat.py 主流式 + independent_review.py 审查流的 `for chunk in response:` 后必 `finally: response.close()`（同步触发 wrapper settle，防提前 break/return 把结算延到 GC 致下次 reserve 在结算前发生）；close 失败 `logger.warning` 不 silent pass。
+- 配额异常处理：chat.py 主流式/sync + independent_review.py 在通用 `except` **之前**截 `(QuotaExceededError, ModelPausedError)` → 友好提示。**`ChatResponse.system_notices` 是 `List[SystemNotice]` 对象、非 `List[str]`** → 配额友好返回 `system_notices=None`、提示放 `content`。
+- main.py：`/api/chat` 非流式预检（`require_project` 后、`get_chat_handler` **前**，仅 `mode=="managed"` 才碰 metering/accounts，`used>=cap`→友好 200 不建 handler）；`/api/auth/me` 两分支（local 合成 + 真实用户）都加 `today_cost_yuan`/`daily_cap_yuan`；review 端点构造 agent 传 `uid=scope.uid`。
+- **DeepSeek 官渠兼容**：B2 只加 reserve/settle + 被动 usage，**不碰** provider message/tool-call/`reasoning_content`/`tool_choice` 序列化。
+
+**前端**：`utils/quotaFormat.js`（`formatYuan`/`quotaLabel`/`quotaRatio`，全 `Number.isFinite` 归一、`quotaRatio` 恒 [0,1] 不返 NaN）；`Sidebar.jsx` 账号块额度行——外层守卫 `authUser && (uid!=='local' || typeof daily_cap_yuan==='number')`，**登出按钮**仍只对非-local（避困登录页），**额度行对 local 也显示**（local 经 managed 计费、受默认 ¥5/天 cap）。
+
+**已知限制 / 待决策**：软帽非原子 reserve（spec §11，并发略超一轮容忍）；从未消费的流不结算；settle 失败 @ app-initiated break 仅记日志、漏计一次；`.responses` 透传不计费（managed 不走，B3 custom 处理）；单进程 `_miss_counter`；custom 生产不可达（managed-forced，B3 激活）；**⚠️ 桌面 local 受 ¥5/天默认 cap、会被 reserve 拦**（若不想桌面同事被限需单独配置豁免——属配置/产品决策）。
+
+**回归**：`tests/test_metering.py`（计价/usage fail-closed/reserve/settle/暂停/工厂/source-guard）、`test_accounts.py::UsageDailyTests`、`test_chat_runtime.py::B2BillingWiringTests`+`B2BillingSettleTests`（含真 reserve 集成 + reload 回归守卫 + 压缩/视觉真 settle）、`test_independent_review.py::B2ReviewBillingTests`、`test_main_api.py::B2ChatQuotaTests`、`test_auth_api.py::MeCostFieldsTests`、前端 `quotaFormat`/`sidebarQuota.source`。**B2 测试夹具**：reserve/settle 在 managed chat/review 单测里会真跑——base setUp 须隔离 `CRA_DATA_ROOT`+`init_db`+把两道闸门设不触发（巨大 cap + `MAX_CONSECUTIVE_USAGE_MISS`），pause/quota 真行为由 `test_metering.py` 独立覆盖。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
