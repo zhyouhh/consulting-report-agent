@@ -22,6 +22,8 @@ from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.responses import JSONResponse
+from urllib.parse import urlparse
 
 from .chat import (
     ChatHandler,
@@ -54,6 +56,47 @@ limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="咨询报告写作助手")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# —— CSRF / CORS 允许源 ——
+# 必须定义在 CORS middleware 注册之前：CORS 的 allow_origins=list(allowed_origins())
+# 在 import 期求值。
+_LOOPBACK_ORIGINS = {
+    "http://127.0.0.1:8080", "http://localhost:8080",
+    "http://127.0.0.1:8888", "http://localhost:8888",
+    "http://localhost:3000", "http://127.0.0.1:3000",  # vite dev
+}
+
+
+def allowed_origins() -> set[str]:
+    origins = set(_LOOPBACK_ORIGINS)
+    raw = (os.environ.get("CRA_ALLOWED_ORIGIN") or "").strip()
+    if raw:
+        origins |= {o.strip().rstrip("/") for o in raw.split(",") if o.strip()}
+    return origins
+
+
+def _origin_from_referer(referer):
+    if not referer:
+        return None
+    p = urlparse(referer)
+    if p.scheme and p.netloc:
+        return f"{p.scheme}://{p.netloc}"
+    return None
+
+
+# CSRF Origin/Referer 中间件：web 态（auth_required）对所有状态变更方法校验同源。
+# 桌面 loopback（auth_required=False）跳过；GET/OPTIONS（含 preflight）不检查。
+# 在 CORS 之前注册 → CORS 作为最外层 middleware（Starlette 按反向 add 顺序包裹）。
+@app.middleware("http")
+async def csrf_origin_guard(request, call_next):
+    if (request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and getattr(request.app.state, "auth_required", True)):
+        origin = request.headers.get("origin") or _origin_from_referer(request.headers.get("referer"))
+        if not origin or origin.rstrip("/") not in allowed_origins():
+            return JSONResponse({"detail": "跨站请求被拒绝"}, status_code=403)
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,

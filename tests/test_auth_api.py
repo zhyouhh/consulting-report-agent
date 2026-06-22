@@ -5,9 +5,17 @@ from fastapi.testclient import TestClient
 
 
 class AuthApiTestBase(unittest.TestCase):
+    # CSRF guard（web 态）校验同源 Origin；web 态测试 client 默认带此源，
+    # 并设 CRA_ALLOWED_ORIGIN 让中间件放行。缺失-Origin 用例须用 bare client（见 test_csrf.py）。
+    _ALLOWED_ORIGIN = "https://app.example.com"
+
     def setUp(self):
         self._tmp = Path(os.path.realpath(tempfile.mkdtemp()))
-        self._env = mock.patch.dict(os.environ, {"CRA_DATA_ROOT": str(self._tmp), "CRA_INVITE_CODE": "JOIN"})
+        self._env = mock.patch.dict(os.environ, {
+            "CRA_DATA_ROOT": str(self._tmp),
+            "CRA_INVITE_CODE": "JOIN",
+            "CRA_ALLOWED_ORIGIN": self._ALLOWED_ORIGIN,
+        })
         self._env.start()
         from backend import accounts, config
         importlib.reload(config); importlib.reload(accounts)
@@ -18,6 +26,7 @@ class AuthApiTestBase(unittest.TestCase):
         self.m = m; m.app.state.auth_required = True
         self._reset_module_singletons()
         self.client = TestClient(m.app)
+        self.client.headers.update({"origin": self._ALLOWED_ORIGIN})  # 满足 CSRF 同源
 
     def _reset_module_singletons(self):
         from backend import chat as cm, independent_review as im

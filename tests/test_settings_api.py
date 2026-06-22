@@ -245,6 +245,9 @@ class SettingsApiTests(AuthApiTestBase):
         tb = accounts.create_session(ub)
         ca = TestClient(self.m.app); ca.cookies.set("cra_session", ta)
         cb = TestClient(self.m.app); cb.cookies.set("cra_session", tb)
+        # fresh client 不继承基类默认 Origin → web 态 POST 会被 CSRF 拦；显式补同源。
+        ca.headers.update({"origin": self._ALLOWED_ORIGIN})
+        cb.headers.update({"origin": self._ALLOWED_ORIGIN})
         # custom_api_base is NOT masked by GET → observe per-uid isolation through the endpoint.
         body = lambda base: {
             "mode": "managed",
