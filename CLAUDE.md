@@ -235,7 +235,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **回归**：`tests/test_tenant.py`、`test_accounts.py`、`test_auth_api.py`（含 `AuthApiTestBase`：reload(main) + mock heal + 单例 reset）、`test_tenant_isolation.py`（复合键/搜索隔离/`CrossTenantApiTests` 跨租户 404）、`test_settings_api.py`、`test_project_create_api.py`；既有端点测试已迁移到租户作用域（`auth_required=False` → uid="local" + `get_project_record` mock + 复合 store 键）。**写端点测试**：`AuthApiTestBase` 起隔离 `CRA_DATA_ROOT`；非鉴权端点测试设 `app.state.auth_required=False` 跑 local。
 
-## W2-B/B2 中央计费 + per-user 配额（2026-06-22 实施完成；分支 `feat/w2b-b2-billing`，**未 merge/未 push**）
+## W2-B/B2 中央计费 + per-user 配额（2026-06-22 实施完成 + merge main `c2916b1` + push origin；分支 `feat/w2b-b2-billing` 保留）
 
 所有 managed LLM/视觉调用经单一 `MeteredManagedClient` 出口计费。改计费 / usage 解析 / 调用点客户端构造 / 配额门禁前必读。详尽交付与红队修复见 `docs/superpowers/cutover_report_2026-06-22_w2b-b2.md`；plan `docs/superpowers/plans/2026-06-22-w2b-b2-central-billing-quota.md`。
 
