@@ -8,6 +8,14 @@ import backend.main as main_module
 from tests.test_auth_api import AuthApiTestBase
 
 
+def _settings_body(**overrides):
+    """拼完整必填体（mode + managed_model），custom 时补 custom_*。
+    所有 settings/CSRF POST 测试复用，避免漏 managed_model 触发 422。"""
+    body = {"mode": "managed", "managed_model": "deepseek-v4-pro"}
+    body.update(overrides)
+    return body
+
+
 class SettingsIsolationTests(unittest.TestCase):
     def test_settings_isolated_per_uid(self):
         from backend.config import load_settings, save_settings, Settings
@@ -43,6 +51,28 @@ class SettingsApiTests(AuthApiTestBase):
     def _load_local(self):
         from backend.config import load_settings
         return load_settings("local")
+
+    # —— Task 3: managed_base_url 服务端只读 ——
+    def test_normalize_forces_managed_base_url_constant(self):
+        from backend.config import normalize_settings_payload, DEFAULT_MANAGED_BASE_URL
+        out = normalize_settings_payload({"managed_base_url": "https://attacker.internal/v1"})
+        self.assertEqual(out["managed_base_url"], DEFAULT_MANAGED_BASE_URL)
+        self.assertEqual(out["api_base"], DEFAULT_MANAGED_BASE_URL)  # managed alias 也回常量
+
+    def test_post_settings_without_managed_base_url_ok(self):
+        # 前端不再发 managed_base_url（Task 18），带必填 managed_model 应 200 而非 422
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body())   # 不含 managed_base_url
+        self.assertEqual(resp.status_code, 200)
+
+    def test_post_settings_ignores_client_managed_base_url(self):
+        from backend.config import DEFAULT_MANAGED_BASE_URL
+        self.client.post("/api/settings",
+                         headers={"origin": "https://app.example.com"},
+                         json=_settings_body(managed_base_url="https://attacker.internal/v1"))
+        s = self._load_local()
+        self.assertEqual(s.managed_base_url, DEFAULT_MANAGED_BASE_URL)
 
     def test_get_settings_masks_custom_api_key(self):
         from backend.config import Settings

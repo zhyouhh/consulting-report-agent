@@ -289,7 +289,7 @@ class SettingsUpdate(BaseModel):
     """前端提交的设置更新"""
 
     mode: Literal["managed", "custom"]
-    managed_base_url: str
+    managed_base_url: str | None = None   # 服务端只读：接收但忽略，永远用 DEFAULT_MANAGED_BASE_URL
     managed_model: str
     managed_vision_model: Optional[str] = None
     vision_enabled: Optional[bool] = None
@@ -304,7 +304,7 @@ async def update_settings(update: SettingsUpdate, uid: str = Depends(get_current
     with _settings_lock:
         s = load_settings(uid)
         s.mode = update.mode
-        s.managed_base_url = update.managed_base_url
+        # managed_base_url 服务端只读：忽略客户端值，由 normalize 强制为 DEFAULT_MANAGED_BASE_URL。
         s.managed_model = update.managed_model
         if "managed_vision_model" in update.model_fields_set and update.managed_vision_model is not None:
             s.managed_vision_model = update.managed_vision_model

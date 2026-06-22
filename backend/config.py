@@ -324,7 +324,7 @@ def normalize_settings_payload(data: dict) -> dict:
     if "mode" not in normalized:
         normalized["mode"] = "managed"
 
-    normalized.setdefault("managed_base_url", DEFAULT_MANAGED_BASE_URL)
+    normalized["managed_base_url"] = DEFAULT_MANAGED_BASE_URL   # 服务端只读，覆盖任何历史/客户端值
     normalized.setdefault("managed_model", DEFAULT_MANAGED_MODEL)
     normalized.setdefault("managed_vision_model", DEFAULT_MANAGED_VISION_MODEL)
     normalized.setdefault("vision_enabled", True)
