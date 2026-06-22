@@ -3,6 +3,7 @@ import axios from 'axios'
 import SettingsModal from './SettingsModal'
 import ProjectCreateModal from './ProjectCreateModal'
 import { describeConnectionMode } from '../utils/connectionMode'
+import { quotaLabel } from '../utils/quotaFormat.js'
 
 export default function Sidebar({
   projects,
@@ -83,12 +84,19 @@ export default function Sidebar({
         {/* 桌面/本地模式（uid==="local"，合成账号、无真实会话）不显示账号块——
             否则点登出会清掉 authUser 把用户困在登录页（Codex review）。仅 web 真实用户显示。 */}
         {authUser && authUser.uid !== 'local' && (
-          <div className="mb-2 px-3 py-2 rounded-lg bg-[#15162d] border border-[#2f3158] flex items-center justify-between">
-            <span className="text-xs text-[#e2e2f0] truncate">{authUser.username}</span>
-            <button
-              onClick={async () => { try { await axios.post('/api/auth/logout') } catch (_) { /* ignore */ } onLoggedOut?.() }}
-              className="text-[11px] text-[#8888a8] hover:text-[#e2e2f0] ml-2"
-            >登出</button>
+          <div className="mb-2 px-3 py-2 rounded-lg bg-[#15162d] border border-[#2f3158]">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#e2e2f0] truncate">{authUser.username}</span>
+              <button
+                onClick={async () => { try { await axios.post('/api/auth/logout') } catch (_) { /* ignore */ } onLoggedOut?.() }}
+                className="text-[11px] text-[#8888a8] hover:text-[#e2e2f0] ml-2"
+              >登出</button>
+            </div>
+            {typeof authUser.daily_cap_yuan === 'number' && (
+              <div className="text-xs text-gray-400 mt-1">
+                {quotaLabel(authUser.today_cost_yuan ?? 0, authUser.daily_cap_yuan)}
+              </div>
+            )}
           </div>
         )}
         <button
