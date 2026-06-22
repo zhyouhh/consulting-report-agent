@@ -258,7 +258,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **前端**：`utils/quotaFormat.js`（`formatYuan`/`quotaLabel`/`quotaRatio`，全 `Number.isFinite` 归一、`quotaRatio` 恒 [0,1] 不返 NaN）；`Sidebar.jsx` 账号块额度行——外层守卫 `authUser && (uid!=='local' || typeof daily_cap_yuan==='number')`，**登出按钮**仍只对非-local（避困登录页），**额度行对 local 也显示**（local 经 managed 计费、受默认 ¥5/天 cap）。
 
-**已知限制 / 待决策**：软帽非原子 reserve（spec §11，并发略超一轮容忍）；从未消费的流不结算；settle 失败 @ app-initiated break 仅记日志、漏计一次；`.responses` 透传不计费（managed 不走，B3 custom 处理）；单进程 `_miss_counter`；custom 生产不可达（managed-forced，B3 激活）；**⚠️ 桌面 local 受 ¥5/天默认 cap、会被 reserve 拦**（若不想桌面同事被限需单独配置豁免——属配置/产品决策）。
+**已知限制 / 待决策**：软帽非原子 reserve（spec §11，并发略超一轮容忍）；从未消费的流不结算；**`_settle` 失败 best-effort**（任何 settle/DB 写失败一律 `logger.warning` 记日志、绝不抛给调用方、漏计一次——计费是成本护栏非支付系统，不因记账抖动崩用户操作）；`.responses` 透传不计费（managed 不走，B3 custom 处理）；单进程 `_miss_counter`；custom 生产不可达（managed-forced，B3 激活）；**⚠️ 桌面 local 受 ¥5/天默认 cap、会被 reserve 拦**（若不想桌面同事被限需单独配置豁免——属配置/产品决策）。
 
 **回归**：`tests/test_metering.py`（计价/usage fail-closed/reserve/settle/暂停/工厂/source-guard）、`test_accounts.py::UsageDailyTests`、`test_chat_runtime.py::B2BillingWiringTests`+`B2BillingSettleTests`（含真 reserve 集成 + reload 回归守卫 + 压缩/视觉真 settle）、`test_independent_review.py::B2ReviewBillingTests`、`test_main_api.py::B2ChatQuotaTests`、`test_auth_api.py::MeCostFieldsTests`、前端 `quotaFormat`/`sidebarQuota.source`。**B2 测试夹具**：reserve/settle 在 managed chat/review 单测里会真跑——base setUp 须隔离 `CRA_DATA_ROOT`+`init_db`+把两道闸门设不触发（巨大 cap + `MAX_CONSECUTIVE_USAGE_MISS`），pause/quota 真行为由 `test_metering.py` 独立覆盖。
 

@@ -11,7 +11,7 @@
 
 ## 验收证据
 
-- 后端 `.venv/bin/python -m pytest tests/` → **1342 passed, 1 skipped, 4 failed**。4 个 failed 全是已知 **mac-realpath 环境差异**（`test_skill_engine.py` / `test_workspace_materials.py` 的 `/var`→`/private/var` symlink 路径比对，Windows 上绿，非 B2 引入 —— 已对其中一例确认 traceback 为 `'/private/var/...' is not in the subpath of '/var/...'`）。
+- 后端 `.venv/bin/python -m pytest tests/` → **1347 passed, 1 skipped, 4 failed**。4 个 failed 全是已知 **mac-realpath 环境差异**（`test_skill_engine.py` / `test_workspace_materials.py` 的 `/var`→`/private/var` symlink 路径比对，Windows 上绿，非 B2 引入 —— 已对其中一例确认 traceback 为 `'/private/var/...' is not in the subpath of '/var/...'`）。
 - 前端 `node --test tests/` → **342 passed**；`npm run build` → 绿。
 - 定向回归 `pytest test_metering test_chat_runtime test_independent_review test_tenant_isolation test_main_api test_auth_api test_accounts` → **774 passed**（计费覆盖面 + 跨租户隔离 + DeepSeek 兼容全绿）。
 - DeepSeek 官渠兼容回归 `-k "deepseek or tool_call or reasoning"` → 绿；`test_deepseek_compat_helpers_match_chat_helpers`（含流式 follow-up）→ 绿。
@@ -51,7 +51,7 @@
 
 1. **软帽（soft cap）**：`reserve` 只做 `used >= cap` 读检查、非原子预留（spec §11 接受）；同 uid 并发至多略超一轮。¥5/天单账号桌面源/小型 web 单进程部署下不引入原子预留账本。
 2. **从未消费的流不结算**：`create()` 返回的流若从不被迭代则不结算（reserve 已跑挡下次）；真实调用点一律 `for chunk in response:` 至少进入一次，不存在该生产路径。
-3. **settle 失败 @ app-initiated break**：流式提前 break 经 `response.close()`→GeneratorExit 触发 settle；若此刻 settle（SQLite 写）抛错，只 `logger.warning` 记录、不遮蔽 GeneratorExit、该流漏计一次（极罕见，favors「不因 DB 抖动崩聊天轮」）。
+3. **settle 失败 best-effort**：计费是成本护栏非支付系统——**任何** `_settle`（SQLite 写等）失败（非流式 / 流式自然结束 / 提前 break / provider 异常 / GeneratorExit）一律只 `logger.warning("... call left unbilled")` 记录、**绝不抛给调用方**，该次调用漏计一次（极罕见 DB 抖动，favors「不因 ¥0.00x 记账失败崩用户的聊天/摘要/审查」）。DB 写失败时无论如何记不上账，至少可观测。
 4. **`.responses` 透传不计费**：wrapper `__getattr__` 透传非 `.chat.completions.create` 调用面（如原生搜索 `self.client.responses.create`）；仅 custom-OpenAI（`api.openai.com`+`gpt-*`）才走该路径，**managed 模式不走** → B2 无实际计费缺口；B3 custom 真激活时处理。
 5. **单进程 miss-counter**：`_miss_counter` 进程级 + day 入键（单进程部署成立；多 worker 需迁 DB，B3/部署期）。
 6. **custom 生产不可达（managed-forced）**：`config.normalize_settings_payload` 在 load/save 路径无条件 `mode="managed"`，故 B1/B2 production custom 不可达。本期 custom 分支与其单元测试是**对 wrapper 工厂逻辑的单元验证 + B3 custom 激活预留**，非 production 验收。

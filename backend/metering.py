@@ -225,9 +225,10 @@ class MeteredManagedClient:
                     last_usage = u
                 yield chunk
         finally:
-            # close 用独立 finally 包住 settle：即便 settle 抛错（如 DB 写失败），底层 provider 流也必被关闭。
-            # pending = 正在 unwinding 的原始异常（provider 抛 / GeneratorExit / 消费方异常）：
-            #   有原始异常时 settle 失败只记日志、不得遮蔽它；正常结束时（pending is None）settle 失败如实抛出。
+            # `_settle` 自身已 best-effort（内部吞 DB 写等失败、只记日志、不抛），故正常情况下这里不会捕到异常。
+            # 下面的 pending / except 是**防御性**：万一 `_settle` 因意外（如被测试 monkeypatch、或 logger 异常）抛出，
+            # 也不得遮蔽正在 unwinding 的原始异常（provider 抛 / GeneratorExit / 消费方异常）；close 用独立内层
+            # finally 包住，保证底层 provider 流无论如何都被关闭。
             pending = sys.exc_info()[1]
             try:
                 self._settle(model, last_usage)   # 自然结束 / provider 异常 / GeneratorExit 都恰好结算一次

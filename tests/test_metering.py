@@ -296,8 +296,8 @@ class MeteredStreamTests(MeteredNonStreamTests):  # 复用 setUp/tearDown/_FakeO
         self.assertEqual(row["cost_micro_yuan"], 768000)  # 未见 usage → fail-closed 保守封顶
 
     def test_close_runs_and_error_propagates_even_if_settle_raises(self):
-        # Codex quality 轨 B7：settle 抛错（如 DB 写失败）时，底层 provider 流仍必被关闭，
-        # 且 settle 异常如实抛出（不被静默吞掉）。
+        # Codex quality 轨 B7（防御性）：真 _settle 已 best-effort（内部吞失败、不抛）；本测试 monkeypatch
+        # _settle 强制抛，验证万一 settle 意外抛出时——底层 provider 流仍必被关闭、且该异常如实抛出（不静默吞）。
         closed = {"v": False}
 
         class _Closable:
@@ -328,8 +328,8 @@ class MeteredStreamTests(MeteredNonStreamTests):  # 复用 setUp/tearDown/_FakeO
         self.assertTrue(closed["v"])   # settle 抛错，底层流仍被关闭
 
     def test_provider_error_not_masked_when_settle_also_raises(self):
-        # Codex quality 轨 B1（再审）：provider 流中途抛 + settle 同时抛 →
-        # 调用方必须看到 provider 异常（非 settle 异常），且底层流仍被关闭。
+        # Codex quality 轨 B1（再审，防御性）：真 _settle 已 best-effort；本测试 monkeypatch _settle 强制抛，
+        # 验证 provider 流中途抛 + settle 也抛时——调用方仍看到 provider 异常（非 settle 异常）、底层流仍关闭。
         closed = {"v": False}
 
         class _Closable:
