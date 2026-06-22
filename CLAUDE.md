@@ -18,11 +18,12 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 
 ## 关键数据边界
 
-**运行时用户数据全部位于** `~/.consulting-report/`（即 `C:\Users\<user>\.consulting-report\`）：
+**⚠️ W2-B/B1 后数据根改为 `data_root()`（`backend/config.py`，`CRA_DATA_ROOT` 环境变量，缺省 = `~/.consulting-report/`）下的 per-uid 分层**（详见下方「## W2-B 多租户基座」段）：
 
-- `config.json` — `Settings` 序列化（排除 `mode/api_key/api_base/model/projects_dir/skill_dir/managed_client_token` 等运行时派生字段）
-- `projects/<project_id>/` — 每个项目的完整工作区（对话历史、plan 文件、正文、附件）
-- `search_runtime_state.json`、`search_cache.json` — 内置搜索池动态状态与缓存
+- `<data-root>/app.db` — SQLite 账号库（users/sessions/app_config），见 `backend/accounts.py`
+- `<data-root>/users/<uid>/config.json` — **per-uid** `Settings`（排除 `mode/api_key/api_base/model/projects_dir/skill_dir/managed_client_token` 等运行时派生字段）
+- `<data-root>/users/<uid>/projects/<project_id>/` — 每个项目的完整工作区（对话历史、plan 文件、正文、附件）。**桌面态 uid 硬绑 `"local"`** → 桌面项目现位于 `~/.consulting-report/users/local/projects/`（**B1 行为变更**：老桌面用户既有 `~/.consulting-report/projects/` 需迁移；桌面已去重点化）
+- `<data-root>/search_runtime_state.json`、`search_cache.json` — 内置搜索池动态状态与缓存（**不分 uid**；隔离靠复合键 `tenant_project_key(uid,cid)` 进 cache/quota key，见下方 W2-B 段）
 
 **构建期私有文件**（`.gitignore` 已忽略，必须本地注入）：
 
@@ -207,6 +208,32 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - 材料 size 守门由 N6 接管（plan 原 Task 5/6 删——N6 §5 已覆盖 `size_bytes` + `material_limits.MAX_HEAVY_MATERIAL_BYTES`），W1 不重做。
 - 前端 `ProjectCreateModal.jsx` 下拉加「技术标（投标）」→ `technical-bid`；`skill/plan-template/project-overview.md` 报告类型占位与 `_populate_v2_plan_files` 替换 key **必须逐字一致**（否则新建项目占位换不掉）。
 - 回归：`tests/test_skill_engine.py`（七类/seam/注入内容/bid 腔调/净化守护/声明槽位）、`test_chat_runtime.py`（两表 append 落点锁）、前端 `projectCreateModal`。详见 `docs/superpowers/cutover_report_2026-06-20_w1-technical-bid.md`。
+
+## W2-B 多租户基座（B1，2026-06-22 实施完成 + merge main `c62cd4d` + push origin；分支 `feat/w2b-multi-tenant-core` 保留）
+
+把单用户引擎改成「登录后每用户工作区完全隔离」的多租户 Web 基座。**改鉴权 / 数据路径 / 进程内锁/store/搜索键 / 项目创建前必读。** 详尽交付与红队修复见 `docs/superpowers/cutover_report_2026-06-22_w2b-b1.md`；spec `docs/superpowers/specs/2026-06-21-w2b-multi-tenant-core-design.md`、plan `docs/superpowers/plans/2026-06-21-w2b-b1-tenant-base-auth.md`。
+
+**新增叶子模块**：
+- `backend/tenant.py`（**只依赖 config，绝不 import chat/skill/main**）：`data_root()` 下的 per-uid 路径助手 + `tenant_project_key(uid, project_id)`（**唯一中央复合键**，无损可逆转义 `\`/`:` 再以 `::` 连接，杜绝跨租户碰撞，**任何处禁止手拼**）+ `_safe_path_component`（uid 作路径段前拒 `/`/`\`/`..`/`.`/`:`/空——含 Windows 盘符；uuid-hex 与 "local" 通过）。
+- `backend/accounts.py`（**只依赖 tenant**）：SQLite 账号层（argon2 密码、sha256 session token、`app_config` 邀请码）。`_db()` 上下文管理器**提交+关闭**（别退回 `with _connect()`）；公共 `get_user_by_*` **剥 password_hash**（内部 `_get_user_row` 才带）；`create_session` 原子 `INSERT...SELECT...WHERE disabled=0` fail-closed 拒停用/不存在用户；`set_user_disabled` 停用与撤销会话**同一事务**。
+
+**main.py 接线（硬约束）**：
+- per-uid 工厂 `get_skill_engine(uid)` / `get_chat_handler(uid, project_id)`（缓存键 `(uid, project_id)` 元组）；`SkillEngine`/`ChatHandler` 持 `self.uid`（`ChatHandler.__init__` 断言 `skill_engine.uid==uid`，防分叉）。
+- 鉴权依赖 `get_current_uid`（`app.state.auth_required` falsy → "local"；否则 httpOnly cookie `cra_session` → `accounts.get_session_uid` → 401）/ `get_current_admin`（403）。
+- **统一归属卡点** `require_project(project_id, uid=Depends(get_current_uid)) -> ProjectScope{uid, project_id(canonical rec["id"]), engine, project_record, lock_key}`：canonicalize id-or-name → `rec["id"]`，查不到即 **404**（非属主用户自己的引擎 registry 无该项目 → 天然隔离，按 id 和按名称都不泄漏）。**所有 `{project_id}` 端点必经 `require_project`**，用 `scope.engine.M(scope.project_id, ...)`，不得用原始路径 project_id 寻址引擎/锁/store。
+- `/api/auth/{register,login,logout,me,change-password}`：邀请门（`secrets.compare_digest`）、httpOnly cookie（`samesite=lax`、`secure` 取 `app.state.cookie_secure`）、**logout 幂等**（不依赖有效会话，总清 cookie）、改密保当前会话撤其它、桌面合成 local `/me`。register/login `@limiter.limit("10/minute")`。
+- web 创建项目**服务端分配工作区**（`user_projects_dir(uid)/<uuid hex>`）、按 `model_fields_set` **拒收客户端** `workspace_dir`/`initial_material_paths`（400）；桌面态客户端路径照旧。
+
+**复合键不变式（隔离核心）**：进程内 per-project 状态全按 `tenant_project_key(uid, project_id)` 键化——`chat.py` 请求锁 `_get_project_request_lock`(模块级 registry 接已合成键)/会话锁 `_get_conversation_state_lock`、`skill.py:record_stage_checkpoint`（请求锁 + 审查锁检查）、`independent_review.py` 审查锁 `get_independent_review_lock` + `_REVIEW_SESSION_STORE`、搜索 cache + project-minute 配额（`chat.py` 的 `router.search(project_id=tenant_project_key(self.uid, ...))`；**global 配额仍全局共享**）。
+- **审查侧 `store_key` vs `project_id` 分离（红队 CRITICAL，改 IndependentReviewAgent 前必读）**：`IndependentReviewAgent.run(project_id, ..., store_key=None)` 用 **canonical `project_id`** 做文件/引擎访问（`get_primary_report_path`/`get_project_path`/`_execute_tool`），用 **`store_key`（=端点 `scope.lock_key` 复合键，默认回落 project_id 向后兼容）** 做所有 `store.*`（`set_errored`/`atomic_commit_report`）；`_commit_verified_candidate` 同。端点 worker 传 `store_key=review_key`、`agent.run(review_project_id)`。混用会让端点 claim（复合）与 agent commit（canonical）键不一致 → 审查保存失败、tombstone 写错键、chat 读不到。
+
+**桌面（`app.py`）/ web（`run_web.py`）入口 + 启动安全门** `assert_safe_startup(auth_required, host)`：桌面 `auth_required=False` + `cookie_secure=False` + 强制 loopback host；web `auth_required=True` + **强制 `CRA_INVITE_CODE`**（否则拒启动）。`app.state.auth_required` 模块级缺省 True（直连 `uvicorn backend.main:app` 默认安全 web 态）。
+
+**环境变量**：`CRA_DATA_ROOT`（数据根）；`CRA_INVITE_CODE`（**web 必设**，含 mac 本地 `run_web.py`——例 `CRA_INVITE_CODE=devcode .venv/bin/python run_web.py`；env 已设则 `set_config` upsert 每次启动权威，未设则随机码 fail-closed 锁死注册）；`CRA_BOOTSTRAP_ADMIN_USERNAME`+`CRA_BOOTSTRAP_ADMIN_PASSWORD`（首启建管理员、`must_change_password=True`、幂等）。
+
+**B1 明确未做（B2/B3）**：custom 模式**仍 managed-forced**（`normalize_settings_payload` 强制 `mode="managed"`；per-uid settings 只隔离**存储**，custom 激活+SSRF 归 B3）；中央计费 + per-user ¥/天配额（B2）；admin 面板、CSRF/SSRF/CORS 硬化（现 `allow_origins=["*"]` + SameSite=Lax 基线）、`must_change_password` 路由级强制、per-username 限流（B3）。
+
+**回归**：`tests/test_tenant.py`、`test_accounts.py`、`test_auth_api.py`（含 `AuthApiTestBase`：reload(main) + mock heal + 单例 reset）、`test_tenant_isolation.py`（复合键/搜索隔离/`CrossTenantApiTests` 跨租户 404）、`test_settings_api.py`、`test_project_create_api.py`；既有端点测试已迁移到租户作用域（`auth_required=False` → uid="local" + `get_project_record` mock + 复合 store 键）。**写端点测试**：`AuthApiTestBase` 起隔离 `CRA_DATA_ROOT`；非鉴权端点测试设 `app.state.auth_required=False` 跑 local。
 
 ## 管理型搜索池
 
