@@ -100,6 +100,13 @@ class CsrfTests(_CsrfTestBase):
                                 json={"project_id": "nonexistent", "message_text": "hi"})
         self.assertNotEqual(resp.status_code, 403)
 
+    def test_cors_not_wildcard(self):
+        import inspect
+        from backend import main as m
+        src = inspect.getsource(m)
+        self.assertIn("allow_origins=list(allowed_origins())", src)
+        self.assertNotRegex(src, r'allow_origins=\[\s*["\']\*["\']\s*\]')
+
 
 if __name__ == "__main__":
     unittest.main()

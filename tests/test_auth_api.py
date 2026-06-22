@@ -131,6 +131,13 @@ class AuthFlowTests(AuthApiTestBase):
         self._reg()
         self.assertEqual(self.client.post("/api/auth/login", json={"username":"alice","password":"x"}).status_code, 422)
 
+    def test_web_cookie_has_secure_flag(self):
+        # run_web 不参与 TestClient，故显式置 cookie_secure（login set-cookie 读 app.state.cookie_secure）。
+        self.m.app.state.cookie_secure = True
+        self._reg()
+        resp = self.client.post("/api/auth/login", json={"username": "alice", "password": "pw-123456"})
+        self.assertIn("Secure", resp.headers.get("set-cookie", ""))
+
     def test_logout_idempotent_without_session(self):
         # no cookie -> still 200, still clears
         r = self.client.post("/api/auth/logout")
