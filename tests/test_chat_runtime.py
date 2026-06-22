@@ -14491,3 +14491,41 @@ for _inh in dir(ChatRuntimeTests):
     if _inh.startswith("test_") and _inh not in B2BillingWiringTests.__dict__:
         setattr(B2BillingWiringTests, _inh, None)
 del _inh
+
+
+class B2BillingSettleTests(ChatRuntimeTests):
+    def test_compaction_call_settles_usage(self):
+        from types import SimpleNamespace
+        from backend import accounts
+        import backend.metering as m
+        handler = self._make_handler_with_project()   # managed → client 是 MeteredManagedClient
+        usage = SimpleNamespace(prompt_tokens=100, prompt_cache_hit_tokens=0,
+                                prompt_cache_miss_tokens=100, completion_tokens=50)
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="摘要"))], usage=usage)
+        with mock.patch.object(handler.client._raw.chat.completions, "create", return_value=resp):
+            handler._summarize_messages([{"role": "user", "content": "x"}])
+        row = accounts.get_usage_today(handler.uid, m.today_shanghai())
+        self.assertEqual(row["cache_miss_tokens"], 100)   # 压缩真的 settle 了
+        self.assertGreater(row["cost_micro_yuan"], 0)
+
+    def test_vision_transcribe_settles_usage(self):
+        from types import SimpleNamespace
+        from backend import accounts
+        import backend.metering as m
+        handler = self._make_handler_with_project()
+        handler.settings.vision_enabled = True
+        usage = SimpleNamespace(prompt_tokens=200, prompt_cache_hit_tokens=0,
+                                prompt_cache_miss_tokens=200, completion_tokens=30)
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="图片转述"))], usage=usage)
+        with mock.patch.object(handler.client._raw.chat.completions, "create", return_value=resp):
+            out = handler._vision_transcribe("data:image/png;base64,AAAA", "image/png")
+        self.assertIn("图片转述", out)
+        row = accounts.get_usage_today(handler.uid, m.today_shanghai())
+        self.assertEqual(row["cache_miss_tokens"], 200)   # 视觉真的 settle 了
+
+
+# Codex NIT: 置空继承的 test_（同上 pattern）
+for _inh in dir(ChatRuntimeTests):
+    if _inh.startswith("test_") and _inh not in B2BillingSettleTests.__dict__:
+        setattr(B2BillingSettleTests, _inh, None)
+del _inh
