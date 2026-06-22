@@ -180,3 +180,17 @@ class BootstrapSafetyTests(AuthApiTestBase):
         with mock.patch.dict(os.environ, {"CRA_INVITE_CODE": ""}):
             with self.assertRaises(SystemExit):
                 self.m.assert_safe_startup(auth_required=True, host="0.0.0.0")
+
+
+class MeCostFieldsTests(AuthApiTestBase):
+    def test_me_includes_today_cost_and_cap(self):
+        self.client.post("/api/auth/register",
+                         json={"username": "bob", "password": "pw-123456", "invite_code": "JOIN"})
+        self.client.post("/api/auth/login", json={"username": "bob", "password": "pw-123456"})
+        import backend.accounts as accounts, backend.metering as metering
+        uid = accounts.get_user_by_username("bob")["uid"]
+        accounts.add_usage(uid, metering.today_shanghai(), 1_500_000, 0, 0, 0)  # ¥1.5
+        body = self.client.get("/api/auth/me").json()
+        self.assertAlmostEqual(body["today_cost_yuan"], 1.5, places=4)
+        self.assertIn("daily_cap_yuan", body)
+        self.assertGreater(body["daily_cap_yuan"], 0)

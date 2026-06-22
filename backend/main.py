@@ -246,13 +246,19 @@ def auth_logout(request: Request, response: Response):
 
 @app.get("/api/auth/me")
 def auth_me(request: Request, uid: str = Depends(get_current_uid)):
+    from backend import metering
+    used = accounts.get_usage_today(uid, metering.today_shanghai())["cost_micro_yuan"]
+    cap = accounts.get_effective_daily_cap_micro(uid)
+    cost_fields = {"today_cost_yuan": round(used / 1_000_000, 4),
+                   "daily_cap_yuan": round(cap / 1_000_000, 4)}
     if uid == "local" and not getattr(request.app.state, "auth_required", True):
-        return {"uid": "local", "username": "本地用户", "is_admin": False, "must_change_password": False}
+        return {"uid": "local", "username": "本地用户", "is_admin": False,
+                "must_change_password": False, **cost_fields}
     rec = accounts.get_user_by_uid(uid)
     if not rec:
         raise HTTPException(status_code=401, detail="未登录")
     return {"uid": uid, "username": rec["username"], "is_admin": rec["is_admin"],
-            "must_change_password": rec["must_change_password"]}
+            "must_change_password": rec["must_change_password"], **cost_fields}
 
 
 @app.post("/api/auth/change-password")
