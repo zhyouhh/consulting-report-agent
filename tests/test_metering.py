@@ -64,6 +64,18 @@ class ExtractUsageTests(unittest.TestCase):
              "prompt_cache_miss_tokens": 90, "completion_tokens": 5})
         self.assertEqual((bu.hit, bu.miss, bu.completion), (10, 90, 5))
 
+    def test_negative_tokens_clamped_to_zero(self):
+        # Codex quality 轨 B6：provider 异常返回负数不得倒扣 usage_daily（逃配额）。
+        u = _FakeUsage(prompt_tokens=100, prompt_cache_hit_tokens=-5,
+                       prompt_cache_miss_tokens=-90, completion_tokens=-5)
+        bu = metering.extract_billing_usage(u)
+        self.assertEqual((bu.hit, bu.miss, bu.completion), (0, 0, 0))
+
+    def test_malformed_usage_returns_none_fail_closed(self):
+        # Codex quality 轨 B6：非数值字段 → None（→ fail-closed 保守封顶），不抛穿计费路径。
+        self.assertIsNone(metering.extract_billing_usage(
+            _FakeUsage(prompt_tokens="oops", completion_tokens=5)))
+
 
 # tests/test_metering.py（追加）
 import datetime as _dt
@@ -237,6 +249,38 @@ class MeteredStreamTests(MeteredNonStreamTests):  # 复用 setUp/tearDown/_FakeO
         gen.close()        # GeneratorExit → finally fail-closed
         row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
         self.assertEqual(row["cost_micro_yuan"], 768000)  # 未见 usage → fail-closed 保守封顶
+
+    def test_close_runs_and_error_propagates_even_if_settle_raises(self):
+        # Codex quality 轨 B7：settle 抛错（如 DB 写失败）时，底层 provider 流仍必被关闭，
+        # 且 settle 异常如实抛出（不被静默吞掉）。
+        closed = {"v": False}
+
+        class _Closable:
+            def __init__(self): self._it = iter([_Chunk()])
+            def __iter__(self): return self
+            def __next__(self): return next(self._it)
+            def close(self): closed["v"] = True
+
+        class _SC:
+            def create(self, **kw): return _Closable()
+
+        class _Ch:
+            def __init__(self): self.completions = _SC()
+
+        class _Raw:
+            def __init__(self): self.chat = _Ch()
+
+        from backend.config import DEFAULT_MANAGED_MODEL_PRICING
+        c = self.m.MeteredManagedClient(_Raw(), uid="u1", model_pricing=DEFAULT_MANAGED_MODEL_PRICING)
+
+        def _boom(*a, **k):
+            raise RuntimeError("billing db down")
+        c._settle = _boom   # 实例属性遮蔽 _settle，模拟结算抛错
+
+        gen = c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=True)
+        with self.assertRaises(RuntimeError):
+            list(gen)
+        self.assertTrue(closed["v"])   # settle 抛错，底层流仍被关闭
 
 
 # tests/test_metering.py（追加）

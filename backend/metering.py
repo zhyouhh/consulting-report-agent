@@ -38,12 +38,18 @@ def extract_billing_usage(usage) -> BillingUsage | None:
     miss = _usage_get(usage, "prompt_cache_miss_tokens")
     if prompt is None and completion is None and hit is None and miss is None:
         return None
-    hit = int(hit or 0)
-    if miss is None:
-        miss = max(int(prompt or 0) - hit, 0)
-    else:
-        miss = int(miss)
-    return BillingUsage(hit=hit, miss=miss, completion=int(completion or 0))
+    # 防御性：非数值/畸形 usage → None（fail-closed 保守封顶），不让 int() 抛穿设算路径；
+    # 负数 token（provider 异常）钳到 0，杜绝「负计费倒扣 usage_daily 逃配额」。
+    try:
+        hit = max(int(hit or 0), 0)
+        if miss is None:
+            miss = max(int(prompt or 0) - hit, 0)
+        else:
+            miss = max(int(miss), 0)
+        completion = max(int(completion or 0), 0)
+    except (TypeError, ValueError):
+        return None
+    return BillingUsage(hit=hit, miss=miss, completion=completion)
 
 
 def price_micro_yuan(model: str, hit: int, miss: int, completion: int, pricing: dict) -> int:
@@ -54,8 +60,7 @@ def price_micro_yuan(model: str, hit: int, miss: int, completion: int, pricing: 
 
 import threading
 from backend import accounts
-from backend.config import (DEFAULT_MANAGED_MODEL_PRICING,
-                            DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN, MAX_CONSECUTIVE_USAGE_MISS,
+from backend.config import (DEFAULT_MANAGED_MODEL_PRICING, MAX_CONSECUTIVE_USAGE_MISS,
                             MANAGED_FAILCLOSED_CEILING)
 from backend.context_policy import resolve_context_policy   # fail-closed 取该模型 effective 上下文上限
 
@@ -182,13 +187,17 @@ class MeteredManagedClient:
                     last_usage = u
                 yield chunk
         finally:
-            self._settle(model, last_usage)   # 自然结束 / provider 异常 / GeneratorExit 都恰好结算一次
-            close = getattr(raw_stream, "close", None)   # 释放底层 provider 流（HTTP 连接）
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
+            # close 用独立 finally 包住 settle：即便 settle 抛错（如 DB 写失败），底层 provider 流
+            # 也必被关闭、且原始 provider/consumer 异常不被 settle 异常遮蔽。
+            try:
+                self._settle(model, last_usage)   # 自然结束 / provider 异常 / GeneratorExit 都恰好结算一次
+            finally:
+                close = getattr(raw_stream, "close", None)   # 释放底层 provider 流（HTTP 连接）
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
 
 
 def wrap_client_for_billing(raw_client, uid: str, settings):
