@@ -344,22 +344,30 @@ class WorkspaceFilesRequest(BaseModel):
 
 @app.post("/api/models/list")
 async def list_models(request: ModelsRequest, uid: str = Depends(get_current_uid)):
-    try:
-        from openai import OpenAI
-        import httpx
+    from openai import OpenAI
+    from backend import url_guard
 
-        http_client = httpx.Client(timeout=30.0)
+    # —— 校验在宽 try 之外，400 不被吞成 500 ——
+    try:
+        validated_base = url_guard.validate_custom_api_base(request.api_base or "")
+    except url_guard.SsrfBlockedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    http_client = url_guard.build_guarded_http_client(timeout=30.0)
+    try:
         client = OpenAI(
             api_key=request.api_key,
-            base_url=request.api_base,
+            base_url=validated_base,
             http_client=http_client,
         )
         models = client.models.list()
         model_ids = [m.id for m in models.data]
-        http_client.close()
         return {"models": model_ids}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取模型列表失败: {str(e)}")
+    finally:
+        http_client.close()
 
 
 @app.post("/api/system/select-workspace-folder")

@@ -261,7 +261,9 @@ class IndependentReviewAgent:
         # Structured timeout (C4 / spec §7): bound connect/read/write/pool separately so a
         # provider that never sends a first byte can't pin the worker (and the review lock it
         # holds) for the full 120s. read=60 caps the no-first-token window per request.
-        http_client = httpx.Client(
+        from backend import url_guard
+
+        http_client = url_guard.build_guarded_http_client(
             timeout=httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=30.0)
         )
         raw = OpenAI(

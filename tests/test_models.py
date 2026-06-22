@@ -1,8 +1,26 @@
 import unittest
 
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from backend.models import ChatRequest, ProjectInfo
+
+from tests.test_auth_api import AuthApiTestBase
+
+
+class ModelsListApiTests(AuthApiTestBase):
+    """POST /api/models/list — B3 Task 5：custom api_base 走 SSRF 白名单校验。"""
+
+    def setUp(self):
+        super().setUp()
+        self.m.app.state.auth_required = False   # get_current_uid → "local"
+        self.client = TestClient(self.m.app)
+
+    def test_models_list_rejects_offlist_base(self):
+        resp = self.client.post("/api/models/list", json={
+            "api_key": "sk-x", "api_base": "https://evil.example.com/v1",
+        })
+        self.assertEqual(resp.status_code, 400)
 
 
 class ModelsSchemaTests(unittest.TestCase):

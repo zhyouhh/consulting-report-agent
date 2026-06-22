@@ -14474,6 +14474,15 @@ class B2BillingWiringTests(ChatRuntimeTests):
         self.assertTrue(any(e.get("type") == "error" and "额度" in str(e.get("data", ""))
                             for e in events))
 
+    def test_chat_client_uses_guarded_http_client(self):
+        # B3 Task 5: ChatHandler 的 OpenAI client 必须走 url_guard 受控 http_client，
+        # 不再用裸 httpx.Client(timeout=120...)。
+        import inspect
+        from backend import chat
+        src = inspect.getsource(chat)
+        self.assertIn("url_guard.build_guarded_http_client", src)
+        self.assertNotRegex(src, r"http_client\s*=\s*httpx\.Client\(timeout=120")
+
     def test_chat_stream_consumption_closes_response(self):
         # Codex NIT: 不全局 grep `response.close()`（chat.py 别处已有无关 close，会假绿）；
         # 锚定主流式 `for chunk in response:` 后窗口内必须有 finally + response.close()。
