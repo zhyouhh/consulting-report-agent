@@ -16,7 +16,7 @@
 - 定向回归 `pytest test_metering test_chat_runtime test_independent_review test_tenant_isolation test_main_api test_auth_api test_accounts` → **774 passed**（计费覆盖面 + 跨租户隔离 + DeepSeek 兼容全绿）。
 - DeepSeek 官渠兼容回归 `-k "deepseek or tool_call or reasoning"` → 绿；`test_deepseek_compat_helpers_match_chat_helpers`（含流式 follow-up）→ 绿。
 
-## 22 commit 一览（5 实施簇 + 收尾，每簇双轨 Codex review）
+## commit 一览（5 实施簇 + 收尾，每簇双轨 Codex review）
 
 - **簇A metering 叶子模块（Task 1–7）**：`0a23e3e` 单价常量+`price_micro_yuan` · `7c8be50` `extract_billing_usage` · `12acd7f` `usage_daily` 表+`today_shanghai` · `bcc248f` 非流式 reserve/settle/fail-closed · `df93e3a` 流式透传+末包结算 · `556be93` 连续缺失暂停 · `ec7c758` `wrap_client_for_billing` 工厂+source-guard · 红队修复 `d0bfc30`/`539dd5c`/`8929362`（usage 防御性 fail-closed）。
 - **簇B 接线 ChatHandler（Task 8–9）**：`6518e4a` 包 client+友好配额事件 · `860f30f` 压缩/视觉计费实证+DeepSeek 绿 · `ef23e18` 行为 close+settle 测试+真 reserve 集成测试+close 失败记日志。
