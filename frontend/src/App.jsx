@@ -4,6 +4,7 @@ import Sidebar from './components/Sidebar'
 import Login from './components/Login'
 import ChatPanel from './components/ChatPanel'
 import WorkspacePanel from './components/WorkspacePanel'
+import AdminPanel from './components/AdminPanel'
 import axios from 'axios'
 import { setUnauthedHandler } from './api'
 import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
@@ -39,6 +40,7 @@ function App() {
   const [injectedPrompt, setInjectedPrompt] = useState(null)
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
+  const [showAdmin, setShowAdmin] = useState(false)
   const activeProjectRef = useRef(currentProjectId)
   const chatPanelRef = useRef(null)
   const workspacePanelRef = useRef(null)
@@ -257,6 +259,7 @@ function App() {
           onSettingsSaved={loadSettings}
           authUser={authUser}
           onLoggedOut={() => setAuthUser(null)}
+          onOpenAdmin={() => setShowAdmin(true)}
         />
         <ChatPanel
           ref={chatPanelRef}
@@ -287,6 +290,7 @@ function App() {
             onDropPendingReviewTriggers={(triggerType) => chatPanelRef.current?.dropPendingReviewTriggers(triggerType)}
           />
         )}
+        {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
       </div>
     </ErrorBoundary>
   )

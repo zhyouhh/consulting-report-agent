@@ -15,6 +15,7 @@ export default function Sidebar({
   onSettingsSaved,
   authUser,
   onLoggedOut,
+  onOpenAdmin,
 }) {
   const [showModal, setShowModal] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -100,6 +101,14 @@ export default function Sidebar({
               <div className={`text-xs text-gray-400 ${authUser.uid !== 'local' ? 'mt-1' : ''}`}>
                 {quotaLabel(authUser.today_cost_yuan ?? 0, authUser.daily_cap_yuan)}
               </div>
+            )}
+            {authUser?.is_admin && (
+              <button
+                onClick={() => onOpenAdmin?.()}
+                className="text-[11px] text-[#64ffda] hover:underline mt-1"
+              >
+                👤 用户管理
+              </button>
             )}
           </div>
         )}
