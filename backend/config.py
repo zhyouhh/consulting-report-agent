@@ -380,8 +380,9 @@ def save_settings(settings: Settings, uid: str | None = None):
     config_file = _config_path_for(uid)
     config_file.parent.mkdir(parents=True, exist_ok=True)
     data = normalize_settings_payload(settings.model_dump())
+    # 注意：mode 是用户选择、必须持久化（B3 Task 4 custom 激活），故 *不* 剔除。
+    # 以下都是 normalize 从 mode + custom_*/managed_* 派生的别名/运行时值，持久化它们会污染配置。
     for key in [
-        "mode",
         "api_key",
         "api_base",
         "model",

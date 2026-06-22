@@ -52,3 +52,31 @@ class AllowlistTests(unittest.TestCase):
                 url_guard.validate_custom_api_base("https://api.openai.com/v1 "),
                 "https://api.openai.com/v1",
             )
+
+
+class GuardedTransportTests(unittest.TestCase):
+    """行为级：真起 build_guarded_http_client() 的 client 发请求，断言 transport 在
+    校验阶段就抛 SsrfBlockedError（不真出网——off-list 在 super().handle_request 之前被拦；
+    私网 case 用 mock 让 getaddrinfo 返私网 IP，同样在 connect 之前抛）。"""
+
+    def test_request_to_offlist_host_blocked(self):
+        client = url_guard.build_guarded_http_client(timeout=5.0)
+        self.addCleanup(client.close)
+        # 不 mock getaddrinfo：off-list 主机在白名单检查处即抛，不会走到 DNS / connect。
+        with self.assertRaises(url_guard.SsrfBlockedError):
+            client.get("https://evil.example.com/")
+
+    def test_request_to_allowlisted_host_resolving_private_blocked(self):
+        client = url_guard.build_guarded_http_client(timeout=5.0)
+        self.addCleanup(client.close)
+        # 白名单内主机但解析到私网（投毒/误配）→ public-IP 二道防线在 connect 前拦下。
+        with mock.patch("backend.url_guard.socket.getaddrinfo",
+                        return_value=[(2, 1, 6, "", ("10.0.0.9", 0))]):
+            with self.assertRaises(url_guard.SsrfBlockedError):
+                client.get("https://api.openai.com/v1/models")
+
+    def test_request_to_non_https_blocked(self):
+        client = url_guard.build_guarded_http_client(timeout=5.0)
+        self.addCleanup(client.close)
+        with self.assertRaises(url_guard.SsrfBlockedError):
+            client.get("http://api.openai.com/v1/models")
