@@ -44,6 +44,7 @@ from .material_limits import MAX_HEAVY_MATERIAL_BYTES
 from .skill import SkillEngine, StaleFileError, UserWriteForbiddenError
 from .tenant import user_projects_dir, ensure_user_dirs, tenant_project_key
 from . import accounts
+from . import url_guard
 
 
 logging.basicConfig(
@@ -145,6 +146,13 @@ def _bootstrap_admin():
 
 
 _bootstrap_admin()
+
+
+# 启动时把 app_config 白名单注入 url_guard（admin 之前存的允许域名进程起来即生效）。
+# NIT R3：顺手过滤历史非法项（accounts 层只存不校验），避免坏数据进运行时白名单。
+url_guard.set_runtime_allowed_hosts(
+    [h for h in accounts.get_custom_api_extra_hosts() if url_guard.is_valid_hostname(h)]
+)
 
 
 # host 在 import 期未知，无法集中化；必须由受支持的入口（run_web.py / app.py）显式调用作早退检查。
@@ -405,6 +413,38 @@ def auth_change_password(request: Request, payload: ChangePwPayload, uid: str = 
     else:
         accounts.delete_user_sessions(uid)
     return {"status": "ok"}
+
+
+@app.get("/api/admin/users")
+def admin_list_users(admin_uid: str = Depends(get_current_admin)):
+    from backend import metering   # 模块限定（B2 铁律，避 reload 异常身份失配）
+    day = metering.today_shanghai()
+    out = []
+    for u in accounts.list_all_users():
+        used = accounts.get_usage_today(u["uid"], day)["cost_micro_yuan"]
+        cap = accounts.get_effective_daily_cap_micro(u["uid"])
+        out.append({
+            "uid": u["uid"], "username": u["username"],
+            "is_admin": bool(u["is_admin"]), "disabled": bool(u["disabled"]),
+            "created_at": u["created_at"],
+            "today_cost_yuan": round(used / 1_000_000, 4),
+            "daily_cap_yuan": round(cap / 1_000_000, 4),
+        })
+    return out
+
+
+@app.get("/api/admin/invite-code")
+def admin_get_invite_code(admin_uid: str = Depends(get_current_admin)):
+    return {"invite_code": accounts.get_config("invite_code") or ""}
+
+
+@app.get("/api/admin/allowed-hosts")
+def admin_get_allowed_hosts(admin_uid: str = Depends(get_current_admin)):
+    return {
+        "builtin_hosts": sorted(url_guard.builtin_allowed_hosts()),   # 内置默认（只读）
+        "env_hosts": sorted(url_guard.env_allowed_hosts()),           # env 注入（只读）
+        "extra_hosts": accounts.get_custom_api_extra_hosts(),         # app_config（admin 可编辑）
+    }
 
 
 @app.get("/api/settings")
