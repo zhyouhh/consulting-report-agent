@@ -1745,11 +1745,17 @@ class B2ReviewBillingTests(IndependentReviewAgentTests):
         with mock.patch("backend.independent_review.OpenAI") as mo:
             mo.return_value.chat.completions.create.side_effect = responses
             list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
-            kwargs = mo.return_value.chat.completions.create.call_args.kwargs
+            create = mo.return_value.chat.completions.create
+            kwargs = create.call_args.kwargs
         self.assertEqual(kwargs.get("stream_options"), {"include_usage": True})
+        # 精确计账（✦ Codex NIT 1）：5 条 response 各被完整消费 → metered stream 在各自 finally
+        # 按末包 usage 恰好结算一次（无重复、无遗漏）。每条末包 miss=10 / out=5，5 次累加：
+        #   cache_miss_tokens == 5×10 == 50；output_tokens == 5×5 == 25。
+        # 底层 raw create 调用 5 次（5 个流式响应全部走到 settle 路径，已 E2E 实测确认）。
+        self.assertEqual(create.call_count, 5)
         row = accounts.get_usage_today("u1", m.today_shanghai())
-        self.assertGreater(row["cache_miss_tokens"], 0)
-        self.assertLess(row["cache_miss_tokens"], 256000)   # 真 usage，非 fail-closed 256k 封顶
+        self.assertEqual(row["cache_miss_tokens"], 50)   # 真 usage 精确累加，非 fail-closed 256k 封顶
+        self.assertEqual(row["output_tokens"], 25)
 
 
 # ✦ Codex NIT：置空继承的 test_（pattern: test_chat_runtime.py:14364）

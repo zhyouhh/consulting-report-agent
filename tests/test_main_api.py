@@ -767,6 +767,42 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
         self.assertIn(str(captured["mtime"]), response.text)
         self.assertIn("data: [DONE]", response.text)
 
+    @mock.patch("backend.main.IndependentReviewAgent")
+    def test_review_post_constructs_agent_with_uid(self, mock_agent_cls):
+        # W2-B/B2 endpoint-uid regression guard (✦ Codex NIT 2): the review endpoint must
+        # construct IndependentReviewAgent with uid=scope.uid so the agent meters managed calls
+        # under the right tenant's daily quota. In local (auth-off) mode scope.uid == "local".
+        # The worker is created in the endpoint function body and driven to completion via the
+        # streaming response, so mock_agent_cls.call_args is populated once the POST returns.
+        from backend.independent_review import CANONICAL_REVIEW_PATH
+
+        project_id = "demo-post-uid"
+        run_id = "frontend-run-uid"
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+
+        def fake_run(project_id_arg, run_id=None, store=None, store_key=None, **kwargs):
+            del kwargs
+            canonical = os.path.join(tmpdir.name, "independent-review.md")
+            fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("final report")
+            mtime = store.atomic_commit_report(store_key, run_id, temp_path, canonical, {"messages": []})
+            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": mtime}
+
+        mock_agent_cls.return_value.run.side_effect = fake_run
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(project_id), run_id)
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": run_id},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        # construction kwargs carry uid; local tenant resolves to "local".
+        self.assertEqual(mock_agent_cls.call_args.kwargs.get("uid"), "local")
+
     def test_review_post_first_run_409_when_lock_held(self):
         from backend.independent_review import get_independent_review_lock
 
