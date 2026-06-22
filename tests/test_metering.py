@@ -429,11 +429,12 @@ class SourceGuardTests(unittest.TestCase):
 
     def test_chat_handler_client_assigned_through_wrapper(self):
         # ✦ NIT：不只查字符串（死 import 也会过），断言 self.client 由 wrap_client_for_billing 赋值。
+        # 允许可选 `metering.` 前缀（模块限定访问，reload 安全——见 chat.py __init__ 注释）。
         src = self._src("backend/chat.py")
-        self.assertRegex(src, r"self\.client\s*=\s*wrap_client_for_billing\(",
+        self.assertRegex(src, r"self\.client\s*=\s*(?:metering\.)?wrap_client_for_billing\(",
                          "ChatHandler.self.client 必须由 wrap_client_for_billing 赋值")
 
     def test_independent_review_client_returned_through_wrapper(self):
         src = self._src("backend/independent_review.py")
-        self.assertRegex(src, r"return\s+wrap_client_for_billing\(",
+        self.assertRegex(src, r"return\s+(?:metering\.)?wrap_client_for_billing\(",
                          "IndependentReviewAgent._build_client 必须 return wrap_client_for_billing(...)")

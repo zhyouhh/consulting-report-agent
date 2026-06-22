@@ -13,7 +13,7 @@ import httpx
 from openai import OpenAI
 
 from .config import Settings
-from .metering import QuotaExceededError, ModelPausedError
+from . import metering  # 模块限定访问 metering.QuotaExceededError 等（reload 安全，见 _quota_notice 注释）
 from .report_quality import scan_placeholders, build_placeholder_grounding
 from .skill import SkillEngine
 from .stream_parsing import ThinkingStreamParser
@@ -236,8 +236,9 @@ def extract_latest_review_candidate_from_messages(messages) -> str | None:
 
 
 def _quota_notice(err) -> str:
-    from backend.metering import QuotaExceededError
-    if isinstance(err, QuotaExceededError):
+    # 用 metering.QuotaExceededError 模块限定访问（非拷贝名）：importlib.reload(metering) 会重建异常类，
+    # 拷贝名会与 wrapper 实抛的活类 isinstance 失配、误返回暂停消息（仅测试态 reload 触发）。
+    if isinstance(err, metering.QuotaExceededError):
         return (f"今日额度已用尽（已用 ¥{err.used_micro/1_000_000:.2f} / "
                 f"上限 ¥{err.cap_micro/1_000_000:.2f}），明日 0 点（北京时间）恢复。")
     return "审查模型暂时不可用（多次未取得用量计数已保护性暂停），请稍后再试。"
@@ -265,8 +266,7 @@ class IndependentReviewAgent:
             base_url=self.settings.api_base,
             http_client=http_client,
         )
-        from backend.metering import wrap_client_for_billing
-        return wrap_client_for_billing(raw, uid=self.uid, settings=self.settings)
+        return metering.wrap_client_for_billing(raw, uid=self.uid, settings=self.settings)
 
     def _resolve_model(self) -> str:
         if self.settings.mode == "managed":
@@ -494,7 +494,7 @@ class IndependentReviewAgent:
                 return
             try:
                 response = client.chat.completions.create(**request_kwargs)
-            except (QuotaExceededError, ModelPausedError) as qe:
+            except (metering.QuotaExceededError, metering.ModelPausedError) as qe:
                 if store is not None and run_id is not None:
                     store.set_errored(store_key, run_id, snapshot_now(iteration))
                 yield {"type": "error", "detail": _quota_notice(qe)}

@@ -14543,6 +14543,25 @@ class B2BillingWiringTests(ChatRuntimeTests):
         self.assertIn("额度", result["content"])
         raw_create.assert_not_called()
 
+    def test_quota_friendly_event_survives_metering_module_reload(self):
+        # 回归守卫（Codex F 轮全量回归暴露）：importlib.reload(metering) 会在同一模块对象内重建
+        # 异常类；chat.py 必须用模块限定访问 metering.QuotaExceededError（而非 `from .metering import` 拷贝名），
+        # 否则 wrapper 实抛的活类与 except 捕获的旧类 isinstance 失配 → 配额异常漏成 "API调用失败"。
+        # 本测试在 reload 后建 handler 走 over-cap 路径，断言友好 "额度" 事件仍被 except 接住。
+        import importlib
+        import backend.metering as m
+        importlib.reload(m)
+        from backend import accounts
+        handler = self._make_handler_with_project()
+        day = m.today_shanghai()
+        accounts.set_config("global_daily_cap_micro_yuan", "100")
+        accounts.add_usage(handler.uid, day, 100, 0, 0, 0)
+        with mock.patch.object(handler.client._raw.chat.completions, "create") as raw_create:
+            events = list(handler.chat_stream(self.project_id, "你好", [], []))
+        self.assertTrue(any(e.get("type") == "error" and "额度" in str(e.get("data", ""))
+                            for e in events), "reload 后配额异常仍须转友好事件，不得漏成 provider error")
+        raw_create.assert_not_called()
+
 
 # Codex NIT: 子类化 ChatRuntimeTests 会继承其全部 test_；按 repo 既有 pattern
 # 置空继承的 test_，避免 targeted class run 重跑整个父套件。

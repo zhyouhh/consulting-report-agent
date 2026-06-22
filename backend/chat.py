@@ -33,7 +33,7 @@ from .independent_review import (
     _REVIEW_SESSION_STORE,
     get_independent_review_lock,
 )
-from .metering import ModelPausedError, QuotaExceededError
+from . import metering  # 用模块限定访问 metering.QuotaExceededError 等（见 __init__ 注释：reload 安全）
 from .models import SystemNotice
 from .search_pool import SearchRouter
 from .search_providers import (
@@ -413,10 +413,12 @@ class ChatHandler:
             base_url=settings.api_base,
             http_client=http_client,
         )
-        from backend.metering import wrap_client_for_billing
         # managed → MeteredManagedClient（reserve/settle/fail-closed）；custom → 原样。
         # 5 个调用点全用 self.client.chat.completions.create，包裹后零改动自动计费。
-        self.client = wrap_client_for_billing(raw_client, uid=self.uid, settings=settings)
+        # 全程用 metering.X 模块限定访问（而非 `from .metering import X` 拷贝名）：importlib.reload(metering)
+        # 会在同一模块对象内重建异常类，拷贝名会变陈旧、与 wrapper 实抛的活类 isinstance 失配；模块属性
+        # 访问总取当前类，reload 安全（仅测试态 reload 触发，生产无 reload）。
+        self.client = metering.wrap_client_for_billing(raw_client, uid=self.uid, settings=settings)
 
         from backend.material_conversion import MaterialConverter
 
@@ -515,7 +517,7 @@ class ChatHandler:
         return f"API调用失败: {raw_message}"
 
     def _format_quota_error(self, err) -> str:
-        if isinstance(err, QuotaExceededError):
+        if isinstance(err, metering.QuotaExceededError):
             used = err.used_micro / 1_000_000
             cap = err.cap_micro / 1_000_000
             return (f"今日额度已用尽（已用 ¥{used:.2f} / 上限 ¥{cap:.2f}），"
@@ -2824,7 +2826,7 @@ class ChatHandler:
                 try:
                     response = self.client.chat.completions.create(**request_kwargs)
                     break
-                except (QuotaExceededError, ModelPausedError) as qe:
+                except (metering.QuotaExceededError, metering.ModelPausedError) as qe:
                     # 配额/暂停异常不进重试、不当 provider error：直接给用户友好提示并收尾。
                     yield {"type": "error", "data": self._format_quota_error(qe)}
                     return
@@ -3293,7 +3295,7 @@ class ChatHandler:
                 try:
                     response = self.client.chat.completions.create(**request_kwargs)
                     break
-                except (QuotaExceededError, ModelPausedError) as qe:
+                except (metering.QuotaExceededError, metering.ModelPausedError) as qe:
                     # Codex BLOCKER：ChatResponse.system_notices 是 List[SystemNotice] 对象、非 List[str]；
                     # 友好提示放 content，notices 置 None（避 pydantic 校验失败）。
                     return {"content": self._format_quota_error(qe), "token_usage": None,
