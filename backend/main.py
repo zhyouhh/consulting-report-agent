@@ -662,7 +662,7 @@ async def independent_review_stream_post(
 
         def run_worker():
             try:
-                agent = IndependentReviewAgent(scope.engine, load_settings(scope.uid))
+                agent = IndependentReviewAgent(scope.engine, load_settings(scope.uid), uid=scope.uid)
                 for event in agent.run(
                     review_project_id,
                     run_id=run_id,

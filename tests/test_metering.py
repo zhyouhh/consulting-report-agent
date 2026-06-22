@@ -433,8 +433,6 @@ class SourceGuardTests(unittest.TestCase):
         self.assertRegex(src, r"self\.client\s*=\s*wrap_client_for_billing\(",
                          "ChatHandler.self.client 必须由 wrap_client_for_billing 赋值")
 
-    # TODO(B2 簇B/C): 接线后移除 expectedFailure
-    @unittest.expectedFailure
     def test_independent_review_client_returned_through_wrapper(self):
         src = self._src("backend/independent_review.py")
         self.assertRegex(src, r"return\s+wrap_client_for_billing\(",
