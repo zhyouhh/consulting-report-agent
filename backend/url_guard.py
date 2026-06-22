@@ -84,6 +84,13 @@ def validate_custom_api_base(url: str) -> str:
     parsed = urlparse(cleaned)
     if parsed.scheme != "https":
         raise SsrfBlockedError("自定义 API 地址必须是 https。")
+    if parsed.username or parsed.password:
+        # userinfo 会让 httpx 注入 Authorization: Basic，覆盖用户的 Bearer key → 静默坏掉 custom 调用。
+        raise SsrfBlockedError("自定义 API 地址不能包含用户名/密码")
+    try:
+        _ = parsed.port   # 坏端口（如 :bad）此处抛 ValueError；合法端口/无端口都放行。
+    except ValueError as exc:
+        raise SsrfBlockedError("自定义 API 地址端口非法") from exc
     host = (parsed.hostname or "").lower()
     if not host:
         raise SsrfBlockedError("自定义 API 地址缺少主机名。")

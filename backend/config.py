@@ -382,6 +382,7 @@ def save_settings(settings: Settings, uid: str | None = None):
     data = normalize_settings_payload(settings.model_dump())
     # 注意：mode 是用户选择、必须持久化（B3 Task 4 custom 激活），故 *不* 剔除。
     # 以下都是 normalize 从 mode + custom_*/managed_* 派生的别名/运行时值，持久化它们会污染配置。
+    # managed_base_url 服务端只读（spec §8 不进 per-user settings）：load 时 normalize 强制回常量。
     for key in [
         "api_key",
         "api_base",
@@ -389,6 +390,7 @@ def save_settings(settings: Settings, uid: str | None = None):
         "projects_dir",
         "skill_dir",
         "managed_client_token",
+        "managed_base_url",
     ]:
         data.pop(key, None)
     # 原子写：同目录 temp + os.replace（与 R3 用户写一致），避免 GET 无锁 load_settings 读到半截。

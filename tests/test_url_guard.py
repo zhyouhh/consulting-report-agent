@@ -53,6 +53,32 @@ class AllowlistTests(unittest.TestCase):
                 "https://api.openai.com/v1",
             )
 
+    def test_validate_rejects_userinfo_in_url(self):
+        # userinfo (u:p@) 会让 httpx 发 Authorization: Basic 覆盖用户 Bearer key → 静默坏掉调用。
+        # mock DNS 为公网放行：确保 raise 是因 userinfo 检测、而非 DNS（host 在白名单内）。
+        with mock.patch("backend.url_guard.socket.getaddrinfo",
+                        return_value=[(2, 1, 6, "", ("1.2.3.4", 0))]):
+            with self.assertRaises(url_guard.SsrfBlockedError) as ctx:
+                url_guard.validate_custom_api_base("https://u:p@api.openai.com/v1")
+        self.assertIn("用户名", str(ctx.exception))
+
+    def test_validate_rejects_bad_port(self):
+        # 坏端口：urlparse 不报错但 .port 访问抛 ValueError；保存期放行→运行期炸，体验差。
+        with mock.patch("backend.url_guard.socket.getaddrinfo",
+                        return_value=[(2, 1, 6, "", ("1.2.3.4", 0))]):
+            with self.assertRaises(url_guard.SsrfBlockedError) as ctx:
+                url_guard.validate_custom_api_base("https://api.openai.com:bad/v1")
+        self.assertIn("端口", str(ctx.exception))
+
+    def test_validate_allowlisted_host_explicit_port_passes(self):
+        # 合法显式端口不被误伤（白名单是 host-only）。
+        with mock.patch("backend.url_guard.socket.getaddrinfo",
+                        return_value=[(2, 1, 6, "", ("1.2.3.4", 0))]):
+            self.assertEqual(
+                url_guard.validate_custom_api_base("https://api.openai.com:8443/v1"),
+                "https://api.openai.com:8443/v1",
+            )
+
 
 class GuardedTransportTests(unittest.TestCase):
     """行为级：真起 build_guarded_http_client() 的 client 发请求，断言 transport 在

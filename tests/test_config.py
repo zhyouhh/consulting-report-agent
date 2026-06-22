@@ -216,6 +216,8 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertNotIn("projects_dir", saved)
         self.assertNotIn("skill_dir", saved)
         self.assertNotIn("managed_client_token", saved)
+        # spec §8: managed_base_url 不进 per-user settings（load 时 normalize 强制回常量，故只读）。
+        self.assertNotIn("managed_base_url", saved)
         # B3 Task 4: mode 现在持久化（用户的 managed/custom 选择必须跨 reload 存活）。
         self.assertIn('"mode"', saved)
         # 这些仍是 normalize 从 mode+custom_*/managed_* 派生的别名/运行时值，继续剥离。
