@@ -14601,6 +14601,23 @@ class B2BillingSettleTests(ChatRuntimeTests):
         row = accounts.get_usage_today(handler.uid, m.today_shanghai())
         self.assertEqual(row["cache_miss_tokens"], 200)   # 视觉真的 settle 了
 
+    def test_compaction_survives_settle_failure(self):
+        # Codex 全分支综合审 BLOCKER：压缩调用的 settle 失败不得让 _summarize_messages 静默吞成 None；
+        # settle 失败现记日志、不抛 → 摘要照常返回（计费尽力而为、不破坏用户操作）。
+        from types import SimpleNamespace
+        from backend import accounts
+        handler = self._make_handler_with_project()
+        usage = SimpleNamespace(prompt_tokens=100, prompt_cache_hit_tokens=0,
+                                prompt_cache_miss_tokens=100, completion_tokens=50)
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="摘要内容"))], usage=usage)
+
+        def _boom(*a, **k):
+            raise RuntimeError("sqlite write failed")
+        with mock.patch.object(handler.client._raw.chat.completions, "create", return_value=resp), \
+                mock.patch.object(accounts, "add_usage", side_effect=_boom):
+            out = handler._summarize_messages([{"role": "user", "content": "x"}])
+        self.assertIn("摘要内容", out or "")   # settle 失败未把摘要吞成 None
+
 
 # Codex NIT: 置空继承的 test_（同上 pattern）
 for _inh in dir(ChatRuntimeTests):

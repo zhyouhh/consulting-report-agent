@@ -177,22 +177,29 @@ class MeteredManagedClient:
 
     # --- 累计 ---
     def _settle(self, model: str, usage) -> None:
-        day = today_shanghai()
-        bu = extract_billing_usage(usage)
-        if bu is None:
-            # fail-closed（spec §6.3「该模型上下文上限 × 未命中价估上界」）：视觉等模型有显式锚（不在 context_policy
-            # EXACT tier），否则按该模型 effective 上下文上限（app 压缩保证 prompt ≤ effective），deepseek-v4-pro=256000；
-            # resolve_context_policy 对未知模型走 UNKNOWN_FALLBACK_TIER、不抛。连续缺失计数 +1。
-            ceiling = (MANAGED_FAILCLOSED_CEILING.get(model)
-                       or resolve_context_policy(model).effective_context_limit)
-            _, p_miss, _ = self._pricing.get(model, FALLBACK_MODEL_PRICING)
-            cost = round(ceiling * p_miss)
-            accounts.add_usage(self.uid, day, cost, 0, ceiling, 0)
-            _bump_miss(self.uid, model, day)
-            return
-        cost = price_micro_yuan(model, bu.hit, bu.miss, bu.completion, self._pricing)
-        accounts.add_usage(self.uid, day, cost, bu.hit, bu.miss, bu.completion)
-        _reset_miss(self.uid, model, day)
+        # 计费是尽力而为的成本护栏：结算（SQLite 写等）失败只记日志、绝不向调用方抛——否则会破坏用户的
+        # 聊天/摘要/审查操作（尤其 _summarize_messages 的宽 except 会把它静默吞成「摘要失败」→ 既不计费又不可观测）。
+        # DB 写失败时无论如何都记不上这一次账；至少让它可观测（频繁出现可据日志排查）。stream/非流式语义一致。
+        try:
+            day = today_shanghai()
+            bu = extract_billing_usage(usage)
+            if bu is None:
+                # fail-closed（spec §6.3「该模型上下文上限 × 未命中价估上界」）：视觉等模型有显式锚（不在 context_policy
+                # EXACT tier），否则按该模型 effective 上下文上限（app 压缩保证 prompt ≤ effective），deepseek-v4-pro=256000；
+                # resolve_context_policy 对未知模型走 UNKNOWN_FALLBACK_TIER、不抛。连续缺失计数 +1。
+                ceiling = (MANAGED_FAILCLOSED_CEILING.get(model)
+                           or resolve_context_policy(model).effective_context_limit)
+                _, p_miss, _ = self._pricing.get(model, FALLBACK_MODEL_PRICING)
+                cost = round(ceiling * p_miss)
+                accounts.add_usage(self.uid, day, cost, 0, ceiling, 0)
+                _bump_miss(self.uid, model, day)
+                return
+            cost = price_micro_yuan(model, bu.hit, bu.miss, bu.completion, self._pricing)
+            accounts.add_usage(self.uid, day, cost, bu.hit, bu.miss, bu.completion)
+            _reset_miss(self.uid, model, day)
+        except Exception:
+            logger.warning("metered settle failed (uid=%s model=%s) — call left unbilled",
+                           self.uid, model, exc_info=True)
 
     def _create(self, raw_completions, **kwargs):
         model = kwargs.get("model", "")

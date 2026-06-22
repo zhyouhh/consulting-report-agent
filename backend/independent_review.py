@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -17,6 +18,8 @@ from . import metering  # 模块限定访问 metering.QuotaExceededError 等（r
 from .report_quality import scan_placeholders, build_placeholder_grounding
 from .skill import SkillEngine
 from .stream_parsing import ThinkingStreamParser
+
+logger = logging.getLogger(__name__)
 
 
 Event = dict[str, object]
@@ -571,7 +574,7 @@ class IndependentReviewAgent:
                 try:
                     response.close()
                 except Exception:
-                    pass
+                    logger.warning("metered review stream response.close() failed", exc_info=True)
             yield from drain(parser.flush())
 
             tool_calls = collected["tool_calls"]

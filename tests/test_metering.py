@@ -209,6 +209,22 @@ class MeteredNonStreamTests(unittest.TestCase):
         row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
         self.assertEqual(row["cost_micro_yuan"], 32768 * 3)   # 32768 × p_miss(3) = 98304
 
+    def test_settle_failure_is_swallowed_and_logged(self):
+        # Codex 全分支综合审 BLOCKER：结算（add_usage 等）失败不得抛给调用方——否则 _summarize_messages
+        # 的宽 except 会把它静默吞成「摘要失败」、既不计费又不可观测。改为记日志、调用照常返回。
+        usage = _FakeUsage(prompt_tokens=10, prompt_cache_hit_tokens=0,
+                           prompt_cache_miss_tokens=10, completion_tokens=5)
+        c = self._client(usage)
+
+        def _boom(*a, **k):
+            raise RuntimeError("sqlite write failed")
+        self.accounts.add_usage = _boom   # 模拟结算 DB 写失败
+
+        with self.assertLogs("backend.metering", level="WARNING") as logs:
+            resp = c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+        self.assertIsNotNone(resp)                                    # 调用正常返回、未抛
+        self.assertTrue(any("unbilled" in line for line in logs.output))
+
 
 # tests/test_metering.py（追加，在 MeteredNonStreamTests 同夹具风格下新建类）
 class _Chunk:
