@@ -4,7 +4,7 @@
 
 **Goal:** 让「导出可审草稿」在 Linux/mac 上工作（删 PowerShell、Python 直调 pandoc、原子发布、web 用户真能下载 docx），并补齐部署前置代码（入口 env 化 + 反代真实 IP + SSE 心跳），最后收口 N6 F2 死解析器——使 W2-C 部署后同事能端到端写作+导出。
 
-**Architecture:** Part A 把 `report_tools.export_reviewable_draft` 改为纯 Python 调 pandoc（解析守卫 frozen/Windows、temp+os.replace 原子发布），导出端点改非阻塞线程池执行 + 新增 `GET .../export-draft/download` 流式回 docx；前端 `exportDraft` 改按 status 判成败 + 触发浏览器下载。入口 `run_web.py` host/port env 化 + uvicorn `proxy_headers`。SSE 防 CF 断流：审查流周期心跳、聊天流首字节心跳。Part B 删 N6 遗留的 4 个 legacy 解析器并给无-converter 测试注入假 converter。**部署 runbook（spec §5 / Part C）不在本 plan，交互式执行。**
+**Architecture:** Part A 把 `report_tools.export_reviewable_draft` 改为纯 Python 调 pandoc（解析守卫 frozen/Windows、temp+os.replace 原子发布），导出端点改非阻塞线程池执行 + 新增 `GET .../export-draft/download` 流式回 docx；前端 `exportDraft` 改按 status 判成败 + 触发浏览器下载。入口 `run_web.py` host/port env 化 + uvicorn `proxy_headers`。SSE 防 CF 断流：两条流都周期心跳（聊天流经线程多路复用包装）。Part B 删 N6 遗留的 4 个 legacy 解析器并给无-converter 测试注入假 converter。**部署 runbook（spec §5 / Part C）不在本 plan，交互式执行。**
 
 **Tech Stack:** Python 3.12 / FastAPI / Starlette `StreamingResponse` / pandoc CLI / pytest(unittest) / React + Node 原生 `node:test`。
 
@@ -27,7 +27,7 @@
 | `run_web.py` | host/port env 化 + uvicorn proxy_headers | 修改 |
 | `backend/skill.py` | 删 4 个 legacy 解析器 + `_converter_read_document` 无 converter 改报错；删 `get_script_path`（导出唯一消费者） | 修改 |
 | `skill/scripts/export_draft.ps1` / `export_draft.sh` | 退役 | 删除 |
-| `skill/modules/final-delivery.md` / `quality-review.md` | 去脚本引用、改应用导出操作描述 | 修改 |
+| `skill/modules/final-delivery.md` / `quality-review.md` / `BUILD.md` | 去脚本引用、改应用导出操作描述（保 `pandoc.exe`/`可审草稿` 锁句） | 修改 |
 | `frontend/src/components/WorkspacePanel.jsx` | `exportDraft` 按 status 判成败 + 触发下载 | 修改 |
 | `tests/test_report_tools.py` | 改 mock pandoc subprocess + 解析守卫 + 原子发布 + 不阻塞 loop | 重写 |
 | `tests/test_main_api.py` | 导出端点签名 + 下载端点（属主/非属主/未生成/穿越/FileResponse 非 catch-all） | 修改 |
@@ -59,32 +59,43 @@ from backend import report_tools
 
 class ResolvePandocTests(unittest.TestCase):
     @mock.patch("backend.report_tools.shutil.which", return_value="/usr/bin/pandoc")
-    @mock.patch("backend.report_tools.sys")
-    def test_non_windows_non_frozen_uses_system_pandoc_even_if_root_exe_exists(self, m_sys, m_which):
-        # 守卫：Linux/mac 非打包态，即便仓库根有 pandoc.exe 也绝不试它。
-        m_sys.platform = "linux"
-        del m_sys.frozen  # getattr(sys, "frozen", False) → False
-        self.assertEqual(report_tools._resolve_pandoc(), "/usr/bin/pandoc")
-        m_which.assert_called_once_with("pandoc")
-
-    @mock.patch("backend.report_tools.shutil.which", return_value=None)
     @mock.patch("backend.report_tools.get_base_path")
     @mock.patch("backend.report_tools.sys")
-    def test_windows_prefers_bundled_exe(self, m_sys, m_base, m_which, tmp=None):
+    def test_non_windows_skips_bundled_exe_even_when_root_exe_exists(self, m_sys, m_base, m_which):
+        # 守卫核心锁：仓库根真放一个 pandoc.exe，Linux 非 frozen 必须跳过它走系统 pandoc。
+        # （破掉守卫的实现——非 Windows 也试 .exe——会返回 .exe 路径，本测试即失败。）
         import tempfile
+        m_sys.platform = "linux"
+        del m_sys.frozen  # getattr(sys, "frozen", False) → False
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "pandoc.exe").write_text("x")
-            m_sys.platform = "win32"
-            del m_sys.frozen
+            m_base.return_value = Path(d)
+            self.assertEqual(report_tools._resolve_pandoc(), "/usr/bin/pandoc")
+            m_which.assert_called_once_with("pandoc")
+
+    @mock.patch("backend.report_tools.shutil.which", return_value="/usr/bin/pandoc")
+    @mock.patch("backend.report_tools.get_base_path")
+    @mock.patch("backend.report_tools.sys")
+    def test_windows_prefers_bundled_exe_over_system(self, m_sys, m_base, m_which):
+        # 即便系统 pandoc 存在（which 返回路径），Windows/打包态也优先包内 pandoc.exe。
+        import tempfile
+        m_sys.platform = "win32"
+        del m_sys.frozen
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "pandoc.exe").write_text("x")
             m_base.return_value = Path(d)
             self.assertEqual(report_tools._resolve_pandoc(), str(Path(d) / "pandoc.exe"))
 
     @mock.patch("backend.report_tools.shutil.which", return_value=None)
+    @mock.patch("backend.report_tools.get_base_path")
     @mock.patch("backend.report_tools.sys")
-    def test_no_pandoc_returns_none(self, m_sys, m_which):
+    def test_no_pandoc_returns_none(self, m_sys, m_base, m_which):
+        import tempfile
         m_sys.platform = "linux"
         del m_sys.frozen
-        self.assertIsNone(report_tools._resolve_pandoc())
+        with tempfile.TemporaryDirectory() as d:
+            m_base.return_value = Path(d)  # 根目录无 pandoc.exe
+            self.assertIsNone(report_tools._resolve_pandoc())
 
 
 class ExportReviewableDraftTests(unittest.TestCase):
@@ -264,12 +275,21 @@ git commit -m "feat(w2c): pandoc export in pure Python — resolver guard + atom
             "/tmp/report_draft_v1.md",
             "/tmp/output",
         )
+
+    def test_export_draft_route_not_blocking_async(self):
+        # spec §3.2 守卫：导出端点必须是同步 def（FastAPI 跑线程池）或经 run_in_threadpool，
+        # 不得在 async 路由里直接同步调 pandoc 阻塞事件循环。
+        import inspect
+        self.assertFalse(
+            inspect.iscoroutinefunction(main_module.export_draft),
+            "export_draft 必须是同步 def 路由（线程池执行），否则阻塞事件循环掐住 SSE 心跳",
+        )
 ```
 
 - [ ] **Step 2: 跑测试看它失败**
 
-Run: `.venv/bin/python -m pytest tests/test_main_api.py -k export_draft_endpoint -v`
-Expected: FAIL（旧端点仍调 `get_script_path` + 3 参）
+Run: `.venv/bin/python -m pytest tests/test_main_api.py -k "export_draft_endpoint or export_draft_route" -v`
+Expected: FAIL（旧端点仍 `async def` + 调 `get_script_path` + 3 参）
 
 - [ ] **Step 3: 改导出端点**（`backend/main.py`，把 `async def export_draft` 改为同步 `def`，FastAPI 自动丢线程池跑——避免阻塞事件循环 + 掐住异步流心跳；不取 request lock）
 
@@ -306,38 +326,56 @@ git commit -m "feat(w2c): export endpoint drops script_path, runs off event loop
 - Modify: `backend/main.py`（紧邻 `POST .../export-draft` 注册；新增 import `from fastapi.responses import FileResponse`）
 - Test: `tests/test_main_api.py`（新增 `ExportDownloadTests` 或并入既有导出测试类）
 
-- [ ] **Step 1: 写失败测试**（在 `tests/test_main_api.py` 新增，沿用既有 `require_project`/engine mock 夹具风格——参照同文件其它端点测试如何 mock `self.engine` 与 `get_project_record`）
+- [ ] **Step 1: 写失败测试**——属主 200(+header) / 未生成 404 / symlink 越界 404 放进 `WorkspaceApiTests`（`_LocalMockEngineMixin`，`self.engine` 是 MagicMock(spec=SkillEngine)）；跨租户 404 放进 `CrossTenantApiTests`
 
+`WorkspaceApiTests` 内新增：
 ```python
     def test_export_download_serves_deterministic_docx_for_owner(self):
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as d:
-            out = Path(d) / "output"
-            out.mkdir()
+            out = Path(d) / "output"; out.mkdir()
             (out / "report_draft_v1.docx").write_bytes(b"PKdocxbytes")
             self.engine.ensure_output_dir.return_value = str(out)
             resp = self.client.get("/api/projects/demo/export-draft/download")
             self.assertEqual(resp.status_code, 200)
             self.assertIn("attachment", resp.headers["content-disposition"])
-            self.assertEqual(resp.content, b"PKdocxbytes")
+            self.assertIn("report_draft_v1.docx", resp.headers["content-disposition"])
+            self.assertEqual(resp.content, b"PKdocxbytes")  # FileResponse 真回文件，非 JSON
 
     def test_export_download_404_when_not_generated(self):
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as d:
-            out = Path(d) / "output"
-            out.mkdir()
+            out = Path(d) / "output"; out.mkdir()
             self.engine.ensure_output_dir.return_value = str(out)
-            resp = self.client.get("/api/projects/demo/export-draft/download")
-            self.assertEqual(resp.status_code, 404)
+            self.assertEqual(self.client.get("/api/projects/demo/export-draft/download").status_code, 404)
+
+    def test_export_download_rejects_symlink_escape(self):
+        import os, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "output"; out.mkdir()
+            secret = Path(d) / "secret.docx"; secret.write_bytes(b"SECRET")
+            try:
+                os.symlink(secret, out / "report_draft_v1.docx")  # 指向 output 目录外
+            except OSError:
+                self.skipTest("无 symlink 权限（Windows 非管理员）")
+            self.engine.ensure_output_dir.return_value = str(out)
+            # resolve() 后越界 → output_dir not in target.parents → 404（不外泄目录外文件）
+            self.assertEqual(self.client.get("/api/projects/demo/export-draft/download").status_code, 404)
 ```
 
-> 跨租户/非属主 404 由 `require_project`（canonical id + per-uid engine registry）天然保证——参照同文件 `CrossTenantApiTests` 模式补一条非属主 GET → 404。
+`CrossTenantApiTests` 内新增（B 取 A 的下载端点必 404——`require_project` 天然隔离，无需真 pandoc）：
+```python
+    def test_b_cannot_download_a_export(self):
+        pid = self._create(self.A, "A机密")
+        self.assertEqual(self.B.get(f"/api/projects/{pid}/export-draft/download").status_code, 404)
+```
 
 - [ ] **Step 2: 跑测试看它失败**
 
-Run: `.venv/bin/python -m pytest tests/test_main_api.py -k export_download -v`
+Run: `.venv/bin/python -m pytest tests/test_main_api.py -k "export_download or cannot_download_a_export" -v`
 Expected: FAIL（路由不存在 → 404 但 content-disposition 缺失 / 第一个用例 200 拿不到）
 
 - [ ] **Step 3: 加下载端点**（`backend/main.py`，紧邻 `POST .../export-draft`；文件名确定 `report_draft_v1.docx`，路径穿越守卫）
@@ -365,7 +403,7 @@ def export_draft_download(scope: ProjectScope = Depends(require_project)):
 
 - [ ] **Step 4: 跑测试看它通过**
 
-Run: `.venv/bin/python -m pytest tests/test_main_api.py -k export_download -v`
+Run: `.venv/bin/python -m pytest tests/test_main_api.py -k "export_download or cannot_download_a_export" -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -381,9 +419,9 @@ git commit -m "feat(w2c): GET export-draft/download streams docx to browser (det
 
 **Files:**
 - Modify: `frontend/src/components/WorkspacePanel.jsx`（`exportDraft` `~226-235`）
-- Test: `frontend/tests/workspacePanel.source.test.mjs`（source-guard；无 jsdom）
+- Test: **新建** `frontend/tests/workspacePanelExport.source.test.mjs`（独立文件避免与既有 `workspacePanel.source.test.mjs` 的 import 重复绑定——Codex plan-R2 BLOCKER；无 jsdom）
 
-- [ ] **Step 1: 写/补 source-guard 测试**（在既有 `workspacePanel.source.test.mjs` 加断言）
+- [ ] **Step 1: 写 source-guard 测试**（新建 `frontend/tests/workspacePanelExport.source.test.mjs`，自包含 imports）
 
 ```javascript
 import { test } from 'node:test'
@@ -392,20 +430,23 @@ import { readFileSync } from 'node:fs'
 
 const src = readFileSync(new URL('../src/components/WorkspacePanel.jsx', import.meta.url), 'utf8')
 
-test('exportDraft 按 status 判成败，不把任意 200 当成功', () => {
-  const fn = src.slice(src.indexOf('const exportDraft'), src.indexOf('const exportDraft') + 700)
-  assert.match(fn, /status\s*!==\s*['"]ok['"]|res\.data\.status/, 'exportDraft 必须检查 res.data.status')
+const fn = src.slice(src.indexOf('const exportDraft'), src.indexOf('const exportDraft') + 900)
+
+test('exportDraft 显式按 status !== "ok" 判失败并 showError', () => {
+  assert.match(fn, /status\s*!==\s*['"]ok['"]/, '必须有 status !== "ok" 失败分支')
+  assert.match(fn, /status\s*!==\s*['"]ok['"][\s\S]{0,120}showError/, '失败分支必须 showError 后 return')
 })
 
-test('exportDraft 成功后触发浏览器下载 export-draft/download', () => {
-  const fn = src.slice(src.indexOf('const exportDraft'), src.indexOf('const exportDraft') + 700)
-  assert.match(fn, /export-draft\/download/, 'exportDraft 必须触发下载端点')
+test('exportDraft 成功后创建 anchor 触发下载 export-draft/download', () => {
+  assert.match(fn, /createElement\(\s*['"]a['"]\s*\)/, '必须创建 <a> 触发下载')
+  assert.match(fn, /export-draft\/download/, '下载 href 必须指向下载端点')
+  assert.match(fn, /\.click\(\)/, '必须 .click() 触发下载')
 })
 ```
 
 - [ ] **Step 2: 跑测试看它失败**
 
-Run: `cd frontend && node --test tests/workspacePanel.source.test.mjs`
+Run: `cd frontend && node --test tests/workspacePanelExport.source.test.mjs`
 Expected: FAIL
 
 - [ ] **Step 3: 改 `exportDraft`**（`frontend/src/components/WorkspacePanel.jsx`）
@@ -436,13 +477,13 @@ Expected: FAIL
 
 - [ ] **Step 4: 跑测试 + build**
 
-Run: `cd frontend && node --test tests/workspacePanel.source.test.mjs && npm run build`
+Run: `cd frontend && node --test tests/workspacePanelExport.source.test.mjs && npm run build`
 Expected: PASS + build 绿
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/components/WorkspacePanel.jsx frontend/tests/workspacePanel.source.test.mjs
+git add frontend/src/components/WorkspacePanel.jsx frontend/tests/workspacePanelExport.source.test.mjs
 git commit -m "feat(w2c): exportDraft checks status + triggers browser download"
 ```
 
@@ -464,16 +505,20 @@ git commit -m "feat(w2c): exportDraft checks status + triggers browser download"
 # 整体删除：test_windows_powershell_scripts_use_utf8_bom、test_windows_powershell_scripts_force_utf8_stdout、
 #   test_export_draft_ps1_prefers_bundled_pandoc_before_system_path（~135）。
 # 新增 source-guard：
-    def test_skill_docs_no_longer_reference_export_scripts(self):
+    def test_active_docs_no_longer_reference_export_scripts(self):
         root = Path(__file__).resolve().parents[1]
-        skill_dir = root / "skill"
+        # 扫 skill 文档 + 根 BUILD/WINDOWS_BUILD（Codex plan-R1 NIT：BUILD.md 也引用 export_draft.ps1）
+        targets = list((root / "skill").rglob("*.md")) + [root / "BUILD.md", root / "WINDOWS_BUILD.md"]
         offenders = []
-        for p in skill_dir.rglob("*.md"):
-            if "scripts/export_draft" in p.read_text(encoding="utf-8"):
+        for p in targets:
+            if not p.exists():
+                continue
+            text = p.read_text(encoding="utf-8")
+            if "export_draft.ps1" in text or "export_draft.sh" in text or "scripts/export_draft" in text:
                 offenders.append(str(p.relative_to(root)))
-        self.assertEqual(offenders, [], f"skill 文档仍引用退役导出脚本: {offenders}")
-        self.assertFalse((skill_dir / "scripts" / "export_draft.ps1").exists())
-        self.assertFalse((skill_dir / "scripts" / "export_draft.sh").exists())
+        self.assertEqual(offenders, [], f"文档仍引用退役导出脚本: {offenders}")
+        self.assertFalse((root / "skill" / "scripts" / "export_draft.ps1").exists())
+        self.assertFalse((root / "skill" / "scripts" / "export_draft.sh").exists())
 ```
 
 - [ ] **Step 2: 跑测试看它失败**
@@ -495,6 +540,8 @@ git rm skill/scripts/export_draft.ps1 skill/scripts/export_draft.sh
 
 `skill/modules/quality-review.md:136`「如需导出 `docx` 预审版本，可结合 `modules/final-delivery.md` 使用导出脚本。」→「如需导出 `docx` 预审版本，在工作区点击『导出可审草稿』按钮（见 `modules/final-delivery.md`）。」
 
+`BUILD.md:129`「- `export_draft.ps1` 优先使用发布包内的 `_internal\pandoc.exe`。」→「- 可审草稿导出优先使用发布包内的 `_internal\pandoc.exe`（由后端 Python 直接调用，不再经 PowerShell 脚本）。」（**保留 `pandoc.exe`/`可审草稿` 字样**——`tests/test_packaging_docs.py` 锁这两句；只去脚本引用。）
+
 `backend/skill.py`：删除 `get_script_path`（`~1802-1806`，导出唯一消费者已在 Task 2 去掉）。
 
 - [ ] **Step 4: 跑测试看它通过**
@@ -505,8 +552,8 @@ Expected: PASS + grep 无残留（除非有未知消费者，有则一并处理�
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A skill/ backend/skill.py tests/test_skill_assets.py
-git commit -m "feat(w2c): retire export_draft scripts + de-reference skill docs + drop get_script_path"
+git add -A skill/ backend/skill.py tests/test_skill_assets.py BUILD.md
+git commit -m "feat(w2c): retire export_draft scripts + de-reference skill/BUILD docs + drop get_script_path"
 ```
 
 ---
@@ -597,56 +644,199 @@ git commit -m "feat(w2c): run_web host/port from env + uvicorn proxy_headers for
 
 ---
 
-### Task 7: SSE 防 CF 断流心跳
+### Task 7: SSE 防 CF 断流心跳（两条流都周期心跳）
 
 **Files:**
-- Modify: `backend/main.py`（审查流 generate `~1049-1056`、聊天流 generate `~1213-1235`）
-- Test: `frontend/tests/sseEvents.test.mjs`（容忍）+ `tests/test_main_api.py`（审查流心跳）
+- Modify: `backend/main.py`（审查流 generate `~1049-1066`、聊天流 `chat_stream` `~1208-1245`）
+- Test: `frontend/tests/sseEvents.test.mjs`（容忍）+ `tests/test_main_api.py`（审查流 + 聊天流心跳）
 
-设计（spec §3.7）：审查流有长空闲 queue-wait → 周期心跳；聊天流 sync generator 风险高 → **只在 generate() 开头立即发一行心跳**（正中「无首包」P1 失败模式：首字节即达 CF；中段空闲由 nginx `proxy_read_timeout 600s` + 已有 `X-Accel-Buffering:no` 兜，**不重构 sync generator、不碰 chat.py、不碰锁**）。前端两消费者已天然忽略非 `data:` 行（`extractSseDataPayload` 返 null / `startsWith('data: ')`），只加容忍锁。
+设计（spec §3.7，**Codex plan-R1 BLOCKER 修正：两条流都要周期心跳，非聊天首字节单发**——CF 边缘对已开始的流仍有 ~100s 无数据切，DeepSeek reasoner 中段长思考 >100s 会被断）：
+- **审查流**（已是 async generator + `event_queue` 0.1s timeout 循环）：在 timeout 路径按 `SSE_HEARTBEAT_INTERVAL_SECONDS` 计时发 `: keepalive`。
+- **聊天流**（sync generator，阻塞在 `handler.chat_stream` 内、无法自发心跳）：用**线程 + 队列异步多路复用包装** `_sse_with_heartbeat`——同步生成器在专用线程池跑，主循环空闲 > interval 就发 `: keepalive`。**心跳只在 HTTP SSE 帧层注入，不碰 chat.py 的 provider/tool-call/`reasoning_content`/DeepSeek 逻辑、不碰 request lock**。**不加 leading 心跳**：快测试（mock handler 即时返回 < interval）输出与现状完全一致 → 零回归；仅真长空闲发心跳。
+- 前端两消费者已天然忽略非 `data:` 行（`extractSseDataPayload` 返 null / `startsWith('data: ')`），只加容忍锁。
 
-- [ ] **Step 1: 写前端容忍测试**（`frontend/tests/sseEvents.test.mjs` 增）
+- [ ] **Step 1: 写前端容忍测试**（**新建** `frontend/tests/sseHeartbeat.test.mjs`——独立文件避免与 `sseEvents.test.mjs` import 重复绑定，Codex plan-R2 BLOCKER）
 
 ```javascript
 import { test } from 'node:test'
 import assert from 'node:assert'
+import { readFileSync } from 'node:fs'
 import { extractSseDataPayload } from '../src/utils/chatPresentation.js'
 
-test(': keepalive 心跳注释行被忽略（返回 null）', () => {
+// 聊天消费者（ChatPanel 经此函数）忽略非 data: 行
+test('extractSseDataPayload 忽略 : keepalive 心跳注释行（返回 null）', () => {
   assert.strictEqual(extractSseDataPayload(': keepalive'), null)
   assert.strictEqual(extractSseDataPayload(':keepalive'), null)
 })
+
+// 审查消费者（IndependentReviewDrawer）跳过非 data: 块——source guard 锁住容忍逻辑（spec §3.7 两消费者都锁）
+test('IndependentReviewDrawer 跳过非 data: 块（容忍心跳注释）', () => {
+  const drawer = readFileSync(new URL('../src/components/IndependentReviewDrawer.jsx', import.meta.url), 'utf8')
+  assert.match(drawer, /!block\.startsWith\(\s*['"]data: ['"]\s*\)/, 'drawer 必须跳过非 data: 块')
+})
 ```
 
-- [ ] **Step 2: 写后端审查流心跳测试**（`tests/test_main_api.py`，沿用既有 review stream 测试夹具——构造一个延迟首事件的 worker，断言流里出现 `: keepalive`）
+- [ ] **Step 2: 写后端两条流心跳测试**（`tests/test_main_api.py`）
 
+审查流心跳（放进现有 review-stream 测试类，沿用 `@mock.patch("backend.main.IndependentReviewAgent")` + `self._skey` + `self.engine`）：
 ```python
-    def test_review_stream_emits_heartbeat_during_idle(self):
-        # 构造：worker 长时间不产事件 → generate 的 0.1s timeout 循环应周期发 ": keepalive"。
-        # 用很小的心跳间隔（patch HEARTBEAT_INTERVAL_SECONDS）+ 模拟 worker 空转 → 断言收到心跳。
-        # 具体夹具参照本文件其它 review-stream 流式断言；关键断言：
-        #   self.assertIn(": keepalive", collected_text)
-        ...
+    @mock.patch("backend.main.SSE_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    @mock.patch("backend.main.IndependentReviewAgent")
+    def test_review_stream_emits_heartbeat_during_idle(self, mock_agent_cls):  # patch(值) 不注入参数
+        import time
+        from backend.independent_review import CANONICAL_REVIEW_PATH
+        project_id = "demo-hb"
+        run_id = "hb-run"
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+
+        def slow_run(project_id_arg, run_id=None, store=None, resume_snapshot=None,
+                     cancel_event=None, store_key=None, **kwargs):
+            del cancel_event, kwargs
+            time.sleep(0.2)  # 空闲：event_queue 空 → generate 应周期发心跳
+            canonical = os.path.join(tmpdir.name, "independent-review.md")
+            fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("final report")
+            mtime = store.atomic_commit_report(store_key, run_id, temp_path, canonical, {"messages": []})
+            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": mtime}
+
+        mock_agent_cls.return_value.run.side_effect = slow_run
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(project_id), run_id)
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": run_id},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(": keepalive", response.text)
 ```
 
-> 实现者按本文件既有 review-stream 测试写法补全；核心断言＝空闲期流中出现 `: keepalive`。
+聊天流心跳（放进 `_LocalMockEngineMixin` 的 chat 测试类，如 `WorkspaceApiTests` 同款）：
+```python
+    @mock.patch("backend.main.SSE_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    @mock.patch("backend.main.get_chat_handler")
+    def test_chat_stream_emits_heartbeat_during_idle(self, mock_get_handler):  # patch(值) 不注入参数
+        import time
+        def slow_stream(*a, **k):
+            time.sleep(0.2)  # 空闲：多路复用包装应周期发心跳
+            yield {"type": "content", "data": "hi"}
+        handler = mock.Mock()
+        handler.chat_stream.side_effect = slow_stream
+        mock_get_handler.return_value = handler
+        response = self.client.post(
+            "/api/chat/stream",
+            json={"project_id": "demo", "message_text": "hi"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(": keepalive", response.text)
+        self.assertIn("data:", response.text)  # 真内容仍流出
+```
+
+断连聚焦测试（直接驱动 `_sse_with_heartbeat`，验消费侧 aclose 后包装器干净终止 + 同步 generator 的
+`finally` 运行——真实 chat 里该 finally 即释放 request lock）：
+```python
+    def test_sse_heartbeat_closes_sync_generator_on_consumer_aclose(self):
+        import asyncio, time as _t
+        closed = []
+        def gen():
+            try:
+                yield "data: a\n\n"
+                yield "data: b\n\n"
+            finally:
+                closed.append(True)  # gen.close()（断连）或自然耗尽都会触发；两者都释放真实 chat 的锁
+
+        async def drive():
+            agen = main_module._sse_with_heartbeat(gen, interval=10)
+            first = await agen.__anext__()
+            await agen.aclose()      # 模拟消费侧断连
+            return first
+
+        first = asyncio.run(drive())
+        self.assertEqual(first, "data: a\n\n")
+        for _ in range(50):          # pump 线程异步收尾，轮询等 finally
+            if closed:
+                break
+            _t.sleep(0.02)
+        self.assertEqual(closed, [True])  # 不挂起 + generator finally 已运行
+        # 注：pump 无界预取可能在 aclose 前已自然耗尽 gen，故断言「finally 最终运行 + 不挂起」这一稳健属性，
+        # 不强行区分 close vs 耗尽（阻塞中的 provider 调用本就无法被 close 中断，见 _sse_with_heartbeat docstring）。
+```
 
 - [ ] **Step 3: 跑测试看它失败**
 
-Run: `cd frontend && node --test tests/sseEvents.test.mjs`（容忍测试此刻应已 PASS——纯既有函数行为，作回归锁）
-Run: `.venv/bin/python -m pytest tests/test_main_api.py -k review_stream_emits_heartbeat -v`
-Expected: 后端 FAIL（无心跳）
+Run: `cd frontend && node --test tests/sseHeartbeat.test.mjs`（容忍测试此刻应 PASS——纯既有函数行为，作回归锁）
+Run: `.venv/bin/python -m pytest tests/test_main_api.py -k "heartbeat" -v`
+Expected: 后端两条 FAIL（无心跳）
 
 - [ ] **Step 4: 实现心跳**
 
-`backend/main.py` 顶部常量：
+`backend/main.py` 顶部（与 `_USER_WRITE_EXECUTOR` 并列）：
 ```python
+import threading
+import time
 SSE_HEARTBEAT_INTERVAL_SECONDS = 20.0
+_CHAT_STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="chat-stream")
+
+
+async def _sse_with_heartbeat(sync_gen_factory, interval=None):
+    """在专用线程池跑同步 SSE 生成器；空闲 > interval 秒发 ': keepalive\\n\\n'。
+    心跳只在 HTTP SSE 帧层注入——不碰 chat.py 的 provider/tool-call/DeepSeek 逻辑、不碰 request lock。
+
+    断连正确性（Codex plan-R2/R3 BLOCKER）：finally 置 stop_event；pump 每轮**先判 stop 再 next(gen)**
+    （不在断连后多推进一次进新 provider/tool 阶段），随后 `gen.close()` 在 generator 当前 yield 点抛
+    GeneratorExit → chat_stream 的 `with request_lock` finally 释放锁。**注意**：`gen.close()` 只能在
+    generator 挂起于 yield、或当前 `next()` 返回后生效，**无法中断已在途的 provider 调用**——故锁释放 /
+    停止烧 token 发生在「当前阶段返回之后」，不是瞬时（与现状 Starlette 断连关闭同步 generator 行为一致）。
+    队列无界：体量受**单轮输出量 / app 的 token 限额**界定（非队列界定，慢客户端会让一条流缓存整轮输出）；
+    不用有界阻塞 put——断连后消费侧停抽、阻塞 put 会与 stop 死锁、pump 到不了 gen.close()、锁反泄漏
+    （trial 接受该内存权衡）。"""
+    if interval is None:
+        interval = SSE_HEARTBEAT_INTERVAL_SECONDS
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    DONE = object()
+    stop_event = threading.Event()
+
+    def pump():
+        gen = None
+        try:
+            gen = sync_gen_factory()
+            while not stop_event.is_set():           # 先判 stop 再推进（Codex plan-R3）
+                try:
+                    item = next(gen)
+                except StopIteration:
+                    break
+                if stop_event.is_set():
+                    break
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+        finally:
+            if gen is not None:
+                gen.close()  # 断连：GeneratorExit 抵达当前 yield → chat_stream finally 释放 request lock
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(queue.put_nowait, DONE)
+
+    fut = loop.run_in_executor(_CHAT_STREAM_EXECUTOR, pump)
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=interval)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if item is DONE:
+                break
+            yield item
+    finally:
+        stop_event.set()   # 断连/正常结束：令 pump 在下个 item 后停（不排空整轮、不漏锁）
+        if fut.done():
+            fut.exception()                                  # 取回异常避免 warning
+        else:
+            fut.add_done_callback(lambda f: f.exception())   # 后台收尾、不阻塞清理
 ```
 
-审查流 `generate()` 的 `while True` 循环（`~1049-1056`）改为带空闲计时心跳：
+审查流 `generate()` 的 `while True` 循环（`~1049-1066`）timeout 路径加计时心跳：
 ```python
-        import time
         last_emit = time.monotonic()
         try:
             while True:
@@ -665,27 +855,32 @@ SSE_HEARTBEAT_INTERVAL_SECONDS = 20.0
                 last_emit = time.monotonic()
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 ```
+> `SSE_HEARTBEAT_INTERVAL_SECONDS` 被测试 patch 成 0.05，故 timeout(0.1) 后即满足心跳条件。
 
-聊天流 `generate()`（`~1213`）首行立即发心跳（覆盖「无首包」）：
+聊天流：保持 `def generate()` 原样（**不加 leading 心跳**），仅把 `StreamingResponse(generate(), ...)` 改为包多路复用——`generate` 作为工厂传入：
 ```python
-    def generate():
-        yield ": keepalive\n\n"   # 首字节立即达 CF，避开无首包期 edge 超时（spec §3.7）
-        try:
-            handler = get_chat_handler(scope.uid, scope.project_id)
-            ...
+    return StreamingResponse(
+        _sse_with_heartbeat(generate),   # 注意：传函数本身（工厂），不是 generate()
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 ```
 
-- [ ] **Step 5: 跑测试看它通过 + DeepSeek 回归**
+- [ ] **Step 5: 跑测试看它通过 + 既有 chat/review 流式 + DeepSeek 回归**
 
-Run: `.venv/bin/python -m pytest tests/test_main_api.py -k review_stream -v`
+Run: `.venv/bin/python -m pytest tests/test_main_api.py -k "heartbeat or review_post or chat_stream" -v`
 Run: `.venv/bin/python -m pytest tests/test_chat_runtime.py -k "deepseek or compat or stream" -v`
-Expected: PASS（心跳生效 + DeepSeek 兼容不破）
+Expected: PASS（两条心跳生效 + 既有流式不破 + DeepSeek 兼容不破）。若某既有 chat_stream 测试断言 response 首行精确，确认未加 leading 心跳即应零差异。
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend/main.py frontend/tests/sseEvents.test.mjs tests/test_main_api.py
-git commit -m "feat(w2c): SSE heartbeat — review stream periodic + chat stream first-byte (anti CF idle drop)"
+git add backend/main.py frontend/tests/sseHeartbeat.test.mjs tests/test_main_api.py
+git commit -m "feat(w2c): SSE periodic heartbeat on both streams (anti CF idle drop)"
 ```
 
 ---
@@ -704,10 +899,13 @@ git commit -m "feat(w2c): SSE heartbeat — review stream periodic + chat stream
 ```python
     def test_read_document_without_converter_raises_not_legacy(self):
         # F2：删 legacy 回退后，无 converter 必须明确报错（不再有 _legacy_read_document）。
-        engine = SkillEngine(self.config_projects_dir, self.repo_skill_dir)
-        self.assertFalse(hasattr(engine, "_legacy_read_document"))
-        with self.assertRaises(ValueError):
-            engine._converter_read_document("nonexistent", Path("/tmp/x.txt"))
+        # SkillEngineTests.setUp 只有 self.repo_skill_dir，projects_dir 用 TemporaryDirectory（同文件惯例）。
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            self.assertFalse(hasattr(engine, "_legacy_read_document"))
+            with self.assertRaises(ValueError):
+                engine._converter_read_document("nonexistent", Path(tmp) / "x.txt")
 ```
 
 - [ ] **Step 2: 跑测试看它失败**
@@ -734,15 +932,19 @@ Expected: FAIL（`_legacy_read_document` 仍存在 / 不抛错）
 在 `tests/test_skill_engine.py` 顶部加共享假 converter（覆盖 read 路径用到的面：`convert_document` 读文本、`retain`/`release` no-op、`cache_key_from_sha256`、`image_cache_extra`）：
 ```python
 class _FakeConverter:
+    # 接口须匹配 SkillEngine 真调点（Codex plan-R1 BLOCKER）：
+    #   _cache_key_for_material → cache_key_from_sha256(content_hash, extra)（2 参！skill.py:1629）
+    #   _converter_read_document → convert_document(path)
+    #   _retain_material_cache → retain(key, material_id)
     image_cache_extra = ""
-    def cache_key_from_sha256(self, sha): return sha
+    def cache_key_from_sha256(self, sha, extra=""): return sha + (extra or "")
     def convert_document(self, path): return Path(path).read_text(encoding="utf-8")
     def retain(self, *a, **k): pass
     def release(self, *a, **k): pass
 ```
-在 `~59,129,160` 调 `read_material_file` 前注入 `engine._material_converter = _FakeConverter()`。`tests/test_workspace_materials.py` 读 `.txt` 素材的用例同样注入。
+在 `tests/test_skill_engine.py` 的 `~59,129,160` 调 `read_material_file` 前注入 `engine._material_converter = _FakeConverter()`；`tests/test_workspace_materials.py` 读 `.txt` 素材的用例同样注入。
 
-> 运行全套发现遗漏的无-converter read 点（假 converter 缺某方法报 AttributeError）即按需补该方法。
+> 跑全套若某无-converter read 点报 `AttributeError`（假 converter 缺方法）或 `TypeError`（签名不符），即按 `backend/material_conversion.py:MaterialConverter` 真实签名补该方法。
 
 - [ ] **Step 5: 跑全套相关测试**
 
@@ -793,7 +995,7 @@ git commit -m "chore(w2c): part A+B regression green"
 | §3.3 删脚本/端点改接/删 get_script_path/模块文档 | Task 2 + Task 5 |
 | §3.4 测试同步 + source-guard | Task 1/2/5 |
 | §3.6 web 下载契约（确定文件名/穿越守卫/路由插点/status 判定/锁外读） | Task 3 + Task 4 |
-| §3.7 SSE 心跳（审查周期 + 聊天首字节 + 前端容忍） | Task 7 |
+| §3.7 SSE 心跳（审查周期 + 聊天周期·线程多路复用 + 前端容忍） | Task 7 |
 | §4 N6 F2 删 legacy + 无-converter 测试 | Task 8 |
 | §5.4 入口 env 化 + uvicorn proxy_headers | Task 6 |
 | §5.1/§5.5–§5.9 装机/env/systemd/nginx/CF/ufw | **Part C runbook，不在本 plan**（spec §5 交互式执行） |
