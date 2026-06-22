@@ -237,3 +237,55 @@ class MeteredStreamTests(MeteredNonStreamTests):  # 复用 setUp/tearDown/_FakeO
         gen.close()        # GeneratorExit → finally fail-closed
         row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
         self.assertEqual(row["cost_micro_yuan"], 768000)  # 未见 usage → fail-closed 保守封顶
+
+
+# tests/test_metering.py（追加）
+class MissCounterTests(MeteredNonStreamTests):
+    def setUp(self):
+        super().setUp()
+        # _miss_counter 是模块级全局；显式清零更稳（reload 已新建模块）。
+        self.m._miss_counter.clear()
+
+    def test_three_consecutive_misses_pause_model(self):
+        c = self._client(None)  # 每次都缺 usage
+        for _ in range(3):
+            c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+        # 第 4 次：reserve 阶段即暂停
+        with self.assertRaises(self.m.ModelPausedError):
+            c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+
+    def test_success_resets_miss_counter(self):
+        miss_client = self._client(None)
+        miss_client.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+        miss_client.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+        # 一次成功 settle 清零
+        ok = self._client(_FakeUsage(prompt_tokens=1, prompt_cache_hit_tokens=0,
+                                     prompt_cache_miss_tokens=1, completion_tokens=1))
+        ok.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+        # 再连续 2 次缺失仍不暂停（计数已清）
+        miss_client.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+        miss_client.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)  # 不抛
+
+    def test_pause_is_per_model(self):
+        c_miss = self._client(None)
+        for _ in range(3):
+            c_miss.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+        other = self._client(_FakeUsage(prompt_tokens=1, prompt_cache_hit_tokens=0,
+                                        prompt_cache_miss_tokens=1, completion_tokens=1))
+        other.chat.completions.create(model="Qwen/Qwen3-VL-8B-Instruct", messages=[], stream=False)  # 不抛
+
+    def test_next_day_auto_resets_pause(self):
+        # ✦ Codex BLOCKER：暂停后 reserve 在任何成功 settle 前就拦截 → 同键永不清零；
+        # day 入键则次日自动清零。monkeypatch today_shanghai 模拟跨日（_reserve/_settle 均查模块级 today_shanghai）。
+        c = self._client(None)
+        orig = self.m.today_shanghai
+        self.m.today_shanghai = lambda: "2026-06-22"
+        try:
+            for _ in range(3):
+                c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+            with self.assertRaises(self.m.ModelPausedError):
+                c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+            self.m.today_shanghai = lambda: "2026-06-23"   # 次日
+            c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)  # 不抛 = 自动清零
+        finally:
+            self.m.today_shanghai = orig
