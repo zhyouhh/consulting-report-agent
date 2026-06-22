@@ -231,7 +231,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **环境变量**：`CRA_DATA_ROOT`（数据根）；`CRA_INVITE_CODE`（**web 必设**，含 mac 本地 `run_web.py`——例 `CRA_INVITE_CODE=devcode .venv/bin/python run_web.py`；env 已设则 `set_config` upsert 每次启动权威，未设则随机码 fail-closed 锁死注册）；`CRA_BOOTSTRAP_ADMIN_USERNAME`+`CRA_BOOTSTRAP_ADMIN_PASSWORD`（首启建管理员、`must_change_password=True`、幂等）。
 
-**B1 明确未做（B2/B3）**：custom 模式**仍 managed-forced**（`normalize_settings_payload` 强制 `mode="managed"`；per-uid settings 只隔离**存储**，custom 激活+SSRF 归 B3）；中央计费 + per-user ¥/天配额（B2）；admin 面板、CSRF/SSRF/CORS 硬化（现 `allow_origins=["*"]` + SameSite=Lax 基线）、`must_change_password` 路由级强制、per-username 限流（B3）。
+**B1 明确未做（已由 B2/B3 落地——下列均为 B1 当时的边界，现已实现，见「## W2-B/B2」「## W2-B/B3」段）**：custom 模式 B1 时 managed-forced（per-uid settings 只隔离**存储**，custom 激活+SSRF 归 B3——**B3 已激活：`mode` 持久化 + `url_guard` 白名单 SSRF**）；中央计费 + per-user ¥/天配额（B2 已落地）；admin 面板、CSRF/SSRF/CORS 硬化（B1 时 `allow_origins=["*"]` + SameSite=Lax 基线 → **B3 已收紧到 allowlist + Origin 中间件**）、`must_change_password` 路由级强制、per-username 限流（**B3 已落地**）。
 
 **回归**：`tests/test_tenant.py`、`test_accounts.py`、`test_auth_api.py`（含 `AuthApiTestBase`：reload(main) + mock heal + 单例 reset）、`test_tenant_isolation.py`（复合键/搜索隔离/`CrossTenantApiTests` 跨租户 404）、`test_settings_api.py`、`test_project_create_api.py`；既有端点测试已迁移到租户作用域（`auth_required=False` → uid="local" + `get_project_record` mock + 复合 store 键）。**写端点测试**：`AuthApiTestBase` 起隔离 `CRA_DATA_ROOT`；非鉴权端点测试设 `app.state.auth_required=False` 跑 local。
 
@@ -258,11 +258,11 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **前端**：`utils/quotaFormat.js`（`formatYuan`/`quotaLabel`/`quotaRatio`，全 `Number.isFinite` 归一、`quotaRatio` 恒 [0,1] 不返 NaN）；`Sidebar.jsx` 账号块额度行——外层守卫 `authUser && (uid!=='local' || typeof daily_cap_yuan==='number')`，**登出按钮**仍只对非-local（避困登录页），**额度行对 local 也显示**（local 经 managed 计费、受默认 ¥5/天 cap）。
 
-**已知限制 / 待决策**：软帽非原子 reserve（spec §11，并发略超一轮容忍）；从未消费的流不结算；**`_settle` 失败 best-effort**（任何 settle/DB 写失败一律 `logger.warning` 记日志、绝不抛给调用方、漏计一次——计费是成本护栏非支付系统，不因记账抖动崩用户操作）；`.responses` 透传不计费（managed 不走，B3 custom 处理）；单进程 `_miss_counter`；custom 生产不可达（managed-forced，B3 激活）；**⚠️ 桌面 local 受 ¥5/天默认 cap、会被 reserve 拦**（若不想桌面同事被限需单独配置豁免——属配置/产品决策）。
+**已知限制 / 待决策**：软帽非原子 reserve（spec §11，并发略超一轮容忍）；从未消费的流不结算；**`_settle` 失败 best-effort**（任何 settle/DB 写失败一律 `logger.warning` 记日志、绝不抛给调用方、漏计一次——计费是成本护栏非支付系统，不因记账抖动崩用户操作）；`.responses` 透传不计费（managed 不走，B3 custom 处理）；单进程 `_miss_counter`；custom 计费：B2 时 managed-forced 故生产不可达，**B3 已激活 custom（走裸 client 不计费——用户自带 key，见「## W2-B/B3」段）**；**⚠️ 桌面 local 受 ¥5/天默认 cap、会被 reserve 拦**（若不想桌面同事被限需单独配置豁免——属配置/产品决策）。
 
 **回归**：`tests/test_metering.py`（计价/usage fail-closed/reserve/settle/暂停/工厂/source-guard）、`test_accounts.py::UsageDailyTests`、`test_chat_runtime.py::B2BillingWiringTests`+`B2BillingSettleTests`（含真 reserve 集成 + reload 回归守卫 + 压缩/视觉真 settle）、`test_independent_review.py::B2ReviewBillingTests`、`test_main_api.py::B2ChatQuotaTests`、`test_auth_api.py::MeCostFieldsTests`、前端 `quotaFormat`/`sidebarQuota.source`。**B2 测试夹具**：reserve/settle 在 managed chat/review 单测里会真跑——base setUp 须隔离 `CRA_DATA_ROOT`+`init_db`+把两道闸门设不触发（巨大 cap + `MAX_CONSECUTIVE_USAGE_MISS`），pause/quota 真行为由 `test_metering.py` 独立覆盖。
 
-## W2-B/B3 admin 面板 + 安全硬化 + custom 激活（2026-06-23 实施完成；分支 `feat/w2b-b3-admin-security-hardening` 待 merge）
+## W2-B/B3 admin 面板 + 安全硬化 + custom 激活（2026-06-23 实施完成 + merge main `450acba`（--no-ff）+ push origin；分支 `feat/w2b-b3-admin-security-hardening` 保留）
 
 给多租户 Web 基座补 admin 面板 + CSRF/CORS/SSRF 硬化 + throttle-first 登录限流 + `must_change_password` 路由级强制 + **custom 真激活**。改鉴权 / SSRF 护栏 / settings 持久化 / admin 端点 / 登录限流前必读。详尽交付与红队叙事见 `docs/superpowers/cutover_report_2026-06-23_w2b-b3.md`；plan `docs/superpowers/plans/2026-06-22-w2b-b3-admin-security-hardening.md`。
 

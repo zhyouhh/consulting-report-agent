@@ -1,7 +1,7 @@
 # Cutover Report — W2-B / B3 Admin 面板 + 安全硬化 + custom 模式激活
 
 - 日期：2026-06-23
-- 分支：`feat/w2b-b3-admin-security-hardening`（基于 main，B1 + B2 已 merge），HEAD `a1b64e8`
+- 分支：`feat/w2b-b3-admin-security-hardening`（基于 main，B1 + B2 已 merge）。本报告写于 HEAD `a1b64e8`；其后全分支综合审 SHIP-READY + 收尾 NIT `e37be31`（CRA_ALLOWED_ORIGIN 启动告警按 cookie_secure 准确化）→ **merge main `450acba`（--no-ff）+ push origin**（分支保留）
 - plan：`docs/superpowers/plans/2026-06-22-w2b-b3-admin-security-hardening.md`（19 task / 6 Phase，Codex plan 4 轮 APPROVED）
 - spec：`docs/superpowers/specs/2026-06-21-w2b-multi-tenant-core-design.md`（§7 admin / §8 CSRF/SSRF/CORS / §13 B3 验收门）
 

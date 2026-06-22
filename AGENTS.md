@@ -2,6 +2,12 @@
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
+> ⚠️ **本文件已过时（停留在 W2-B 之前）。`CLAUDE.md` 是当前唯一权威真值源。**
+> 尤其「关键数据边界」段描述的是**旧单用户布局**（`~/.consulting-report/config.json` 扁平结构）——
+> W2-B 多租户化后数据已改为 `data_root()`（`CRA_DATA_ROOT`，缺省 `~/.consulting-report/`）下的 per-uid 分层
+> `users/<uid>/`，且新增了鉴权/计费/admin/CSRF/SSRF/custom 激活（B1/B2/B3）。这些 AGENTS.md 全部缺失。
+> 接手前请以 `CLAUDE.md` 的「## W2-B 多租户基座」「## W2-B/B2」「## W2-B/B3」段为准。
+
 ## 项目定位
 
 Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI 的同事，交付形态是 `dist\咨询报告助手\` 整个文件夹（不是裸 exe）。当前只承诺 Windows 分发和 `可审草稿` 导出，不承诺 macOS 正式支持和最终排版稿。
