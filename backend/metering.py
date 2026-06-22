@@ -1,6 +1,7 @@
 # backend/metering.py
 """中央计费叶子模块（只依赖 accounts/config；绝不 import chat/skill/main/independent_review）。"""
 from __future__ import annotations
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from backend.config import FALLBACK_MODEL_PRICING
@@ -33,8 +34,29 @@ def _usage_get(usage, key: str):
     return getattr(usage, key, None)
 
 
+class _BadUsage(Exception):
+    """单个 usage token 值 present-but-malformed（→ 整条 usage fail-closed）。"""
+
+
+def _coerce_token(value) -> int:
+    """单个 usage token 值规整为 >=0 整数。None（字段缺省）→ 0。
+    present-but-malformed 一律 raise _BadUsage（→ fail-closed，绝不静默归零）：
+    非 int/float（""/[]/{} 等）、bool（不是 token 计数）、inf/nan、负数、超真实量级。"""
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _BadUsage
+    if isinstance(value, float) and not math.isfinite(value):
+        raise _BadUsage
+    v = int(value)
+    if v < 0 or v > _MAX_PLAUSIBLE_TOKENS:
+        raise _BadUsage
+    return v
+
+
 def extract_billing_usage(usage) -> BillingUsage | None:
-    """从 provider usage（对象或 dict）取三档计费 token。无法识别 token 字段时返回 None（→ fail-closed）。"""
+    """从 provider usage（对象或 dict）取三档计费 token。无法识别 token 字段、或任何字段
+    present-but-malformed → 返回 None（→ fail-closed 保守封顶 + 缺失计数 +1）。"""
     if usage is None:
         return None
     prompt = _usage_get(usage, "prompt_tokens")
@@ -43,21 +65,18 @@ def extract_billing_usage(usage) -> BillingUsage | None:
     miss = _usage_get(usage, "prompt_cache_miss_tokens")
     if prompt is None and completion is None and hit is None and miss is None:
         return None
-    # 防御性 fail-closed：非数值 / 非有限(inf,nan) / 溢出 → None（→ 保守封顶），不让其抛穿计费路径；
-    # 负数 token（provider 异常）钳到 0，杜绝「负计费倒扣 usage_daily 逃配额」；
-    # 超出真实量级（_MAX_PLAUSIBLE_TOKENS）视为畸形 → None，避免 float 计价溢出 / SQLite INTEGER 越界。
+    # 防御性 fail-closed：present-but-malformed（非数值/bool/inf/nan/负/超量级）→ None，
+    # 不静默归零——归零会假记 0 费用并复位缺失计数、绕过暂停保护。仅真正缺省(None)字段安全默认 0。
     try:
-        hit = max(int(hit or 0), 0)
+        hit_v = _coerce_token(hit)
         if miss is None:
-            miss = max(int(prompt or 0) - hit, 0)
+            miss_v = max(_coerce_token(prompt) - hit_v, 0)  # 派生 miss：hit>prompt 的 provider 怪值钳 0
         else:
-            miss = max(int(miss), 0)
-        completion = max(int(completion or 0), 0)
-    except (TypeError, ValueError, OverflowError):
+            miss_v = _coerce_token(miss)
+        completion_v = _coerce_token(completion)
+    except _BadUsage:
         return None
-    if max(hit, miss, completion) > _MAX_PLAUSIBLE_TOKENS:
-        return None
-    return BillingUsage(hit=hit, miss=miss, completion=completion)
+    return BillingUsage(hit=hit_v, miss=miss_v, completion=completion_v)
 
 
 def price_micro_yuan(model: str, hit: int, miss: int, completion: int, pricing: dict) -> int:

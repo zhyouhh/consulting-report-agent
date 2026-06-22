@@ -68,17 +68,30 @@ class ExtractUsageTests(unittest.TestCase):
              "prompt_cache_miss_tokens": 90, "completion_tokens": 5})
         self.assertEqual((bu.hit, bu.miss, bu.completion), (10, 90, 5))
 
-    def test_negative_tokens_clamped_to_zero(self):
-        # Codex quality 轨 B6：provider 异常返回负数不得倒扣 usage_daily（逃配额）。
+    def test_negative_tokens_rejected_fail_closed(self):
+        # Codex quality 轨 B6/round3：负 token（provider 异常）→ None（fail-closed），
+        # 不静默归零（归零会假记 0 + 复位缺失计数、绕过暂停保护）。
         u = _FakeUsage(prompt_tokens=100, prompt_cache_hit_tokens=-5,
                        prompt_cache_miss_tokens=-90, completion_tokens=-5)
-        bu = metering.extract_billing_usage(u)
-        self.assertEqual((bu.hit, bu.miss, bu.completion), (0, 0, 0))
+        self.assertIsNone(metering.extract_billing_usage(u))
 
     def test_malformed_usage_returns_none_fail_closed(self):
         # Codex quality 轨 B6：非数值字段 → None（→ fail-closed 保守封顶），不抛穿计费路径。
         self.assertIsNone(metering.extract_billing_usage(
             _FakeUsage(prompt_tokens="oops", completion_tokens=5)))
+
+    def test_falsey_nonnumeric_present_values_return_none(self):
+        # Codex quality 轨 round3：present-but-falsey 非数值（""/[]/{}）不得被 `x or 0` 静默归零。
+        self.assertIsNone(metering.extract_billing_usage(
+            {"prompt_tokens": "", "completion_tokens": ""}))
+        self.assertIsNone(metering.extract_billing_usage(
+            _FakeUsage(prompt_tokens=[], prompt_cache_hit_tokens={}, completion_tokens=0)))
+
+    def test_bool_token_value_rejected(self):
+        # Codex quality 轨 round3：bool 是 int 子类但不是 token 计数 → None（fail-closed）。
+        self.assertIsNone(metering.extract_billing_usage(
+            _FakeUsage(prompt_tokens=True, prompt_cache_hit_tokens=False,
+                       prompt_cache_miss_tokens=True, completion_tokens=False)))
 
     def test_non_finite_usage_returns_none(self):
         # Codex quality 轨 B2：inf/nan → None（int(inf) 抛 OverflowError、int(nan) 抛 ValueError）。
