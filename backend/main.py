@@ -246,13 +246,19 @@ def auth_logout(request: Request, response: Response):
 
 @app.get("/api/auth/me")
 def auth_me(request: Request, uid: str = Depends(get_current_uid)):
+    from backend import metering
+    used = accounts.get_usage_today(uid, metering.today_shanghai())["cost_micro_yuan"]
+    cap = accounts.get_effective_daily_cap_micro(uid)
+    cost_fields = {"today_cost_yuan": round(used / 1_000_000, 4),
+                   "daily_cap_yuan": round(cap / 1_000_000, 4)}
     if uid == "local" and not getattr(request.app.state, "auth_required", True):
-        return {"uid": "local", "username": "本地用户", "is_admin": False, "must_change_password": False}
+        return {"uid": "local", "username": "本地用户", "is_admin": False,
+                "must_change_password": False, **cost_fields}
     rec = accounts.get_user_by_uid(uid)
     if not rec:
         raise HTTPException(status_code=401, detail="未登录")
     return {"uid": uid, "username": rec["username"], "is_admin": rec["is_admin"],
-            "must_change_password": rec["must_change_password"]}
+            "must_change_password": rec["must_change_password"], **cost_fields}
 
 
 @app.post("/api/auth/change-password")
@@ -469,6 +475,25 @@ async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(g
     # 宽泛 except Exception 吞成 500（破坏租户隔离 404 契约，Codex T11a review）。
     logger.info(f"Chat request for project: {chat_request.project_id}")
     scope = require_project(chat_request.project_id, uid)
+    # 预检（建 handler 前）：仅 managed 模式做 ¥ 门禁——✦ Codex BLOCKER：custom 不计费/不受 ¥ 门禁（§6.4），
+    # 不可因 managed 额度尽而拦 custom 聊天。B2 production 仍 managed-forced，此 gate 为正确性 + B3 预留。
+    # 额度尽时直接友好返回，不建 handler、不半启动 turn（mid-turn 由 wrapper reserve 兜底）。
+    # ✦ Codex NIT2：先判 mode==managed，才碰 metering/accounts——custom 路径（B3 真开放时）不该被坏
+    # cap 配置 / 计费 DB 异常波及。metering import 提到 try 之前，供下面 except 引用其异常类型。
+    from backend import metering
+    if load_settings(scope.uid).mode == "managed":
+        cap = accounts.get_effective_daily_cap_micro(scope.uid)
+        used = accounts.get_usage_today(scope.uid, metering.today_shanghai())["cost_micro_yuan"]
+        if used >= cap:
+            # ✦ Codex BLOCKER：system_notices 是 List[SystemNotice]、非 List[str] → 置 None，提示放 content。
+            return ChatResponse(
+                content=(
+                    f"今日额度已用尽（已用 ¥{used / 1_000_000:.2f} / 上限 ¥{cap / 1_000_000:.2f}），"
+                    f"明日 0 点（北京时间）恢复。"
+                ),
+                token_usage=None,
+                system_notices=None,
+            )
     handler = get_chat_handler(scope.uid, scope.project_id)
     try:
         result = await asyncio.to_thread(
@@ -485,6 +510,12 @@ async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(g
             content=result["content"],
             token_usage=result.get("token_usage"),
             system_notices=result.get("system_notices"),
+        )
+    except (metering.QuotaExceededError, metering.ModelPausedError) as qe:
+        return ChatResponse(
+            content=handler._format_quota_error(qe),
+            token_usage=None,
+            system_notices=None,
         )
     except Exception as e:
         logger.error(f"Chat error: {str(e)}", exc_info=True)
@@ -662,7 +693,7 @@ async def independent_review_stream_post(
 
         def run_worker():
             try:
-                agent = IndependentReviewAgent(scope.engine, load_settings(scope.uid))
+                agent = IndependentReviewAgent(scope.engine, load_settings(scope.uid), uid=scope.uid)
                 for event in agent.run(
                     review_project_id,
                     run_id=run_id,

@@ -29,6 +29,24 @@ class ChatRuntimeTests(unittest.TestCase):
         self._curl_cffi_patcher.start()
         self.addCleanup(self._curl_cffi_patcher.stop)
 
+        import os, tempfile
+        from backend import accounts
+        self._billing_tmp = tempfile.TemporaryDirectory(); self.addCleanup(self._billing_tmp.cleanup)
+        self._prev_data_root = os.environ.get("CRA_DATA_ROOT")
+        os.environ["CRA_DATA_ROOT"] = self._billing_tmp.name
+        self.addCleanup(self._restore_data_root)
+        accounts.init_db()                                   # 建 users/sessions/app_config/usage_daily
+        accounts.set_config("global_daily_cap_micro_yuan", str(10**15))   # cap 巨大 → reserve 永不因成本拦
+        import backend.metering as _m
+        _m._miss_counter.clear(); self.addCleanup(_m._miss_counter.clear)
+        self._pause_patch = mock.patch.object(_m, "MAX_CONSECUTIVE_USAGE_MISS", 10**9)  # 永不暂停
+        self._pause_patch.start(); self.addCleanup(self._pause_patch.stop)
+
+    def _restore_data_root(self):
+        import os
+        if self._prev_data_root is None: os.environ.pop("CRA_DATA_ROOT", None)
+        else: os.environ["CRA_DATA_ROOT"] = self._prev_data_root
+
     def _make_tool_call(self, name: str, arguments: str):
         return type(
             "ToolCall",
@@ -5582,9 +5600,12 @@ class ChatRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
             debug_dir = home / ".consulting-report" / "debug"
+            # clear=True 会清掉 setUp 设的 CRA_DATA_ROOT；B2 包裹后 managed create 前的 reserve 要读计费 DB，
+            # 故保留 CRA_DATA_ROOT 指向 setUp 已 init_db 的隔离库（否则 reserve 撞 no-such-table、遮蔽 provider 错误）。
             with mock.patch("pathlib.Path.home", return_value=home), mock.patch.dict(
                 "os.environ",
-                {"CONSULTING_REPORT_DEBUG_DUMP": "1"},
+                {"CONSULTING_REPORT_DEBUG_DUMP": "1",
+                 "CRA_DATA_ROOT": self._billing_tmp.name},
                 clear=True,
             ):
                 result = handler.chat(self.project_id, secret_message)
@@ -14393,3 +14414,213 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(OcrImageTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class B2BillingWiringTests(ChatRuntimeTests):
+    def _make_custom_handler_with_project(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        projects_dir = Path(tmp.name) / "projects"
+        engine = SkillEngine(projects_dir, self.repo_skill_dir)
+        project = engine.create_project(
+            name="demo", workspace_dir=str(Path(tmp.name) / "ws"),
+            project_type="strategy-consulting", theme="t", target_audience="a",
+            deadline="2026-04-01", expected_length="3000 words")
+        handler = ChatHandler(
+            self._make_settings(mode="custom", custom_api_base="https://api.example.com/v1",
+                                custom_api_key="sk-x", custom_model="gpt-4o",
+                                projects_dir=projects_dir),
+            engine)
+        self.project_id = project["id"]
+        return handler
+
+    def _capture_stream_kwargs(self, handler):
+        captured = {}
+        def _fake_create(**kwargs):
+            captured.update(kwargs)
+            return iter([self._make_chunk(content="完成")])
+        with mock.patch.object(handler.client.chat.completions, "create", side_effect=_fake_create):
+            list(handler.chat_stream(self.project_id, "你好", [], []))
+        return captured
+
+    def test_managed_client_is_metered(self):
+        handler = self._make_handler_with_project()
+        from backend.metering import MeteredManagedClient
+        self.assertIsInstance(handler.client, MeteredManagedClient)
+
+    def test_custom_client_is_raw(self):
+        handler = self._make_custom_handler_with_project()
+        from backend.metering import MeteredManagedClient
+        self.assertNotIsInstance(handler.client, MeteredManagedClient)
+
+    def test_managed_stream_requests_include_usage(self):
+        handler = self._make_handler_with_project()
+        captured = self._capture_stream_kwargs(handler)
+        self.assertEqual(captured.get("stream_options"), {"include_usage": True})
+
+    def test_custom_stream_omits_include_usage(self):
+        # Codex BLOCKER: include_usage_requested 现无条件 True，custom 也发 → 改 managed-only
+        handler = self._make_custom_handler_with_project()
+        captured = self._capture_stream_kwargs(handler)
+        self.assertNotIn("stream_options", captured)
+
+    def test_stream_quota_exceeded_yields_friendly_event(self):
+        handler = self._make_handler_with_project()
+        from backend import metering
+        def _boom(**kwargs):
+            raise metering.QuotaExceededError(used_micro=5_000_000, cap_micro=5_000_000)
+        with mock.patch.object(handler.client.chat.completions, "create", side_effect=_boom):
+            events = list(handler.chat_stream(self.project_id, "你好", [], []))
+        self.assertTrue(any(e.get("type") == "error" and "额度" in str(e.get("data", ""))
+                            for e in events))
+
+    def test_chat_stream_consumption_closes_response(self):
+        # Codex NIT: 不全局 grep `response.close()`（chat.py 别处已有无关 close，会假绿）；
+        # 锚定主流式 `for chunk in response:` 后窗口内必须有 finally + response.close()。
+        import pathlib
+        src = pathlib.Path(__file__).resolve().parents[1].joinpath("backend/chat.py").read_text(encoding="utf-8")
+        i = src.index("for chunk in response:")          # 主流式消费锚点（chat.py 仅此处用此短语）
+        window = src[i:i + 4000]                          # 窗口覆盖循环体 + 紧随 try/except/finally（实测 finally 在 ~3125）
+        self.assertIn("finally:", window)
+        self.assertIn("response.close()", window)
+
+    def test_chat_stream_consumption_closes_underlying_stream_and_settles_real_usage(self):
+        # Codex NIT#1 行为版（非 source-guard）：patch 底层 _raw create 返回**可关闭流对象**（非裸 iter），
+        # 跑真 chat_stream 消费到底 → 断言①底层流 close() 被调用 ②settle 进 usage_daily 的是**真 usage**
+        # （非 fail-closed 256k 封顶），证明 chat 消费 + close 经真 wrapper settle 了真用量。
+        from backend import accounts
+        import backend.metering as m
+        handler = self._make_handler_with_project()   # managed → MeteredManagedClient；主流式模型 gemini-3-flash
+
+        class _CloseableStream:
+            def __init__(self, chunks):
+                self._it = iter(chunks)
+                self.close_count = 0
+            def __iter__(self):
+                return self
+            def __next__(self):
+                return next(self._it)
+            def close(self):
+                self.close_count += 1
+
+        usage_chunk = self._make_usage_chunk(prompt_tokens=100, prompt_cache_hit_tokens=0,
+                                             prompt_cache_miss_tokens=100, completion_tokens=50)
+        stream = _CloseableStream([self._make_chunk(content="完成"), usage_chunk])
+        with mock.patch.object(handler.client._raw.chat.completions, "create", return_value=stream):
+            list(handler.chat_stream(self.project_id, "你好", [], []))
+
+        self.assertGreaterEqual(stream.close_count, 1)   # 底层 provider 流被关闭
+        row = accounts.get_usage_today(handler.uid, m.today_shanghai())
+        # gemini-3-flash 走 FALLBACK_MODEL_PRICING(0.025/3/6)：miss=100,completion=50 → 100*3+50*6=600 微元。
+        self.assertEqual(row["cache_miss_tokens"], 100)   # 真 usage，非 fail-closed 256k
+        self.assertEqual(row["cost_micro_yuan"], 600)
+
+    def test_stream_real_reserve_blocks_when_over_cap(self):
+        # Codex NIT#2：不 patch create——让真 MeteredManagedClient._reserve 自然抛 QuotaExceededError。
+        from backend import accounts
+        import backend.metering as m
+        handler = self._make_handler_with_project()
+        day = m.today_shanghai()
+        accounts.set_config("global_daily_cap_micro_yuan", "100")   # 局部覆盖 base setUp 的巨大 cap
+        accounts.add_usage(handler.uid, day, 100, 0, 0, 0)          # 顶满 → reserve 应拦
+        # spy 仅为断言 raw create 未被触达（reserve 在 create 之前跑，spy 不绕过 reserve）。
+        with mock.patch.object(handler.client._raw.chat.completions, "create") as raw_create:
+            events = list(handler.chat_stream(self.project_id, "你好", [], []))
+        self.assertTrue(any(e.get("type") == "error" and "额度" in str(e.get("data", ""))
+                            for e in events))
+        raw_create.assert_not_called()
+
+    def test_sync_real_reserve_blocks_when_over_cap(self):
+        # Codex NIT#2 非流式版：真 reserve 拦 → handler.chat() 返回友好 content、raw create 未调用。
+        from backend import accounts
+        import backend.metering as m
+        handler = self._make_handler_with_project()
+        day = m.today_shanghai()
+        accounts.set_config("global_daily_cap_micro_yuan", "100")
+        accounts.add_usage(handler.uid, day, 100, 0, 0, 0)
+        with mock.patch.object(handler.client._raw.chat.completions, "create") as raw_create:
+            result = handler.chat(self.project_id, "你好")
+        self.assertIn("额度", result["content"])
+        raw_create.assert_not_called()
+
+    def test_quota_friendly_event_survives_metering_module_reload(self):
+        # 回归守卫（Codex F 轮全量回归暴露）：importlib.reload(metering) 会在同一模块对象内重建
+        # 异常类；chat.py 必须用模块限定访问 metering.QuotaExceededError（而非 `from .metering import` 拷贝名），
+        # 否则 wrapper 实抛的活类与 except 捕获的旧类 isinstance 失配 → 配额异常漏成 "API调用失败"。
+        # 本测试在 reload 后建 handler 走 over-cap 路径，断言友好 "额度" 事件仍被 except 接住。
+        import importlib
+        import backend.metering as m
+        importlib.reload(m)
+        from backend import accounts
+        handler = self._make_handler_with_project()
+        day = m.today_shanghai()
+        accounts.set_config("global_daily_cap_micro_yuan", "100")
+        accounts.add_usage(handler.uid, day, 100, 0, 0, 0)
+        with mock.patch.object(handler.client._raw.chat.completions, "create") as raw_create:
+            events = list(handler.chat_stream(self.project_id, "你好", [], []))
+        self.assertTrue(any(e.get("type") == "error" and "额度" in str(e.get("data", ""))
+                            for e in events), "reload 后配额异常仍须转友好事件，不得漏成 provider error")
+        raw_create.assert_not_called()
+
+
+# Codex NIT: 子类化 ChatRuntimeTests 会继承其全部 test_；按 repo 既有 pattern
+# 置空继承的 test_，避免 targeted class run 重跑整个父套件。
+for _inh in dir(ChatRuntimeTests):
+    if _inh.startswith("test_") and _inh not in B2BillingWiringTests.__dict__:
+        setattr(B2BillingWiringTests, _inh, None)
+del _inh
+
+
+class B2BillingSettleTests(ChatRuntimeTests):
+    def test_compaction_call_settles_usage(self):
+        from types import SimpleNamespace
+        from backend import accounts
+        import backend.metering as m
+        handler = self._make_handler_with_project()   # managed → client 是 MeteredManagedClient
+        usage = SimpleNamespace(prompt_tokens=100, prompt_cache_hit_tokens=0,
+                                prompt_cache_miss_tokens=100, completion_tokens=50)
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="摘要"))], usage=usage)
+        with mock.patch.object(handler.client._raw.chat.completions, "create", return_value=resp):
+            handler._summarize_messages([{"role": "user", "content": "x"}])
+        row = accounts.get_usage_today(handler.uid, m.today_shanghai())
+        self.assertEqual(row["cache_miss_tokens"], 100)   # 压缩真的 settle 了
+        self.assertGreater(row["cost_micro_yuan"], 0)
+
+    def test_vision_transcribe_settles_usage(self):
+        from types import SimpleNamespace
+        from backend import accounts
+        import backend.metering as m
+        handler = self._make_handler_with_project()
+        handler.settings.vision_enabled = True
+        usage = SimpleNamespace(prompt_tokens=200, prompt_cache_hit_tokens=0,
+                                prompt_cache_miss_tokens=200, completion_tokens=30)
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="图片转述"))], usage=usage)
+        with mock.patch.object(handler.client._raw.chat.completions, "create", return_value=resp):
+            out = handler._vision_transcribe("data:image/png;base64,AAAA", "image/png")
+        self.assertIn("图片转述", out)
+        row = accounts.get_usage_today(handler.uid, m.today_shanghai())
+        self.assertEqual(row["cache_miss_tokens"], 200)   # 视觉真的 settle 了
+
+    def test_compaction_survives_settle_failure(self):
+        # Codex 全分支综合审 BLOCKER：压缩调用的 settle 失败不得让 _summarize_messages 静默吞成 None；
+        # settle 失败现记日志、不抛 → 摘要照常返回（计费尽力而为、不破坏用户操作）。
+        from types import SimpleNamespace
+        from backend import accounts
+        handler = self._make_handler_with_project()
+        usage = SimpleNamespace(prompt_tokens=100, prompt_cache_hit_tokens=0,
+                                prompt_cache_miss_tokens=100, completion_tokens=50)
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="摘要内容"))], usage=usage)
+
+        def _boom(*a, **k):
+            raise RuntimeError("sqlite write failed")
+        with mock.patch.object(handler.client._raw.chat.completions, "create", return_value=resp), \
+                mock.patch.object(accounts, "add_usage", side_effect=_boom):
+            out = handler._summarize_messages([{"role": "user", "content": "x"}])
+        self.assertIn("摘要内容", out or "")   # settle 失败未把摘要吞成 None
+
+
+# Codex NIT: 置空继承的 test_（同上 pattern）
+for _inh in dir(ChatRuntimeTests):
+    if _inh.startswith("test_") and _inh not in B2BillingSettleTests.__dict__:
+        setattr(B2BillingSettleTests, _inh, None)
+del _inh

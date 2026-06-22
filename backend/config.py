@@ -9,6 +9,24 @@ import sys
 DEFAULT_MANAGED_BASE_URL = "https://newapi.z0y0h.work/client/v1"
 DEFAULT_MANAGED_MODEL = "deepseek-v4-pro"
 DEFAULT_MANAGED_VISION_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+# 每模型单价（元/百万 token）：(命中, 未命中, 输出)。spec §6.1 上机实测口径。
+# vision 单价占位（按 deepseek 同档保守，可后填真实价）。
+DEFAULT_MANAGED_MODEL_PRICING: dict[str, tuple[float, float, float]] = {
+    "deepseek-v4-pro": (0.025, 3.0, 6.0),
+    "Qwen/Qwen3-VL-8B-Instruct": (0.025, 3.0, 6.0),
+}
+# 未知模型 fallback 单价（保守按 deepseek 三档）
+FALLBACK_MODEL_PRICING: tuple[float, float, float] = (0.025, 3.0, 6.0)
+# 全局默认日配额：¥5/天 = 5_000_000 微元
+DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN: int = 5_000_000
+# fail-closed：连续 N 次 usage 缺失 → 暂停该 (uid, model)
+MAX_CONSECUTIVE_USAGE_MISS = 3
+# fail-closed 保守封顶上下文上限（token）。✦ Codex BLOCKER：视觉模型不在 context_policy 的
+# EXACT_MODEL_TIERS → 会落 UNKNOWN_FALLBACK_TIER（非「该模型上下文上限」）→ 显式给视觉模型定锚；
+# 其余模型 _settle 回落 resolve_context_policy(model).effective_context_limit。
+MANAGED_FAILCLOSED_CEILING: dict[str, int] = {
+    "Qwen/Qwen3-VL-8B-Instruct": 32768,   # Qwen3-VL 基础上下文；× p_miss 作视觉调用 fail-closed 上界
+}
 DEFAULT_MANAGED_SEARCH_API_URL = "https://search.z0y0h.work/search"
 DEFAULT_MANAGED_CLIENT_TOKEN = "managed"
 MANAGED_CLIENT_TOKEN_FILENAME = "managed_client_token.txt"

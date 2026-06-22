@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -13,9 +14,12 @@ import httpx
 from openai import OpenAI
 
 from .config import Settings
+from . import metering  # 模块限定访问 metering.QuotaExceededError 等（reload 安全，见 _quota_notice 注释）
 from .report_quality import scan_placeholders, build_placeholder_grounding
 from .skill import SkillEngine
 from .stream_parsing import ThinkingStreamParser
+
+logger = logging.getLogger(__name__)
 
 
 Event = dict[str, object]
@@ -234,27 +238,38 @@ def extract_latest_review_candidate_from_messages(messages) -> str | None:
     return latest_candidate
 
 
+def _quota_notice(err) -> str:
+    # 用 metering.QuotaExceededError 模块限定访问（非拷贝名）：importlib.reload(metering) 会重建异常类，
+    # 拷贝名会与 wrapper 实抛的活类 isinstance 失配、误返回暂停消息（仅测试态 reload 触发）。
+    if isinstance(err, metering.QuotaExceededError):
+        return (f"今日额度已用尽（已用 ¥{err.used_micro/1_000_000:.2f} / "
+                f"上限 ¥{err.cap_micro/1_000_000:.2f}），明日 0 点（北京时间）恢复。")
+    return "审查模型暂时不可用（多次未取得用量计数已保护性暂停），请稍后再试。"
+
+
 class IndependentReviewAgent:
     """Independent S5 reviewer. A caller should hold the per-project lock while running."""
 
     MAX_ITERATIONS = 15
 
-    def __init__(self, skill_engine: SkillEngine, settings: Settings):
+    def __init__(self, skill_engine: SkillEngine, settings: Settings, uid: str = "local"):
         self.skill_engine = skill_engine
         self.settings = settings
+        self.uid = uid
 
-    def _build_client(self) -> OpenAI:
+    def _build_client(self):
         # Structured timeout (C4 / spec §7): bound connect/read/write/pool separately so a
         # provider that never sends a first byte can't pin the worker (and the review lock it
         # holds) for the full 120s. read=60 caps the no-first-token window per request.
         http_client = httpx.Client(
             timeout=httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=30.0)
         )
-        return OpenAI(
+        raw = OpenAI(
             api_key=self.settings.api_key,
             base_url=self.settings.api_base,
             http_client=http_client,
         )
+        return metering.wrap_client_for_billing(raw, uid=self.uid, settings=self.settings)
 
     def _resolve_model(self) -> str:
         if self.settings.mode == "managed":
@@ -474,12 +489,19 @@ class IndependentReviewAgent:
             }
             if self._should_send_explicit_tool_choice(model):
                 request_kwargs["tool_choice"] = "auto"
+            if self.settings.mode == "managed":
+                request_kwargs["stream_options"] = {"include_usage": True}   # 计费末包取 usage
 
             if is_cancelled():
                 yield from cancel_and_return(iteration)
                 return
             try:
                 response = client.chat.completions.create(**request_kwargs)
+            except (metering.QuotaExceededError, metering.ModelPausedError) as qe:
+                if store is not None and run_id is not None:
+                    store.set_errored(store_key, run_id, snapshot_now(iteration))
+                yield {"type": "error", "detail": _quota_notice(qe)}
+                return
             except Exception as exc:
                 if store is not None and run_id is not None:
                     store.set_errored(store_key, run_id, snapshot_now(iteration))
@@ -545,6 +567,14 @@ class IndependentReviewAgent:
                     store.set_errored(store_key, run_id, snapshot_now(iteration))
                 yield {"type": "error", "detail": f"模型调用失败：{str(exc)}"}
                 return
+            finally:
+                # 同步结算（✦ Codex BLOCKER 同 chat）：自然结束 / provider 异常 / 消费方中断
+                # (GeneratorExit) 一律关闭 response → MeteredManagedClient 在 finally 内按 last_usage
+                # 结算一次，缺失即 fail-closed，不留漏计后门。
+                try:
+                    response.close()
+                except Exception:
+                    logger.warning("metered review stream response.close() failed", exc_info=True)
             yield from drain(parser.flush())
 
             tool_calls = collected["tool_calls"]

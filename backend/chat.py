@@ -33,6 +33,7 @@ from .independent_review import (
     _REVIEW_SESSION_STORE,
     get_independent_review_lock,
 )
+from . import metering  # 用模块限定访问 metering.QuotaExceededError 等（见 __init__ 注释：reload 安全）
 from .models import SystemNotice
 from .search_pool import SearchRouter
 from .search_providers import (
@@ -56,6 +57,8 @@ from .trust_boundary import (
     ATTACHMENT_DATA_CLOSE,
     _neutralize_attachment_data_markers,
 )
+
+logger = logging.getLogger("backend.chat")
 
 try:
     import tiktoken
@@ -405,11 +408,17 @@ class ChatHandler:
         import httpx
 
         http_client = httpx.Client(timeout=120.0)
-        self.client = OpenAI(
+        raw_client = OpenAI(
             api_key=settings.api_key,
             base_url=settings.api_base,
             http_client=http_client,
         )
+        # managed → MeteredManagedClient（reserve/settle/fail-closed）；custom → 原样。
+        # 5 个调用点全用 self.client.chat.completions.create，包裹后零改动自动计费。
+        # 全程用 metering.X 模块限定访问（而非 `from .metering import X` 拷贝名）：importlib.reload(metering)
+        # 会在同一模块对象内重建异常类，拷贝名会变陈旧、与 wrapper 实抛的活类 isinstance 失配；模块属性
+        # 访问总取当前类，reload 安全（仅测试态 reload 触发，生产无 reload）。
+        self.client = metering.wrap_client_for_billing(raw_client, uid=self.uid, settings=settings)
 
         from backend.material_conversion import MaterialConverter
 
@@ -506,6 +515,14 @@ class ChatHandler:
         if not raw_message:
             return "API调用失败"
         return f"API调用失败: {raw_message}"
+
+    def _format_quota_error(self, err) -> str:
+        if isinstance(err, metering.QuotaExceededError):
+            used = err.used_micro / 1_000_000
+            cap = err.cap_micro / 1_000_000
+            return (f"今日额度已用尽（已用 ¥{used:.2f} / 上限 ¥{cap:.2f}），"
+                    f"明日 0 点（北京时间）恢复。如需提额请联系管理员。")
+        return "当前模型暂时不可用（多次未取得用量计数已保护性暂停），请稍后再试或联系管理员。"
 
     def _get_active_model_name(self) -> str:
         if self.settings.mode == "managed":
@@ -2786,7 +2803,7 @@ class ChatHandler:
                 yield {"type": "error", "data": str(exc)}
                 return
 
-            include_usage_requested = True
+            include_usage_requested = self.settings.mode == "managed"
             for retry in range(2):
                 request_kwargs = {
                     "model": active_model,
@@ -2809,6 +2826,10 @@ class ChatHandler:
                 try:
                     response = self.client.chat.completions.create(**request_kwargs)
                     break
+                except (metering.QuotaExceededError, metering.ModelPausedError) as qe:
+                    # 配额/暂停异常不进重试、不当 provider error：直接给用户友好提示并收尾。
+                    yield {"type": "error", "data": self._format_quota_error(qe)}
+                    return
                 except Exception as e:
                     if include_usage_requested and self._should_retry_stream_without_usage(e):
                         include_usage_requested = False
@@ -2918,6 +2939,15 @@ class ChatHandler:
                     ),
                 }
                 return
+            finally:
+                # 任何退出（提前 break / 异常 / return）都同步关闭 response，触发 wrapper 的
+                # finally→settle 恰好一次——否则结算延到 GC、下一次 create 的 reserve 会在结算前发生（漏计/少算）。
+                # managed 下 response 是 _metered_stream 生成器、custom 下是 OpenAI Stream，二者都有 .close()；
+                # 已结束的生成器再 close 是 no-op、不会二次 settle。
+                try:
+                    response.close()
+                except Exception:
+                    logger.warning("metered stream response.close() failed", exc_info=True)
 
             yield from emit_parsed_stream_events(parser.flush())
             if self._looks_like_self_correction_loop(accumulated):
@@ -3265,6 +3295,11 @@ class ChatHandler:
                 try:
                     response = self.client.chat.completions.create(**request_kwargs)
                     break
+                except (metering.QuotaExceededError, metering.ModelPausedError) as qe:
+                    # Codex BLOCKER：ChatResponse.system_notices 是 List[SystemNotice] 对象、非 List[str]；
+                    # 友好提示放 content，notices 置 None（避 pydantic 校验失败）。
+                    return {"content": self._format_quota_error(qe), "token_usage": None,
+                            "system_notices": None}
                 except Exception as e:
                     if retry < 1:
                         time.sleep(2)

@@ -55,6 +55,13 @@ def init_db() -> None:
                 expires_at TEXT NOT NULL, created_ip TEXT, user_agent TEXT, last_seen TEXT);
             CREATE INDEX IF NOT EXISTS idx_sessions_uid ON sessions(uid);
             CREATE TABLE IF NOT EXISTS app_config(key TEXT PRIMARY KEY NOT NULL, value TEXT);
+            CREATE TABLE IF NOT EXISTS usage_daily(
+                uid TEXT NOT NULL, day TEXT NOT NULL,
+                cost_micro_yuan INTEGER NOT NULL DEFAULT 0,
+                cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(uid, day));
             """
         )
 
@@ -187,3 +194,45 @@ def set_config(key, value) -> None:
 def seed_config_if_absent(key, value) -> None:
     with _db() as conn:
         conn.execute("INSERT OR IGNORE INTO app_config(key,value) VALUES(?,?)", (key, value))
+
+
+def add_usage(uid, day, cost_micro_yuan, hit, miss, output) -> None:
+    # 原子累加：首行 INSERT、已存在则 DO UPDATE 累加（spec §5.4）。
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO usage_daily(uid,day,cost_micro_yuan,cache_hit_tokens,cache_miss_tokens,output_tokens)"
+            " VALUES(?,?,?,?,?,?)"
+            " ON CONFLICT(uid,day) DO UPDATE SET"
+            "   cost_micro_yuan=cost_micro_yuan+excluded.cost_micro_yuan,"
+            "   cache_hit_tokens=cache_hit_tokens+excluded.cache_hit_tokens,"
+            "   cache_miss_tokens=cache_miss_tokens+excluded.cache_miss_tokens,"
+            "   output_tokens=output_tokens+excluded.output_tokens",
+            (uid, day, int(cost_micro_yuan), int(hit), int(miss), int(output)))
+
+
+def get_usage_today(uid, day) -> dict:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT cost_micro_yuan,cache_hit_tokens,cache_miss_tokens,output_tokens"
+            " FROM usage_daily WHERE uid=? AND day=?", (uid, day)).fetchone()
+    if row is None:
+        return {"cost_micro_yuan": 0, "cache_hit_tokens": 0, "cache_miss_tokens": 0, "output_tokens": 0}
+    return dict(row)
+
+
+def set_user_daily_cap_micro(uid, cap_micro_yuan) -> None:
+    """None = 清除 per-user override（退回全局/默认）。"""
+    with _db() as conn:
+        conn.execute("UPDATE users SET daily_cost_micro_yuan=? WHERE uid=?",
+                     (None if cap_micro_yuan is None else int(cap_micro_yuan), uid))
+
+
+def get_effective_daily_cap_micro(uid) -> int:
+    from backend.config import DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN
+    rec = _get_user_row("uid", uid)
+    if rec is not None and rec.get("daily_cost_micro_yuan") is not None:
+        return int(rec["daily_cost_micro_yuan"])
+    g = get_config("global_daily_cap_micro_yuan")
+    if g is not None:
+        return int(g)
+    return DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN

@@ -41,6 +41,23 @@ class _FakeMessage:
 class IndependentReviewAgentTests(unittest.TestCase):
     def setUp(self):
         self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+        import os, tempfile
+        from backend import accounts
+        self._billing_tmp = tempfile.TemporaryDirectory(); self.addCleanup(self._billing_tmp.cleanup)
+        self._prev_data_root = os.environ.get("CRA_DATA_ROOT")
+        os.environ["CRA_DATA_ROOT"] = self._billing_tmp.name
+        self.addCleanup(self._restore_data_root)
+        accounts.init_db()
+        accounts.set_config("global_daily_cap_micro_yuan", str(10**15))
+        import backend.metering as _m
+        _m._miss_counter.clear(); self.addCleanup(_m._miss_counter.clear)
+        self._pause_patch = mock.patch.object(_m, "MAX_CONSECUTIVE_USAGE_MISS", 10**9)
+        self._pause_patch.start(); self.addCleanup(self._pause_patch.stop)
+
+    def _restore_data_root(self):
+        import os
+        if self._prev_data_root is None: os.environ.pop("CRA_DATA_ROOT", None)
+        else: os.environ["CRA_DATA_ROOT"] = self._prev_data_root
 
     def _make_settings(self, projects_dir: Path, **overrides):
         payload = {
@@ -1678,6 +1695,74 @@ class ReviewSessionStoreTests(unittest.TestCase):
         self.assertFalse(self.store.finalize_orphan_running("s", "WRONG", {"messages": ["x"]}))
         self.store.discard("s", "run-s")
         self.assertFalse(self.store.finalize_orphan_running("s", "run-s", {"messages": ["x"]}))
+
+
+class B2ReviewBillingTests(IndependentReviewAgentTests):
+    def test_review_agent_managed_client_is_metered(self):
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        agent.settings.mode = "managed"; agent.uid = "u1"
+        from backend.metering import MeteredManagedClient
+        self.assertIsInstance(agent._build_client(), MeteredManagedClient)
+
+    def test_review_agent_custom_client_is_raw(self):
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        agent.settings.mode = "custom"; agent.uid = "u1"
+        from backend.metering import MeteredManagedClient
+        self.assertNotIsInstance(agent._build_client(), MeteredManagedClient)
+
+    def test_review_agent_accepts_uid_param(self):
+        # __init__ 新增 uid（默认 "local" 向后兼容既有构造）
+        from backend.independent_review import IndependentReviewAgent
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        a2 = IndependentReviewAgent(skill_engine=engine, settings=agent.settings, uid="u9")
+        self.assertEqual(a2.uid, "u9")
+
+    def test_review_run_meters_usage_and_requests_include_usage(self):
+        # ✦ NIT：B2 验收门「审查」覆盖——run() 经 metered client、请求 include_usage、usage_daily 记**真** usage
+        # （非 fail-closed 封顶）。复用 test_run_emits_progress_events 已验证的 5-response 成功路径，逐条补真 usage 末包。
+        from types import SimpleNamespace
+        from backend import accounts
+        import backend.metering as m
+        from backend.independent_review import CANONICAL_REVIEW_PATH
+        engine, project, project_dir, agent = self._make_engine_project_and_agent()
+        agent.settings.mode = "managed"; agent.uid = "u1"
+        store, run_id = self._claim_store(project)
+
+        def _with_usage(stream):   # builder 默认不带 usage → 补真 usage 末包（choices=[] 解析器透明跳过）
+            chunks = list(stream)
+            chunks.append(SimpleNamespace(choices=[], usage=SimpleNamespace(
+                prompt_tokens=10, prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=10, completion_tokens=5)))
+            return iter(chunks)
+
+        responses = [_with_usage(s) for s in (
+            self._stream_single_tool_call("read_file", {"file_path": "plan/data-log.md"}, "c1"),
+            self._stream_single_tool_call("read_file", {"file_path": "plan/analysis-notes.md"}, "c2"),
+            self._stream_single_tool_call("read_file", {"file_path": "content/report_draft_v1.md"}, "c3"),
+            self._stream_single_tool_call("write_file",
+                {"file_path": CANONICAL_REVIEW_PATH, "content": self._complete_review_text()}, "c4"),
+            self._stream_text("审查完成"),
+        )]
+        with mock.patch("backend.independent_review.OpenAI") as mo:
+            mo.return_value.chat.completions.create.side_effect = responses
+            list(agent.run(project["id"], draft_word_count=100, store=store, run_id=run_id))
+            create = mo.return_value.chat.completions.create
+            kwargs = create.call_args.kwargs
+        self.assertEqual(kwargs.get("stream_options"), {"include_usage": True})
+        # 精确计账（✦ Codex NIT 1）：5 条 response 各被完整消费 → metered stream 在各自 finally
+        # 按末包 usage 恰好结算一次（无重复、无遗漏）。每条末包 miss=10 / out=5，5 次累加：
+        #   cache_miss_tokens == 5×10 == 50；output_tokens == 5×5 == 25。
+        # 底层 raw create 调用 5 次（5 个流式响应全部走到 settle 路径，已 E2E 实测确认）。
+        self.assertEqual(create.call_count, 5)
+        row = accounts.get_usage_today("u1", m.today_shanghai())
+        self.assertEqual(row["cache_miss_tokens"], 50)   # 真 usage 精确累加，非 fail-closed 256k 封顶
+        self.assertEqual(row["output_tokens"], 25)
+
+
+# ✦ Codex NIT：置空继承的 test_（pattern: test_chat_runtime.py:14364）
+for _inh in dir(IndependentReviewAgentTests):
+    if _inh.startswith("test_") and _inh not in B2ReviewBillingTests.__dict__:
+        setattr(B2ReviewBillingTests, _inh, None)
+del _inh
 
 
 if __name__ == "__main__":
