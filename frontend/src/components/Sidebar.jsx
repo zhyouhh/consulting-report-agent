@@ -81,19 +81,23 @@ export default function Sidebar({
             {connection.helper}
           </div>
         )}
-        {/* 桌面/本地模式（uid==="local"，合成账号、无真实会话）不显示账号块——
-            否则点登出会清掉 authUser 把用户困在登录页（Codex review）。仅 web 真实用户显示。 */}
-        {authUser && authUser.uid !== 'local' && (
+        {/* 登出按钮只对 web 真实用户显示——桌面/本地（uid==="local"，合成账号）点登出会清掉
+            authUser 把用户困在登录页（Codex review）。但今日额度对 local 同样适用（local 经
+            managed 计费、默认 ¥5/天 cap、会被 reserve 拦），故额度行只要 daily_cap_yuan 是数字
+            就显示（含 local），与登出门解耦。 */}
+        {authUser && (authUser.uid !== 'local' || typeof authUser.daily_cap_yuan === 'number') && (
           <div className="mb-2 px-3 py-2 rounded-lg bg-[#15162d] border border-[#2f3158]">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-[#e2e2f0] truncate">{authUser.username}</span>
-              <button
-                onClick={async () => { try { await axios.post('/api/auth/logout') } catch (_) { /* ignore */ } onLoggedOut?.() }}
-                className="text-[11px] text-[#8888a8] hover:text-[#e2e2f0] ml-2"
-              >登出</button>
-            </div>
+            {authUser.uid !== 'local' && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-[#e2e2f0] truncate">{authUser.username}</span>
+                <button
+                  onClick={async () => { try { await axios.post('/api/auth/logout') } catch (_) { /* ignore */ } onLoggedOut?.() }}
+                  className="text-[11px] text-[#8888a8] hover:text-[#e2e2f0] ml-2"
+                >登出</button>
+              </div>
+            )}
             {typeof authUser.daily_cap_yuan === 'number' && (
-              <div className="text-xs text-gray-400 mt-1">
+              <div className={`text-xs text-gray-400 ${authUser.uid !== 'local' ? 'mt-1' : ''}`}>
                 {quotaLabel(authUser.today_cost_yuan ?? 0, authUser.daily_cap_yuan)}
               </div>
             )}

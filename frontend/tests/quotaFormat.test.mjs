@@ -37,6 +37,6 @@ test('quotaRatio never returns NaN and stays within [0,1]', () => {
     assert.ok(r >= 0 && r <= 1, `quotaRatio(${String(u)},${String(c)})=${r} 应落在 [0,1]`);
   }
   assert.equal(quotaRatio(NaN, 5), 0);   // 非 finite used → 0
-  assert.equal(quotaRatio('3', 5), 0);   // 与 formatToken 一致：字符串非 finite → 0（不隐式转换）
+  assert.equal(quotaRatio('3', 5), 0);   // 与 formatYuan 一致：字符串非 finite → 0（不隐式转换）
   assert.equal(quotaRatio(-2, 5), 0);    // 负 used clamp 到 0
 });
