@@ -154,6 +154,49 @@ class AuthFlowTests(AuthApiTestBase):
         self.assertIsNone(accounts.get_session_uid(other))                   # other revoked
 
 
+class MustChangePasswordEnforcementTests(AuthApiTestBase):
+    # B3 Task 14：must_change_password 路由级强制。标志为真时业务路由 403，
+    # 自救路由（me/change-password/logout）仍可用，改密后业务路由解除 403。
+    def test_must_change_password_blocks_business_routes(self):
+        from backend import accounts
+        uid = accounts.create_user("grace", "pw-123456", must_change_password=True)
+        token = accounts.create_session(uid)
+        self.client.cookies.set("cra_session", token)
+        org = {"origin": self._ALLOWED_ORIGIN}
+        # path-param 项目路由（经 require_project 默认依赖）被拦
+        self.assertEqual(self.client.get("/api/projects").status_code, 403)
+        # settings（显式串依赖）被拦
+        self.assertEqual(self.client.get("/api/settings").status_code, 403)
+        # body-project 路由也被拦（R1-BLOCKER3：显式串依赖才覆盖）
+        self.assertEqual(self.client.post("/api/models/list", headers=org,
+                                          json={"api_key": "x", "api_base": "https://api.openai.com/v1"}).status_code, 403)
+        self.assertEqual(self.client.post("/api/chat/stream", headers=org,
+                                          json={"project_id": "x", "message_text": "hi"}).status_code, 403)
+        self.assertEqual(self.client.post("/api/chat", headers=org,
+                                          json={"project_id": "x", "message_text": "hi"}).status_code, 403)
+        # me / change-password 仍可用（否则无法自救）
+        self.assertEqual(self.client.get("/api/auth/me").status_code, 200)
+        self.assertEqual(self.client.post("/api/auth/logout", headers=org).status_code, 200)
+
+    def test_must_change_password_does_not_block_normal_user(self):
+        # 普通用户（标志为假）业务路由不被误挡——确认豁免逻辑只看标志、不一刀切。
+        from backend import accounts
+        uid = accounts.create_user("ivan", "pw-123456", must_change_password=False)
+        token = accounts.create_session(uid)
+        self.client.cookies.set("cra_session", token)
+        self.assertNotEqual(self.client.get("/api/projects").status_code, 403)
+
+    def test_after_change_password_business_routes_unblocked(self):
+        from backend import accounts
+        uid = accounts.create_user("heidi", "pw-123456", must_change_password=True)
+        token = accounts.create_session(uid)
+        self.client.cookies.set("cra_session", token)
+        self.client.post("/api/auth/change-password",
+                         headers={"origin": self._ALLOWED_ORIGIN},
+                         json={"old_password": "pw-123456", "new_password": "new-123456"})
+        self.assertNotEqual(self.client.get("/api/projects").status_code, 403)
+
+
 class DesktopLocalTests(AuthApiTestBase):
     def setUp(self):
         super().setUp(); self.m.app.state.auth_required = False

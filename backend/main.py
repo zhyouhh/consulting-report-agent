@@ -285,7 +285,18 @@ def get_current_uid(request: Request) -> str:
     return uid
 
 
-def get_current_admin(uid: str = Depends(get_current_uid)) -> str:
+def require_password_current(uid: str = Depends(get_current_uid)) -> str:
+    # B3 Task 14：must_change_password 为真时，对业务路由 403，前端据此弹强制改密屏。
+    # 桌面 local（auth off）无此约束；豁免集（me/change-password/logout/health）不串本依赖。
+    if not getattr(app.state, "auth_required", True):
+        return uid   # 桌面 local 无此约束
+    user = accounts.get_user_by_uid(uid)
+    if user and user.get("must_change_password"):
+        raise HTTPException(status_code=403, detail="must_change_password")
+    return uid
+
+
+def get_current_admin(uid: str = Depends(require_password_current)) -> str:
     rec = accounts.get_user_by_uid(uid)
     if not rec or not rec["is_admin"]:
         raise HTTPException(status_code=403, detail="需要管理员权限")
@@ -301,7 +312,7 @@ class ProjectScope:
     lock_key: str
 
 
-def require_project(project_id: str, uid: str = Depends(get_current_uid)) -> ProjectScope:
+def require_project(project_id: str, uid: str = Depends(require_password_current)) -> ProjectScope:
     eng = get_skill_engine(uid)
     rec = eng.get_project_record(project_id)   # accepts id OR name alias
     if rec is None:
@@ -536,7 +547,7 @@ def admin_set_allowed_hosts(body: AllowedHostsBody, admin_uid: str = Depends(get
 
 
 @app.get("/api/settings")
-async def get_settings(uid: str = Depends(get_current_uid)):
+async def get_settings(uid: str = Depends(require_password_current)):
     data = load_settings(uid).model_dump(exclude={"managed_client_token"})
     data["api_key"] = "***" if data["api_key"] else ""
     data["custom_api_key"] = "***" if data.get("custom_api_key") else ""
@@ -558,7 +569,7 @@ class SettingsUpdate(BaseModel):
 
 
 @app.post("/api/settings")
-async def update_settings(update: SettingsUpdate, uid: str = Depends(get_current_uid)):
+async def update_settings(update: SettingsUpdate, uid: str = Depends(require_password_current)):
     from backend import url_guard
     if (update.mode or "") == "custom":
         # 保存 custom 前即时校验 base：https + 白名单主机 + 解析到公网；不合法不落盘。
@@ -601,7 +612,7 @@ class WorkspaceFilesRequest(BaseModel):
 
 
 @app.post("/api/models/list")
-async def list_models(request: ModelsRequest, uid: str = Depends(get_current_uid)):
+async def list_models(request: ModelsRequest, uid: str = Depends(require_password_current)):
     from openai import OpenAI
     from backend import url_guard
 
@@ -643,12 +654,12 @@ async def select_workspace_files(request: WorkspaceFilesRequest, uid: str = Depe
 
 
 @app.get("/api/projects")
-async def list_projects(uid: str = Depends(get_current_uid)):
+async def list_projects(uid: str = Depends(require_password_current)):
     return get_skill_engine(uid).list_projects()
 
 
 @app.post("/api/projects")
-async def create_project(info: ProjectInfo, request: Request, uid: str = Depends(get_current_uid)):
+async def create_project(info: ProjectInfo, request: Request, uid: str = Depends(require_password_current)):
     if getattr(request.app.state, "auth_required", True):   # web mode
         # 按「字段是否发送」拒绝，而非按值真假——web 客户端根本不该带这两个字段（更清晰的契约）。
         sent = info.model_fields_set
@@ -743,7 +754,7 @@ async def delete_material(material_id: str, scope: ProjectScope = Depends(requir
 
 @app.post("/api/chat")
 @limiter.limit("20/minute")
-async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(get_current_uid)):
+async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(require_password_current)):
     # scope 解析必须在 try 外：require_project 的 404（非属主/不存在）不能被下面的
     # 宽泛 except Exception 吞成 500（破坏租户隔离 404 契约，Codex T11a review）。
     logger.info(f"Chat request for project: {chat_request.project_id}")
@@ -1196,7 +1207,7 @@ async def clear_conversation(scope: ProjectScope = Depends(require_project)):
 
 @app.post("/api/chat/stream")
 @limiter.limit("20/minute")
-def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(get_current_uid)):
+def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(require_password_current)):
     # 归属校验在函数体（StreamingResponse 之前）：非属主 → require_project 抛 404，
     # 而不是把 404 埋进 SSE 流里。scope 解析失败直接以 HTTP 错误冒泡。
     scope = require_project(chat_request.project_id, uid)
