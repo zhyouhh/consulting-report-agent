@@ -186,6 +186,19 @@ class MustChangePasswordEnforcementTests(AuthApiTestBase):
         self.client.cookies.set("cra_session", token)
         self.assertNotEqual(self.client.get("/api/projects").status_code, 403)
 
+    def test_must_change_password_blocks_desktop_bridge_routes_before_503(self):
+        # 桌面桥端点也串 require_password_current：强制层在 require_desktop_bridge 的 503 之前生效，
+        # 故 must_change_password 用户拿 403（detail=must_change_password）而非 503（codex NIT）。
+        from backend import accounts
+        uid = accounts.create_user("judy", "pw-123456", must_change_password=True)
+        token = accounts.create_session(uid)
+        self.client.cookies.set("cra_session", token)
+        r = self.client.post("/api/system/select-workspace-files",
+                             headers={"origin": self._ALLOWED_ORIGIN},
+                             json={"workspace_dir": "/tmp"})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json()["detail"], "must_change_password")
+
     def test_after_change_password_business_routes_unblocked(self):
         from backend import accounts
         uid = accounts.create_user("heidi", "pw-123456", must_change_password=True)

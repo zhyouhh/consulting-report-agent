@@ -640,14 +640,14 @@ async def list_models(request: ModelsRequest, uid: str = Depends(require_passwor
 
 
 @app.post("/api/system/select-workspace-folder")
-async def select_workspace_folder(uid: str = Depends(get_current_uid)):
+async def select_workspace_folder(uid: str = Depends(require_password_current)):
     bridge = require_desktop_bridge()
     selected_path = await asyncio.to_thread(bridge.select_workspace_folder)
     return {"path": selected_path or ""}
 
 
 @app.post("/api/system/select-workspace-files")
-async def select_workspace_files(request: WorkspaceFilesRequest, uid: str = Depends(get_current_uid)):
+async def select_workspace_files(request: WorkspaceFilesRequest, uid: str = Depends(require_password_current)):
     bridge = require_desktop_bridge()
     selected_paths = await asyncio.to_thread(bridge.select_workspace_files, request.workspace_dir)
     return {"paths": selected_paths or []}
