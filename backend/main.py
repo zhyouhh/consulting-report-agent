@@ -160,6 +160,48 @@ _desktop_bridge = None
 SESSION_COOKIE = "cra_session"
 
 
+# —— per-username 登录限流（反撞库；补 per-IP slowapi，IP 轮换绕不过）——
+import time as _time
+
+_LOGIN_FAILS: dict[str, list[float]] = {}
+_LOGIN_FAILS_LOCK = threading.Lock()
+_LOGIN_WINDOW_SEC = 300.0
+_LOGIN_MAX_FAILS = 10
+
+
+def _norm_login_key(username: str) -> str:
+    return (username or "").strip().casefold()   # trim + casefold，键归一
+
+
+def _prune_login_fails(now: float) -> None:
+    # 顺带清空过期键，防进程内存随用户名爆涨（持锁内调用）。
+    for k in list(_LOGIN_FAILS):
+        kept = [t for t in _LOGIN_FAILS[k] if now - t < _LOGIN_WINDOW_SEC]
+        if kept:
+            _LOGIN_FAILS[k] = kept
+        else:
+            del _LOGIN_FAILS[k]
+
+
+def _login_throttled(username: str) -> bool:
+    key, now = _norm_login_key(username), _time.monotonic()
+    with _LOGIN_FAILS_LOCK:
+        _prune_login_fails(now)
+        return len(_LOGIN_FAILS.get(key, [])) >= _LOGIN_MAX_FAILS
+
+
+def _record_login_fail(username: str) -> None:
+    key, now = _norm_login_key(username), _time.monotonic()
+    with _LOGIN_FAILS_LOCK:
+        _prune_login_fails(now)
+        _LOGIN_FAILS.setdefault(key, []).append(now)
+
+
+def _clear_login_fails(username: str) -> None:
+    with _LOGIN_FAILS_LOCK:
+        _LOGIN_FAILS.pop(_norm_login_key(username), None)
+
+
 def register_desktop_bridge(bridge):
     global _desktop_bridge
     _desktop_bridge = bridge
@@ -265,11 +307,15 @@ def auth_register(request: Request, payload: RegisterPayload):
 @app.post("/api/auth/login")
 @limiter.limit("10/minute")
 def auth_login(request: Request, payload: LoginPayload, response: Response):
+    if _login_throttled(payload.username):
+        raise HTTPException(status_code=429, detail="登录尝试过于频繁，请 5 分钟后再试。")
     if not accounts.verify_user_password(payload.username, payload.password):
+        _record_login_fail(payload.username)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     rec = accounts.get_user_by_username(payload.username)
     if rec["disabled"]:
         raise HTTPException(status_code=403, detail="账号已停用")
+    _clear_login_fails(payload.username)
     token = accounts.create_session(rec["uid"], ip=request.client.host if request.client else "",
                                     ua=request.headers.get("user-agent", ""))
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",

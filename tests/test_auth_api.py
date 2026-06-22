@@ -198,6 +198,33 @@ class BootstrapSafetyTests(AuthApiTestBase):
                 self.m.assert_safe_startup(auth_required=True, host="0.0.0.0")
 
 
+class LoginThrottleTests(AuthApiTestBase):
+    def test_login_throttle_pure_logic_and_casefold(self):
+        m = self.m
+        m._clear_login_fails("victim")
+        for _ in range(m._LOGIN_MAX_FAILS):
+            m._record_login_fail("victim")
+        self.assertTrue(m._login_throttled("victim"))
+        self.assertTrue(m._login_throttled("  Victim  "))   # trim+casefold 共享计数
+        m._clear_login_fails("VICTIM")
+        self.assertFalse(m._login_throttled("victim"))
+
+    def test_login_per_username_throttle_endpoint(self):
+        m = self.m
+        m.limiter.enabled = False   # 关 per-IP slowapi，隔离出 username 维度
+        try:
+            self.client.post("/api/auth/register",
+                             json={"username": "victim", "password": "right-123456", "invite_code": "JOIN"})
+            for _ in range(m._LOGIN_MAX_FAILS):
+                self.client.post("/api/auth/login",
+                                 json={"username": "victim", "password": "wrong-xxxxx"})
+            resp = self.client.post("/api/auth/login",
+                                    json={"username": "victim", "password": "wrong-xxxxx"})
+            self.assertEqual(resp.status_code, 429)
+        finally:
+            m.limiter.enabled = True
+
+
 class MeCostFieldsTests(AuthApiTestBase):
     def test_me_includes_today_cost_and_cap(self):
         self.client.post("/api/auth/register",
