@@ -9,6 +9,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -445,6 +446,79 @@ def admin_get_allowed_hosts(admin_uid: str = Depends(get_current_admin)):
         "env_hosts": sorted(url_guard.env_allowed_hosts()),           # env 注入（只读）
         "extra_hosts": accounts.get_custom_api_extra_hosts(),         # app_config（admin 可编辑）
     }
+
+
+class AdminPasswordBody(BaseModel):
+    new_password: str = Field(min_length=8, max_length=256)
+
+class AdminCapBody(BaseModel):
+    daily_cost_yuan: Optional[str] = None   # 字符串入参，Decimal 解析免 float 漂移；null=回退全局
+
+class AdminDisabledBody(BaseModel):
+    disabled: bool
+
+class AllowedHostsBody(BaseModel):
+    hosts: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/admin/users/{uid}/password")
+def admin_set_password(uid: str, body: AdminPasswordBody, admin_uid: str = Depends(get_current_admin)):
+    if accounts.get_user_by_uid(uid) is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    accounts.admin_reset_password(uid, body.new_password)
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/users/{uid}/cap")
+def admin_set_cap(uid: str, body: AdminCapBody, admin_uid: str = Depends(get_current_admin)):
+    if accounts.get_user_by_uid(uid) is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if body.daily_cost_yuan is None or body.daily_cost_yuan.strip() == "":
+        micro = None
+    else:
+        try:
+            yuan = Decimal(body.daily_cost_yuan.strip())
+        except (InvalidOperation, ValueError):
+            raise HTTPException(status_code=400, detail="额度格式非法")
+        if not yuan.is_finite():   # 拒 NaN/Infinity（Decimal 不当解析错误）
+            raise HTTPException(status_code=400, detail="额度格式非法")
+        if yuan < 0:
+            raise HTTPException(status_code=400, detail="额度不能为负")
+        micro = int(yuan * 1_000_000)
+    accounts.set_user_daily_cap_micro(uid, micro)
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/users/{uid}/disabled")
+def admin_set_disabled(uid: str, body: AdminDisabledBody, admin_uid: str = Depends(get_current_admin)):
+    target = accounts.get_user_by_uid(uid)
+    if target is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    # 防锁死——不许禁用自己；不许禁用最后一个在用 admin
+    if body.disabled and uid == admin_uid:
+        raise HTTPException(status_code=400, detail="不能禁用当前登录的管理员")
+    if body.disabled and target.get("is_admin"):
+        active_admins = [u for u in accounts.list_all_users() if u["is_admin"] and not u["disabled"]]
+        if len(active_admins) <= 1:
+            raise HTTPException(status_code=400, detail="不能禁用最后一个管理员")
+    accounts.set_user_disabled(uid, body.disabled)
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/invite-code/rotate")
+def admin_rotate_invite(admin_uid: str = Depends(get_current_admin)):
+    return {"invite_code": accounts.rotate_invite_code()}
+
+
+@app.post("/api/admin/allowed-hosts")
+def admin_set_allowed_hosts(body: AllowedHostsBody, admin_uid: str = Depends(get_current_admin)):
+    cleaned = [h.strip().lower() for h in body.hosts if h and h.strip()]
+    bad = [h for h in cleaned if not url_guard.is_valid_hostname(h)]   # 拒 scheme/port/path/通配符/空白
+    if bad:
+        raise HTTPException(status_code=400, detail=f"非法域名：{', '.join(bad)}（只填主机名，如 my.llm.cn）")
+    accounts.set_custom_api_extra_hosts(cleaned)
+    url_guard.set_runtime_allowed_hosts(accounts.get_custom_api_extra_hosts())  # 即时刷新，无需重启
+    return {"extra_hosts": accounts.get_custom_api_extra_hosts()}
 
 
 @app.get("/api/settings")
