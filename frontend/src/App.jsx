@@ -48,8 +48,18 @@ function App() {
 
   useEffect(() => {
     setUnauthedHandler(() => setAuthUser(null))
-    axios.get('/api/auth/me').then((r) => { setAuthUser(r.data); return initializeApp() }).catch(() => {}).finally(() => setAuthChecked(true))
+    axios.get('/api/auth/me').then((r) => { setAuthUser(r.data) }).catch(() => {}).finally(() => setAuthChecked(true))
   }, [])
+
+  // 主界面数据初始化（项目/设置）effect 驱动，按 must_change_password gate（codex NIT 1）：
+  // 强制改密用户登录后，业务路由会被后端 403（Phase 4 强制）→ 若此时 initializeApp 会闪
+  // 「加载项目列表失败」错误弹窗。故只在「已登录且无需强制改密」时才加载；改密成功刷新
+  // authUser（must_change_password 变 false）后此 effect 重跑，这时才加载主界面。
+  useEffect(() => {
+    if (authUser && !authUser.must_change_password) {
+      initializeApp()
+    }
+  }, [authUser])
 
   useEffect(() => {
     activeProjectRef.current = currentProjectId
@@ -240,7 +250,8 @@ function App() {
   }
 
   if (!authChecked) return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
-  if (!authUser) return <Login onAuthed={(u) => { setAuthUser(u); initializeApp() }} />
+  // 登录成功只 setAuthUser；初始化交给 authUser effect（按 must_change_password gate，codex NIT 1）。
+  if (!authUser) return <Login onAuthed={(u) => { setAuthUser(u) }} />
 
   // B3 Task 17：首次登录强制改密——登录后、主界面前的硬门。改完刷新 authUser 才放行；
   // 不可关（无 onClose）。后端 Task 14 已对业务路由 403 双保险。
@@ -299,7 +310,7 @@ function App() {
             onDropPendingReviewTriggers={(triggerType) => chatPanelRef.current?.dropPendingReviewTriggers(triggerType)}
           />
         )}
-        {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
+        {showAdmin && authUser?.is_admin && <AdminPanel onClose={() => setShowAdmin(false)} />}
       </div>
     </ErrorBoundary>
   )
