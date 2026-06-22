@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react'
 import axios from 'axios'
 
+// 默认代理地址仅作只读展示——服务端只读、提交体不再发送 managed_base_url（B3 Task 18）。
+const MANAGED_BASE_URL_DISPLAY = 'https://newapi.z0y0h.work/client/v1'
+
 const defaultForm = {
   mode: 'managed',
-  managed_base_url: 'https://newapi.z0y0h.work/client/v1',
   managed_model: 'deepseek-v4-pro',
   custom_api_base: '',
   custom_api_key: '',
@@ -22,7 +24,6 @@ export default function SettingsModal({ onClose, onSaved }) {
     axios.get('/api/settings').then(res => {
       setForm({
         mode: res.data.mode || 'managed',
-        managed_base_url: res.data.managed_base_url || defaultForm.managed_base_url,
         managed_model: res.data.managed_model || defaultForm.managed_model,
         custom_api_base: res.data.custom_api_base || '',
         custom_api_key: res.data.custom_api_key || '',
@@ -133,7 +134,7 @@ export default function SettingsModal({ onClose, onSaved }) {
             <>
               <label className="block text-sm text-[#8f93c9] mb-1">默认代理地址</label>
               <input
-                value={form.managed_base_url}
+                value={MANAGED_BASE_URL_DISPLAY}
                 readOnly
                 className="w-full bg-[#191b34] border border-[#34365c] text-[#cfd3ff] rounded px-3 py-2 mb-3"
               />

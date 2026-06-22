@@ -457,6 +457,7 @@ const ChatPanel = forwardRef(function ChatPanel({
     try {
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildChatRequest({
           projectId: requestProjectId,
