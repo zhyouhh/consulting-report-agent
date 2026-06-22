@@ -1,8 +1,10 @@
 # Current Worklist
 
-最后更新：2026-06-21（**N7 统一审查 + 去 AI 味（= W2-A）✅ 实施完成**——两审查合并成一个「独立审查」+ 维度⑤语言专业性·去 AI 味（吸收 Humanizer-zh 可迁移规则）+ 占位符纯 Python 扫描 grounding + 删整条 lint/PowerShell 审查路径，审查路径自此纯 Python、零 PowerShell；**subagent-driven 实现，每 commit 后 Codex review + 收尾期 spec/quality 双轨独立 review（铁律「不合并」）全 APPROVED**（含 Task 5 计划内偏离被 Codex 独立判定 valid & necessary、Task 7+8 原子删 41 文件 −1797 行；收尾 spec 轨挖出维度⑤黑名单被压缩、已忠实转写 spec §3.3 全 literal）；后端 **1209 passed / 4 mac-realpath 环境差异**、前端 **327 passed**、`npm run build` 绿；**分支 `feat/n7-unified-review-deai` 未 push / 未 merge main**。cutover：`docs/superpowers/cutover_report_2026-06-21_n7-unified-review-deai.md`。**下一步：用户决定 push/merge；之后 W2-B 多租户 + W2-C 部署/剩余去 Windows 化**。详见下方 N7 条。
+最后更新：2026-06-21（**W2-B 多租户化：spec + B1 plan 全部 Codex APPROVED**——W2 web 化 brainstorm 拍板**「真多用户产品」**（**推翻旧『仅熟人/不做开放注册』scope**，见下方 🟢 段订正）：用户名+密码、邀请码自助注册、per-user 密码/API 隔离、后台管理面板、per-user **¥5/天金额配额**按 deepseek 缓存三档（命中0.025/未命中3/输出6 元每百万token）精确计费——**已上机 jp-app-01 实测**：deepseek-v4-pro 经真实路径（公网→薄网关→new-api→官渠）端到端返回 `prompt_cache_hit/miss_tokens`、流式加 `stream_options.include_usage` 也拿得到、官渠未拒。**spec** `docs/superpowers/specs/2026-06-21-w2b-multi-tenant-core-design.md`（Codex 4 轮 APPROVED：R1 8 BLOCKER+R2 1+R3 红队 1）+ **B1 plan** `docs/superpowers/plans/2026-06-21-w2b-b1-tenant-base-auth.md`（18 TDD task，Codex **5 轮 APPROVED**：R1 8+R2 4+R3 1+R4 红队 2→R5；红队抓出 get_chat_handler 漏迁移点/independent-review 裸变量等执行即崩真洞）。分支 `feat/w2b-multi-tenant-core`（HEAD `d80d13a`，**未 push/未 merge**）。**下一步：用户定执行方式（subagent-driven 推荐）后实施 B1**；B2 中央计费 / B3 admin+安全硬化 plan 待 B1 实施后写。详见下方 🟢 服务器化 簇。）
 
-上一次更新：2026-06-21（**N6 + W1 技术标 + R5 硬卡修复 均已 merge main + push origin（HEAD `06eec26`，已核实 local==origin/main）；轮 1 全收口**——W1 subagent-driven（预检砍掉 N6 已覆盖的 Task 5/6，10→8 task）+ Codex 双轨独立 + 整 branch 综合审全 APPROVED（quality 红队挖出 Task7 半假绿并修）；**真模型 GUI E2E（deepseek-v4-pro）亲跑通过**：bid 方法论注入/RFP 评分点结构/后置两表/字数护栏全落地，并暴露一个 pre-existing R5 硬卡（方法论声明放 `## 确认状态` 之下 parser 扫不到 → 确认大纲门对全 7 类硬卡），**同分支已修**（outline 模板内置声明槽位 + 指令点明位置，不碰 trust-boundary parser；Codex APPROVED）。后端 1207 passed / 4 mac-realpath 环境差异、前端 331 passed、token 注入块 1712≤2000。已 **merge main（`9e9a869` --no-ff，分支 `feat/w1-technical-bid-type` 保留）+ push origin（HEAD `06eec26`）**。N6 详情见下——N6 走 subagent-driven 实施，A–E+F1+F3 每阶段 codex/opus 红队 review 全 APPROVED + 整 branch 综合审 APPROVED（红队累计挖出 sentinel 越狱/压缩边界泄漏/缓存投毒 TOCTOU/客户端 id 注入等真安全洞，全修）；F4 薄网关白名单透传 + 视觉模型已上线 jp-app-01 并实测转写 200。分支 `feat/n6-attachment-pipeline` 已 **merge main（`95949ab`）+ push origin**；仅剩 F2（Windows 打包 smoke + 删 legacy 解析器；**2026-06-21 用户决定推迟到 W2 服务器化一起做**——W2 去 Windows 化本就要改解析层）。**下一步：W2 服务器化 + 多用户 Web（待设计，brainstorm 进行中）**。详见下方 N6/W1 条。
+上一次更新：2026-06-21（**N7 统一审查 + 去 AI 味（= W2-A）✅ 实施完成 + 已 merge/push**——两审查合并成一个「独立审查」+ 维度⑤语言专业性·去 AI 味（吸收 Humanizer-zh 可迁移规则）+ 占位符纯 Python 扫描 grounding + 删整条 lint/PowerShell 审查路径，审查路径自此纯 Python、零 PowerShell；**subagent-driven 实现，每 commit 后 Codex review + 收尾期 spec/quality 双轨独立 review（铁律「不合并」）全 APPROVED**（含 Task 5 计划内偏离被 Codex 独立判定 valid & necessary、Task 7+8 原子删 41 文件 −1797 行；收尾 spec 轨挖出维度⑤黑名单被压缩、已忠实转写 spec §3.3 全 literal）；后端 **1209 passed / 4 mac-realpath 环境差异**、前端 **327 passed**、`npm run build` 绿；**已 merge main（merge commit `f0de6be`）+ push origin（已核实 local==origin/main）**。cutover：`docs/superpowers/cutover_report_2026-06-21_n7-unified-review-deai.md`。（W2-B 已起 spec+B1 plan，见顶部）详见下方 N7 条。
+
+上一次更新：2026-06-21（**N6 + W1 技术标 + R5 硬卡修复 均已 merge main + push origin（HEAD `06eec26`，已核实 local==origin/main）；轮 1 全收口**——W1 subagent-driven（预检砍掉 N6 已覆盖的 Task 5/6，10→8 task）+ Codex 双轨独立 + 整 branch 综合审全 APPROVED（quality 红队挖出 Task7 半假绿并修）；**真模型 GUI E2E（deepseek-v4-pro）亲跑通过**：bid 方法论注入/RFP 评分点结构/后置两表/字数护栏全落地，并暴露一个 pre-existing R5 硬卡（方法论声明放 `## 确认状态` 之下 parser 扫不到 → 确认大纲门对全 7 类硬卡），**同分支已修**（outline 模板内置声明槽位 + 指令点明位置，不碰 trust-boundary parser；Codex APPROVED）。后端 1207 passed / 4 mac-realpath 环境差异、前端 331 passed、token 注入块 1712≤2000。已 **merge main（`9e9a869` --no-ff，分支 `feat/w1-technical-bid-type` 保留）+ push origin（HEAD `06eec26`）**。N6 详情见下——N6 走 subagent-driven 实施，A–E+F1+F3 每阶段 codex/opus 红队 review 全 APPROVED + 整 branch 综合审 APPROVED（红队累计挖出 sentinel 越狱/压缩边界泄漏/缓存投毒 TOCTOU/客户端 id 注入等真安全洞，全修）；F4 薄网关白名单透传 + 视觉模型已上线 jp-app-01 并实测转写 200。分支 `feat/n6-attachment-pipeline` 已 **merge main（`95949ab`）+ push origin**；仅剩 F2（Windows 打包 smoke + 删 legacy 解析器；**2026-06-21 用户决定推迟到 W2 服务器化一起做**——W2 去 Windows 化本就要改解析层）。（W2 web 化后续已推进到 spec + B1 plan APPROVED，见顶部）详见下方 N6/W1 条。
 > 设计期历史（2026-06-20）：N6 spec(5 轮)+plan(7 轮·红队)、W1 spec(4 轮)+plan(2 轮·红队) 均 codex APPROVED；上机只读核实 jp-app-01 拓扑后把 N6 proxy 设计从「自建 per-model 路由」简化为「透传+SELECTABLE_MODELS」。）
 
 上一次更新：2026-06-15（**新方向：服务器化 + 多用户 Web 部署 + 标书模板** —— 2026-06-15 给领导汇报后，领导明确要求「迁服务器 / 做网页给人用 / 加用户系统」，= 上方原记的产品化方向 **b 解 park**。已定：**不拆仓库**（web 作本仓库「运行模式」、引擎共用）、范围＝**公网熟人 + 登录与工作区隔离**、试用机 **kr-web-01**[腾讯云首尔，登记在 VPS-fix 库]、模型**留 `deepseek-v4-pro` 别降级**。标书模板＝引擎级前置特性、建议先做。两者**均待设计**（下一步 brainstorm→plan）。详见下方「🟢 服务器化…」簇。R1–R5 整改簇此前已全部闭环合 main `0162ef1`。）
@@ -18,11 +20,11 @@
 来源：2026-06-15 给领导汇报后，领导明确要求「迁到服务器、做成网页给人用、加用户系统」（动因：同事都用 Mac，桌面版只 Windows 分发、用不了）。即上方原记的产品化方向 **b（部门内部共享部署）**——此前 park，现领导亲自提出，**解 park、定为下一个方向**。
 
 **执行顺序（更新 2026-06-20）**：**轮 1 = W1 标书 + N6 附件**（两个独立引擎特性，各自 spec/plan，**不合并成一个 plan**——体量/风险差太多、稀释 review）。**N6 先做**（拥有材料层 + W1 依赖的强安全边界；且 N6 §5 接管文件 size 守门后，W1 那点后端守门退化为纯 prompt+配置）→ **W1 后**（更小）。W2 web 化排在轮 1 之后。
-- **轮 1 进度（更新 2026-06-21）**：**N6 ✅ merge main + push origin + F4 上线**（F2 推迟 W2）；**W1 ✅ 实施 + 真模型 GUI E2E 通过 + R5 硬卡同分支修复，已 merge main + push origin（`9e9a869` → HEAD `06eec26`）**（分支 `feat/w1-technical-bid-type` 保留）。**轮 1（N6+W1）全收口（代码 + push）**。下一步：W2 服务器化 + 多用户 Web（待设计，brainstorm 进行中，见下方 🟢 簇）。
+- **轮 1 进度（更新 2026-06-21）**：**N6 ✅ merge main + push origin + F4 上线**（F2 推迟 W2）；**W1 ✅ 实施 + 真模型 GUI E2E 通过 + R5 硬卡同分支修复，已 merge main + push origin（`9e9a869` → HEAD `06eec26`）**（分支 `feat/w1-technical-bid-type` 保留）。**轮 1（N6+W1）全收口（代码 + push）**。下一步：**W2 web 化——spec + B1 plan 已 Codex APPROVED，待实施**（见下方 W2 条）。
 
 **已定决策（避免重新讨论）**：
 - **不拆仓库**：web 是本仓库的「运行模式」（`run_web.py` 已存在 + `app.py` 桌面入口），引擎共用，web 特有的登录/多租户放界限清楚的新模块（`backend/auth/` 等）+ mode 开关隔开。曾一度建过独立仓库 `consulting-report-agent-web` 又删了。**两线都长期活跃才抽共享包 `consulting-report-core`，现在抽是过度设计**。
-- **范围**：公网可访问但**仅限熟人**；用户系统只做**登录 + 各自工作区隔离**——不做开放注册、角色权限、计费。
+- **范围（2026-06-21 brainstorm 订正——推翻旧『仅熟人 / 不做开放注册』）**：**真多用户产品**——用户名+密码、**邀请码自助注册**（admin 可轮换、群发）、per-user 密码 / API / 工作区**完全隔离**、**后台管理面板**（用户列表 / 今日花费 / 改密码 / 调配额 / 禁用 / 轮换邀请码）。仍不做：角色权限体系、计费（成本靠 per-user ¥/天金额配额控）。
 - **模型**：试用期默认留 `deepseek-v4-pro`，**不要降级 v4flash**（试用是证明报告质量、降模型本末倒置；成本靠 per-user 日配额控）。
 - **服务器**：试用机 `kr-web-01`（腾讯云轻量首尔 2C2G+swap+40G，Debian 13，SSH 2233，已 fail2ban+ufw+komari），登记在 VPS-fix 库 `notes/kr-web-01.md`（运维不在本项目重复）。渠道商代购、**非自有账号、仅试用、转生产换自有/公司账号正经实例**。Linux 部署、不 PyInstaller、venv 跑 uvicorn。
 - **成本**：先垫钱、推广试用后报销。
@@ -36,17 +38,19 @@
 - 危险词坑：方法论声明行框架名避开 `覆盖`/`推进` 等（在 `_METHODOLOGY_DANGER_SUBSTRINGS`，命中判 malformed），用「评分点对标/点对点应答/WBS/重难点对策」。
 - 涉及：`backend/skill.py`（`TYPE_SKELETON_MAP`+`METHODOLOGY_TONE`+`_declare_and_invite_instruction` bid 分支）、新 `skill/modules/technical-bid.md`、前端 `ProjectCreateModal.jsx` 下拉、`skill/plan-template/project-overview.md` 旧类型清单同步。
 
-**W2. 服务器化 + 多用户 Web 化** — 状态：`待设计（大改、先出 spec/plan）`
-- 迁移工作项：
+**W2. 服务器化 + 多用户 Web 化** — 状态：`spec + B1 plan 全 Codex APPROVED（2026-06-21）；B1 待实施；B2/B3 plan 待 B1 后写`
+- **spec**：`docs/superpowers/specs/2026-06-21-w2b-multi-tenant-core-design.md`（4 轮 APPROVED）。**实施拆 3 plan**：**B1** 租户基座+鉴权+创建闭环（`plans/2026-06-21-w2b-b1-tenant-base-auth.md`，18 TDD task，5 轮含 2 轮红队 APPROVED，**待实施**）/ **B2** 中央计费 `MeteredManagedClient`+per-user ¥配额 / **B3** admin 面板 + CSRF/SSRF/CORS 硬化。分支 `feat/w2b-multi-tenant-core`（HEAD `d80d13a`，**未 push**）。
+- **已定关键设计（spec/plan 为真值源，实施必读）**：服务端 session+httpOnly cookie；`<data-root>/users/<uid>/` 分目录 + per-uid 引擎实例工厂；统一卡点 `require_project(uid,ref)` canonicalize 到 `rec["id"]`、查不到即 404=天然归属；进程锁/store/搜索 project 级状态全改复合键 `tenant_project_key(uid,cid)`（**含 skill.py `record_stage_checkpoint`**）；配额=金额制 ¥5/天按 deepseek 缓存三档精确计费（中央计费客户端覆盖 chat/压缩/vision/审查、整数微元、usage 缺失 fail-closed）；web 创建项目服务端分配工作区拒客户端路径；桌面 uid=local 硬绑 loopback、否则拒启动。
+- 迁移工作项（设计已定，下为概览）：
   - **数据多租户隔离（最大头）**：现全挤在单一 `~/.consulting-report/` → `<data-root>/users/<uid>/projects/...`，所有经 `get_base_path()` 的寻址加 uid 层。
-  - **登录 + 鉴权**：登录页 + 会话（cookie/JWT 待定）；每个项目 / 文件接口**校验调用者归属**；账号邀请制 / 管理员建（非自助注册）。
+  - **登录 + 鉴权**：登录页 + 服务端 session（**已定 httpOnly cookie，非 JWT**）；每接口经 `require_project` 校验归属；**邀请码自助注册**（admin 可轮换，非「管理员建号」）。
   - **进程内单例 / 锁按 uid 键化**：`_SEARCH_ROUTER_SINGLETON`、`ReviewSessionStore`、各 RLock（现为单用户假设）。
   - **文件导入**：`DesktopBridge` 原生选择器（web 模式本就 503）→ 浏览器上传。
   - **去 Windows 化**：`export_draft.ps1` 改 Python（或 Linux 跑 pwsh），`pandoc.exe` 换 Linux 版（`quality_check.ps1` 部分已由 N7 删除/合并进独立审查维度⑤，审查路径已纯 Python）。
   - **账号存储**：元数据 SQLite 起步；**项目工作区仍走文件系统**（按 uid 隔离），不把文件驱动引擎搬进 DB。
   - **部署**：venv 跑 uvicorn + Cloudflare 域名 / HTTPS。
 - **安全红线（web 新增威胁面，桌面版只绑 127.0.0.1 没有）**：① 每接口校验资源归属（A 不能读 B）；② `custom` 模式自填 API base 堵 SSRF；③ LLM / 搜索 per-user 日配额防滥用；④ 上传文件类型 / 大小 / 内容校验；⑤ 沿用报告内容 trust boundary（数据非指令）。
-- 待设计开放问题：会话方案、数据根布局、归属校验如何织入每个接口、并发键化改造粒度。
+- ~~待设计开放问题~~ **已定（见 spec/B1 plan）**：会话=httpOnly cookie session；数据根=`<data-root>/users/<uid>/`；归属=统一 `require_project` 卡点（canonicalize）；并发键化=复合键 `tenant_project_key(uid,cid)` 全覆盖（锁/store/搜索 project 级状态/handler）。
 
 ### ✅ R5 方法论声明硬卡已修（2026-06-21，W1 GUI E2E 发现并当场修复，影响全 7 类）
 
@@ -97,7 +101,7 @@
 - **薄网关已上机核实拓扑（2026-06-20 SSH 只读）**：薄网关 = `consulting-report-managed-proxy` 容器在 **jp-app-01**（`43.153.168.175:2233`，连接走 VPS-fix 库 `notes/jp-app-01.md`），上游指**本地 new-api**（`127.0.0.1:3000`）；**new-api 已按模型名路由**，**硅基流动渠道 id 60 已配已启用、含 Qwen3-VL 一批**。故 proxy 改 = **白名单透传 + 新 `MANAGED_PROXY_SELECTABLE_MODELS`**（`/v1/models` 仍只露 deepseek-v4-pro），**不需自建 per-model upstream**。**✅ F4 ops 已完成 2026-06-21**：proxy env 加 `ALLOWED_MODELS`(含 Qwen3-VL)+`SELECTABLE_MODELS`+重建容器；并发现 new-api 前置坑（上游 token model_limits 只准 deepseek + 渠道 60 group/abilities 缺 ds）一并配通；视觉转写 200 实测过。备份+回滚见 `VPS-fix-private/notes/jp-app-01.md`。
 - **N6 先于 W1**：N6 接管材料层 + size 守门 + 材料 trust boundary（W1 安全强边界依赖它）。
 
-**N7. S5 质量审查重做：合并成一个 LLM 独立审查 + 去 AI 味（吸收 Humanizer-zh）** — 状态：`✅ 实施完成（2026-06-21，subagent-driven，每 commit 后 Codex review + 收尾期 spec/quality 双轨独立 review 全 APPROVED；后端 1209 passed/4 mac-realpath、前端 327 passed、build 绿；分支 feat/n7-unified-review-deai 未 push/未 merge）`（属 W2 服务器化的 **W2-A**，先于 W2-B 多租户、W2-C 部署+剩余去 Windows 化）
+**N7. S5 质量审查重做：合并成一个 LLM 独立审查 + 去 AI 味（吸收 Humanizer-zh）** — 状态：`✅ 实施完成（2026-06-21，subagent-driven，每 commit 后 Codex review + 收尾期 spec/quality 双轨独立 review 全 APPROVED；后端 1209 passed/4 mac-realpath、前端 327 passed、build 绿；**已 merge main（`f0de6be`）+ push origin**）`（属 W2 服务器化的 **W2-A**，先于 W2-B 多租户、W2-C 部署+剩余去 Windows 化）
 - **决策（brainstorm 定）**：两审查合并成**一个「独立审查」按钮**——独立审查 5 维度删「目标读者匹配」（N3 已删该输入字段、维度悬空）、加第 5 维「语言专业性与去 AI 味」（誊入 Humanizer-zh 18 类✅可迁移规则 + 黑名单，prompt 写死排除❌口语/第一人称/情绪自白）；删 `quality_check.{ps1,sh}` lint 脚本 + lint-report 路径；加十几行纯 Python 占位符扫描作 grounding 注入（首轮、对用户隐形）。审查路径自此纯 Python、零 PowerShell。
 - **关键设计**：扩展 `IndependentReviewAgent`（不新建）；抽 `backend/trust_boundary.py`（解循环导入 + 新 `UNTRUSTED_DATA_*` marker）+ 新 `backend/report_quality.py`（占位符扫描）；门禁 `review_passed_at` 改单报告；S5 checklist 3→2 + cascade；Task 7+8 删 lint 路径为**一个原子 commit**（删接口与删消费者不可分）。
 - spec：`docs/superpowers/specs/2026-06-21-n7-unified-review-deai-design.md`；plan：`docs/superpowers/plans/2026-06-21-n7-unified-review-deai.md`（9 TDD task）；**cutover：`docs/superpowers/cutover_report_2026-06-21_n7-unified-review-deai.md`**。分支 `feat/n7-unified-review-deai`。

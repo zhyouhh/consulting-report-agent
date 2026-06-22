@@ -36,7 +36,10 @@ test("prepareProjectCreatePayload derives the project name from the theme and ke
   assert.equal(payload.notes, "");
   // 目标读者字段已移除，payload 不再携带。
   assert.equal(payload.target_audience, undefined);
-  assert.deepEqual(payload.initial_material_paths, ["D:\\workspace\\brief.md"]);
+  // W2-B (T15): web 模式服务端分配工作区——即便 form 残留 workspace_dir/initial_material_paths，
+  // payload 也不再携带（后端 web 模式对客户端这两字段 400）。
+  assert.equal(payload.workspace_dir, undefined);
+  assert.equal(payload.initial_material_paths, undefined);
 });
 
 test("prepareProjectCreatePayload preserves a meaningful theme as the project display name", () => {

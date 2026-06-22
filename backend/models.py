@@ -18,7 +18,7 @@ class ProjectInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=200)
-    workspace_dir: str = Field(..., min_length=1, max_length=500)
+    workspace_dir: Optional[str] = Field(default=None, max_length=500)
     project_type: str = Field(..., min_length=1, max_length=100)
     theme: str = Field(..., min_length=1, max_length=200)
     # 报告面向对象（高层/中层/执行）已从新建表单移除，保留为可选字段仅作向后兼容。

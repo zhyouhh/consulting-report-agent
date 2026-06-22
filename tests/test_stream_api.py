@@ -9,6 +9,7 @@ import requests
 import uvicorn
 
 import backend.main as main_module
+from backend.skill import SkillEngine
 
 
 pytestmark = pytest.mark.slow
@@ -21,10 +22,30 @@ def _pick_free_port() -> int:
 
 
 class ChatStreamApiTests(unittest.TestCase):
+    def setUp(self):
+        # W2-B (T11c): the stream endpoint resolves require_project(project_id, uid) before streaming.
+        # auth off → uid "local"; install a MagicMock engine whose get_project_record echoes so the
+        # 'demo' project resolves. get_chat_handler is monkeypatched per-test (now 2-arg uid,pid).
+        self._prev_auth = getattr(main_module.app.state, "auth_required", True)
+        main_module.app.state.auth_required = False
+        engine = mock.MagicMock(spec=SkillEngine)
+        engine.get_project_record.side_effect = lambda pid: {"id": pid, "name": pid}
+        with main_module._engines_guard:
+            self._prev_engine = main_module._engines.get("local")
+            main_module._engines["local"] = engine
+
+    def tearDown(self):
+        main_module.app.state.auth_required = self._prev_auth
+        with main_module._engines_guard:
+            if self._prev_engine is None:
+                main_module._engines.pop("local", None)
+            else:
+                main_module._engines["local"] = self._prev_engine
+
     def test_stream_endpoint_emits_provider_usage_shape_incrementally(self):
         handler = mock.Mock()
 
-        def fake_stream(project_id, message_text, attached_material_ids, transient_attachments):
+        def fake_stream(project_id, message_text, attached_material_ids, transient_attachments, **kwargs):
             events = [
                 {"type": "tool", "data": "🔧 调用工具: web_search({\"query\":\"q1\"})"},
                 {"type": "content", "data": "第一段"},
@@ -51,7 +72,7 @@ class ChatStreamApiTests(unittest.TestCase):
 
         handler.chat_stream.side_effect = fake_stream
         original_get_chat_handler = main_module.get_chat_handler
-        main_module.get_chat_handler = lambda project_id: handler
+        main_module.get_chat_handler = lambda uid, project_id: handler
         port = _pick_free_port()
         config = uvicorn.Config(main_module.app, host="127.0.0.1", port=port, log_level="error")
         server = uvicorn.Server(config)
@@ -104,7 +125,7 @@ class ChatStreamApiTests(unittest.TestCase):
     def test_stream_endpoint_forwards_transient_attachments(self):
         handler = mock.Mock()
 
-        def fake_stream(project_id, message_text, attached_material_ids, transient_attachments):
+        def fake_stream(project_id, message_text, attached_material_ids, transient_attachments, **kwargs):
             self.assertEqual(project_id, "demo")
             self.assertEqual(message_text, "请看截图")
             self.assertEqual(attached_material_ids, [])
@@ -112,6 +133,7 @@ class ChatStreamApiTests(unittest.TestCase):
                 transient_attachments,
                 [
                     {
+                        "id": "att-1",
                         "name": "bug.png",
                         "mime_type": "image/png",
                         "data_url": "data:image/png;base64,AAAA",
@@ -122,7 +144,7 @@ class ChatStreamApiTests(unittest.TestCase):
 
         handler.chat_stream.side_effect = fake_stream
         original_get_chat_handler = main_module.get_chat_handler
-        main_module.get_chat_handler = lambda project_id: handler
+        main_module.get_chat_handler = lambda uid, project_id: handler
         port = _pick_free_port()
         config = uvicorn.Config(main_module.app, host="127.0.0.1", port=port, log_level="error")
         server = uvicorn.Server(config)
@@ -139,6 +161,7 @@ class ChatStreamApiTests(unittest.TestCase):
                     "attached_material_ids": [],
                     "transient_attachments": [
                         {
+                            "id": "att-1",
                             "name": "bug.png",
                             "mime_type": "image/png",
                             "data_url": "data:image/png;base64,AAAA",
@@ -159,7 +182,7 @@ class ChatStreamApiTests(unittest.TestCase):
     def test_stream_endpoint_keeps_usage_event_last_before_done(self):
         handler = mock.Mock()
 
-        def fake_stream(project_id, message_text, attached_material_ids, transient_attachments):
+        def fake_stream(project_id, message_text, attached_material_ids, transient_attachments, **kwargs):
             yield {"type": "content", "data": "第一段"}
             yield {
                 "type": "usage",
@@ -176,7 +199,7 @@ class ChatStreamApiTests(unittest.TestCase):
 
         handler.chat_stream.side_effect = fake_stream
         original_get_chat_handler = main_module.get_chat_handler
-        main_module.get_chat_handler = lambda project_id: handler
+        main_module.get_chat_handler = lambda uid, project_id: handler
         port = _pick_free_port()
         config = uvicorn.Config(main_module.app, host="127.0.0.1", port=port, log_level="error")
         server = uvicorn.Server(config)

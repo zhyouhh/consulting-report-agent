@@ -1,21 +1,24 @@
 import asyncio
 import json
 import logging
+import os
+import secrets
 import shutil
 import tempfile
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
 
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -37,6 +40,8 @@ from .models import ChatRequest, ChatResponse, ProjectInfo
 from .report_tools import export_reviewable_draft
 from .material_limits import MAX_HEAVY_MATERIAL_BYTES
 from .skill import SkillEngine, StaleFileError, UserWriteForbiddenError
+from .tenant import user_projects_dir, ensure_user_dirs, tenant_project_key
+from . import accounts
 
 
 logging.basicConfig(
@@ -71,10 +76,45 @@ try:
 except Exception:
     logger.exception("heal_stale_managed_model failed unexpectedly; continuing with stored settings")
 
-skill_engine = SkillEngine(settings.projects_dir, settings.skill_dir)
-_chat_handlers = {}
+accounts.init_db()
+_env_invite = (os.environ.get("CRA_INVITE_CODE") or "").strip()
+if _env_invite:
+    accounts.set_config("invite_code", _env_invite)   # 运维显式设的邀请码每次启动都生效（权威）
+else:
+    accounts.seed_config_if_absent("invite_code", secrets.token_urlsafe(12))  # 未设→随机锁死(fail-closed)
+    logger.warning(
+        "CRA_INVITE_CODE 未设置：已随机生成一次性邀请码并写入 app_config（注册实质锁死）。"
+        "请设置 CRA_INVITE_CODE 后重启，或经后续管理面板轮换邀请码。"
+    )
+
+
+def _bootstrap_admin():
+    u = os.environ.get("CRA_BOOTSTRAP_ADMIN_USERNAME")
+    p = os.environ.get("CRA_BOOTSTRAP_ADMIN_PASSWORD")
+    if u and p and accounts.get_user_by_username(u) is None:
+        ensure_user_dirs(accounts.create_user(u, p, is_admin=True, must_change_password=True))
+
+
+_bootstrap_admin()
+
+
+# host 在 import 期未知，无法集中化；必须由受支持的入口（run_web.py / app.py）显式调用作早退检查。
+def assert_safe_startup(auth_required: bool, host: str) -> None:
+    if not auth_required and host not in {"127.0.0.1", "::1", "localhost"}:
+        raise SystemExit(f"拒绝启动：auth 关闭时 host 必须 loopback，当前 {host!r}")
+    if auth_required and not (os.environ.get("CRA_INVITE_CODE") or "").strip():
+        raise SystemExit(
+            "拒绝启动：web 模式（鉴权开启）必须显式设置 CRA_INVITE_CODE 环境变量"
+            "（否则邀请码被随机锁死、无人能注册）。示例：CRA_INVITE_CODE=你的邀请码"
+        )
+
+
+_engines: dict[str, SkillEngine] = {}
+_engines_guard = threading.Lock()
+_chat_handlers: dict[tuple, ChatHandler] = {}
 _settings_lock = threading.Lock()
 _desktop_bridge = None
+SESSION_COOKIE = "cra_session"
 
 
 def register_desktop_bridge(bridge):
@@ -82,11 +122,63 @@ def register_desktop_bridge(bridge):
     _desktop_bridge = bridge
 
 
-def get_chat_handler(project_id: str) -> ChatHandler:
+def get_skill_engine(uid: str) -> SkillEngine:
+    with _engines_guard:
+        eng = _engines.get(uid)
+        if eng is None:
+            ensure_user_dirs(uid)
+            eng = SkillEngine(user_projects_dir(uid), settings.skill_dir, uid=uid)
+            _engines[uid] = eng
+        return eng
+
+
+def get_chat_handler(uid: str, project_id: str) -> ChatHandler:
+    # Use the module-level load_settings (imported at top); do NOT re-import inside the function,
+    # or tests that patch backend.main.save_settings/load_settings won't intercept it.
     with _settings_lock:
-        if project_id not in _chat_handlers:
-            _chat_handlers[project_id] = ChatHandler(settings, skill_engine)
-        return _chat_handlers[project_id]
+        key = (uid, project_id)
+        if key not in _chat_handlers:
+            _chat_handlers[key] = ChatHandler(load_settings(uid), get_skill_engine(uid), uid=uid)
+        return _chat_handlers[key]
+
+
+def get_current_uid(request: Request) -> str:
+    if not getattr(request.app.state, "auth_required", True):
+        return "local"
+    token = request.cookies.get(SESSION_COOKIE)
+    uid = accounts.get_session_uid(token) if token else None
+    if not uid:
+        raise HTTPException(status_code=401, detail="未登录")
+    return uid
+
+
+def get_current_admin(uid: str = Depends(get_current_uid)) -> str:
+    rec = accounts.get_user_by_uid(uid)
+    if not rec or not rec["is_admin"]:
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return uid
+
+
+@dataclass
+class ProjectScope:
+    uid: str
+    project_id: str          # canonical rec["id"]
+    engine: SkillEngine
+    project_record: dict
+    lock_key: str
+
+
+def require_project(project_id: str, uid: str = Depends(get_current_uid)) -> ProjectScope:
+    eng = get_skill_engine(uid)
+    rec = eng.get_project_record(project_id)   # accepts id OR name alias
+    if rec is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    cid = rec["id"]
+    return ProjectScope(uid=uid, project_id=cid, engine=eng, project_record=rec,
+                        lock_key=tenant_project_key(uid, cid))
+
+
+app.state.auth_required = True
 
 
 def require_desktop_bridge():
@@ -100,9 +192,88 @@ async def health():
     return {"status": "ok"}
 
 
+class RegisterPayload(BaseModel):
+    username: str = Field(..., min_length=3, max_length=40)
+    password: str = Field(..., min_length=6, max_length=200)
+    invite_code: str
+
+class LoginPayload(BaseModel):
+    username: str = Field(..., min_length=3, max_length=40)
+    password: str = Field(..., min_length=6, max_length=200)
+
+class ChangePwPayload(BaseModel):
+    old_password: str = Field(..., min_length=6, max_length=200)
+    new_password: str = Field(..., min_length=6, max_length=200)
+
+
+@app.post("/api/auth/register")
+@limiter.limit("10/minute")
+def auth_register(request: Request, payload: RegisterPayload):
+    if not secrets.compare_digest(payload.invite_code, accounts.get_config("invite_code", "")):
+        raise HTTPException(status_code=403, detail="邀请码无效")
+    try:
+        uid = accounts.create_user(payload.username, payload.password)
+    except accounts.UsernameTakenError:
+        raise HTTPException(status_code=409, detail="用户名已被占用")
+    ensure_user_dirs(uid)
+    return {"status": "ok"}
+
+
+@app.post("/api/auth/login")
+@limiter.limit("10/minute")
+def auth_login(request: Request, payload: LoginPayload, response: Response):
+    if not accounts.verify_user_password(payload.username, payload.password):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    rec = accounts.get_user_by_username(payload.username)
+    if rec["disabled"]:
+        raise HTTPException(status_code=403, detail="账号已停用")
+    token = accounts.create_session(rec["uid"], ip=request.client.host if request.client else "",
+                                    ua=request.headers.get("user-agent", ""))
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                        secure=bool(getattr(request.app.state, "cookie_secure", False)),
+                        max_age=30 * 24 * 3600, path="/")
+    return {"status": "ok"}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        accounts.delete_session(token)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"status": "ok"}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request, uid: str = Depends(get_current_uid)):
+    if uid == "local" and not getattr(request.app.state, "auth_required", True):
+        return {"uid": "local", "username": "本地用户", "is_admin": False, "must_change_password": False}
+    rec = accounts.get_user_by_uid(uid)
+    if not rec:
+        raise HTTPException(status_code=401, detail="未登录")
+    return {"uid": uid, "username": rec["username"], "is_admin": rec["is_admin"],
+            "must_change_password": rec["must_change_password"]}
+
+
+@app.post("/api/auth/change-password")
+def auth_change_password(request: Request, payload: ChangePwPayload, uid: str = Depends(get_current_uid)):
+    rec = accounts.get_user_by_uid(uid)
+    if not rec:
+        raise HTTPException(status_code=400, detail="当前账号不支持改密")
+    if not accounts.verify_user_password(rec["username"], payload.old_password):
+        raise HTTPException(status_code=401, detail="原密码错误")
+    accounts.set_user_password(uid, payload.new_password)
+    cur = request.cookies.get(SESSION_COOKIE)
+    if cur:
+        accounts.delete_other_user_sessions(uid, cur)   # keep current session, revoke others
+    else:
+        accounts.delete_user_sessions(uid)
+    return {"status": "ok"}
+
+
 @app.get("/api/settings")
-async def get_settings():
-    data = settings.model_dump(exclude={"managed_client_token"})
+async def get_settings(uid: str = Depends(get_current_uid)):
+    data = load_settings(uid).model_dump(exclude={"managed_client_token"})
     data["api_key"] = "***" if data["api_key"] else ""
     data["custom_api_key"] = "***" if data.get("custom_api_key") else ""
     return data
@@ -123,36 +294,27 @@ class SettingsUpdate(BaseModel):
 
 
 @app.post("/api/settings")
-async def update_settings(update: SettingsUpdate):
-    global settings, _chat_handlers
+async def update_settings(update: SettingsUpdate, uid: str = Depends(get_current_uid)):
     with _settings_lock:
-        settings.mode = update.mode
-        settings.managed_base_url = update.managed_base_url
-        settings.managed_model = update.managed_model
+        s = load_settings(uid)
+        s.mode = update.mode
+        s.managed_base_url = update.managed_base_url
+        s.managed_model = update.managed_model
         if "managed_vision_model" in update.model_fields_set and update.managed_vision_model is not None:
-            settings.managed_vision_model = update.managed_vision_model
+            s.managed_vision_model = update.managed_vision_model
         if "vision_enabled" in update.model_fields_set and update.vision_enabled is not None:
-            settings.vision_enabled = update.vision_enabled
-        settings.custom_api_base = update.custom_api_base
+            s.vision_enabled = update.vision_enabled
+        s.custom_api_base = update.custom_api_base
         if update.custom_api_key != "***":
-            settings.custom_api_key = update.custom_api_key
-        settings.custom_model = update.custom_model
+            s.custom_api_key = update.custom_api_key
+        s.custom_model = update.custom_model
         if "custom_context_limit_override" in update.model_fields_set:
-            settings.custom_context_limit_override = clamp_custom_context_limit_override(
+            s.custom_context_limit_override = clamp_custom_context_limit_override(
                 update.custom_context_limit_override
             )
-
-        if update.mode == "managed":
-            settings.api_base = update.managed_base_url
-            settings.model = update.managed_model
-            settings.api_key = settings.managed_client_token
-        else:
-            settings.api_base = update.custom_api_base
-            settings.model = update.custom_model
-            settings.api_key = settings.custom_api_key
-
-        save_settings(settings)
-        _chat_handlers.clear()
+        save_settings(s, uid=uid)
+        for k in [k for k in _chat_handlers if k[0] == uid]:
+            _chat_handlers.pop(k, None)
     return {"status": "ok"}
 
 
@@ -168,7 +330,7 @@ class WorkspaceFilesRequest(BaseModel):
 
 
 @app.post("/api/models/list")
-async def list_models(request: ModelsRequest):
+async def list_models(request: ModelsRequest, uid: str = Depends(get_current_uid)):
     try:
         from openai import OpenAI
         import httpx
@@ -188,65 +350,67 @@ async def list_models(request: ModelsRequest):
 
 
 @app.post("/api/system/select-workspace-folder")
-async def select_workspace_folder():
+async def select_workspace_folder(uid: str = Depends(get_current_uid)):
     bridge = require_desktop_bridge()
     selected_path = await asyncio.to_thread(bridge.select_workspace_folder)
     return {"path": selected_path or ""}
 
 
 @app.post("/api/system/select-workspace-files")
-async def select_workspace_files(request: WorkspaceFilesRequest):
+async def select_workspace_files(request: WorkspaceFilesRequest, uid: str = Depends(get_current_uid)):
     bridge = require_desktop_bridge()
     selected_paths = await asyncio.to_thread(bridge.select_workspace_files, request.workspace_dir)
     return {"paths": selected_paths or []}
 
 
 @app.get("/api/projects")
-async def list_projects():
-    return skill_engine.list_projects()
+async def list_projects(uid: str = Depends(get_current_uid)):
+    return get_skill_engine(uid).list_projects()
 
 
 @app.post("/api/projects")
-async def create_project(info: ProjectInfo):
+async def create_project(info: ProjectInfo, request: Request, uid: str = Depends(get_current_uid)):
+    if getattr(request.app.state, "auth_required", True):   # web mode
+        # 按「字段是否发送」拒绝，而非按值真假——web 客户端根本不该带这两个字段（更清晰的契约）。
+        sent = info.model_fields_set
+        if "workspace_dir" in sent or "initial_material_paths" in sent:
+            raise HTTPException(status_code=400, detail="web 模式不接受客户端工作目录/本地材料路径")
+        info = info.model_copy(update={"workspace_dir": str(user_projects_dir(uid) / uuid.uuid4().hex)})
     try:
-        project = skill_engine.create_project(info)
+        project = get_skill_engine(uid).create_project(info)
         return {"status": "ok", "project_id": project["id"], "project": project}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/projects/{project_id}/materials")
-async def list_project_materials(project_id: str):
-    project = skill_engine.get_project_record(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-    return {"materials": skill_engine.list_materials(project_id)}
+async def list_project_materials(scope: ProjectScope = Depends(require_project)):
+    return {"materials": scope.engine.list_materials(scope.project_id)}
 
 
 @app.post("/api/projects/{project_id}/materials/select-from-workspace")
-async def select_materials_from_workspace(project_id: str):
-    project = skill_engine.get_project_record(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-
+async def select_materials_from_workspace(scope: ProjectScope = Depends(require_project)):
+    # require_project 已校验归属（非属主 404）；之后才判桌面桥（非属主拿 404 而非 503）。
     bridge = require_desktop_bridge()
-    file_paths = await asyncio.to_thread(bridge.select_workspace_files, project["workspace_dir"])
+    file_paths = await asyncio.to_thread(
+        bridge.select_workspace_files, scope.project_record["workspace_dir"]
+    )
     if not file_paths:
         return {"materials": []}
 
     try:
-        materials = skill_engine.add_materials(project_id, file_paths, added_via="workspace_select")
+        materials = scope.engine.add_materials(
+            scope.project_id, file_paths, added_via="workspace_select"
+        )
         return {"materials": materials}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/projects/{project_id}/materials/upload")
-async def upload_materials(project_id: str, files: list[UploadFile] = File(...)):
-    project = skill_engine.get_project_record(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-
+async def upload_materials(
+    scope: ProjectScope = Depends(require_project), files: list[UploadFile] = File(...)
+):
     limit_mb = MAX_HEAVY_MATERIAL_BYTES / (1024 * 1024)
     staged_paths = []
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -281,16 +445,18 @@ async def upload_materials(project_id: str, files: list[UploadFile] = File(...))
             staged_paths.append(str(temp_path))
 
         try:
-            materials = skill_engine.add_materials(project_id, staged_paths, added_via="chat_upload")
+            materials = scope.engine.add_materials(
+                scope.project_id, staged_paths, added_via="chat_upload"
+            )
             return {"materials": materials}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.delete("/api/projects/{project_id}/materials/{material_id}")
-async def delete_material(project_id: str, material_id: str):
+async def delete_material(material_id: str, scope: ProjectScope = Depends(require_project)):
     try:
-        skill_engine.remove_material(project_id, material_id)
+        scope.engine.remove_material(scope.project_id, material_id)
         return {"status": "ok"}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -298,13 +464,16 @@ async def delete_material(project_id: str, material_id: str):
 
 @app.post("/api/chat")
 @limiter.limit("20/minute")
-async def chat(request: Request, chat_request: ChatRequest):
+async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(get_current_uid)):
+    # scope 解析必须在 try 外：require_project 的 404（非属主/不存在）不能被下面的
+    # 宽泛 except Exception 吞成 500（破坏租户隔离 404 契约，Codex T11a review）。
+    logger.info(f"Chat request for project: {chat_request.project_id}")
+    scope = require_project(chat_request.project_id, uid)
+    handler = get_chat_handler(scope.uid, scope.project_id)
     try:
-        logger.info(f"Chat request for project: {chat_request.project_id}")
-        handler = get_chat_handler(chat_request.project_id)
         result = await asyncio.to_thread(
             handler.chat,
-            chat_request.project_id,
+            scope.project_id,
             chat_request.message_text,
             chat_request.attached_material_ids,
             [item.model_dump() for item in chat_request.transient_attachments],
@@ -323,19 +492,19 @@ async def chat(request: Request, chat_request: ChatRequest):
 
 
 @app.get("/api/projects/{project_id}/files")
-async def list_files(project_id: str):
+async def list_files(scope: ProjectScope = Depends(require_project)):
     try:
-        return {"files": skill_engine.list_workspace_files(project_id)}
+        return {"files": scope.engine.list_workspace_files(scope.project_id)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/api/projects/{project_id}/files/{file_path:path}")
-async def read_file(project_id: str, file_path: str):
+async def read_file(file_path: str, scope: ProjectScope = Depends(require_project)):
     try:
-        normalized = skill_engine.normalize_file_path(project_id, file_path)
-        data = skill_engine.read_file_with_mtime(project_id, file_path)
-        data["editable"] = skill_engine.is_user_editable(normalized)
+        normalized = scope.engine.normalize_file_path(scope.project_id, file_path)
+        data = scope.engine.read_file_with_mtime(scope.project_id, file_path)
+        data["editable"] = scope.engine.is_user_editable(normalized)
         return data
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -356,21 +525,22 @@ _USER_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="use
 
 
 @app.post("/api/projects/{project_id}/files/{file_path:path}")
-async def write_user_file(project_id: str, file_path: str, payload: UserFileWrite):
-    # 项目不存在前置判 404（避免靠脆弱字符串匹配区分 404/400）
-    if not skill_engine.get_project_path(project_id):
-        raise HTTPException(status_code=404, detail="项目不存在")
-
-    handler = get_chat_handler(project_id)
-    request_lock = handler._get_project_request_lock(project_id)
+async def write_user_file(
+    file_path: str,
+    payload: UserFileWrite,
+    scope: ProjectScope = Depends(require_project),
+):
+    # require_project 已校验归属（非属主 404）；项目存在性也由它兜底。
+    handler = get_chat_handler(scope.uid, scope.project_id)
+    request_lock = handler._get_project_request_lock(scope.project_id)
 
     def _write_under_lock():
         # 全段持与聊天同一把锁：CAS(stat) → os.replace 必须对 AI 写入原子互斥。
         # 跑在专用池线程（见 _USER_WRITE_EXECUTOR 注释）：锁阻塞落在该线程、不阻塞事件循环，
         # 且该线程绝不是 chat_stream 的 anyio worker，杜绝 RLock 重入绕过。
         with request_lock:
-            new_mtime = skill_engine.user_write_file(
-                project_id, file_path, payload.content, payload.base_mtime_ns
+            new_mtime = scope.engine.user_write_file(
+                scope.project_id, file_path, payload.content, payload.base_mtime_ns
             )
             return {"status": "ok", "mtime_ns": new_mtime}
 
@@ -401,15 +571,17 @@ async def write_user_file(project_id: str, file_path: str, payload: UserFileWrit
 
 
 @app.get("/api/projects/{project_id}/workspace")
-async def get_workspace(project_id: str):
+async def get_workspace(scope: ProjectScope = Depends(require_project)):
     try:
-        return skill_engine.get_workspace_summary(project_id)
+        return scope.engine.get_workspace_summary(scope.project_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.post("/api/projects/{project_id}/independent-review/stream")
-async def independent_review_stream_post(project_id: str, request: Request):
+async def independent_review_stream_post(
+    request: Request, scope: ProjectScope = Depends(require_project)
+):
     """POST stream with frontend-stable run_id + resume/discard support.
 
     C5 cutover: the legacy GET endpoint was deleted and the front end now drives this POST
@@ -427,14 +599,19 @@ async def independent_review_stream_post(project_id: str, request: Request):
     if not run_id:
         raise HTTPException(status_code=400, detail="run_id required")
 
+    # W2-B 多租户（T11b）：lock/store 用复合键，engine/agent.run 用 canonical project id。
+    # 严格区分——混用是本任务要避免的 bug。
+    review_key = scope.lock_key          # composite key for lock + store
+    review_project_id = scope.project_id  # canonical id for engine / agent.run
+
     try:
-        workspace = skill_engine.get_workspace_summary(project_id)
+        workspace = scope.engine.get_workspace_summary(review_project_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     if workspace.get("stage_code") != "S5":
         raise HTTPException(status_code=400, detail="独立审查只能在 S5 阶段使用")
 
-    lock = get_independent_review_lock(project_id)
+    lock = get_independent_review_lock(review_key)
     store = _REVIEW_SESSION_STORE
     cancel_event = threading.Event()
     resume_snapshot = None
@@ -443,7 +620,7 @@ async def independent_review_stream_post(project_id: str, request: Request):
     if not resume:
         if not lock.acquire(blocking=False):
             raise HTTPException(status_code=409, detail="上一次独立审查仍在进行中，请等待")
-        if not store.claim_first(project_id, run_id, cancel_event):
+        if not store.claim_first(review_key, run_id, cancel_event):
             lock.release()  # CAS 失败必须 release（红队：防 lock 泄漏）
             raise HTTPException(status_code=409, detail="已有进行中的审查")
     else:
@@ -452,7 +629,7 @@ async def independent_review_stream_post(project_id: str, request: Request):
         if not got:
             raise HTTPException(status_code=409, detail="上一次审查正在收尾，请稍候")
         # 拿到锁后重读 store（等锁期间 worker 可能已 atomic_commit 收尾、状态翻 done）。
-        kind, payload = store.claim_resume(project_id, run_id, cancel_event)
+        kind, payload = store.claim_resume(review_key, run_id, cancel_event)
         if kind == "errored":
             resume_snapshot = payload
         elif kind == "done":
@@ -485,14 +662,15 @@ async def independent_review_stream_post(project_id: str, request: Request):
 
         def run_worker():
             try:
-                agent = IndependentReviewAgent(skill_engine, settings)
+                agent = IndependentReviewAgent(scope.engine, load_settings(scope.uid))
                 for event in agent.run(
-                    project_id,
+                    review_project_id,
                     run_id=run_id,
                     store=store,
                     resume_snapshot=resume_snapshot,
                     supplement=supplement,
                     cancel_event=cancel_event,
+                    store_key=review_key,
                 ):
                     if cancel_event.is_set():
                         break
@@ -509,7 +687,7 @@ async def independent_review_stream_post(project_id: str, request: Request):
                     # worker 退出兜底（codex R2 BLOCKER 4）：record 仍 running 则收敛——续审场景留
                     # snapshot 可再 resume，无则清 record。done/errored/被 discard → no-op。
                     # 先收敛 store，再释放 review lock。
-                    store.finalize_orphan_running(project_id, run_id, resume_snapshot)
+                    store.finalize_orphan_running(review_key, run_id, resume_snapshot)
                 finally:
                     try:
                         enqueue_event(None)
@@ -528,7 +706,7 @@ async def independent_review_stream_post(project_id: str, request: Request):
         async def emit_completion():
             if await request.is_disconnected():
                 return
-            final_mtime = store.get_done_mtime(project_id, run_id)
+            final_mtime = store.get_done_mtime(review_key, run_id)
             if final_mtime:
                 yield (
                     "data: "
@@ -590,7 +768,9 @@ async def independent_review_stream_post(project_id: str, request: Request):
 
 
 @app.post("/api/projects/{project_id}/independent-review/discard")
-async def independent_review_discard(project_id: str, request: Request):
+async def independent_review_discard(
+    request: Request, scope: ProjectScope = Depends(require_project)
+):
     """C4: cancel an in-flight (or finished) review session without acquiring the review lock.
 
     Uses only the store guard so it can cancel even while a long-running worker holds the
@@ -602,26 +782,27 @@ async def independent_review_discard(project_id: str, request: Request):
     run_id = body.get("run_id")
     if not run_id:
         raise HTTPException(status_code=400, detail="run_id required")
-    cancelled = _REVIEW_SESSION_STORE.discard(project_id, run_id)
+    cancelled = _REVIEW_SESSION_STORE.discard(scope.lock_key, run_id)
     return {"cancelled": cancelled}
 
 
 @app.post("/api/projects/{project_id}/export-draft")
-async def export_draft(project_id: str):
+async def export_draft(scope: ProjectScope = Depends(require_project)):
     try:
-        report_path = skill_engine.get_primary_report_path(project_id)
-        output_dir = skill_engine.ensure_output_dir(project_id)
-        script_path = skill_engine.get_script_path("export_draft.ps1")
+        report_path = scope.engine.get_primary_report_path(scope.project_id)
+        output_dir = scope.engine.ensure_output_dir(scope.project_id)
+        script_path = scope.engine.get_script_path("export_draft.ps1")
         return export_reviewable_draft(report_path, output_dir, script_path)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.delete("/api/projects/{project_id}")
-async def delete_project(project_id: str):
+async def delete_project(scope: ProjectScope = Depends(require_project)):
     try:
-        skill_engine.delete_project(project_id)
-        _chat_handlers.pop(project_id, None)
+        scope.engine.delete_project(scope.project_id)
+        with _settings_lock:
+            _chat_handlers.pop((scope.uid, scope.project_id), None)
         return {"status": "ok"}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -640,7 +821,9 @@ _CHECKPOINT_ROUTES = {
 
 
 @app.post("/api/projects/{project_id}/checkpoints/{name}")
-async def set_checkpoint(project_id: str, name: str, action: str = "set"):
+async def set_checkpoint(
+    name: str, action: str = "set", scope: ProjectScope = Depends(require_project)
+):
     key = _CHECKPOINT_ROUTES.get(name)
     if key is None:
         raise HTTPException(status_code=404, detail=f"未知 checkpoint: {name}")
@@ -656,7 +839,7 @@ async def set_checkpoint(project_id: str, name: str, action: str = "set"):
             ),
         )
     try:
-        return skill_engine.record_stage_checkpoint(project_id, key, action)
+        return scope.engine.record_stage_checkpoint(scope.project_id, key, action)
     except ValueError as exc:
         detail = str(exc)
         status = 404 if "项目不存在" in detail else 400
@@ -664,8 +847,8 @@ async def set_checkpoint(project_id: str, name: str, action: str = "set"):
 
 
 @app.get("/api/projects/{project_id}/conversation")
-async def get_conversation(project_id: str):
-    project_path = skill_engine.get_project_path(project_id)
+async def get_conversation(scope: ProjectScope = Depends(require_project)):
+    project_path = scope.engine.get_project_path(scope.project_id)
     if not project_path:
         raise HTTPException(status_code=404, detail="项目不存在")
     conv_file = project_path / "conversation.json"
@@ -689,12 +872,12 @@ async def get_conversation(project_id: str):
 
 
 @app.delete("/api/projects/{project_id}/conversation")
-async def clear_conversation(project_id: str):
-    project_path = skill_engine.get_project_path(project_id)
+async def clear_conversation(scope: ProjectScope = Depends(require_project)):
+    project_path = scope.engine.get_project_path(scope.project_id)
     if not project_path:
         raise HTTPException(status_code=404, detail="项目不存在")
-    handler = get_chat_handler(project_id)
-    request_lock = handler._get_project_request_lock(project_id)
+    handler = get_chat_handler(scope.uid, scope.project_id)
+    request_lock = handler._get_project_request_lock(scope.project_id)
     with request_lock:
         for file_name in (
             "conversation.json",
@@ -709,10 +892,14 @@ async def clear_conversation(project_id: str):
 
 @app.post("/api/chat/stream")
 @limiter.limit("20/minute")
-def chat_stream(request: Request, chat_request: ChatRequest):
+def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(get_current_uid)):
+    # 归属校验在函数体（StreamingResponse 之前）：非属主 → require_project 抛 404，
+    # 而不是把 404 埋进 SSE 流里。scope 解析失败直接以 HTTP 错误冒泡。
+    scope = require_project(chat_request.project_id, uid)
+
     def generate():
         try:
-            handler = get_chat_handler(chat_request.project_id)
+            handler = get_chat_handler(scope.uid, scope.project_id)
             # C5: thread run-bound trigger metadata end-to-end so the main agent can bind a
             # review report to the exact run that produced it (run_id/report_mtime_ns stay
             # opaque strings — pydantic already rejects raw ints; never coerce to Number).
@@ -721,7 +908,7 @@ def chat_stream(request: Request, chat_request: ChatRequest):
                 "report_mtime_ns": chat_request.report_mtime_ns,
             }
             for chunk in handler.chat_stream(
-                chat_request.project_id,
+                scope.project_id,
                 chat_request.message_text,
                 chat_request.attached_material_ids,
                 [item.model_dump() for item in chat_request.transient_attachments],

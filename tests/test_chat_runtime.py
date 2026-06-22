@@ -3849,6 +3849,7 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_module_and_instance_level_project_locks_share_identity(self, mock_openai):
         del mock_openai
         from backend.chat import _get_project_request_lock as module_lock
+        from backend.tenant import tenant_project_key
 
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
@@ -3858,7 +3859,10 @@ class ChatRuntimeTests(unittest.TestCase):
             "set",
         )
 
-        module_obj = module_lock(self.project_id)
+        # W2-B 多租户：实例 helper / record_stage_checkpoint 都用复合键 (uid, project_id)，
+        # 故模块级 registry 取同一把锁须用同样的复合键（uid 默认 "local"）。
+        composite_key = tenant_project_key("local", self.project_id)
+        module_obj = module_lock(composite_key)
         instance_obj = handler._get_project_request_lock(self.project_id)
         with mock.patch("backend.main.get_chat_handler") as mock_get_chat_handler:
             handler.skill_engine.record_stage_checkpoint(
@@ -3866,7 +3870,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "outline_confirmed_at",
                 "set",
             )
-            checkpoint_obj = module_lock(self.project_id)
+            checkpoint_obj = module_lock(composite_key)
 
         self.assertIs(module_obj, instance_obj)
         self.assertIs(module_obj, checkpoint_obj)
@@ -4075,9 +4079,11 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(result["provider"], "serper")
         self.assertIn("猪猪侠2025观察", result["results"])
         self.assertEqual(result["items"][0]["domain"], "example.com")
+        from backend.tenant import tenant_project_key
         fake_router.search.assert_called_once_with(
             "猪猪侠 2025",
-            project_id="demo",
+            # W2-B (T13): 搜索按复合键 (uid, project_id) 隔离；handler 默认 uid="local"。
+            project_id=tenant_project_key("local", "demo"),
             turn_search_count=0,
             native_search=handler._search_with_native_provider,
         )
@@ -10860,19 +10866,24 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         the independent-review.md file's real mtime (unless overridden), and stash the metadata
         the chat route would forward. Returns {run_id, report_mtime_ns}."""
         from backend.independent_review import _REVIEW_SESSION_STORE
+        from backend.tenant import tenant_project_key
 
+        # W2-B (T11): chat-side system_trigger reads the tombstone via get_done_mtime(
+        # tenant_project_key(uid, project_id), run_id) — handler uid defaults to "local". So seed
+        # under the composite key, not the bare project_id, or the lookup misses and nothing injects.
+        store_key = tenant_project_key("local", self.project_id)
         report_path = self.project_dir / "plan" / "independent-review.md"
         if mtime_ns is None:
             mtime_ns = str(report_path.stat().st_mtime_ns)
         with _REVIEW_SESSION_STORE._guard:
-            _REVIEW_SESSION_STORE._records[self.project_id] = {
+            _REVIEW_SESSION_STORE._records[store_key] = {
                 "run_id": run_id,
                 "status": "done",
                 "snapshot": None,
                 "cancel_event": None,
                 "report_mtime_ns": mtime_ns,
             }
-        self.addCleanup(_REVIEW_SESSION_STORE.discard, self.project_id, run_id)
+        self.addCleanup(_REVIEW_SESSION_STORE.discard, store_key, run_id)
         self._independent_run_metadata = {"run_id": run_id, "report_mtime_ns": mtime_ns}
         return self._independent_run_metadata
 
@@ -11450,8 +11461,11 @@ class SystemTriggerRunBoundTests(SystemTriggerStreamTests):
 
     def _review_lock(self):
         from backend.independent_review import get_independent_review_lock
+        from backend.tenant import tenant_project_key
 
-        return get_independent_review_lock(self.project_id)
+        # W2-B (T11): chat-side review lock is keyed by tenant_project_key(uid, project_id) —
+        # handler uid defaults to "local". Assert against the same composite-key lock.
+        return get_independent_review_lock(tenant_project_key("local", self.project_id))
 
     def _assert_review_lock_free(self):
         lock = self._review_lock()

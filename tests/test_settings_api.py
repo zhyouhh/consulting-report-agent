@@ -5,20 +5,51 @@ from fastapi.testclient import TestClient
 
 import backend.main as main_module
 
+from tests.test_auth_api import AuthApiTestBase
 
-class SettingsApiTests(unittest.TestCase):
+
+class SettingsIsolationTests(unittest.TestCase):
+    def test_settings_isolated_per_uid(self):
+        from backend.config import load_settings, save_settings, Settings
+        import os, tempfile
+        from unittest import mock
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        with mock.patch.dict(os.environ, {"CRA_DATA_ROOT": tmp}):
+            sa = Settings(); sa.custom_api_key = "A-KEY"; save_settings(sa, uid="ua")
+            sb = Settings(); sb.custom_api_key = "B-KEY"; save_settings(sb, uid="ub")
+            self.assertEqual(load_settings("ua").custom_api_key, "A-KEY")
+            self.assertEqual(load_settings("ub").custom_api_key, "B-KEY")
+
+
+class SettingsApiTests(AuthApiTestBase):
     def setUp(self):
-        self.client = TestClient(main_module.app)
-        self.original = main_module.settings.model_dump()
+        super().setUp()
+        # Single-user semantics: get_current_uid → "local".
+        self.m.app.state.auth_required = False
+        # The endpoints read load_settings("local") from data_root/users/local/config.json;
+        # preseed so GET has a deterministic baseline, and so per-test mutations are isolated.
+        from backend.config import save_settings, Settings
+        save_settings(Settings(), uid="local")
+        self.client = TestClient(self.m.app)
 
-    def tearDown(self):
-        for key, value in self.original.items():
-            setattr(main_module.settings, key, value)
+    @property
+    def main_module(self):
+        return self.m
+
+    def _save_local(self, settings):
+        from backend.config import save_settings
+        save_settings(settings, uid="local")
+
+    def _load_local(self):
+        from backend.config import load_settings
+        return load_settings("local")
 
     def test_get_settings_masks_custom_api_key(self):
-        main_module.settings.mode = "custom"
-        main_module.settings.custom_api_key = "very-secret"
-        main_module.settings.api_key = "very-secret"
+        from backend.config import Settings
+        s = Settings()
+        s.custom_api_key = "very-secret"
+        self._save_local(s)
+        # normalize re-derives api_key from the managed client token at load time (non-empty) → masked.
         response = self.client.get("/api/settings")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -26,7 +57,10 @@ class SettingsApiTests(unittest.TestCase):
         self.assertEqual(payload["api_key"], "***")
 
     def test_get_settings_includes_custom_context_limit_override(self):
-        main_module.settings.custom_context_limit_override = 48000
+        from backend.config import Settings
+        s = Settings()
+        s.custom_context_limit_override = 48000
+        self._save_local(s)
 
         response = self.client.get("/api/settings")
 
@@ -35,13 +69,12 @@ class SettingsApiTests(unittest.TestCase):
         self.assertEqual(payload["custom_context_limit_override"], 48000)
 
     def test_update_settings_preserves_existing_custom_key_when_payload_is_masked(self):
-        main_module.settings.mode = "custom"
-        main_module.settings.custom_api_key = "very-secret"
-        main_module.settings.custom_api_base = "https://custom.example/v1"
-        main_module.settings.custom_model = "gpt-4.1-mini"
-        main_module.settings.api_key = "very-secret"
-        main_module.settings.api_base = "https://custom.example/v1"
-        main_module.settings.model = "gpt-4.1-mini"
+        from backend.config import Settings
+        s = Settings()
+        s.custom_api_key = "very-secret"
+        s.custom_api_base = "https://custom.example/v1"
+        s.custom_model = "gpt-4.1-mini"
+        self._save_local(s)
 
         response = self.client.post(
             "/api/settings",
@@ -56,8 +89,8 @@ class SettingsApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(main_module.settings.custom_api_key, "very-secret")
-        self.assertEqual(main_module.settings.api_key, "very-secret")
+        # Masked key → existing custom_api_key preserved through the save round-trip on disk.
+        self.assertEqual(self._load_local().custom_api_key, "very-secret")
 
     def test_update_settings_saves_custom_context_limit_override(self):
         with mock.patch.object(main_module, "save_settings") as save_settings_mock:
@@ -75,8 +108,8 @@ class SettingsApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(main_module.settings.custom_context_limit_override, 32000)
         save_settings_mock.assert_called_once()
+        self.assertEqual(save_settings_mock.call_args.kwargs.get("uid"), "local")
         saved_settings = save_settings_mock.call_args.args[0]
         self.assertEqual(saved_settings.custom_context_limit_override, 32000)
 
@@ -96,20 +129,19 @@ class SettingsApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(main_module.settings.custom_context_limit_override, 4096)
         save_settings_mock.assert_called_once()
+        self.assertEqual(save_settings_mock.call_args.kwargs.get("uid"), "local")
         saved_settings = save_settings_mock.call_args.args[0]
         self.assertEqual(saved_settings.custom_context_limit_override, 4096)
 
     def test_update_settings_preserves_existing_custom_context_limit_override_when_omitted(self):
-        main_module.settings.mode = "custom"
-        main_module.settings.custom_api_key = "very-secret"
-        main_module.settings.custom_api_base = "https://custom.example/v1"
-        main_module.settings.custom_model = "gpt-4.1-mini"
-        main_module.settings.custom_context_limit_override = 64000
-        main_module.settings.api_key = "very-secret"
-        main_module.settings.api_base = "https://custom.example/v1"
-        main_module.settings.model = "gpt-4.1-mini"
+        from backend.config import Settings
+        s = Settings()
+        s.custom_api_key = "very-secret"
+        s.custom_api_base = "https://custom.example/v1"
+        s.custom_model = "gpt-4.1-mini"
+        s.custom_context_limit_override = 64000
+        self._save_local(s)
 
         with mock.patch.object(main_module, "save_settings") as save_settings_mock:
             response = self.client.post(
@@ -125,7 +157,37 @@ class SettingsApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(main_module.settings.custom_context_limit_override, 64000)
         save_settings_mock.assert_called_once()
+        self.assertEqual(save_settings_mock.call_args.kwargs.get("uid"), "local")
         saved_settings = save_settings_mock.call_args.args[0]
         self.assertEqual(saved_settings.custom_context_limit_override, 64000)
+
+
+    def test_settings_endpoint_requires_auth(self):
+        # auth on + no session cookie -> 401
+        self.m.app.state.auth_required = True
+        client = TestClient(self.m.app)  # fresh client carries no cookies
+        self.assertEqual(client.get("/api/settings").status_code, 401)
+
+    def test_settings_isolated_between_authenticated_users(self):
+        from backend import accounts
+        self.m.app.state.auth_required = True
+        ua = accounts.create_user("ua", "pw-123456")
+        ub = accounts.create_user("ub", "pw-123456")
+        ta = accounts.create_session(ua)
+        tb = accounts.create_session(ub)
+        ca = TestClient(self.m.app); ca.cookies.set("cra_session", ta)
+        cb = TestClient(self.m.app); cb.cookies.set("cra_session", tb)
+        # custom_api_base is NOT masked by GET → observe per-uid isolation through the endpoint.
+        body = lambda base: {
+            "mode": "managed",
+            "managed_base_url": "https://x",
+            "managed_model": "m",
+            "custom_api_base": base,
+            "custom_api_key": "",
+            "custom_model": "",
+        }
+        self.assertEqual(ca.post("/api/settings", json=body("A-BASE")).status_code, 200)
+        self.assertEqual(cb.post("/api/settings", json=body("B-BASE")).status_code, 200)
+        self.assertEqual(ca.get("/api/settings").json()["custom_api_base"], "A-BASE")
+        self.assertEqual(cb.get("/api/settings").json()["custom_api_base"], "B-BASE")

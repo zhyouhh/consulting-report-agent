@@ -352,7 +352,14 @@ class IndependentReviewAgent:
         store: "ReviewSessionStore | None" = None,
         resume_snapshot: dict | None = None,
         supplement: str | None = None,
+        store_key: str | None = None,
     ) -> Iterator[Event]:
+        # W2-B 多租户（T11b）：store 操作键与 project_id（文件/engine 访问的 canonical id）解耦。
+        # 端点在复合键 (uid, project_id) 下 claim/commit，故 store.* 必须用同一复合键写
+        # tombstone，否则 atomic_commit_report 找不到 running record、报告保存失败。
+        # 默认回落 project_id：未传 store_key 的旧调用方/测试保持单键语义（向后兼容）。
+        store_key = store_key if store_key is not None else project_id
+
         def is_cancelled() -> bool:
             return cancel_event is not None and cancel_event.is_set()
 
@@ -379,7 +386,7 @@ class IndependentReviewAgent:
             # cancel 落档（Step 5.5 / codex R2 BLOCKER 2）：return 前 set_errored（CAS：被 discard
             # 已清 record 时 no-op；断连时翻 errored 带完整 provider-valid snapshot 供精确 resume）。
             if store is not None and run_id is not None:
-                store.set_errored(project_id, run_id, snapshot_now(iteration_value))
+                store.set_errored(store_key, run_id, snapshot_now(iteration_value))
             yield {"type": "cancelled", "data": "客户端断开，已取消审查"}
 
         if is_cancelled():
@@ -389,7 +396,7 @@ class IndependentReviewAgent:
             # 唯一续审快照彻底丢失。故 resume 场景把 resume_snapshot CAS 写回 errored 再退（断连可续）。
             # discard 已 pop record → set_errored run_id 失配 no-op（不复活被丢弃的 run）；首次审查无快照可保。
             if resume_snapshot is not None and store is not None and run_id is not None:
-                store.set_errored(project_id, run_id, resume_snapshot)
+                store.set_errored(store_key, run_id, resume_snapshot)
             yield {"type": "cancelled", "data": "客户端断开，已取消审查"}
             return
 
@@ -475,7 +482,7 @@ class IndependentReviewAgent:
                 response = client.chat.completions.create(**request_kwargs)
             except Exception as exc:
                 if store is not None and run_id is not None:
-                    store.set_errored(project_id, run_id, snapshot_now(iteration))
+                    store.set_errored(store_key, run_id, snapshot_now(iteration))
                 yield {"type": "error", "detail": f"模型调用失败：{str(exc)}"}
                 return
 
@@ -535,7 +542,7 @@ class IndependentReviewAgent:
             except Exception as exc:
                 yield from drain(parser.flush())
                 if store is not None and run_id is not None:
-                    store.set_errored(project_id, run_id, snapshot_now(iteration))
+                    store.set_errored(store_key, run_id, snapshot_now(iteration))
                 yield {"type": "error", "detail": f"模型调用失败：{str(exc)}"}
                 return
             yield from drain(parser.flush())
@@ -636,7 +643,7 @@ class IndependentReviewAgent:
             if candidate_text is None:
                 # 从未写过候选——这是模型问题，不进自修（自修只针对"写了但不完整"）。
                 if store is not None and run_id is not None:
-                    store.set_errored(project_id, run_id, snapshot_now(iteration))
+                    store.set_errored(store_key, run_id, snapshot_now(iteration))
                 yield {"type": "error", "detail": "审查代理未生成报告，请重试"}
                 return
             review_error = self._verify_review_completeness(candidate_text)
@@ -656,17 +663,17 @@ class IndependentReviewAgent:
                     )
                     continue
                 if store is not None and run_id is not None:
-                    store.set_errored(project_id, run_id, snapshot_now(iteration))
+                    store.set_errored(store_key, run_id, snapshot_now(iteration))
                 yield {"type": "error", "detail": review_error}
                 return
             # 校验通过 → 成功路径：先锁外写 temp，再 store guard 内原子替换 + 写 tombstone。
             yield from self._commit_verified_candidate(
-                project_id, run_id, store, candidate_text, snapshot_now(iteration)
+                project_id, run_id, store, candidate_text, snapshot_now(iteration), store_key
             )
             return
 
         if store is not None and run_id is not None:
-            store.set_errored(project_id, run_id, snapshot_now(self.MAX_ITERATIONS))
+            store.set_errored(store_key, run_id, snapshot_now(self.MAX_ITERATIONS))
         yield {"type": "error", "detail": f"审查超时（超过 {self.MAX_ITERATIONS} 轮），请重试"}
 
     def _commit_verified_candidate(
@@ -676,7 +683,11 @@ class IndependentReviewAgent:
         store: "ReviewSessionStore | None",
         candidate_text: str,
         errored_snapshot: dict,
+        store_key: str | None = None,
     ) -> Iterator[Event]:
+        # store_key 与 project_id 解耦（T11b）：store 写用 store_key，project 文件用 project_id。
+        # 默认回落 project_id 保持向后兼容（旧调用方/测试单键语义）。
+        store_key = store_key if store_key is not None else project_id
         """成功路径：候选已校验通过。**store + run_id 是必需依赖、无直写回退**（plan:644 / spec §70/§86：
         canonical 替换只能在 store guard 下原子完成，codex C3-review BLOCKER 1）——缺任一则 fail-fast
         error，绝不静默直写 canonical。流程：**先锁外** mkstemp(canonical 同目录) + 写 candidate + close →
@@ -691,7 +702,7 @@ class IndependentReviewAgent:
         # canonical 绝对路径：get_project_path 返回 Optional[Path]，None fail-fast（避免异常变 500）。
         project_path = self.skill_engine.get_project_path(project_id)
         if project_path is None:
-            store.set_errored(project_id, run_id, errored_snapshot)
+            store.set_errored(store_key, run_id, errored_snapshot)
             yield {"type": "error", "detail": "项目路径不存在，无法保存审查报告，请重试"}
             return
         canonical_abs_path = str((project_path / CANONICAL_REVIEW_PATH).resolve())
@@ -710,12 +721,12 @@ class IndependentReviewAgent:
                     pass
                 raise
         except Exception as exc:
-            store.set_errored(project_id, run_id, errored_snapshot)
+            store.set_errored(store_key, run_id, errored_snapshot)
             yield {"type": "error", "detail": f"写入审查报告失败：{str(exc)}"}
             return
 
         report_mtime_ns = store.atomic_commit_report(
-            project_id, run_id, temp_abs_path, canonical_abs_path, errored_snapshot
+            store_key, run_id, temp_abs_path, canonical_abs_path, errored_snapshot
         )
         if report_mtime_ns is None:
             # run_id 失配 / status 非 running / 已 cancel / os.replace 失败：删 temp（atomic_commit 失败时

@@ -909,7 +909,8 @@ class SkillEngine:
     def _has_enough_analysis_refs(self, project_path, min_refs):
         return self._count_analysis_refs(project_path) >= min_refs
 
-    def __init__(self, projects_dir: Path, skill_dir: Path):
+    def __init__(self, projects_dir: Path, skill_dir: Path, uid: str = "local"):
+        self.uid = uid
         self.projects_dir = projects_dir
         self.skill_dir = skill_dir
         self.projects_dir.mkdir(parents=True, exist_ok=True)
@@ -1954,18 +1955,22 @@ class SkillEngine:
 
     def record_stage_checkpoint(self, project_id: str, key: str, action: str) -> dict:
         from backend.chat import _get_project_request_lock
+        from backend.tenant import tenant_project_key
 
         project_path = self.get_project_path(project_id)
         if project_path is None:
             raise ValueError(f"项目不存在: {project_id}")
         if action not in ("set", "clear"):
             raise ValueError(f"未知 action: {action}")
-        lock = _get_project_request_lock(project_id)
+        # W2-B 多租户：请求锁按复合键 (uid, project_id)，与 chat_stream / 文件写端点同把锁。
+        lock = _get_project_request_lock(tenant_project_key(self.uid, project_id))
         with lock:
             if key == "review_passed_at" and action == "set":
                 from backend.independent_review import get_independent_review_lock
 
-                review_lock = get_independent_review_lock(project_id)
+                # W2-B 多租户（T11b）：审查锁键已迁为复合键 (uid, project_id)，与审查端点 worker +
+                # chat 汇报轮读同把锁——两用户同名 project_id 各拿独立审查锁，门禁互不串。
+                review_lock = get_independent_review_lock(tenant_project_key(self.uid, project_id))
                 if review_lock.locked():
                     raise ValueError("独立审查正在进行中，请等待完成后再标记审查通过")
 

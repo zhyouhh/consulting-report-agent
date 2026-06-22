@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import axios from 'axios'
 import SettingsModal from './SettingsModal'
 import ProjectCreateModal from './ProjectCreateModal'
 import { describeConnectionMode } from '../utils/connectionMode'
@@ -11,6 +12,8 @@ export default function Sidebar({
   onCreateProject,
   onDeleteProject,
   onSettingsSaved,
+  authUser,
+  onLoggedOut,
 }) {
   const [showModal, setShowModal] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -75,6 +78,17 @@ export default function Sidebar({
         {connection.helper && (
           <div className="mb-2 text-[11px] leading-5 text-[#7f84b8]">
             {connection.helper}
+          </div>
+        )}
+        {/* 桌面/本地模式（uid==="local"，合成账号、无真实会话）不显示账号块——
+            否则点登出会清掉 authUser 把用户困在登录页（Codex review）。仅 web 真实用户显示。 */}
+        {authUser && authUser.uid !== 'local' && (
+          <div className="mb-2 px-3 py-2 rounded-lg bg-[#15162d] border border-[#2f3158] flex items-center justify-between">
+            <span className="text-xs text-[#e2e2f0] truncate">{authUser.username}</span>
+            <button
+              onClick={async () => { try { await axios.post('/api/auth/logout') } catch (_) { /* ignore */ } onLoggedOut?.() }}
+              className="text-[11px] text-[#8888a8] hover:text-[#e2e2f0] ml-2"
+            >登出</button>
           </div>
         )}
         <button

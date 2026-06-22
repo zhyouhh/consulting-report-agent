@@ -12,12 +12,10 @@ export function prepareProjectCreatePayload(formData = {}) {
 
   return {
     name: theme,
-    workspace_dir: (formData.workspace_dir || "").trim(),
     project_type: formData.project_type || "strategy-consulting",
     theme,
     deadline: (formData.deadline || "").trim(),
     expected_length: (formData.expected_length || "").trim(),
     notes: "",
-    initial_material_paths: formData.initial_material_paths || [],
   };
 }

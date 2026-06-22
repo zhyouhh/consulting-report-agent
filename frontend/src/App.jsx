@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { Toaster } from 'react-hot-toast'
 import Sidebar from './components/Sidebar'
+import Login from './components/Login'
 import ChatPanel from './components/ChatPanel'
 import WorkspacePanel from './components/WorkspacePanel'
 import axios from 'axios'
+import { setUnauthedHandler } from './api'
 import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
 import { mergeMaterials, removeMaterialById } from './utils/chatMaterials'
 import { getCurrentProject, isSameProjectSelection, reconcileCurrentProjectId } from './utils/projectSelection'
@@ -35,12 +37,15 @@ function App() {
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(true)
   const [loading, setLoading] = useState(true)
   const [injectedPrompt, setInjectedPrompt] = useState(null)
+  const [authUser, setAuthUser] = useState(null)
+  const [authChecked, setAuthChecked] = useState(false)
   const activeProjectRef = useRef(currentProjectId)
   const chatPanelRef = useRef(null)
   const workspacePanelRef = useRef(null)
 
   useEffect(() => {
-    initializeApp()
+    setUnauthedHandler(() => setAuthUser(null))
+    axios.get('/api/auth/me').then((r) => { setAuthUser(r.data); return initializeApp() }).catch(() => {}).finally(() => setAuthChecked(true))
   }, [])
 
   useEffect(() => {
@@ -231,6 +236,9 @@ function App() {
     })
   }
 
+  if (!authChecked) return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
+  if (!authUser) return <Login onAuthed={(u) => { setAuthUser(u); initializeApp() }} />
+
   if (loading) {
     return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
   }
@@ -247,6 +255,8 @@ function App() {
           onCreateProject={createProject}
           onDeleteProject={deleteProject}
           onSettingsSaved={loadSettings}
+          authUser={authUser}
+          onLoggedOut={() => setAuthUser(null)}
         />
         <ChatPanel
           ref={chatPanelRef}

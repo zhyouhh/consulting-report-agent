@@ -18,3 +18,4 @@ markitdown[docx,pptx,xlsx,xls,pdf]==0.1.6
 xlrd==2.0.2
 rapidocr-onnxruntime==1.3.24
 onnxruntime==1.27.0
+argon2-cffi==23.1.0

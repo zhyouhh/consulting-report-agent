@@ -49,6 +49,7 @@ from .report_writing import (
 )
 from .search_state import SearchStateStore
 from .skill import SkillEngine
+from .tenant import tenant_project_key
 from .stream_parsing import ThinkingStreamParser
 from .trust_boundary import (
     ATTACHMENT_DATA_OPEN,
@@ -267,9 +268,10 @@ def stream_split_safe_tail(buffer: str) -> tuple[str, str]:
     return buffer, ""
 
 
-def _get_project_request_lock(project_id: str) -> threading.RLock:
-    """Module-level accessor for the per-project RLock."""
-    lock_key = str(project_id or "")
+def _get_project_request_lock(lock_key: str) -> threading.RLock:
+    """Module-level accessor for the per-project RLock registry. Expects an ALREADY-COMPOSED
+    key (tenant_project_key(uid, project_id)), never a bare project_id — callers compose first."""
+    lock_key = str(lock_key or "")
     with _PROJECT_REQUEST_LOCKS_GUARD:
         lock = _PROJECT_REQUEST_LOCKS.get(lock_key)
         if lock is None:
@@ -389,9 +391,15 @@ class ChatHandler:
     _NEGATION_RE = re.compile(r"(不要|别|没|不是|不想|不|并非|非要|非得)[^。！？!?\n]{0,9}$")
     _NEGATION_WINDOW_CHARS = 10
 
-    def __init__(self, settings: Settings, skill_engine: SkillEngine):
+    def __init__(self, settings: Settings, skill_engine: SkillEngine, uid: str = "local"):
+        self.uid = uid
         self.settings = settings
         self.skill_engine = skill_engine
+        # uid 必须与引擎一致：否则 chat 持 (handler.uid) 锁、record_stage_checkpoint 持 (engine.uid)
+        # 锁 → 两把不同锁、互斥失效（Codex review）。工厂对两者传同一 uid；此处 fail-fast 兜误用。
+        engine_uid = getattr(skill_engine, "uid", uid)
+        if engine_uid != uid:
+            raise ValueError(f"ChatHandler uid {uid!r} 与 SkillEngine uid {engine_uid!r} 不一致")
         self._turn_context = self._new_turn_context(can_write_non_plan=True)
         self._fetch_url_cache: Dict[tuple[str, str, str], Dict[str, object]] = {}
         import httpx
@@ -1154,7 +1162,8 @@ class ChatHandler:
         temp_path.replace(state_path)
 
     def _get_conversation_state_lock(self, project_id: str):
-        lock_key = str(project_id or "")
+        # W2-B 多租户：会话状态锁按复合键 (uid, project_id)，两个用户的同名 project_id 拿到不同锁。
+        lock_key = tenant_project_key(self.uid, project_id)
         with _CONVERSATION_STATE_LOCKS_GUARD:
             lock = _CONVERSATION_STATE_LOCKS.get(lock_key)
             if lock is None:
@@ -1163,7 +1172,8 @@ class ChatHandler:
         return lock
 
     def _get_project_request_lock(self, project_id: str):
-        return _get_project_request_lock(project_id)
+        # W2-B 多租户：请求锁按复合键 (uid, project_id)；模块级 registry 仍取不透明键。
+        return _get_project_request_lock(tenant_project_key(self.uid, project_id))
 
     def _mutate_conversation_state(
         self,
@@ -2655,7 +2665,9 @@ class ChatHandler:
                 # review lock 非阻塞获取；拿到后用 try/finally 包裹全部校验/读/再 stat，
                 # 每条退出路径（含成功）都必经 finally 释放锁——漏一条后续审查永久 409
                 # （与 C4 endpoint lock 全路径释放同模式）。
-                review_lock = get_independent_review_lock(project_id)
+                # W2-B 多租户（T11b）：审查锁/store 键已迁为复合键 (uid, project_id)，与审查端点
+                # worker + checkpoint 门禁同把锁——两用户同名 project_id 各拿独立审查锁/tombstone。
+                review_lock = get_independent_review_lock(tenant_project_key(self.uid, project_id))
                 if not review_lock.acquire(blocking=False):
                     yield {"type": "error", "data": "审查状态变化，请稍后重试"}
                     return
@@ -2669,7 +2681,10 @@ class ChatHandler:
                         run_bound_error = "审查报告尚未就绪，请稍后重试"
                     else:
                         # done tombstone 必须存在且 run_id 匹配（防汇报别的 run 的报告）。
-                        done_mtime_ns = _REVIEW_SESSION_STORE.get_done_mtime(project_id, run_id)
+                        # 复合键 (uid, project_id)：与审查端点 worker 写 tombstone 同键（T11b）。
+                        done_mtime_ns = _REVIEW_SESSION_STORE.get_done_mtime(
+                            tenant_project_key(self.uid, project_id), run_id
+                        )
                         if done_mtime_ns is None or str(done_mtime_ns) != str(expected_mtime_ns):
                             run_bound_error = "审查状态变化，请稍后重试"
                         else:
@@ -5429,7 +5444,9 @@ class ChatHandler:
             router = self._get_search_router()
             result = router.search(
                 query,
-                project_id=project_id or "__direct__",
+                # W2-B 多租户：搜索的 cache + project-minute 配额按复合键 (uid, project_id) 隔离，
+                # 不同用户的同名 project 互不串缓存/不共享分钟配额（global 配额仍全局共享，见 search_state）。
+                project_id=tenant_project_key(self.uid, project_id or "__direct__"),
                 turn_search_count=turn_search_count,
                 native_search=self._search_with_native_provider,
             )
