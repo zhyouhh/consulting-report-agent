@@ -337,12 +337,13 @@ def normalize_settings_payload(data: dict) -> dict:
     normalized["projects_dir"] = runtime_projects_dir
     normalized["skill_dir"] = runtime_skill_dir
 
-    # 桌面端始终以试用通道启动，保留自定义 API 信息供用户临时切换。
-    # 同时旧版本配置可能遗留开发环境路径和自定义模式，也在这里统一纠正。
+    # 桌面默认 managed；legacy 配置强制迁移到 managed（迁移安全）；
+    # 非 legacy 配置 honor 用户选择的 mode（custom 已激活，B3）。
     if is_legacy_config:
         normalized["mode"] = "managed"
     else:
-        normalized["mode"] = "managed"
+        requested = normalized.get("mode", "managed")
+        normalized["mode"] = requested if requested in ("managed", "custom") else "managed"
 
     if normalized["mode"] == "managed":
         normalized["api_base"] = normalized["managed_base_url"]

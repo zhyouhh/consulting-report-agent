@@ -34,6 +34,10 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertEqual(settings.api_key, settings.managed_client_token)
 
     def test_save_and_load_preserves_custom_fields_but_starts_in_managed_mode(self):
+        # NOTE (B3 Task 4): custom 模式已在 normalize 层激活，但 save_settings 仍把 mode 当
+        # 运行时派生字段剔除（见 test_save_settings_does_not_persist_runtime_or_session_fields），
+        # 故 save→load 往返后 mode 仍回落 managed（mode 持久化属 Phase 1 范围外的后续项）。
+        # custom 字段本身被保留。
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             settings = Settings(

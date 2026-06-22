@@ -301,6 +301,13 @@ class SettingsUpdate(BaseModel):
 
 @app.post("/api/settings")
 async def update_settings(update: SettingsUpdate, uid: str = Depends(get_current_uid)):
+    from backend import url_guard
+    if (update.mode or "") == "custom":
+        # 保存 custom 前即时校验 base：https + 白名单主机 + 解析到公网；不合法不落盘。
+        try:
+            url_guard.validate_custom_api_base(update.custom_api_base or "")
+        except url_guard.SsrfBlockedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     with _settings_lock:
         s = load_settings(uid)
         s.mode = update.mode
