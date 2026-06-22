@@ -236,3 +236,13 @@ def get_effective_daily_cap_micro(uid) -> int:
     if g is not None:
         return int(g)
     return DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN
+
+
+def list_all_users() -> list[dict]:
+    # 不 SELECT password_hash——遵循 B1「公共查询剥 hash」铁律。
+    with _db() as con:
+        rows = con.execute(
+            "SELECT uid, username, is_admin, daily_cost_micro_yuan, "
+            "must_change_password, disabled, created_at FROM users ORDER BY created_at"
+        ).fetchall()
+    return [dict(r) for r in rows]

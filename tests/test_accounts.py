@@ -169,3 +169,43 @@ class UsageDailyTests(unittest.TestCase):
         # override 清回 None → 退全局
         accounts.set_user_daily_cap_micro(uid, None)
         self.assertEqual(accounts.get_effective_daily_cap_micro(uid), 2000000)
+
+
+class AdminAccountsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = Path(os.path.realpath(tempfile.mkdtemp()))
+        self._env = mock.patch.dict(os.environ, {"CRA_DATA_ROOT": str(self._tmp)})
+        self._env.start(); accounts.init_db()
+
+    def tearDown(self):
+        self._env.stop(); shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_list_all_users_returns_rows_without_password_hash(self):
+        accounts.create_user("alice", "pw-123456")
+        accounts.create_user("bob", "pw-123456")
+        rows = accounts.list_all_users()
+        self.assertEqual({r["username"] for r in rows}, {"alice", "bob"})
+        self.assertNotIn("password_hash", rows[0])
+        for k in ("uid", "username", "is_admin", "disabled", "created_at"):
+            self.assertIn(k, rows[0])
+
+    def test_admin_reset_password_sets_flag_and_revokes_sessions(self):
+        uid = accounts.create_user("carol", "old-123456")
+        token = accounts.create_session(uid)
+        accounts.admin_reset_password(uid, "new-123456")
+        self.assertTrue(accounts.verify_user_password("carol", "new-123456"))
+        self.assertIsNone(accounts.get_session_uid(token))           # 会话被撤
+        self.assertTrue(accounts.get_user_by_uid(uid)["must_change_password"])
+
+    def test_rotate_invite_code_changes_and_returns_new(self):
+        accounts.set_config("invite_code", "OLD")
+        new_code = accounts.rotate_invite_code()
+        self.assertNotEqual(new_code, "OLD")
+        self.assertEqual(accounts.get_config("invite_code"), new_code)
+        self.assertGreaterEqual(len(new_code), 8)
+
+    def test_custom_api_extra_hosts_roundtrip(self):
+        self.assertEqual(accounts.get_custom_api_extra_hosts(), [])
+        accounts.set_custom_api_extra_hosts(["My.LLM.cn ", "", "other.host"])
+        # 归一化：去空白 + 小写 + 去空项；持久化可读回
+        self.assertEqual(set(accounts.get_custom_api_extra_hosts()), {"my.llm.cn", "other.host"})
