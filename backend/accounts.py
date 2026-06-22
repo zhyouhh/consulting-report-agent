@@ -246,3 +246,14 @@ def list_all_users() -> list[dict]:
             "must_change_password, disabled, created_at FROM users ORDER BY created_at"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def admin_reset_password(uid: str, new_password: str) -> None:
+    """管理员重置他人密码：改 hash + 置 must_change_password=1 + 撤销全部会话（同一事务）。"""
+    new_hash = _PH.hash(new_password)
+    with _db() as con:
+        con.execute(
+            "UPDATE users SET password_hash=?, must_change_password=1 WHERE uid=?",
+            (new_hash, uid),
+        )
+        con.execute("DELETE FROM sessions WHERE uid=?", (uid,))
