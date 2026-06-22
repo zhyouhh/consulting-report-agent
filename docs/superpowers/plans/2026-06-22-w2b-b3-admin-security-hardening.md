@@ -1346,7 +1346,9 @@ git commit -m "feat(b3): admin write endpoints (password/cap/disabled/invite rot
 
 **背景:** B2 已让 `/api/auth/me` 返回 `must_change_password`。B3 加后端依赖：标志为真时，对业务路由（项目/聊天/settings/admin）403，前端据此弹强制改密屏。豁免：`/api/auth/me`、`/api/auth/change-password`、`/api/auth/logout`（否则死锁）。
 
-- [ ] **Step 1: 写失败测试**
+> **✅ DONE (2026-06-23)** — commits `69cafda` (enforcement) + `99a53e0` (desktop-bridge NIT 收尾). Codex 红队双轮独立复审 **APPROVED, no BLOCKER**（第二轮对抗式硬查，执行真 grep 确认零遗漏 + upload/review-stream/chat-stream 全经 gated 依赖 + admin-reset/死锁端到端走通 + 启动态无反转）。两个 NIT 留作可选 polish、非阻塞：① `require_password_current` 读模块级 `app.state` 而 `get_current_uid` 读 `request.app.state`（同一对象，无可利用分歧）；② `get_user_by_uid` 返 None 时 fail-open（正常流不可达——`get_session_uid` 的 user join 已拒缺失/停用、且无 user-delete 端点）。豁免集精确收紧到 4 项（me/change-password/logout/health）。回归：关键门全绿，全量除 4 个已知 mac-realpath 环境差异外无新增 failure。
+
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_auth_api.py （追加）
@@ -1377,12 +1379,12 @@ def test_after_change_password_business_routes_unblocked(self):
     self.assertNotEqual(self.client.get("/api/projects").status_code, 403)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_auth_api.py -k must_change -v`
 Expected: FAIL
 
-- [ ] **Step 3: 写实现（main.py）**
+- [x] **Step 3: 写实现（main.py）**
 
 ```python
 def require_password_current(uid: str = Depends(get_current_uid)) -> str:
@@ -1398,16 +1400,16 @@ def require_password_current(uid: str = Depends(get_current_uid)) -> str:
 
 1. `require_project` 默认参数：`uid: str = Depends(require_password_current)`（覆盖所有 path-param `{project_id}` 端点）。
 2. `get_current_admin` 的入参：`uid: str = Depends(require_password_current)`（覆盖所有 `/api/admin/*`）。
-3. **逐个显式**把这些 `uid=Depends(get_current_uid)` 改成 `uid=Depends(require_password_current)`：`/api/chat`、`/api/chat/stream`、`/api/models/list`、`/api/settings`、`/api/projects`(GET 列表)、`/api/projects`(POST 创建)。
+3. **逐个显式**把这些 `uid=Depends(get_current_uid)` 改成 `uid=Depends(require_password_current)`：`/api/chat`、`/api/chat/stream`、`/api/models/list`、`/api/settings`(GET+POST)、`/api/projects`(GET 列表)、`/api/projects`(POST 创建)。**实施期 codex NIT 收尾追加**：`/api/system/select-workspace-folder` + `/api/system/select-workspace-files` 两个桌面桥端点也显式串上（commit `99a53e0`），把豁免集收紧到精确 4 项；web 态它们本就 503，桌面 local 短路无可见行为变化。**最终显式 8 端点**。
 
 依赖链 `require_project → require_password_current → get_current_uid`、`get_current_admin → require_password_current → get_current_uid` 均无环。豁免集（不串 require_password_current）：`/api/auth/me`、`/api/auth/change-password`、`/api/auth/logout`、`/api/health`。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_auth_api.py tests/test_admin_api.py tests/test_tenant_isolation.py -v`
 Expected: PASS（确认跨租户隔离回归未被破坏）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/main.py tests/test_auth_api.py
