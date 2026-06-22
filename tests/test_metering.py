@@ -289,3 +289,45 @@ class MissCounterTests(MeteredNonStreamTests):
             c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)  # 不抛 = 自动清零
         finally:
             self.m.today_shanghai = orig
+
+
+# tests/test_metering.py（追加）
+class WrapFactoryTests(MeteredNonStreamTests):
+    def _settings(self, mode):
+        class _S:  # 最小 settings 替身
+            def __init__(self, mode): self.mode = mode
+        return _S(mode)
+
+    def test_managed_mode_wraps(self):
+        raw = _FakeOpenAI(_FakeResp(None))
+        wrapped = self.m.wrap_client_for_billing(raw, uid="u1", settings=self._settings("managed"))
+        self.assertIsInstance(wrapped, self.m.MeteredManagedClient)
+
+    def test_custom_mode_returns_raw_unwrapped(self):
+        raw = _FakeOpenAI(_FakeResp(None))
+        same = self.m.wrap_client_for_billing(raw, uid="u1", settings=self._settings("custom"))
+        self.assertIs(same, raw)
+
+
+# tests/test_metering.py（追加；锁死「managed 调用必经 MeteredManagedClient」）
+import pathlib
+
+
+class SourceGuardTests(unittest.TestCase):
+    def _src(self, rel):
+        return pathlib.Path(__file__).resolve().parent.parent.joinpath(rel).read_text(encoding="utf-8")
+
+    # TODO(B2 簇B/C): 接线后移除 expectedFailure
+    @unittest.expectedFailure
+    def test_chat_handler_client_assigned_through_wrapper(self):
+        # ✦ NIT：不只查字符串（死 import 也会过），断言 self.client 由 wrap_client_for_billing 赋值。
+        src = self._src("backend/chat.py")
+        self.assertRegex(src, r"self\.client\s*=\s*wrap_client_for_billing\(",
+                         "ChatHandler.self.client 必须由 wrap_client_for_billing 赋值")
+
+    # TODO(B2 簇B/C): 接线后移除 expectedFailure
+    @unittest.expectedFailure
+    def test_independent_review_client_returned_through_wrapper(self):
+        src = self._src("backend/independent_review.py")
+        self.assertRegex(src, r"return\s+wrap_client_for_billing\(",
+                         "IndependentReviewAgent._build_client 必须 return wrap_client_for_billing(...)")

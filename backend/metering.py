@@ -189,3 +189,11 @@ class MeteredManagedClient:
                     close()
                 except Exception:
                     pass
+
+
+def wrap_client_for_billing(raw_client, uid: str, settings):
+    """managed → MeteredManagedClient（计费）；custom → 原样返回（不计费）。
+    settings.mode 在 ChatHandler/Review 构造时已定（per-handler 固定）。"""
+    if getattr(settings, "mode", "managed") == "managed":
+        return MeteredManagedClient(raw_client, uid=uid)
+    return raw_client
