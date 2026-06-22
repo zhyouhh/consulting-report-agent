@@ -44,7 +44,8 @@ def set_runtime_allowed_hosts(hosts) -> None:
     _RUNTIME_ALLOWED_HOSTS = {h.strip().lower() for h in (hosts or []) if h and h.strip()}
 
 
-_HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
+# 末段 TLD label 也受 DNS label 上限约束（≤63 字符）；不限会放非法白名单项（codex 红队 NIT）。
+_HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 
 
 def is_valid_hostname(host: str) -> bool:

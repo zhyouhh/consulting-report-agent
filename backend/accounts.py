@@ -19,6 +19,11 @@ class InactiveUserError(Exception):
     pass
 
 
+class LastAdminError(Exception):
+    """禁用该 admin 会让活跃 admin 数归零——领域层拒绝（防锁死）。"""
+    pass
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -37,6 +42,25 @@ def _db():
     try:
         with conn:          # commits on success / rolls back on exception
             yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _db_immediate():
+    """写锁串行化事务：BEGIN IMMEDIATE 立刻拿 SQLite 写锁，并发写者排队（busy_timeout）。
+    用于「读-判断-写」必须原子的临界区（如 last-admin 守卫，消除 TOCTOU 互禁竞态）。
+    成功 COMMIT；任何异常（含领域 LastAdminError）ROLLBACK。"""
+    conn = _connect()
+    conn.isolation_level = None          # 手动事务控制
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
 
@@ -175,6 +199,26 @@ def delete_other_user_sessions(uid, keep_token) -> None:
 def set_user_disabled(uid, disabled: bool) -> None:
     # 停用与撤销会话必须同一事务：否则中途崩溃/锁会留下会话行，重新启用即复活（Codex review）。
     with _db() as conn:
+        conn.execute("UPDATE users SET disabled=? WHERE uid=?", (int(disabled), uid))
+        if disabled:
+            conn.execute("DELETE FROM sessions WHERE uid=?", (uid,))
+
+
+def admin_set_user_disabled(uid, disabled: bool) -> None:
+    """admin 禁/启用守卫版（防锁死，消除 TOCTOU 互禁竞态）：单个 BEGIN IMMEDIATE 写事务里
+    重读 last-admin 计数 → 判断 → UPDATE + 撤会话，全原子。并发互禁请求被写锁串行化：
+    第二个请求在第一个提交后重读会看到只剩 1 个活跃 admin → 抛 LastAdminError（活跃 admin 绝不归零）。
+    禁用最后一个活跃 admin → LastAdminError；禁用非 admin / 非最后 admin / 重新启用 → 正常执行。
+    （注意：调用者自身的「不许禁用自己」检查留在端点层，actor_uid 不会变、非 racy。）"""
+    with _db_immediate() as conn:
+        if disabled:
+            row = conn.execute("SELECT is_admin, disabled FROM users WHERE uid=?", (uid,)).fetchone()
+            if row is not None and row["is_admin"] and not row["disabled"]:
+                active = conn.execute(
+                    "SELECT COUNT(*) c FROM users WHERE is_admin=1 AND disabled=0"
+                ).fetchone()["c"]
+                if active <= 1:   # 此 admin 即最后一个活跃 admin → 拒绝
+                    raise LastAdminError(uid)
         conn.execute("UPDATE users SET disabled=? WHERE uid=?", (int(disabled), uid))
         if disabled:
             conn.execute("DELETE FROM sessions WHERE uid=?", (uid,))

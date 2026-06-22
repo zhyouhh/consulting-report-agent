@@ -80,6 +80,23 @@ class AllowlistTests(unittest.TestCase):
             )
 
 
+class IsValidHostnameTests(unittest.TestCase):
+    def test_plain_hostname_accepted(self):
+        self.assertTrue(url_guard.is_valid_hostname("my.llm.cn"))
+        self.assertTrue(url_guard.is_valid_hostname("api.openai.com"))
+
+    def test_scheme_port_path_wildcard_space_rejected(self):
+        for bad in ("https://x.com/v1", "x.com:8443", "10.0.0.1", "*.evil.com", "has space"):
+            self.assertFalse(url_guard.is_valid_hostname(bad), bad)
+
+    def test_overlong_tld_label_rejected(self):
+        # codex 红队 NIT：末段 TLD label 不得超 63 字符（DNS label 上限）。
+        long_tld = "a" * 64
+        self.assertFalse(url_guard.is_valid_hostname(f"host.{long_tld}"))
+        # 63 字符 label 仍合法（边界正好通过）。
+        self.assertTrue(url_guard.is_valid_hostname("host." + "a" * 63))
+
+
 class GuardedTransportTests(unittest.TestCase):
     """行为级：真起 build_guarded_http_client() 的 client 发请求，断言 transport 在
     校验阶段就抛 SsrfBlockedError（不真出网——off-list 在 super().handle_request 之前被拦；

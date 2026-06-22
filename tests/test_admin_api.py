@@ -112,3 +112,54 @@ class AdminWriteEndpointTests(AdminApiTestBase):
                                     headers={"origin": "https://app.example.com"},
                                     json={"hosts": [bad]})
             self.assertEqual(resp.status_code, 400, bad)
+
+    # —— BLOCKER 2（codex 红队）：cap 坏输入必须 400、绝不 500 ——
+    def test_admin_set_cap_rejects_bad_inputs_with_400(self):
+        self._login_as_admin()
+        uid = accounts.create_user("capuser", "pw-123456")
+        for bad in ("1e1000000", "1e308", "9" * 40, "-5", "NaN", "Infinity", "abc"):
+            resp = self.client.post(f"/api/admin/users/{uid}/cap",
+                                    headers={"origin": "https://app.example.com"},
+                                    json={"daily_cost_yuan": bad})
+            self.assertEqual(resp.status_code, 400, f"{bad!r} should be 400, got {resp.status_code}")
+
+    def test_admin_set_cap_normal_value_succeeds(self):
+        self._login_as_admin()
+        uid = accounts.create_user("capuser2", "pw-123456")
+        resp = self.client.post(f"/api/admin/users/{uid}/cap",
+                                headers={"origin": "https://app.example.com"},
+                                json={"daily_cost_yuan": "20"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(accounts.get_effective_daily_cap_micro(uid), 20_000_000)
+
+    def test_admin_set_cap_null_clears_override(self):
+        self._login_as_admin()
+        uid = accounts.create_user("capuser3", "pw-123456")
+        accounts.set_user_daily_cap_micro(uid, 9000)
+        resp = self.client.post(f"/api/admin/users/{uid}/cap",
+                                headers={"origin": "https://app.example.com"},
+                                json={"daily_cost_yuan": None})
+        self.assertEqual(resp.status_code, 200)
+        from backend.config import DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN
+        self.assertEqual(accounts.get_effective_daily_cap_micro(uid), DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN)
+
+    # —— BLOCKER 1（codex 红队）：last-admin 禁用走 accounts 原子守卫 ——
+    def test_disable_last_admin_via_endpoint_rejected_400(self):
+        # 仅一个 admin（bootstrap 登录态）：禁用最后一个 admin（即自己）→ 400。
+        self._login_as_admin()
+        admin_uid = self.client.get("/api/auth/me").json()["uid"]
+        resp = self.client.post(f"/api/admin/users/{admin_uid}/disabled",
+                                headers={"origin": "https://app.example.com"},
+                                json={"disabled": True})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_disable_non_last_admin_succeeds(self):
+        # 两个 admin：禁用其中一个（非当前登录者）成功，仍剩一个活跃 admin。
+        self._login_as_admin()
+        other_admin = accounts.create_user("admin2", "pw-123456", is_admin=True)
+        resp = self.client.post(f"/api/admin/users/{other_admin}/disabled",
+                                headers={"origin": "https://app.example.com"},
+                                json={"disabled": True})
+        self.assertEqual(resp.status_code, 200)
+        active = [u for u in accounts.list_all_users() if u["is_admin"] and not u["disabled"]]
+        self.assertGreaterEqual(len(active), 1)

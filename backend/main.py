@@ -9,6 +9,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import decimal
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal, Optional
@@ -454,6 +455,8 @@ class AdminPasswordBody(BaseModel):
 class AdminCapBody(BaseModel):
     daily_cost_yuan: Optional[str] = None   # 字符串入参，Decimal 解析免 float 漂移；null=回退全局
 
+_MAX_DAILY_CAP_YUAN = Decimal(1_000_000)   # 产品级日额上限（¥/天）：超此视为误填 → 400（防整数溢出 500）
+
 class AdminDisabledBody(BaseModel):
     disabled: bool
 
@@ -473,18 +476,28 @@ def admin_set_password(uid: str, body: AdminPasswordBody, admin_uid: str = Depen
 def admin_set_cap(uid: str, body: AdminCapBody, admin_uid: str = Depends(get_current_admin)):
     if accounts.get_user_by_uid(uid) is None:
         raise HTTPException(status_code=404, detail="用户不存在")
-    if body.daily_cost_yuan is None or body.daily_cost_yuan.strip() == "":
+    raw = (body.daily_cost_yuan or "").strip()
+    if raw == "":
         micro = None
     else:
-        try:
-            yuan = Decimal(body.daily_cost_yuan.strip())
-        except (InvalidOperation, ValueError):
+        # 先限输入长度：挡超长数字串（如 "9"*40），避免 Decimal 解析巨数（codex 红队 BLOCKER2）。
+        if len(raw) > 32:
             raise HTTPException(status_code=400, detail="额度格式非法")
-        if not yuan.is_finite():   # 拒 NaN/Infinity（Decimal 不当解析错误）
+        try:
+            yuan = Decimal(raw)
+        except (InvalidOperation, ValueError, decimal.DecimalException):
+            raise HTTPException(status_code=400, detail="额度格式非法")
+        if not yuan.is_finite():   # 拒 NaN/Infinity（"1e1000000" 等过解析但乘法溢出，is_finite 也拦不住下面靠上限）
             raise HTTPException(status_code=400, detail="额度格式非法")
         if yuan < 0:
             raise HTTPException(status_code=400, detail="额度不能为负")
-        micro = int(yuan * 1_000_000)
+        # 产品级合理上限（¥1,000,000/天）：超此即视为误填，挡住 "1e308" 这类天文值（→ SQLite 整数溢出 500）。
+        if yuan > _MAX_DAILY_CAP_YUAN:
+            raise HTTPException(status_code=400, detail="额度过大")
+        try:
+            micro = int(yuan * 1_000_000)
+        except (decimal.DecimalException, OverflowError, ValueError):
+            raise HTTPException(status_code=400, detail="额度格式非法")
     accounts.set_user_daily_cap_micro(uid, micro)
     return {"status": "ok"}
 
@@ -494,14 +507,15 @@ def admin_set_disabled(uid: str, body: AdminDisabledBody, admin_uid: str = Depen
     target = accounts.get_user_by_uid(uid)
     if target is None:
         raise HTTPException(status_code=404, detail="用户不存在")
-    # 防锁死——不许禁用自己；不许禁用最后一个在用 admin
+    # 防锁死自禁（非 racy：actor_uid 是调用者本身、不会变）留在端点层。
     if body.disabled and uid == admin_uid:
         raise HTTPException(status_code=400, detail="不能禁用当前登录的管理员")
-    if body.disabled and target.get("is_admin"):
-        active_admins = [u for u in accounts.list_all_users() if u["is_admin"] and not u["disabled"]]
-        if len(active_admins) <= 1:
-            raise HTTPException(status_code=400, detail="不能禁用最后一个管理员")
-    accounts.set_user_disabled(uid, body.disabled)
+    # last-admin 守卫 + 撤会话在 accounts 层单事务（BEGIN IMMEDIATE）原子完成，
+    # 消除并发互禁 TOCTOU（旧的 main.py 计数检查 + 另起事务 set_user_disabled 已删）。
+    try:
+        accounts.admin_set_user_disabled(uid, body.disabled)
+    except accounts.LastAdminError:
+        raise HTTPException(status_code=400, detail="不能禁用最后一个管理员")
     return {"status": "ok"}
 
 
