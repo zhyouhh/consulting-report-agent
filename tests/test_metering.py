@@ -74,3 +74,96 @@ class DayBoundaryTests(unittest.TestCase):
         s = metering.today_shanghai()
         _dt.datetime.strptime(s, "%Y-%m-%d")  # 不抛即合法
         self.assertEqual(len(s), 10)
+
+
+# tests/test_metering.py（追加；沿用 Task 3 的 CRA_DATA_ROOT 隔离 setUp/tearDown）
+import importlib, os, tempfile
+
+
+class _FakeCompletions:
+    def __init__(self, response):
+        self._response = response
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self._response
+
+
+class _FakeChat:
+    def __init__(self, response):
+        self.completions = _FakeCompletions(response)
+
+
+class _FakeOpenAI:
+    def __init__(self, response):
+        self.chat = _FakeChat(response)
+
+
+class _FakeResp:
+    def __init__(self, usage):
+        self.usage = usage
+        self.choices = []
+
+
+class MeteredNonStreamTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = os.environ.get("CRA_DATA_ROOT")
+        os.environ["CRA_DATA_ROOT"] = self._tmp.name
+        import backend.config as config; importlib.reload(config)
+        import backend.tenant as tenant; importlib.reload(tenant)
+        import backend.accounts as accounts; importlib.reload(accounts)
+        accounts.init_db()
+        self.accounts = accounts
+        import backend.metering as m; importlib.reload(m)
+        self.m = m
+
+    def tearDown(self):
+        if self._old is None: os.environ.pop("CRA_DATA_ROOT", None)
+        else: os.environ["CRA_DATA_ROOT"] = self._old
+        self._tmp.cleanup()
+
+    def _client(self, usage):
+        raw = _FakeOpenAI(_FakeResp(usage))
+        return self.m.MeteredManagedClient(raw, uid="u1", model_pricing=__import__(
+            "backend.config", fromlist=["x"]).DEFAULT_MANAGED_MODEL_PRICING)
+
+    def test_settles_cost_after_call(self):
+        usage = _FakeUsage(prompt_tokens=1289, prompt_cache_hit_tokens=0,
+                           prompt_cache_miss_tokens=1289, completion_tokens=500)
+        c = self._client(usage)
+        c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+        row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
+        self.assertEqual(row["cost_micro_yuan"], 6867)
+        self.assertEqual(row["cache_miss_tokens"], 1289)
+
+    def test_reserve_blocks_when_over_cap(self):
+        self.accounts.set_config("global_daily_cap_micro_yuan", "100")
+        self.accounts.add_usage("u1", self.m.today_shanghai(), 100, 0, 0, 0)  # 已达上限
+        c = self._client(_FakeUsage(prompt_tokens=1, completion_tokens=1,
+                                    prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=1))
+        with self.assertRaises(self.m.QuotaExceededError):
+            c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+        self.assertEqual(len(c.chat.completions._raw_calls()), 0)  # reserve 在调用前，未触达 provider
+
+    def test_fail_closed_when_usage_missing(self):
+        c = self._client(None)  # provider 不返回 usage
+        c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)
+        row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
+        # 保守封顶 = deepseek-v4-pro effective 上限(256000) × p_miss(3) = 768000 微元
+        self.assertEqual(row["cost_micro_yuan"], 768000)
+
+    def test_getattr_delegates_unknown_attrs_to_raw(self):
+        raw = _FakeOpenAI(_FakeResp(None))
+        raw.responses = "RAW_RESPONSES_SENTINEL"   # 模拟 .responses（原生搜索面）
+        from backend.config import DEFAULT_MANAGED_MODEL_PRICING
+        c = self.m.MeteredManagedClient(raw, uid="u1", model_pricing=DEFAULT_MANAGED_MODEL_PRICING)
+        self.assertEqual(c.responses, "RAW_RESPONSES_SENTINEL")  # 透传裸 client，不 AttributeError
+
+    def test_vision_model_fail_closed_uses_explicit_ceiling(self):
+        # ✦ Codex BLOCKER：视觉模型用显式锚（32768），不落 context_policy 未知 fallback。
+        c = self._client(None)
+        c.chat.completions.create(model="Qwen/Qwen3-VL-8B-Instruct", messages=[], stream=False)
+        row = self.accounts.get_usage_today("u1", self.m.today_shanghai())
+        self.assertEqual(row["cost_micro_yuan"], 32768 * 3)   # 32768 × p_miss(3) = 98304
