@@ -2241,6 +2241,9 @@ class B2ChatQuotaTests(_LocalMockEngineMixin, unittest.TestCase):
         import backend.metering as metering
         self.accounts.set_config("global_daily_cap_micro_yuan", "100")
         self.accounts.add_usage("local", metering.today_shanghai(), 100, 0, 0, 0)  # 已达上限
-        resp = self.client.post("/api/chat", json={"project_id": "demo", "message_text": "hi"})
+        # ✦ Codex NIT1：额度尽时预检必须在 build handler 前就友好返回（不半启动 turn）。
+        with mock.patch("backend.main.get_chat_handler") as mock_get_handler:
+            resp = self.client.post("/api/chat", json={"project_id": "demo", "message_text": "hi"})
+            mock_get_handler.assert_not_called()       # 预检短路、未构造 handler
         self.assertEqual(resp.status_code, 200)        # 友好返回、非 500、不 build handler
         self.assertIn("额度", resp.json()["content"])    # 提示在 content（system_notices 是对象模型、置 None）

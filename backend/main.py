@@ -478,19 +478,22 @@ async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(g
     # 预检（建 handler 前）：仅 managed 模式做 ¥ 门禁——✦ Codex BLOCKER：custom 不计费/不受 ¥ 门禁（§6.4），
     # 不可因 managed 额度尽而拦 custom 聊天。B2 production 仍 managed-forced，此 gate 为正确性 + B3 预留。
     # 额度尽时直接友好返回，不建 handler、不半启动 turn（mid-turn 由 wrapper reserve 兜底）。
+    # ✦ Codex NIT2：先判 mode==managed，才碰 metering/accounts——custom 路径（B3 真开放时）不该被坏
+    # cap 配置 / 计费 DB 异常波及。metering import 提到 try 之前，供下面 except 引用其异常类型。
     from backend import metering
-    cap = accounts.get_effective_daily_cap_micro(scope.uid)
-    used = accounts.get_usage_today(scope.uid, metering.today_shanghai())["cost_micro_yuan"]
-    if load_settings(scope.uid).mode == "managed" and used >= cap:
-        # ✦ Codex BLOCKER：system_notices 是 List[SystemNotice]、非 List[str] → 置 None，提示放 content。
-        return ChatResponse(
-            content=(
-                f"今日额度已用尽（已用 ¥{used / 1_000_000:.2f} / 上限 ¥{cap / 1_000_000:.2f}），"
-                f"明日 0 点（北京时间）恢复。"
-            ),
-            token_usage=None,
-            system_notices=None,
-        )
+    if load_settings(scope.uid).mode == "managed":
+        cap = accounts.get_effective_daily_cap_micro(scope.uid)
+        used = accounts.get_usage_today(scope.uid, metering.today_shanghai())["cost_micro_yuan"]
+        if used >= cap:
+            # ✦ Codex BLOCKER：system_notices 是 List[SystemNotice]、非 List[str] → 置 None，提示放 content。
+            return ChatResponse(
+                content=(
+                    f"今日额度已用尽（已用 ¥{used / 1_000_000:.2f} / 上限 ¥{cap / 1_000_000:.2f}），"
+                    f"明日 0 点（北京时间）恢复。"
+                ),
+                token_usage=None,
+                system_notices=None,
+            )
     handler = get_chat_handler(scope.uid, scope.project_id)
     try:
         result = await asyncio.to_thread(
