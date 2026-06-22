@@ -20,6 +20,11 @@ class BillingUsage:
     completion: int
 
 
+# 任何真实单次调用的 token 量级上界（10 亿，远超任何模型上下文，但远低于 float 计价/SQLite INTEGER 溢出点）。
+# 超出即视为畸形 usage → fail-closed。
+_MAX_PLAUSIBLE_TOKENS = 10 ** 9
+
+
 def _usage_get(usage, key: str):
     if usage is None:
         return None
@@ -38,8 +43,9 @@ def extract_billing_usage(usage) -> BillingUsage | None:
     miss = _usage_get(usage, "prompt_cache_miss_tokens")
     if prompt is None and completion is None and hit is None and miss is None:
         return None
-    # 防御性：非数值/畸形 usage → None（fail-closed 保守封顶），不让 int() 抛穿设算路径；
-    # 负数 token（provider 异常）钳到 0，杜绝「负计费倒扣 usage_daily 逃配额」。
+    # 防御性 fail-closed：非数值 / 非有限(inf,nan) / 溢出 → None（→ 保守封顶），不让其抛穿计费路径；
+    # 负数 token（provider 异常）钳到 0，杜绝「负计费倒扣 usage_daily 逃配额」；
+    # 超出真实量级（_MAX_PLAUSIBLE_TOKENS）视为畸形 → None，避免 float 计价溢出 / SQLite INTEGER 越界。
     try:
         hit = max(int(hit or 0), 0)
         if miss is None:
@@ -47,7 +53,9 @@ def extract_billing_usage(usage) -> BillingUsage | None:
         else:
             miss = max(int(miss), 0)
         completion = max(int(completion or 0), 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if max(hit, miss, completion) > _MAX_PLAUSIBLE_TOKENS:
         return None
     return BillingUsage(hit=hit, miss=miss, completion=completion)
 
@@ -58,8 +66,12 @@ def price_micro_yuan(model: str, hit: int, miss: int, completion: int, pricing: 
     return round(hit * p_hit + miss * p_miss + completion * p_out)
 
 
+import logging
+import sys
 import threading
 from backend import accounts
+
+logger = logging.getLogger(__name__)
 from backend.config import (DEFAULT_MANAGED_MODEL_PRICING, MAX_CONSECUTIVE_USAGE_MISS,
                             MANAGED_FAILCLOSED_CEILING)
 from backend.context_policy import resolve_context_policy   # fail-closed 取该模型 effective 上下文上限
@@ -187,10 +199,16 @@ class MeteredManagedClient:
                     last_usage = u
                 yield chunk
         finally:
-            # close 用独立 finally 包住 settle：即便 settle 抛错（如 DB 写失败），底层 provider 流
-            # 也必被关闭、且原始 provider/consumer 异常不被 settle 异常遮蔽。
+            # close 用独立 finally 包住 settle：即便 settle 抛错（如 DB 写失败），底层 provider 流也必被关闭。
+            # pending = 正在 unwinding 的原始异常（provider 抛 / GeneratorExit / 消费方异常）：
+            #   有原始异常时 settle 失败只记日志、不得遮蔽它；正常结束时（pending is None）settle 失败如实抛出。
+            pending = sys.exc_info()[1]
             try:
                 self._settle(model, last_usage)   # 自然结束 / provider 异常 / GeneratorExit 都恰好结算一次
+            except Exception:
+                if pending is None:
+                    raise
+                logger.warning("metered stream settle failed while unwinding %r", pending, exc_info=True)
             finally:
                 close = getattr(raw_stream, "close", None)   # 释放底层 provider 流（HTTP 连接）
                 if callable(close):

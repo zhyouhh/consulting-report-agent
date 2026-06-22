@@ -28,6 +28,10 @@ class PriceTests(unittest.TestCase):
 
 
 # tests/test_metering.py（追加）
+class ProviderBoom(Exception):
+    """测试专用：模拟 provider 流抛出的异常，与 settle 的 RuntimeError 区分。"""
+
+
 class _FakeUsage:
     def __init__(self, **kw):
         for k, v in kw.items():
@@ -75,6 +79,18 @@ class ExtractUsageTests(unittest.TestCase):
         # Codex quality 轨 B6：非数值字段 → None（→ fail-closed 保守封顶），不抛穿计费路径。
         self.assertIsNone(metering.extract_billing_usage(
             _FakeUsage(prompt_tokens="oops", completion_tokens=5)))
+
+    def test_non_finite_usage_returns_none(self):
+        # Codex quality 轨 B2：inf/nan → None（int(inf) 抛 OverflowError、int(nan) 抛 ValueError）。
+        self.assertIsNone(metering.extract_billing_usage(
+            _FakeUsage(prompt_tokens=float("inf"), prompt_cache_hit_tokens=0,
+                       prompt_cache_miss_tokens=float("inf"), completion_tokens=5)))
+
+    def test_implausibly_huge_token_count_returns_none(self):
+        # Codex quality 轨 B2：超大整数能过 int() 但会撑爆 float 计价 / SQLite INTEGER → 视为畸形 → None。
+        self.assertIsNone(metering.extract_billing_usage(
+            _FakeUsage(prompt_tokens=10 ** 100, prompt_cache_hit_tokens=0,
+                       prompt_cache_miss_tokens=10 ** 100, completion_tokens=0)))
 
 
 # tests/test_metering.py（追加）
@@ -281,6 +297,43 @@ class MeteredStreamTests(MeteredNonStreamTests):  # 复用 setUp/tearDown/_FakeO
         with self.assertRaises(RuntimeError):
             list(gen)
         self.assertTrue(closed["v"])   # settle 抛错，底层流仍被关闭
+
+    def test_provider_error_not_masked_when_settle_also_raises(self):
+        # Codex quality 轨 B1（再审）：provider 流中途抛 + settle 同时抛 →
+        # 调用方必须看到 provider 异常（非 settle 异常），且底层流仍被关闭。
+        closed = {"v": False}
+
+        class _Closable:
+            def __init__(self):
+                self._sent = False
+            def __iter__(self): return self
+            def __next__(self):
+                if self._sent:
+                    raise ProviderBoom("provider dropped")
+                self._sent = True
+                return _Chunk()
+            def close(self): closed["v"] = True
+
+        class _SC:
+            def create(self, **kw): return _Closable()
+
+        class _Ch:
+            def __init__(self): self.completions = _SC()
+
+        class _Raw:
+            def __init__(self): self.chat = _Ch()
+
+        from backend.config import DEFAULT_MANAGED_MODEL_PRICING
+        c = self.m.MeteredManagedClient(_Raw(), uid="u1", model_pricing=DEFAULT_MANAGED_MODEL_PRICING)
+
+        def _boom(*a, **k):
+            raise RuntimeError("billing db down")
+        c._settle = _boom
+
+        gen = c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=True)
+        with self.assertRaises(ProviderBoom):   # provider 异常优先，未被 settle 异常遮蔽
+            list(gen)
+        self.assertTrue(closed["v"])
 
 
 # tests/test_metering.py（追加）
