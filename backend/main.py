@@ -68,8 +68,10 @@ _LOOPBACK_ORIGINS = {
 }
 
 
-def allowed_origins() -> set[str]:
-    origins = set(_LOOPBACK_ORIGINS)
+def allowed_origins(include_loopback: bool = True) -> set[str]:
+    # include_loopback: 生产 web 态（CSRF 中间件运行时判定）不信任 dev/loopback 源，传 False。
+    # CORS 在 import 期调用（app.state 未就绪）→ 用默认 True 静态快照；真正的生产收紧在 CSRF 层。
+    origins = set(_LOOPBACK_ORIGINS) if include_loopback else set()
     raw = (os.environ.get("CRA_ALLOWED_ORIGIN") or "").strip()
     if raw:
         origins |= {o.strip().rstrip("/") for o in raw.split(",") if o.strip()}
@@ -88,12 +90,16 @@ def _origin_from_referer(referer):
 # CSRF Origin/Referer 中间件：web 态（auth_required）对所有状态变更方法校验同源。
 # 桌面 loopback（auth_required=False）跳过；GET/OPTIONS（含 preflight）不检查。
 # 在 CORS 之前注册 → CORS 作为最外层 middleware（Starlette 按反向 add 顺序包裹）。
+# 生产收紧（codex 红队 NIT）：auth_required 且 cookie_secure（https 部署）= 生产 web 态，
+# 不把 loopback/dev 源纳入允许集——只信任 CRA_ALLOWED_ORIGIN 配的站点源。
 @app.middleware("http")
 async def csrf_origin_guard(request, call_next):
     if (request.method in {"POST", "PUT", "PATCH", "DELETE"}
             and getattr(request.app.state, "auth_required", True)):
+        is_production = bool(getattr(request.app.state, "cookie_secure", False))
+        allowed = allowed_origins(include_loopback=not is_production)
         origin = request.headers.get("origin") or _origin_from_referer(request.headers.get("referer"))
-        if not origin or origin.rstrip("/") not in allowed_origins():
+        if not origin or origin.rstrip("/") not in allowed:
             return JSONResponse({"detail": "跨站请求被拒绝"}, status_code=403)
     return await call_next(request)
 
@@ -161,45 +167,68 @@ SESSION_COOKIE = "cra_session"
 
 
 # —— per-username 登录限流（反撞库；补 per-IP slowapi，IP 轮换绕不过）——
+# 关键约束（codex 红队）：
+#  - 限流 key = 登录请求里的原始 username（精确、不 casefold/trim）。账号查找是大小写敏感
+#    精确匹配（accounts._get_user_row: WHERE username=?，无 COLLATE NOCASE），桶必须与登录
+#    主体 1:1 对齐，否则 Alice/alice 这类可独立注册的账号会共享桶、放大锁定面。
+#  - record+check 必须锁内原子（_register_login_fail），check-then-record 分两步有 TOCTOU，
+#    并发错误密码能在任何 record 之前都过 check → 一波越过帽。
+#  - store 有界：登录是 pre-auth，攻击者可灌任意用户名；per-key deque(maxlen) + 全局键数上限，
+#    且只 prune 触及的键、不每请求 O(N) 全表扫描。
 import time as _time
+from collections import deque
 
-_LOGIN_FAILS: dict[str, list[float]] = {}
+_LOGIN_FAILS: "dict[str, deque[float]]" = {}
 _LOGIN_FAILS_LOCK = threading.Lock()
 _LOGIN_WINDOW_SEC = 300.0
 _LOGIN_MAX_FAILS = 10
+_MAX_TRACKED_LOGIN_KEYS = 4096   # 全局键数上限，防 pre-auth 灌任意用户名撑爆内存
 
 
-def _norm_login_key(username: str) -> str:
-    return (username or "").strip().casefold()   # trim + casefold，键归一
+def _prune_key(key: str, now: float) -> int:
+    """drop 该 key 已过期的时间戳（持锁内调用）；返回窗口内剩余计数。空则删键。"""
+    bucket = _LOGIN_FAILS.get(key)
+    if bucket is None:
+        return 0
+    while bucket and now - bucket[0] >= _LOGIN_WINDOW_SEC:
+        bucket.popleft()
+    if not bucket:
+        del _LOGIN_FAILS[key]
+        return 0
+    return len(bucket)
 
 
-def _prune_login_fails(now: float) -> None:
-    # 顺带清空过期键，防进程内存随用户名爆涨（持锁内调用）。
-    for k in list(_LOGIN_FAILS):
-        kept = [t for t in _LOGIN_FAILS[k] if now - t < _LOGIN_WINDOW_SEC]
-        if kept:
-            _LOGIN_FAILS[k] = kept
-        else:
-            del _LOGIN_FAILS[k]
+def _evict_if_over_cap() -> None:
+    """全局键数超上限时，按插入顺序（FIFO）丢弃最老的键直到回到上限内（持锁内调用）。
+    仅在超限时触发，不每请求全表扫描。"""
+    while len(_LOGIN_FAILS) > _MAX_TRACKED_LOGIN_KEYS:
+        oldest = next(iter(_LOGIN_FAILS))
+        del _LOGIN_FAILS[oldest]
 
 
 def _login_throttled(username: str) -> bool:
-    key, now = _norm_login_key(username), _time.monotonic()
+    now = _time.monotonic()
     with _LOGIN_FAILS_LOCK:
-        _prune_login_fails(now)
-        return len(_LOGIN_FAILS.get(key, [])) >= _LOGIN_MAX_FAILS
+        return _prune_key(username, now) >= _LOGIN_MAX_FAILS
 
 
-def _record_login_fail(username: str) -> None:
-    key, now = _norm_login_key(username), _time.monotonic()
+def _register_login_fail(username: str) -> bool:
+    """原子记一次失败并判是否已达上限。返回 True=本次后该 username 已超限（应 429）。
+    锁内 prune-this-key + append + 判 len，消除 check-then-record 的 TOCTOU。"""
+    now = _time.monotonic()
     with _LOGIN_FAILS_LOCK:
-        _prune_login_fails(now)
-        _LOGIN_FAILS.setdefault(key, []).append(now)
+        _prune_key(username, now)
+        bucket = _LOGIN_FAILS.get(username)
+        if bucket is None:
+            bucket = _LOGIN_FAILS[username] = deque(maxlen=_LOGIN_MAX_FAILS)
+        bucket.append(now)
+        _evict_if_over_cap()
+        return len(bucket) >= _LOGIN_MAX_FAILS
 
 
 def _clear_login_fails(username: str) -> None:
     with _LOGIN_FAILS_LOCK:
-        _LOGIN_FAILS.pop(_norm_login_key(username), None)
+        _LOGIN_FAILS.pop(username, None)
 
 
 def register_desktop_bridge(bridge):
@@ -307,15 +336,19 @@ def auth_register(request: Request, payload: RegisterPayload):
 @app.post("/api/auth/login")
 @limiter.limit("10/minute")
 def auth_login(request: Request, payload: LoginPayload, response: Response):
-    if _login_throttled(payload.username):
-        raise HTTPException(status_code=429, detail="登录尝试过于频繁，请 5 分钟后再试。")
+    # 验密在前（codex 红队 B2）：正确密码永不被 per-username 限流挡——否则攻击者用受害者
+    # 用户名连发错误密码就能把合法同事锁在门外（账户锁定 DoS）。撞库防护不变：攻击者按定义
+    # 拿不到正确密码，走错误分支照样累计 → 超限 429。限流只 gate 错误密码路径。
     if not accounts.verify_user_password(payload.username, payload.password):
-        _record_login_fail(payload.username)
+        over_cap = _register_login_fail(payload.username)  # 原子记一次并判超限
+        if over_cap:
+            raise HTTPException(status_code=429, detail="登录尝试过于频繁，请 5 分钟后再试。")
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    # 密码正确：先清桶（正确密码 = 合法主体，不受错误密码灌桶影响）。
+    _clear_login_fails(payload.username)
     rec = accounts.get_user_by_username(payload.username)
     if rec["disabled"]:
         raise HTTPException(status_code=403, detail="账号已停用")
-    _clear_login_fails(payload.username)
     token = accounts.create_session(rec["uid"], ip=request.client.host if request.client else "",
                                     ua=request.headers.get("user-agent", ""))
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",

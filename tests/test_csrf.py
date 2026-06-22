@@ -107,6 +107,23 @@ class CsrfTests(_CsrfTestBase):
         self.assertIn("allow_origins=list(allowed_origins())", src)
         self.assertNotRegex(src, r'allow_origins=\[\s*["\']\*["\']\s*\]')
 
+    def test_production_loopback_origin_post_rejected(self):
+        # 生产 web 态（auth_required=True + cookie_secure=True）不信任 dev/loopback 源：
+        # 来自 loopback origin 的状态变更 POST 被 CSRF 403（只有 CRA_ALLOWED_ORIGIN 配的站点源放行）。
+        self.m.app.state.cookie_secure = True
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "http://localhost:3000"},
+                                json=_settings_body())
+        self.assertEqual(resp.status_code, 403)
+
+    def test_nonproduction_loopback_origin_post_allowed(self):
+        # 非生产（cookie_secure 未置/False，如本地 http 调试）仍放行 loopback 源，方便 vite dev。
+        self.m.app.state.cookie_secure = False
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "http://localhost:3000"},
+                                json=_settings_body())
+        self.assertNotEqual(resp.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()
