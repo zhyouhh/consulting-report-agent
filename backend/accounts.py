@@ -257,3 +257,19 @@ def admin_reset_password(uid: str, new_password: str) -> None:
             (new_hash, uid),
         )
         con.execute("DELETE FROM sessions WHERE uid=?", (uid,))
+
+
+def rotate_invite_code() -> str:
+    code = secrets.token_urlsafe(9)   # ~12 字符
+    set_config("invite_code", code)
+    return code
+
+
+def get_custom_api_extra_hosts() -> list[str]:
+    raw = get_config("custom_api_allowed_hosts") or ""
+    return [h.strip().lower() for h in raw.split(",") if h.strip()]
+
+
+def set_custom_api_extra_hosts(hosts) -> None:
+    cleaned = sorted({h.strip().lower() for h in (hosts or []) if h and h.strip()})
+    set_config("custom_api_allowed_hosts", ",".join(cleaned))
