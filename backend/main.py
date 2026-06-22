@@ -167,12 +167,18 @@ SESSION_COOKIE = "cra_session"
 
 
 # —— per-username 登录限流（反撞库；补 per-IP slowapi，IP 轮换绕不过）——
+# 设计：throttle-first（reserve-before-verify，用户拍板）。每个 username 5 分钟滑窗内最多
+# _LOGIN_MAX_FAILS 次尝试；桶满后直接 429、**不再跑 verify_user_password**——这是真封顶：
+# 攻击者每用户名每窗口只能试 MAX 个密码，IP 轮换绕不过 per-IP slowapi 也绕不过这层。
+# 取舍：桶被攻击者填满时该用户正确密码也会 429（5 分钟窗口滚动后自动恢复）——业界标准的
+# 连续失败锁定，用户明确选择「撞库防护真实有效」优先；彻底解法 = 未来给热路径加 CAPTCHA /
+# 邮箱验证作摩擦（backlog，非 B3）。
 # 关键约束（codex 红队）：
 #  - 限流 key = 登录请求里的原始 username（精确、不 casefold/trim）。账号查找是大小写敏感
 #    精确匹配（accounts._get_user_row: WHERE username=?，无 COLLATE NOCASE），桶必须与登录
 #    主体 1:1 对齐，否则 Alice/alice 这类可独立注册的账号会共享桶、放大锁定面。
-#  - record+check 必须锁内原子（_register_login_fail），check-then-record 分两步有 TOCTOU，
-#    并发错误密码能在任何 record 之前都过 check → 一波越过帽。
+#  - reserve 必须锁内原子（_reserve_login_attempt）：单锁内 prune + 判上限 + append，
+#    并发错误密码请求无法一波越过帽（达 MAX 后 reserve 返 True、不再 append、调用方直接 429）。
 #  - store 有界：登录是 pre-auth，攻击者可灌任意用户名；per-key deque(maxlen) + 全局键数上限，
 #    且只 prune 触及的键、不每请求 O(N) 全表扫描。
 import time as _time
@@ -212,18 +218,21 @@ def _login_throttled(username: str) -> bool:
         return _prune_key(username, now) >= _LOGIN_MAX_FAILS
 
 
-def _register_login_fail(username: str) -> bool:
-    """原子记一次失败并判是否已达上限。返回 True=本次后该 username 已超限（应 429）。
-    锁内 prune-this-key + append + 判 len，消除 check-then-record 的 TOCTOU。"""
+def _reserve_login_attempt(username: str) -> bool:
+    """throttle-first：原子地为本次登录尝试占一个槽。返回 True=已达上限（调用方直接 429、
+    且不再验密）；False=未超限、已 append 占槽（调用方继续验密，验对则清桶）。
+    锁内 prune-this-key + 判上限 + append，消除 TOCTOU；桶满时不 append、不验密 → 真封顶。"""
     now = _time.monotonic()
     with _LOGIN_FAILS_LOCK:
         _prune_key(username, now)
         bucket = _LOGIN_FAILS.get(username)
         if bucket is None:
             bucket = _LOGIN_FAILS[username] = deque(maxlen=_LOGIN_MAX_FAILS)
+        if len(bucket) >= _LOGIN_MAX_FAILS:
+            return True          # 已达上限：不 append、不验密，调用方直接 429
         bucket.append(now)
         _evict_if_over_cap()
-        return len(bucket) >= _LOGIN_MAX_FAILS
+        return False
 
 
 def _clear_login_fails(username: str) -> None:
@@ -336,15 +345,14 @@ def auth_register(request: Request, payload: RegisterPayload):
 @app.post("/api/auth/login")
 @limiter.limit("10/minute")
 def auth_login(request: Request, payload: LoginPayload, response: Response):
-    # 验密在前（codex 红队 B2）：正确密码永不被 per-username 限流挡——否则攻击者用受害者
-    # 用户名连发错误密码就能把合法同事锁在门外（账户锁定 DoS）。撞库防护不变：攻击者按定义
-    # 拿不到正确密码，走错误分支照样累计 → 超限 429。限流只 gate 错误密码路径。
+    # throttle-first（用户拍板，撞库防护优先）：先原子占槽，桶满直接 429 且**不跑 verify**——
+    # 这是真封顶，攻击者每用户名每 5min 只能试 MAX 个密码、IP 轮换绕不过。代价：桶被攻击者
+    # 填满时该用户正确密码也会 429（5min 自动恢复），是用户明确选择的取舍、正确行为。
+    if _reserve_login_attempt(payload.username):
+        raise HTTPException(status_code=429, detail="登录尝试过于频繁，请 5 分钟后再试。")
     if not accounts.verify_user_password(payload.username, payload.password):
-        over_cap = _register_login_fail(payload.username)  # 原子记一次并判超限
-        if over_cap:
-            raise HTTPException(status_code=429, detail="登录尝试过于频繁，请 5 分钟后再试。")
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    # 密码正确：先清桶（正确密码 = 合法主体，不受错误密码灌桶影响）。
+    # 密码正确：清桶，合法用户不累积失败计数。
     _clear_login_fails(payload.username)
     rec = accounts.get_user_by_username(payload.username)
     if rec["disabled"]:
