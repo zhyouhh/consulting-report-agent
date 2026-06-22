@@ -2218,3 +2218,29 @@ class CrossTenantApiTests(AuthApiTestBase):
         # require_project accepts a name alias; B must NOT resolve A's project by its display name.
         self._create(self.A, "A机密")
         self.assertEqual(self.B.get("/api/projects/A机密/workspace").status_code, 404)
+
+
+class B2ChatQuotaTests(_LocalMockEngineMixin, unittest.TestCase):
+    def setUp(self):
+        import os, tempfile
+        from backend import accounts
+        self._tmp = tempfile.TemporaryDirectory(); self.addCleanup(self._tmp.cleanup)
+        self._prev_root = os.environ.get("CRA_DATA_ROOT")
+        os.environ["CRA_DATA_ROOT"] = self._tmp.name; self.addCleanup(self._restore_root)
+        accounts.init_db()
+        self.accounts = accounts
+        self._install_mock_engine()
+        self.client = TestClient(main_module.app)
+
+    def _restore_root(self):
+        import os
+        if self._prev_root is None: os.environ.pop("CRA_DATA_ROOT", None)
+        else: os.environ["CRA_DATA_ROOT"] = self._prev_root
+
+    def test_chat_returns_friendly_when_quota_exhausted(self):
+        import backend.metering as metering
+        self.accounts.set_config("global_daily_cap_micro_yuan", "100")
+        self.accounts.add_usage("local", metering.today_shanghai(), 100, 0, 0, 0)  # 已达上限
+        resp = self.client.post("/api/chat", json={"project_id": "demo", "message_text": "hi"})
+        self.assertEqual(resp.status_code, 200)        # 友好返回、非 500、不 build handler
+        self.assertIn("额度", resp.json()["content"])    # 提示在 content（system_notices 是对象模型、置 None）

@@ -469,6 +469,22 @@ async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(g
     # 宽泛 except Exception 吞成 500（破坏租户隔离 404 契约，Codex T11a review）。
     logger.info(f"Chat request for project: {chat_request.project_id}")
     scope = require_project(chat_request.project_id, uid)
+    # 预检（建 handler 前）：仅 managed 模式做 ¥ 门禁——✦ Codex BLOCKER：custom 不计费/不受 ¥ 门禁（§6.4），
+    # 不可因 managed 额度尽而拦 custom 聊天。B2 production 仍 managed-forced，此 gate 为正确性 + B3 预留。
+    # 额度尽时直接友好返回，不建 handler、不半启动 turn（mid-turn 由 wrapper reserve 兜底）。
+    from backend import metering
+    cap = accounts.get_effective_daily_cap_micro(scope.uid)
+    used = accounts.get_usage_today(scope.uid, metering.today_shanghai())["cost_micro_yuan"]
+    if load_settings(scope.uid).mode == "managed" and used >= cap:
+        # ✦ Codex BLOCKER：system_notices 是 List[SystemNotice]、非 List[str] → 置 None，提示放 content。
+        return ChatResponse(
+            content=(
+                f"今日额度已用尽（已用 ¥{used / 1_000_000:.2f} / 上限 ¥{cap / 1_000_000:.2f}），"
+                f"明日 0 点（北京时间）恢复。"
+            ),
+            token_usage=None,
+            system_notices=None,
+        )
     handler = get_chat_handler(scope.uid, scope.project_id)
     try:
         result = await asyncio.to_thread(
@@ -485,6 +501,12 @@ async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(g
             content=result["content"],
             token_usage=result.get("token_usage"),
             system_notices=result.get("system_notices"),
+        )
+    except (metering.QuotaExceededError, metering.ModelPausedError) as qe:
+        return ChatResponse(
+            content=handler._format_quota_error(qe),
+            token_usage=None,
+            system_notices=None,
         )
     except Exception as e:
         logger.error(f"Chat error: {str(e)}", exc_info=True)
