@@ -427,8 +427,6 @@ class SourceGuardTests(unittest.TestCase):
     def _src(self, rel):
         return pathlib.Path(__file__).resolve().parent.parent.joinpath(rel).read_text(encoding="utf-8")
 
-    # TODO(B2 簇B/C): 接线后移除 expectedFailure
-    @unittest.expectedFailure
     def test_chat_handler_client_assigned_through_wrapper(self):
         # ✦ NIT：不只查字符串（死 import 也会过），断言 self.client 由 wrap_client_for_billing 赋值。
         src = self._src("backend/chat.py")

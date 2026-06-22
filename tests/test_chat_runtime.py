@@ -29,6 +29,24 @@ class ChatRuntimeTests(unittest.TestCase):
         self._curl_cffi_patcher.start()
         self.addCleanup(self._curl_cffi_patcher.stop)
 
+        import os, tempfile
+        from backend import accounts
+        self._billing_tmp = tempfile.TemporaryDirectory(); self.addCleanup(self._billing_tmp.cleanup)
+        self._prev_data_root = os.environ.get("CRA_DATA_ROOT")
+        os.environ["CRA_DATA_ROOT"] = self._billing_tmp.name
+        self.addCleanup(self._restore_data_root)
+        accounts.init_db()                                   # 建 users/sessions/app_config/usage_daily
+        accounts.set_config("global_daily_cap_micro_yuan", str(10**15))   # cap 巨大 → reserve 永不因成本拦
+        import backend.metering as _m
+        _m._miss_counter.clear(); self.addCleanup(_m._miss_counter.clear)
+        self._pause_patch = mock.patch.object(_m, "MAX_CONSECUTIVE_USAGE_MISS", 10**9)  # 永不暂停
+        self._pause_patch.start(); self.addCleanup(self._pause_patch.stop)
+
+    def _restore_data_root(self):
+        import os
+        if self._prev_data_root is None: os.environ.pop("CRA_DATA_ROOT", None)
+        else: os.environ["CRA_DATA_ROOT"] = self._prev_data_root
+
     def _make_tool_call(self, name: str, arguments: str):
         return type(
             "ToolCall",
@@ -5582,9 +5600,12 @@ class ChatRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
             debug_dir = home / ".consulting-report" / "debug"
+            # clear=True 会清掉 setUp 设的 CRA_DATA_ROOT；B2 包裹后 managed create 前的 reserve 要读计费 DB，
+            # 故保留 CRA_DATA_ROOT 指向 setUp 已 init_db 的隔离库（否则 reserve 撞 no-such-table、遮蔽 provider 错误）。
             with mock.patch("pathlib.Path.home", return_value=home), mock.patch.dict(
                 "os.environ",
-                {"CONSULTING_REPORT_DEBUG_DUMP": "1"},
+                {"CONSULTING_REPORT_DEBUG_DUMP": "1",
+                 "CRA_DATA_ROOT": self._billing_tmp.name},
                 clear=True,
             ):
                 result = handler.chat(self.project_id, secret_message)
@@ -14393,3 +14414,80 @@ for _inherited_test_name in dir(ChatRuntimeTests):
     ):
         setattr(OcrImageTests, _inherited_test_name, None)
 del _inherited_test_name
+
+
+class B2BillingWiringTests(ChatRuntimeTests):
+    def _make_custom_handler_with_project(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        projects_dir = Path(tmp.name) / "projects"
+        engine = SkillEngine(projects_dir, self.repo_skill_dir)
+        project = engine.create_project(
+            name="demo", workspace_dir=str(Path(tmp.name) / "ws"),
+            project_type="strategy-consulting", theme="t", target_audience="a",
+            deadline="2026-04-01", expected_length="3000 words")
+        handler = ChatHandler(
+            self._make_settings(mode="custom", custom_api_base="https://api.example.com/v1",
+                                custom_api_key="sk-x", custom_model="gpt-4o",
+                                projects_dir=projects_dir),
+            engine)
+        self.project_id = project["id"]
+        return handler
+
+    def _capture_stream_kwargs(self, handler):
+        captured = {}
+        def _fake_create(**kwargs):
+            captured.update(kwargs)
+            return iter([self._make_chunk(content="完成")])
+        with mock.patch.object(handler.client.chat.completions, "create", side_effect=_fake_create):
+            list(handler.chat_stream(self.project_id, "你好", [], []))
+        return captured
+
+    def test_managed_client_is_metered(self):
+        handler = self._make_handler_with_project()
+        from backend.metering import MeteredManagedClient
+        self.assertIsInstance(handler.client, MeteredManagedClient)
+
+    def test_custom_client_is_raw(self):
+        handler = self._make_custom_handler_with_project()
+        from backend.metering import MeteredManagedClient
+        self.assertNotIsInstance(handler.client, MeteredManagedClient)
+
+    def test_managed_stream_requests_include_usage(self):
+        handler = self._make_handler_with_project()
+        captured = self._capture_stream_kwargs(handler)
+        self.assertEqual(captured.get("stream_options"), {"include_usage": True})
+
+    def test_custom_stream_omits_include_usage(self):
+        # Codex BLOCKER: include_usage_requested 现无条件 True，custom 也发 → 改 managed-only
+        handler = self._make_custom_handler_with_project()
+        captured = self._capture_stream_kwargs(handler)
+        self.assertNotIn("stream_options", captured)
+
+    def test_stream_quota_exceeded_yields_friendly_event(self):
+        handler = self._make_handler_with_project()
+        from backend import metering
+        def _boom(**kwargs):
+            raise metering.QuotaExceededError(used_micro=5_000_000, cap_micro=5_000_000)
+        with mock.patch.object(handler.client.chat.completions, "create", side_effect=_boom):
+            events = list(handler.chat_stream(self.project_id, "你好", [], []))
+        self.assertTrue(any(e.get("type") == "error" and "额度" in str(e.get("data", ""))
+                            for e in events))
+
+    def test_chat_stream_consumption_closes_response(self):
+        # Codex NIT: 不全局 grep `response.close()`（chat.py 别处已有无关 close，会假绿）；
+        # 锚定主流式 `for chunk in response:` 后窗口内必须有 finally + response.close()。
+        import pathlib
+        src = pathlib.Path(__file__).resolve().parents[1].joinpath("backend/chat.py").read_text(encoding="utf-8")
+        i = src.index("for chunk in response:")          # 主流式消费锚点（chat.py 仅此处用此短语）
+        window = src[i:i + 4000]                          # 窗口覆盖循环体 + 紧随 try/except/finally（实测 finally 在 ~3125）
+        self.assertIn("finally:", window)
+        self.assertIn("response.close()", window)
+
+
+# Codex NIT: 子类化 ChatRuntimeTests 会继承其全部 test_；按 repo 既有 pattern
+# 置空继承的 test_，避免 targeted class run 重跑整个父套件。
+for _inh in dir(ChatRuntimeTests):
+    if _inh.startswith("test_") and _inh not in B2BillingWiringTests.__dict__:
+        setattr(B2BillingWiringTests, _inh, None)
+del _inh
