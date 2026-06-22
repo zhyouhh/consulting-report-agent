@@ -5,6 +5,7 @@ import Login from './components/Login'
 import ChatPanel from './components/ChatPanel'
 import WorkspacePanel from './components/WorkspacePanel'
 import AdminPanel from './components/AdminPanel'
+import ForcePasswordChange from './components/ForcePasswordChange'
 import axios from 'axios'
 import { setUnauthedHandler } from './api'
 import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
@@ -240,6 +241,14 @@ function App() {
 
   if (!authChecked) return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
   if (!authUser) return <Login onAuthed={(u) => { setAuthUser(u); initializeApp() }} />
+
+  // B3 Task 17：首次登录强制改密——登录后、主界面前的硬门。改完刷新 authUser 才放行；
+  // 不可关（无 onClose）。后端 Task 14 已对业务路由 403 双保险。
+  if (authUser.must_change_password) {
+    return <ForcePasswordChange onChanged={async () => {
+      const r = await axios.get('/api/auth/me'); setAuthUser(r.data)
+    }} />
+  }
 
   if (loading) {
     return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
