@@ -9,6 +9,8 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -22,6 +24,8 @@ from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.responses import JSONResponse
+from urllib.parse import urlparse
 
 from .chat import (
     ChatHandler,
@@ -42,6 +46,7 @@ from .material_limits import MAX_HEAVY_MATERIAL_BYTES
 from .skill import SkillEngine, StaleFileError, UserWriteForbiddenError
 from .tenant import user_projects_dir, ensure_user_dirs, tenant_project_key
 from . import accounts
+from . import url_guard
 
 
 logging.basicConfig(
@@ -55,9 +60,56 @@ app = FastAPI(title="咨询报告写作助手")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+
+# —— CSRF / CORS 允许源 ——
+# 必须定义在 CORS middleware 注册之前：CORS 的 allow_origins=list(allowed_origins())
+# 在 import 期求值。
+_LOOPBACK_ORIGINS = {
+    "http://127.0.0.1:8080", "http://localhost:8080",
+    "http://127.0.0.1:8888", "http://localhost:8888",
+    "http://localhost:3000", "http://127.0.0.1:3000",  # vite dev
+}
+
+
+def allowed_origins(include_loopback: bool = True) -> set[str]:
+    # include_loopback: 生产 web 态（CSRF 中间件运行时判定）不信任 dev/loopback 源，传 False。
+    # CORS 在 import 期调用（app.state 未就绪）→ 用默认 True 静态快照；真正的生产收紧在 CSRF 层。
+    origins = set(_LOOPBACK_ORIGINS) if include_loopback else set()
+    raw = (os.environ.get("CRA_ALLOWED_ORIGIN") or "").strip()
+    if raw:
+        origins |= {o.strip().rstrip("/") for o in raw.split(",") if o.strip()}
+    return origins
+
+
+def _origin_from_referer(referer):
+    if not referer:
+        return None
+    p = urlparse(referer)
+    if p.scheme and p.netloc:
+        return f"{p.scheme}://{p.netloc}"
+    return None
+
+
+# CSRF Origin/Referer 中间件：web 态（auth_required）对所有状态变更方法校验同源。
+# 桌面 loopback（auth_required=False）跳过；GET/OPTIONS（含 preflight）不检查。
+# 在 CORS 之前注册 → CORS 作为最外层 middleware（Starlette 按反向 add 顺序包裹）。
+# 生产收紧（codex 红队 NIT）：auth_required 且 cookie_secure（https 部署）= 生产 web 态，
+# 不把 loopback/dev 源纳入允许集——只信任 CRA_ALLOWED_ORIGIN 配的站点源。
+@app.middleware("http")
+async def csrf_origin_guard(request, call_next):
+    if (request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and getattr(request.app.state, "auth_required", True)):
+        is_production = bool(getattr(request.app.state, "cookie_secure", False))
+        allowed = allowed_origins(include_loopback=not is_production)
+        origin = request.headers.get("origin") or _origin_from_referer(request.headers.get("referer"))
+        if not origin or origin.rstrip("/") not in allowed:
+            return JSONResponse({"detail": "跨站请求被拒绝"}, status_code=403)
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(allowed_origins()),
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
@@ -98,6 +150,13 @@ def _bootstrap_admin():
 _bootstrap_admin()
 
 
+# 启动时把 app_config 白名单注入 url_guard（admin 之前存的允许域名进程起来即生效）。
+# NIT R3：顺手过滤历史非法项（accounts 层只存不校验），避免坏数据进运行时白名单。
+url_guard.set_runtime_allowed_hosts(
+    [h for h in accounts.get_custom_api_extra_hosts() if url_guard.is_valid_hostname(h)]
+)
+
+
 # host 在 import 期未知，无法集中化；必须由受支持的入口（run_web.py / app.py）显式调用作早退检查。
 def assert_safe_startup(auth_required: bool, host: str) -> None:
     if not auth_required and host not in {"127.0.0.1", "::1", "localhost"}:
@@ -115,6 +174,80 @@ _chat_handlers: dict[tuple, ChatHandler] = {}
 _settings_lock = threading.Lock()
 _desktop_bridge = None
 SESSION_COOKIE = "cra_session"
+
+
+# —— per-username 登录限流（反撞库；补 per-IP slowapi，IP 轮换绕不过）——
+# 设计：throttle-first（reserve-before-verify，用户拍板）。每个 username 5 分钟滑窗内最多
+# _LOGIN_MAX_FAILS 次尝试；桶满后直接 429、**不再跑 verify_user_password**——这是真封顶：
+# 攻击者每用户名每窗口只能试 MAX 个密码，IP 轮换绕不过 per-IP slowapi 也绕不过这层。
+# 取舍：桶被攻击者填满时该用户正确密码也会 429（5 分钟窗口滚动后自动恢复）——业界标准的
+# 连续失败锁定，用户明确选择「撞库防护真实有效」优先；彻底解法 = 未来给热路径加 CAPTCHA /
+# 邮箱验证作摩擦（backlog，非 B3）。
+# 关键约束（codex 红队）：
+#  - 限流 key = 登录请求里的原始 username（精确、不 casefold/trim）。账号查找是大小写敏感
+#    精确匹配（accounts._get_user_row: WHERE username=?，无 COLLATE NOCASE），桶必须与登录
+#    主体 1:1 对齐，否则 Alice/alice 这类可独立注册的账号会共享桶、放大锁定面。
+#  - reserve 必须锁内原子（_reserve_login_attempt）：单锁内 prune + 判上限 + append，
+#    并发错误密码请求无法一波越过帽（达 MAX 后 reserve 返 True、不再 append、调用方直接 429）。
+#  - store 有界：登录是 pre-auth，攻击者可灌任意用户名；per-key deque(maxlen) + 全局键数上限，
+#    且只 prune 触及的键、不每请求 O(N) 全表扫描。
+import time as _time
+from collections import deque
+
+_LOGIN_FAILS: "dict[str, deque[float]]" = {}
+_LOGIN_FAILS_LOCK = threading.Lock()
+_LOGIN_WINDOW_SEC = 300.0
+_LOGIN_MAX_FAILS = 10
+_MAX_TRACKED_LOGIN_KEYS = 4096   # 全局键数上限，防 pre-auth 灌任意用户名撑爆内存
+
+
+def _prune_key(key: str, now: float) -> int:
+    """drop 该 key 已过期的时间戳（持锁内调用）；返回窗口内剩余计数。空则删键。"""
+    bucket = _LOGIN_FAILS.get(key)
+    if bucket is None:
+        return 0
+    while bucket and now - bucket[0] >= _LOGIN_WINDOW_SEC:
+        bucket.popleft()
+    if not bucket:
+        del _LOGIN_FAILS[key]
+        return 0
+    return len(bucket)
+
+
+def _evict_if_over_cap() -> None:
+    """全局键数超上限时，按插入顺序（FIFO）丢弃最老的键直到回到上限内（持锁内调用）。
+    仅在超限时触发，不每请求全表扫描。"""
+    while len(_LOGIN_FAILS) > _MAX_TRACKED_LOGIN_KEYS:
+        oldest = next(iter(_LOGIN_FAILS))
+        del _LOGIN_FAILS[oldest]
+
+
+def _login_throttled(username: str) -> bool:
+    now = _time.monotonic()
+    with _LOGIN_FAILS_LOCK:
+        return _prune_key(username, now) >= _LOGIN_MAX_FAILS
+
+
+def _reserve_login_attempt(username: str) -> bool:
+    """throttle-first：原子地为本次登录尝试占一个槽。返回 True=已达上限（调用方直接 429、
+    且不再验密）；False=未超限、已 append 占槽（调用方继续验密，验对则清桶）。
+    锁内 prune-this-key + 判上限 + append，消除 TOCTOU；桶满时不 append、不验密 → 真封顶。"""
+    now = _time.monotonic()
+    with _LOGIN_FAILS_LOCK:
+        _prune_key(username, now)
+        bucket = _LOGIN_FAILS.get(username)
+        if bucket is None:
+            bucket = _LOGIN_FAILS[username] = deque(maxlen=_LOGIN_MAX_FAILS)
+        if len(bucket) >= _LOGIN_MAX_FAILS:
+            return True          # 已达上限：不 append、不验密，调用方直接 429
+        bucket.append(now)
+        _evict_if_over_cap()
+        return False
+
+
+def _clear_login_fails(username: str) -> None:
+    with _LOGIN_FAILS_LOCK:
+        _LOGIN_FAILS.pop(username, None)
 
 
 def register_desktop_bridge(bridge):
@@ -152,7 +285,18 @@ def get_current_uid(request: Request) -> str:
     return uid
 
 
-def get_current_admin(uid: str = Depends(get_current_uid)) -> str:
+def require_password_current(uid: str = Depends(get_current_uid)) -> str:
+    # B3 Task 14：must_change_password 为真时，对业务路由 403，前端据此弹强制改密屏。
+    # 桌面 local（auth off）无此约束；豁免集（me/change-password/logout/health）不串本依赖。
+    if not getattr(app.state, "auth_required", True):
+        return uid   # 桌面 local 无此约束
+    user = accounts.get_user_by_uid(uid)
+    if user and user.get("must_change_password"):
+        raise HTTPException(status_code=403, detail="must_change_password")
+    return uid
+
+
+def get_current_admin(uid: str = Depends(require_password_current)) -> str:
     rec = accounts.get_user_by_uid(uid)
     if not rec or not rec["is_admin"]:
         raise HTTPException(status_code=403, detail="需要管理员权限")
@@ -168,7 +312,7 @@ class ProjectScope:
     lock_key: str
 
 
-def require_project(project_id: str, uid: str = Depends(get_current_uid)) -> ProjectScope:
+def require_project(project_id: str, uid: str = Depends(require_password_current)) -> ProjectScope:
     eng = get_skill_engine(uid)
     rec = eng.get_project_record(project_id)   # accepts id OR name alias
     if rec is None:
@@ -222,8 +366,15 @@ def auth_register(request: Request, payload: RegisterPayload):
 @app.post("/api/auth/login")
 @limiter.limit("10/minute")
 def auth_login(request: Request, payload: LoginPayload, response: Response):
+    # throttle-first（用户拍板，撞库防护优先）：先原子占槽，桶满直接 429 且**不跑 verify**——
+    # 这是真封顶，攻击者每用户名每 5min 只能试 MAX 个密码、IP 轮换绕不过。代价：桶被攻击者
+    # 填满时该用户正确密码也会 429（5min 自动恢复），是用户明确选择的取舍、正确行为。
+    if _reserve_login_attempt(payload.username):
+        raise HTTPException(status_code=429, detail="登录尝试过于频繁，请 5 分钟后再试。")
     if not accounts.verify_user_password(payload.username, payload.password):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    # 密码正确：清桶，合法用户不累积失败计数。
+    _clear_login_fails(payload.username)
     rec = accounts.get_user_by_username(payload.username)
     if rec["disabled"]:
         raise HTTPException(status_code=403, detail="账号已停用")
@@ -277,8 +428,126 @@ def auth_change_password(request: Request, payload: ChangePwPayload, uid: str = 
     return {"status": "ok"}
 
 
+@app.get("/api/admin/users")
+def admin_list_users(admin_uid: str = Depends(get_current_admin)):
+    from backend import metering   # 模块限定（B2 铁律，避 reload 异常身份失配）
+    day = metering.today_shanghai()
+    out = []
+    for u in accounts.list_all_users():
+        used = accounts.get_usage_today(u["uid"], day)["cost_micro_yuan"]
+        cap = accounts.get_effective_daily_cap_micro(u["uid"])
+        out.append({
+            "uid": u["uid"], "username": u["username"],
+            "is_admin": bool(u["is_admin"]), "disabled": bool(u["disabled"]),
+            "created_at": u["created_at"],
+            "today_cost_yuan": round(used / 1_000_000, 4),
+            "daily_cap_yuan": round(cap / 1_000_000, 4),
+        })
+    return out
+
+
+@app.get("/api/admin/invite-code")
+def admin_get_invite_code(admin_uid: str = Depends(get_current_admin)):
+    return {"invite_code": accounts.get_config("invite_code") or ""}
+
+
+@app.get("/api/admin/allowed-hosts")
+def admin_get_allowed_hosts(admin_uid: str = Depends(get_current_admin)):
+    return {
+        "builtin_hosts": sorted(url_guard.builtin_allowed_hosts()),   # 内置默认（只读）
+        "env_hosts": sorted(url_guard.env_allowed_hosts()),           # env 注入（只读）
+        "extra_hosts": accounts.get_custom_api_extra_hosts(),         # app_config（admin 可编辑）
+    }
+
+
+class AdminPasswordBody(BaseModel):
+    new_password: str = Field(min_length=8, max_length=256)
+
+class AdminCapBody(BaseModel):
+    daily_cost_yuan: Optional[str] = None   # 字符串入参，Decimal 解析免 float 漂移；null=回退全局
+
+_MAX_DAILY_CAP_YUAN = Decimal(1_000_000)   # 产品级日额上限（¥/天）：超此视为误填 → 400（防整数溢出 500）
+
+class AdminDisabledBody(BaseModel):
+    disabled: bool
+
+class AllowedHostsBody(BaseModel):
+    hosts: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/admin/users/{uid}/password")
+def admin_set_password(uid: str, body: AdminPasswordBody, admin_uid: str = Depends(get_current_admin)):
+    if accounts.get_user_by_uid(uid) is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    accounts.admin_reset_password(uid, body.new_password)
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/users/{uid}/cap")
+def admin_set_cap(uid: str, body: AdminCapBody, admin_uid: str = Depends(get_current_admin)):
+    if accounts.get_user_by_uid(uid) is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    raw = (body.daily_cost_yuan or "").strip()
+    if raw == "":
+        micro = None
+    else:
+        # 先限输入长度：挡超长数字串（如 "9"*40），避免 Decimal 解析巨数（codex 红队 BLOCKER2）。
+        if len(raw) > 32:
+            raise HTTPException(status_code=400, detail="额度格式非法")
+        try:
+            yuan = Decimal(raw)
+        except (InvalidOperation, ValueError, decimal.DecimalException):
+            raise HTTPException(status_code=400, detail="额度格式非法")
+        if not yuan.is_finite():   # 拒 NaN/Infinity（"1e1000000" 等过解析但乘法溢出，is_finite 也拦不住下面靠上限）
+            raise HTTPException(status_code=400, detail="额度格式非法")
+        if yuan < 0:
+            raise HTTPException(status_code=400, detail="额度不能为负")
+        # 产品级合理上限（¥1,000,000/天）：超此即视为误填，挡住 "1e308" 这类天文值（→ SQLite 整数溢出 500）。
+        if yuan > _MAX_DAILY_CAP_YUAN:
+            raise HTTPException(status_code=400, detail="额度过大")
+        try:
+            micro = int(yuan * 1_000_000)
+        except (decimal.DecimalException, OverflowError, ValueError):
+            raise HTTPException(status_code=400, detail="额度格式非法")
+    accounts.set_user_daily_cap_micro(uid, micro)
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/users/{uid}/disabled")
+def admin_set_disabled(uid: str, body: AdminDisabledBody, admin_uid: str = Depends(get_current_admin)):
+    target = accounts.get_user_by_uid(uid)
+    if target is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    # 防锁死自禁（非 racy：actor_uid 是调用者本身、不会变）留在端点层。
+    if body.disabled and uid == admin_uid:
+        raise HTTPException(status_code=400, detail="不能禁用当前登录的管理员")
+    # last-admin 守卫 + 撤会话在 accounts 层单事务（BEGIN IMMEDIATE）原子完成，
+    # 消除并发互禁 TOCTOU（旧的 main.py 计数检查 + 另起事务 set_user_disabled 已删）。
+    try:
+        accounts.admin_set_user_disabled(uid, body.disabled)
+    except accounts.LastAdminError:
+        raise HTTPException(status_code=400, detail="不能禁用最后一个管理员")
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/invite-code/rotate")
+def admin_rotate_invite(admin_uid: str = Depends(get_current_admin)):
+    return {"invite_code": accounts.rotate_invite_code()}
+
+
+@app.post("/api/admin/allowed-hosts")
+def admin_set_allowed_hosts(body: AllowedHostsBody, admin_uid: str = Depends(get_current_admin)):
+    cleaned = [h.strip().lower() for h in body.hosts if h and h.strip()]
+    bad = [h for h in cleaned if not url_guard.is_valid_hostname(h)]   # 拒 scheme/port/path/通配符/空白
+    if bad:
+        raise HTTPException(status_code=400, detail=f"非法域名：{', '.join(bad)}（只填主机名，如 my.llm.cn）")
+    accounts.set_custom_api_extra_hosts(cleaned)
+    url_guard.set_runtime_allowed_hosts(accounts.get_custom_api_extra_hosts())  # 即时刷新，无需重启
+    return {"extra_hosts": accounts.get_custom_api_extra_hosts()}
+
+
 @app.get("/api/settings")
-async def get_settings(uid: str = Depends(get_current_uid)):
+async def get_settings(uid: str = Depends(require_password_current)):
     data = load_settings(uid).model_dump(exclude={"managed_client_token"})
     data["api_key"] = "***" if data["api_key"] else ""
     data["custom_api_key"] = "***" if data.get("custom_api_key") else ""
@@ -289,7 +558,7 @@ class SettingsUpdate(BaseModel):
     """前端提交的设置更新"""
 
     mode: Literal["managed", "custom"]
-    managed_base_url: str
+    managed_base_url: str | None = None   # 服务端只读：接收但忽略，永远用 DEFAULT_MANAGED_BASE_URL
     managed_model: str
     managed_vision_model: Optional[str] = None
     vision_enabled: Optional[bool] = None
@@ -300,11 +569,18 @@ class SettingsUpdate(BaseModel):
 
 
 @app.post("/api/settings")
-async def update_settings(update: SettingsUpdate, uid: str = Depends(get_current_uid)):
+async def update_settings(update: SettingsUpdate, uid: str = Depends(require_password_current)):
+    from backend import url_guard
+    if (update.mode or "") == "custom":
+        # 保存 custom 前即时校验 base：https + 白名单主机 + 解析到公网；不合法不落盘。
+        try:
+            url_guard.validate_custom_api_base(update.custom_api_base or "")
+        except url_guard.SsrfBlockedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     with _settings_lock:
         s = load_settings(uid)
         s.mode = update.mode
-        s.managed_base_url = update.managed_base_url
+        # managed_base_url 服务端只读：忽略客户端值，由 normalize 强制为 DEFAULT_MANAGED_BASE_URL。
         s.managed_model = update.managed_model
         if "managed_vision_model" in update.model_fields_set and update.managed_vision_model is not None:
             s.managed_vision_model = update.managed_vision_model
@@ -336,46 +612,54 @@ class WorkspaceFilesRequest(BaseModel):
 
 
 @app.post("/api/models/list")
-async def list_models(request: ModelsRequest, uid: str = Depends(get_current_uid)):
-    try:
-        from openai import OpenAI
-        import httpx
+async def list_models(request: ModelsRequest, uid: str = Depends(require_password_current)):
+    from openai import OpenAI
+    from backend import url_guard
 
-        http_client = httpx.Client(timeout=30.0)
+    # —— 校验在宽 try 之外，400 不被吞成 500 ——
+    try:
+        validated_base = url_guard.validate_custom_api_base(request.api_base or "")
+    except url_guard.SsrfBlockedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    http_client = url_guard.build_guarded_http_client(timeout=30.0)
+    try:
         client = OpenAI(
             api_key=request.api_key,
-            base_url=request.api_base,
+            base_url=validated_base,
             http_client=http_client,
         )
         models = client.models.list()
         model_ids = [m.id for m in models.data]
-        http_client.close()
         return {"models": model_ids}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取模型列表失败: {str(e)}")
+    finally:
+        http_client.close()
 
 
 @app.post("/api/system/select-workspace-folder")
-async def select_workspace_folder(uid: str = Depends(get_current_uid)):
+async def select_workspace_folder(uid: str = Depends(require_password_current)):
     bridge = require_desktop_bridge()
     selected_path = await asyncio.to_thread(bridge.select_workspace_folder)
     return {"path": selected_path or ""}
 
 
 @app.post("/api/system/select-workspace-files")
-async def select_workspace_files(request: WorkspaceFilesRequest, uid: str = Depends(get_current_uid)):
+async def select_workspace_files(request: WorkspaceFilesRequest, uid: str = Depends(require_password_current)):
     bridge = require_desktop_bridge()
     selected_paths = await asyncio.to_thread(bridge.select_workspace_files, request.workspace_dir)
     return {"paths": selected_paths or []}
 
 
 @app.get("/api/projects")
-async def list_projects(uid: str = Depends(get_current_uid)):
+async def list_projects(uid: str = Depends(require_password_current)):
     return get_skill_engine(uid).list_projects()
 
 
 @app.post("/api/projects")
-async def create_project(info: ProjectInfo, request: Request, uid: str = Depends(get_current_uid)):
+async def create_project(info: ProjectInfo, request: Request, uid: str = Depends(require_password_current)):
     if getattr(request.app.state, "auth_required", True):   # web mode
         # 按「字段是否发送」拒绝，而非按值真假——web 客户端根本不该带这两个字段（更清晰的契约）。
         sent = info.model_fields_set
@@ -470,7 +754,7 @@ async def delete_material(material_id: str, scope: ProjectScope = Depends(requir
 
 @app.post("/api/chat")
 @limiter.limit("20/minute")
-async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(get_current_uid)):
+async def chat(request: Request, chat_request: ChatRequest, uid: str = Depends(require_password_current)):
     # scope 解析必须在 try 外：require_project 的 404（非属主/不存在）不能被下面的
     # 宽泛 except Exception 吞成 500（破坏租户隔离 404 契约，Codex T11a review）。
     logger.info(f"Chat request for project: {chat_request.project_id}")
@@ -923,7 +1207,7 @@ async def clear_conversation(scope: ProjectScope = Depends(require_project)):
 
 @app.post("/api/chat/stream")
 @limiter.limit("20/minute")
-def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(get_current_uid)):
+def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(require_password_current)):
     # 归属校验在函数体（StreamingResponse 之前）：非属主 → require_project 抛 404，
     # 而不是把 404 埋进 SSE 流里。scope 解析失败直接以 HTTP 错误冒泡。
     scope = require_project(chat_request.project_id, uid)

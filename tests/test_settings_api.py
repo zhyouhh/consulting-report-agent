@@ -8,6 +8,14 @@ import backend.main as main_module
 from tests.test_auth_api import AuthApiTestBase
 
 
+def _settings_body(**overrides):
+    """拼完整必填体（mode + managed_model），custom 时补 custom_*。
+    所有 settings/CSRF POST 测试复用，避免漏 managed_model 触发 422。"""
+    body = {"mode": "managed", "managed_model": "deepseek-v4-pro"}
+    body.update(overrides)
+    return body
+
+
 class SettingsIsolationTests(unittest.TestCase):
     def test_settings_isolated_per_uid(self):
         from backend.config import load_settings, save_settings, Settings
@@ -30,6 +38,14 @@ class SettingsApiTests(AuthApiTestBase):
         # preseed so GET has a deterministic baseline, and so per-test mutations are isolated.
         from backend.config import save_settings, Settings
         save_settings(Settings(), uid="local")
+        # custom 已激活（Task 4）后，保存 custom mode 会跑 url_guard 校验（白名单 + DNS）。
+        # 这些用例只关心 key 掩码 / context-limit 等正交行为，故 stub DNS 解析为公网放行，
+        # 让它们用「白名单内」的 base（api.openai.com）通过校验、不真碰网络。
+        # 注意：offlist 拒绝用例用 evil.example.com，在白名单检查处先被拦，stub 不影响其 400。
+        self._resolve_patch = mock.patch("backend.url_guard.assert_resolves_public",
+                                         return_value=None)
+        self._resolve_patch.start()
+        self.addCleanup(self._resolve_patch.stop)
         self.client = TestClient(self.m.app)
 
     @property
@@ -43,6 +59,57 @@ class SettingsApiTests(AuthApiTestBase):
     def _load_local(self):
         from backend.config import load_settings
         return load_settings("local")
+
+    # —— Task 3: managed_base_url 服务端只读 ——
+    def test_normalize_forces_managed_base_url_constant(self):
+        from backend.config import normalize_settings_payload, DEFAULT_MANAGED_BASE_URL
+        out = normalize_settings_payload({"managed_base_url": "https://attacker.internal/v1"})
+        self.assertEqual(out["managed_base_url"], DEFAULT_MANAGED_BASE_URL)
+        self.assertEqual(out["api_base"], DEFAULT_MANAGED_BASE_URL)  # managed alias 也回常量
+
+    def test_post_settings_without_managed_base_url_ok(self):
+        # 前端不再发 managed_base_url（Task 18），带必填 managed_model 应 200 而非 422
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body())   # 不含 managed_base_url
+        self.assertEqual(resp.status_code, 200)
+
+    def test_post_settings_ignores_client_managed_base_url(self):
+        from backend.config import DEFAULT_MANAGED_BASE_URL
+        self.client.post("/api/settings",
+                         headers={"origin": "https://app.example.com"},
+                         json=_settings_body(managed_base_url="https://attacker.internal/v1"))
+        s = self._load_local()
+        self.assertEqual(s.managed_base_url, DEFAULT_MANAGED_BASE_URL)
+
+    # —— Task 4: 解锁 custom 模式 + 保存时校验 base ——
+    def test_custom_mode_honored_for_current_config(self):
+        from backend.config import normalize_settings_payload, DESKTOP_CONFIG_VERSION
+        out = normalize_settings_payload({
+            "config_version": DESKTOP_CONFIG_VERSION,
+            "mode": "custom",
+            "custom_api_base": "https://api.openai.com/v1",
+            "custom_api_key": "sk-xxx",
+            "custom_model": "gpt-4o",
+        })
+        self.assertEqual(out["mode"], "custom")
+        self.assertEqual(out["api_base"], "https://api.openai.com/v1")
+        self.assertEqual(out["api_key"], "sk-xxx")
+        self.assertEqual(out["model"], "gpt-4o")
+
+    def test_legacy_config_still_coerced_to_managed(self):
+        from backend.config import normalize_settings_payload
+        out = normalize_settings_payload({"config_version": 0, "mode": "custom"})
+        self.assertEqual(out["mode"], "managed")  # legacy 迁移安全
+
+    def test_post_settings_custom_offlist_base_rejected(self):
+        # 带必填 managed_model（_settings_body），custom 字段过 SSRF 白名单校验 → 400
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body(mode="custom",
+                                                    custom_api_base="https://evil.example.com/v1",
+                                                    custom_api_key="sk-x", custom_model="x"))
+        self.assertEqual(resp.status_code, 400)
 
     def test_get_settings_masks_custom_api_key(self):
         from backend.config import Settings
@@ -82,7 +149,7 @@ class SettingsApiTests(AuthApiTestBase):
                 "mode": "custom",
                 "managed_base_url": "https://newapi.z0y0h.work/client/v1",
                 "managed_model": "gemini-3-flash",
-                "custom_api_base": "https://custom.example/v1",
+                "custom_api_base": "https://api.openai.com/v1",
                 "custom_api_key": "***",
                 "custom_model": "gpt-4.1-mini",
             },
@@ -100,7 +167,7 @@ class SettingsApiTests(AuthApiTestBase):
                     "mode": "custom",
                     "managed_base_url": "https://newapi.z0y0h.work/client/v1",
                     "managed_model": "gemini-3-flash",
-                    "custom_api_base": "https://custom.example/v1",
+                    "custom_api_base": "https://api.openai.com/v1",
                     "custom_api_key": "new-secret",
                     "custom_model": "gpt-4.1-mini",
                     "custom_context_limit_override": 32000,
@@ -121,7 +188,7 @@ class SettingsApiTests(AuthApiTestBase):
                     "mode": "custom",
                     "managed_base_url": "https://newapi.z0y0h.work/client/v1",
                     "managed_model": "gemini-3-flash",
-                    "custom_api_base": "https://custom.example/v1",
+                    "custom_api_base": "https://api.openai.com/v1",
                     "custom_api_key": "new-secret",
                     "custom_model": "gpt-4.1-mini",
                     "custom_context_limit_override": 3000,
@@ -150,7 +217,7 @@ class SettingsApiTests(AuthApiTestBase):
                     "mode": "custom",
                     "managed_base_url": "https://newapi.z0y0h.work/client/v1",
                     "managed_model": "gemini-3-flash",
-                    "custom_api_base": "https://custom.example/v1",
+                    "custom_api_base": "https://api.openai.com/v1",
                     "custom_api_key": "***",
                     "custom_model": "gpt-4.1-mini",
                 },
@@ -178,6 +245,9 @@ class SettingsApiTests(AuthApiTestBase):
         tb = accounts.create_session(ub)
         ca = TestClient(self.m.app); ca.cookies.set("cra_session", ta)
         cb = TestClient(self.m.app); cb.cookies.set("cra_session", tb)
+        # fresh client 不继承基类默认 Origin → web 态 POST 会被 CSRF 拦；显式补同源。
+        ca.headers.update({"origin": self._ALLOWED_ORIGIN})
+        cb.headers.update({"origin": self._ALLOWED_ORIGIN})
         # custom_api_base is NOT masked by GET → observe per-uid isolation through the endpoint.
         body = lambda base: {
             "mode": "managed",

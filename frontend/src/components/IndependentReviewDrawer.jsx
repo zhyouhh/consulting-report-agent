@@ -68,6 +68,7 @@ export default function ReviewChatWindow({
     try {
       response = await fetch(url, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ resume: !!resume, run_id: runId, supplement: supplement || undefined }),
         signal: controller.signal,
@@ -189,6 +190,7 @@ export default function ReviewChatWindow({
     if (runId && !completedRef.current) {
       fetch(`/api/projects/${encodeURIComponent(projectId)}/independent-review/discard`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ run_id: runId }),
       }).catch(() => {})

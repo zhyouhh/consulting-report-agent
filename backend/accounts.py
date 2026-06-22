@@ -19,6 +19,11 @@ class InactiveUserError(Exception):
     pass
 
 
+class LastAdminError(Exception):
+    """禁用该 admin 会让活跃 admin 数归零——领域层拒绝（防锁死）。"""
+    pass
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -37,6 +42,25 @@ def _db():
     try:
         with conn:          # commits on success / rolls back on exception
             yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _db_immediate():
+    """写锁串行化事务：BEGIN IMMEDIATE 立刻拿 SQLite 写锁，并发写者排队（busy_timeout）。
+    用于「读-判断-写」必须原子的临界区（如 last-admin 守卫，消除 TOCTOU 互禁竞态）。
+    成功 COMMIT；任何异常（含领域 LastAdminError）ROLLBACK。"""
+    conn = _connect()
+    conn.isolation_level = None          # 手动事务控制
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
 
@@ -180,6 +204,26 @@ def set_user_disabled(uid, disabled: bool) -> None:
             conn.execute("DELETE FROM sessions WHERE uid=?", (uid,))
 
 
+def admin_set_user_disabled(uid, disabled: bool) -> None:
+    """admin 禁/启用守卫版（防锁死，消除 TOCTOU 互禁竞态）：单个 BEGIN IMMEDIATE 写事务里
+    重读 last-admin 计数 → 判断 → UPDATE + 撤会话，全原子。并发互禁请求被写锁串行化：
+    第二个请求在第一个提交后重读会看到只剩 1 个活跃 admin → 抛 LastAdminError（活跃 admin 绝不归零）。
+    禁用最后一个活跃 admin → LastAdminError；禁用非 admin / 非最后 admin / 重新启用 → 正常执行。
+    （注意：调用者自身的「不许禁用自己」检查留在端点层，actor_uid 不会变、非 racy。）"""
+    with _db_immediate() as conn:
+        if disabled:
+            row = conn.execute("SELECT is_admin, disabled FROM users WHERE uid=?", (uid,)).fetchone()
+            if row is not None and row["is_admin"] and not row["disabled"]:
+                active = conn.execute(
+                    "SELECT COUNT(*) c FROM users WHERE is_admin=1 AND disabled=0"
+                ).fetchone()["c"]
+                if active <= 1:   # 此 admin 即最后一个活跃 admin → 拒绝
+                    raise LastAdminError(uid)
+        conn.execute("UPDATE users SET disabled=? WHERE uid=?", (int(disabled), uid))
+        if disabled:
+            conn.execute("DELETE FROM sessions WHERE uid=?", (uid,))
+
+
 def get_config(key, default=None):
     with _db() as conn:
         row = conn.execute("SELECT value FROM app_config WHERE key=?", (key,)).fetchone()
@@ -236,3 +280,40 @@ def get_effective_daily_cap_micro(uid) -> int:
     if g is not None:
         return int(g)
     return DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN
+
+
+def list_all_users() -> list[dict]:
+    # 不 SELECT password_hash——遵循 B1「公共查询剥 hash」铁律。
+    with _db() as con:
+        rows = con.execute(
+            "SELECT uid, username, is_admin, daily_cost_micro_yuan, "
+            "must_change_password, disabled, created_at FROM users ORDER BY created_at"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def admin_reset_password(uid: str, new_password: str) -> None:
+    """管理员重置他人密码：改 hash + 置 must_change_password=1 + 撤销全部会话（同一事务）。"""
+    new_hash = _PH.hash(new_password)
+    with _db() as con:
+        con.execute(
+            "UPDATE users SET password_hash=?, must_change_password=1 WHERE uid=?",
+            (new_hash, uid),
+        )
+        con.execute("DELETE FROM sessions WHERE uid=?", (uid,))
+
+
+def rotate_invite_code() -> str:
+    code = secrets.token_urlsafe(9)   # ~12 字符
+    set_config("invite_code", code)
+    return code
+
+
+def get_custom_api_extra_hosts() -> list[str]:
+    raw = get_config("custom_api_allowed_hosts") or ""
+    return [h.strip().lower() for h in raw.split(",") if h.strip()]
+
+
+def set_custom_api_extra_hosts(hosts) -> None:
+    cleaned = sorted({h.strip().lower() for h in (hosts or []) if h and h.strip()})
+    set_config("custom_api_allowed_hosts", ",".join(cleaned))

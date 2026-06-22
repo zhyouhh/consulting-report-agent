@@ -26,3 +26,9 @@ test('Sidebar shows quota for local users too (not gated solely on non-local)', 
     '额度块外层守卫应为「非 local 或 有 cap」，使 local 也能看到额度',
   );
 });
+
+// B3 Task 16：admin 入口仅对 is_admin 用户显示。
+test('Sidebar 账号块在 is_admin 时露用户管理入口', () => {
+  assert.match(src, /authUser\??\.is_admin/);
+  assert.match(src, /用户管理/);
+});

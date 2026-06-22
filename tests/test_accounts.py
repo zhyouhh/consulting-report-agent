@@ -169,3 +169,101 @@ class UsageDailyTests(unittest.TestCase):
         # override 清回 None → 退全局
         accounts.set_user_daily_cap_micro(uid, None)
         self.assertEqual(accounts.get_effective_daily_cap_micro(uid), 2000000)
+
+
+class AdminAccountsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = Path(os.path.realpath(tempfile.mkdtemp()))
+        self._env = mock.patch.dict(os.environ, {"CRA_DATA_ROOT": str(self._tmp)})
+        self._env.start(); accounts.init_db()
+
+    def tearDown(self):
+        self._env.stop(); shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_list_all_users_returns_rows_without_password_hash(self):
+        accounts.create_user("alice", "pw-123456")
+        accounts.create_user("bob", "pw-123456")
+        rows = accounts.list_all_users()
+        self.assertEqual({r["username"] for r in rows}, {"alice", "bob"})
+        self.assertNotIn("password_hash", rows[0])
+        for k in ("uid", "username", "is_admin", "disabled", "created_at"):
+            self.assertIn(k, rows[0])
+
+    def test_admin_reset_password_sets_flag_and_revokes_sessions(self):
+        uid = accounts.create_user("carol", "old-123456")
+        token = accounts.create_session(uid)
+        accounts.admin_reset_password(uid, "new-123456")
+        self.assertTrue(accounts.verify_user_password("carol", "new-123456"))
+        self.assertIsNone(accounts.get_session_uid(token))           # 会话被撤
+        self.assertTrue(accounts.get_user_by_uid(uid)["must_change_password"])
+
+    def test_rotate_invite_code_changes_and_returns_new(self):
+        accounts.set_config("invite_code", "OLD")
+        new_code = accounts.rotate_invite_code()
+        self.assertNotEqual(new_code, "OLD")
+        self.assertEqual(accounts.get_config("invite_code"), new_code)
+        self.assertGreaterEqual(len(new_code), 8)
+
+    def test_custom_api_extra_hosts_roundtrip(self):
+        self.assertEqual(accounts.get_custom_api_extra_hosts(), [])
+        accounts.set_custom_api_extra_hosts(["My.LLM.cn ", "", "other.host"])
+        # 归一化：去空白 + 小写 + 去空项；持久化可读回
+        self.assertEqual(set(accounts.get_custom_api_extra_hosts()), {"my.llm.cn", "other.host"})
+
+    # —— BLOCKER 1（codex 红队）：admin_set_user_disabled 原子守卫（last-admin + 撤会话同事务）——
+    def test_admin_set_user_disabled_rejects_last_admin(self):
+        admin = accounts.create_user("solo-admin", "pw-123456", is_admin=True)
+        with self.assertRaises(accounts.LastAdminError):
+            accounts.admin_set_user_disabled(admin, True)
+        # 仍活跃（事务回滚 / 未写）
+        self.assertFalse(accounts.get_user_by_uid(admin)["disabled"])
+
+    def test_admin_set_user_disabled_disables_non_last_admin_and_revokes(self):
+        a1 = accounts.create_user("a1", "pw-123456", is_admin=True)
+        a2 = accounts.create_user("a2", "pw-123456", is_admin=True)
+        tok = accounts.create_session(a2)
+        accounts.admin_set_user_disabled(a2, True)   # 还剩 a1 活跃 → 允许
+        self.assertTrue(accounts.get_user_by_uid(a2)["disabled"])
+        self.assertIsNone(accounts.get_session_uid(tok))   # 会话同事务撤销
+
+    def test_admin_set_user_disabled_allows_disable_non_admin(self):
+        accounts.create_user("only-admin", "pw-123456", is_admin=True)
+        user = accounts.create_user("plain", "pw-123456")
+        accounts.admin_set_user_disabled(user, True)   # 非 admin 不受 last-admin 守卫
+        self.assertTrue(accounts.get_user_by_uid(user)["disabled"])
+
+    def test_admin_set_user_disabled_can_reenable(self):
+        a1 = accounts.create_user("a1", "pw-123456", is_admin=True)
+        a2 = accounts.create_user("a2", "pw-123456", is_admin=True)
+        accounts.admin_set_user_disabled(a2, True)
+        accounts.admin_set_user_disabled(a2, False)   # 重新启用不受守卫（disabled=False）
+        self.assertFalse(accounts.get_user_by_uid(a2)["disabled"])
+
+    def test_concurrent_mutual_admin_disable_keeps_one_active(self):
+        # 核心回归：两 admin 并发互禁。原子事务（BEGIN IMMEDIATE）串行化两请求，
+        # 第二个提交前重读计数会看到只剩 1 个活跃 admin → 抛 LastAdminError。
+        # 断言：最终活跃 admin 数 ≥ 1（绝不归零）。
+        import threading
+        a1 = accounts.create_user("ca1", "pw-123456", is_admin=True)
+        a2 = accounts.create_user("ca2", "pw-123456", is_admin=True)
+        barrier = threading.Barrier(2)
+        results = {}
+
+        def worker(actor, target):
+            barrier.wait()   # 尽量同时进入
+            try:
+                accounts.admin_set_user_disabled(target, True)
+                results[actor] = "ok"
+            except accounts.LastAdminError:
+                results[actor] = "rejected"
+            except Exception as e:   # noqa: BLE001 — 记录意外异常便于诊断
+                results[actor] = f"error:{e!r}"
+
+        t1 = threading.Thread(target=worker, args=("t1", a2))
+        t2 = threading.Thread(target=worker, args=("t2", a1))
+        t1.start(); t2.start(); t1.join(); t2.join()
+
+        active = [u for u in accounts.list_all_users() if u["is_admin"] and not u["disabled"]]
+        self.assertGreaterEqual(len(active), 1, f"活跃 admin 归零！results={results}")
+        # 至少一个请求被原子守卫拒绝（不可能两个都 ok）
+        self.assertIn("rejected", results.values(), f"两请求都成功 → 守卫失效；results={results}")

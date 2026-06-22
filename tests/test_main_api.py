@@ -2191,6 +2191,7 @@ class CrossTenantApiTests(AuthApiTestBase):
 
         self.A = self.client
         self.B = TestClient(self.m.app)
+        self.B.headers.update({"origin": self._ALLOWED_ORIGIN})  # fresh client：补 CSRF 同源
         for c, u in ((self.A, "alice"), (self.B, "bob")):
             c.post("/api/auth/register", json={"username": u, "password": "pw-123456", "invite_code": "JOIN"})
             c.post("/api/auth/login", json={"username": u, "password": "pw-123456"})

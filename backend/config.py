@@ -324,7 +324,7 @@ def normalize_settings_payload(data: dict) -> dict:
     if "mode" not in normalized:
         normalized["mode"] = "managed"
 
-    normalized.setdefault("managed_base_url", DEFAULT_MANAGED_BASE_URL)
+    normalized["managed_base_url"] = DEFAULT_MANAGED_BASE_URL   # 服务端只读，覆盖任何历史/客户端值
     normalized.setdefault("managed_model", DEFAULT_MANAGED_MODEL)
     normalized.setdefault("managed_vision_model", DEFAULT_MANAGED_VISION_MODEL)
     normalized.setdefault("vision_enabled", True)
@@ -337,12 +337,13 @@ def normalize_settings_payload(data: dict) -> dict:
     normalized["projects_dir"] = runtime_projects_dir
     normalized["skill_dir"] = runtime_skill_dir
 
-    # 桌面端始终以试用通道启动，保留自定义 API 信息供用户临时切换。
-    # 同时旧版本配置可能遗留开发环境路径和自定义模式，也在这里统一纠正。
+    # 桌面默认 managed；legacy 配置强制迁移到 managed（迁移安全）；
+    # 非 legacy 配置 honor 用户选择的 mode（custom 已激活，B3）。
     if is_legacy_config:
         normalized["mode"] = "managed"
     else:
-        normalized["mode"] = "managed"
+        requested = normalized.get("mode", "managed")
+        normalized["mode"] = requested if requested in ("managed", "custom") else "managed"
 
     if normalized["mode"] == "managed":
         normalized["api_base"] = normalized["managed_base_url"]
@@ -379,14 +380,17 @@ def save_settings(settings: Settings, uid: str | None = None):
     config_file = _config_path_for(uid)
     config_file.parent.mkdir(parents=True, exist_ok=True)
     data = normalize_settings_payload(settings.model_dump())
+    # 注意：mode 是用户选择、必须持久化（B3 Task 4 custom 激活），故 *不* 剔除。
+    # 以下都是 normalize 从 mode + custom_*/managed_* 派生的别名/运行时值，持久化它们会污染配置。
+    # managed_base_url 服务端只读（spec §8 不进 per-user settings）：load 时 normalize 强制回常量。
     for key in [
-        "mode",
         "api_key",
         "api_base",
         "model",
         "projects_dir",
         "skill_dir",
         "managed_client_token",
+        "managed_base_url",
     ]:
         data.pop(key, None)
     # 原子写：同目录 temp + os.replace（与 R3 用户写一致），避免 GET 无锁 load_settings 读到半截。

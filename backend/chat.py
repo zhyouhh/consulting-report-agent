@@ -405,9 +405,9 @@ class ChatHandler:
             raise ValueError(f"ChatHandler uid {uid!r} 与 SkillEngine uid {engine_uid!r} 不一致")
         self._turn_context = self._new_turn_context(can_write_non_plan=True)
         self._fetch_url_cache: Dict[tuple[str, str, str], Dict[str, object]] = {}
-        import httpx
+        from backend import url_guard
 
-        http_client = httpx.Client(timeout=120.0)
+        http_client = url_guard.build_guarded_http_client(timeout=120.0)
         raw_client = OpenAI(
             api_key=settings.api_key,
             base_url=settings.api_base,
@@ -5791,18 +5791,10 @@ class ChatHandler:
             self._ensure_public_ip(ip)
 
     def _ensure_public_ip(self, ip):
-        carrier_grade_nat = ip in ipaddress.ip_network("100.64.0.0/10")
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-            or carrier_grade_nat
-            or getattr(ip, "is_site_local", False)
-        ):
-            raise ValueError("不允许访问本地或内网地址。")
+        # IP 判定单一真值源移到 url_guard（B3 Task 5 DRY）。assert_public_ip 抛 SsrfBlockedError
+        # （继承 ValueError），与原 ValueError 兼容，fetch_url 调用方 catch 不变。
+        from backend import url_guard
+        url_guard.assert_public_ip(str(ip))
 
     def _read_response_bytes(self, response) -> tuple[bytes, bool]:
         chunks = []

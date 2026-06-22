@@ -5,9 +5,17 @@ from fastapi.testclient import TestClient
 
 
 class AuthApiTestBase(unittest.TestCase):
+    # CSRF guard（web 态）校验同源 Origin；web 态测试 client 默认带此源，
+    # 并设 CRA_ALLOWED_ORIGIN 让中间件放行。缺失-Origin 用例须用 bare client（见 test_csrf.py）。
+    _ALLOWED_ORIGIN = "https://app.example.com"
+
     def setUp(self):
         self._tmp = Path(os.path.realpath(tempfile.mkdtemp()))
-        self._env = mock.patch.dict(os.environ, {"CRA_DATA_ROOT": str(self._tmp), "CRA_INVITE_CODE": "JOIN"})
+        self._env = mock.patch.dict(os.environ, {
+            "CRA_DATA_ROOT": str(self._tmp),
+            "CRA_INVITE_CODE": "JOIN",
+            "CRA_ALLOWED_ORIGIN": self._ALLOWED_ORIGIN,
+        })
         self._env.start()
         from backend import accounts, config
         importlib.reload(config); importlib.reload(accounts)
@@ -18,6 +26,7 @@ class AuthApiTestBase(unittest.TestCase):
         self.m = m; m.app.state.auth_required = True
         self._reset_module_singletons()
         self.client = TestClient(m.app)
+        self.client.headers.update({"origin": self._ALLOWED_ORIGIN})  # 满足 CSRF 同源
 
     def _reset_module_singletons(self):
         from backend import chat as cm, independent_review as im
@@ -122,6 +131,13 @@ class AuthFlowTests(AuthApiTestBase):
         self._reg()
         self.assertEqual(self.client.post("/api/auth/login", json={"username":"alice","password":"x"}).status_code, 422)
 
+    def test_web_cookie_has_secure_flag(self):
+        # run_web 不参与 TestClient，故显式置 cookie_secure（login set-cookie 读 app.state.cookie_secure）。
+        self.m.app.state.cookie_secure = True
+        self._reg()
+        resp = self.client.post("/api/auth/login", json={"username": "alice", "password": "pw-123456"})
+        self.assertIn("Secure", resp.headers.get("set-cookie", ""))
+
     def test_logout_idempotent_without_session(self):
         # no cookie -> still 200, still clears
         r = self.client.post("/api/auth/logout")
@@ -136,6 +152,62 @@ class AuthFlowTests(AuthApiTestBase):
         self.client.post("/api/auth/change-password", json={"old_password":"pw-123456","new_password":"new-123456"})
         self.assertEqual(self.client.get("/api/auth/me").status_code, 200)   # current kept
         self.assertIsNone(accounts.get_session_uid(other))                   # other revoked
+
+
+class MustChangePasswordEnforcementTests(AuthApiTestBase):
+    # B3 Task 14：must_change_password 路由级强制。标志为真时业务路由 403，
+    # 自救路由（me/change-password/logout）仍可用，改密后业务路由解除 403。
+    def test_must_change_password_blocks_business_routes(self):
+        from backend import accounts
+        uid = accounts.create_user("grace", "pw-123456", must_change_password=True)
+        token = accounts.create_session(uid)
+        self.client.cookies.set("cra_session", token)
+        org = {"origin": self._ALLOWED_ORIGIN}
+        # path-param 项目路由（经 require_project 默认依赖）被拦
+        self.assertEqual(self.client.get("/api/projects").status_code, 403)
+        # settings（显式串依赖）被拦
+        self.assertEqual(self.client.get("/api/settings").status_code, 403)
+        # body-project 路由也被拦（R1-BLOCKER3：显式串依赖才覆盖）
+        self.assertEqual(self.client.post("/api/models/list", headers=org,
+                                          json={"api_key": "x", "api_base": "https://api.openai.com/v1"}).status_code, 403)
+        self.assertEqual(self.client.post("/api/chat/stream", headers=org,
+                                          json={"project_id": "x", "message_text": "hi"}).status_code, 403)
+        self.assertEqual(self.client.post("/api/chat", headers=org,
+                                          json={"project_id": "x", "message_text": "hi"}).status_code, 403)
+        # me / change-password 仍可用（否则无法自救）
+        self.assertEqual(self.client.get("/api/auth/me").status_code, 200)
+        self.assertEqual(self.client.post("/api/auth/logout", headers=org).status_code, 200)
+
+    def test_must_change_password_does_not_block_normal_user(self):
+        # 普通用户（标志为假）业务路由不被误挡——确认豁免逻辑只看标志、不一刀切。
+        from backend import accounts
+        uid = accounts.create_user("ivan", "pw-123456", must_change_password=False)
+        token = accounts.create_session(uid)
+        self.client.cookies.set("cra_session", token)
+        self.assertNotEqual(self.client.get("/api/projects").status_code, 403)
+
+    def test_must_change_password_blocks_desktop_bridge_routes_before_503(self):
+        # 桌面桥端点也串 require_password_current：强制层在 require_desktop_bridge 的 503 之前生效，
+        # 故 must_change_password 用户拿 403（detail=must_change_password）而非 503（codex NIT）。
+        from backend import accounts
+        uid = accounts.create_user("judy", "pw-123456", must_change_password=True)
+        token = accounts.create_session(uid)
+        self.client.cookies.set("cra_session", token)
+        r = self.client.post("/api/system/select-workspace-files",
+                             headers={"origin": self._ALLOWED_ORIGIN},
+                             json={"workspace_dir": "/tmp"})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json()["detail"], "must_change_password")
+
+    def test_after_change_password_business_routes_unblocked(self):
+        from backend import accounts
+        uid = accounts.create_user("heidi", "pw-123456", must_change_password=True)
+        token = accounts.create_session(uid)
+        self.client.cookies.set("cra_session", token)
+        self.client.post("/api/auth/change-password",
+                         headers={"origin": self._ALLOWED_ORIGIN},
+                         json={"old_password": "pw-123456", "new_password": "new-123456"})
+        self.assertNotEqual(self.client.get("/api/projects").status_code, 403)
 
 
 class DesktopLocalTests(AuthApiTestBase):
@@ -180,6 +252,118 @@ class BootstrapSafetyTests(AuthApiTestBase):
         with mock.patch.dict(os.environ, {"CRA_INVITE_CODE": ""}):
             with self.assertRaises(SystemExit):
                 self.m.assert_safe_startup(auth_required=True, host="0.0.0.0")
+
+
+class LoginThrottleTests(AuthApiTestBase):
+    # 限流为 throttle-first（reserve-before-verify，用户拍板）：撞库防护优先，桶满即 429 且不验密；
+    # 代价是被攻击时该用户正确密码也临时锁 5 分钟（窗口滚动后自动恢复），是 deliberate tradeoff。
+
+    def test_login_throttle_pure_logic_exact_key(self):
+        # B3: 账号查找大小写敏感精确匹配（WHERE username=?，无 COLLATE NOCASE），
+        # 故限流 key 也必须按原始 username 精确匹配，桶与登录主体 1:1 对齐。
+        m = self.m
+        m._clear_login_fails("victim")
+        # MAX 次 reserve 填满桶（每次返 False=未超限、已占槽），第 MAX+1 次返 True=已封顶。
+        for _ in range(m._LOGIN_MAX_FAILS):
+            self.assertFalse(m._reserve_login_attempt("victim"))
+        self.assertTrue(m._reserve_login_attempt("victim"))
+        self.assertTrue(m._login_throttled("victim"))
+        # 精确 key：大小写/空白不同的串互不共享计数（这些是可独立注册的不同账号 / 非法登录串）。
+        self.assertFalse(m._login_throttled("Victim"))
+        self.assertFalse(m._login_throttled("  victim  "))
+        self.assertFalse(m._login_throttled("VICTIM"))
+        m._clear_login_fails("victim")
+        self.assertFalse(m._login_throttled("victim"))
+
+    def test_reserve_login_attempt_atomic_blocks_at_cap(self):
+        # B1: 单锁内原子 prune+判上限+append。第 1..MAX 次返回 False（占槽成功），
+        # 第 MAX+1 次返回 True（桶满、不再 append）。
+        m = self.m
+        m._clear_login_fails("u")
+        results = [m._reserve_login_attempt("u") for _ in range(m._LOGIN_MAX_FAILS + 1)]
+        self.assertEqual(results[:-1], [False] * m._LOGIN_MAX_FAILS)
+        self.assertTrue(results[-1])
+
+    def test_login_per_username_throttle_endpoint(self):
+        # 端点（全程错误密码）：reserve 是「append 前判 >= MAX」，故前 MAX 次走验证返 401，
+        # 第 MAX+1 次桶满 → 429（首个 429 在第 MAX+1 次，消除 off-by-one 模糊）。
+        m = self.m
+        m.limiter.enabled = False   # 关 per-IP slowapi，隔离出 username 维度
+        try:
+            self.client.post("/api/auth/register",
+                             json={"username": "victim", "password": "right-123456", "invite_code": "JOIN"})
+            for i in range(m._LOGIN_MAX_FAILS):
+                r = self.client.post("/api/auth/login",
+                                     json={"username": "victim", "password": "wrong-xxxxx"})
+                self.assertEqual(r.status_code, 401, f"attempt {i+1} should be 401, not 429")
+            resp = self.client.post("/api/auth/login",
+                                    json={"username": "victim", "password": "wrong-xxxxx"})
+            self.assertEqual(resp.status_code, 429)   # 第 MAX+1 次：桶满
+        finally:
+            m.limiter.enabled = True
+
+    def test_bucket_full_path_does_not_call_verify(self):
+        # 撞库防护的核心保证：桶满后第 MAX+1 次直接 429，**不调用 verify_user_password**。
+        # 这是 throttle-first 与 verify-first 的本质区别——攻击者每用户名每窗口只能试 MAX 个密码。
+        m = self.m
+        m.limiter.enabled = False
+        try:
+            self.client.post("/api/auth/register",
+                             json={"username": "victim", "password": "right-123456", "invite_code": "JOIN"})
+            for _ in range(m._LOGIN_MAX_FAILS):   # 填满桶
+                self.client.post("/api/auth/login",
+                                 json={"username": "victim", "password": "wrong-xxxxx"})
+            with mock.patch.object(m.accounts, "verify_user_password") as verify:
+                resp = self.client.post("/api/auth/login",
+                                        json={"username": "victim", "password": "wrong-xxxxx"})
+            self.assertEqual(resp.status_code, 429)
+            verify.assert_not_called()             # 桶满路径绝不验密 → 真封顶
+        finally:
+            m.limiter.enabled = True
+
+    def test_correct_password_blocked_when_bucket_full(self):
+        # deliberate tradeoff（用户拍板）：桶被错误密码灌满（达 MAX）后，即使正确密码也 429。
+        # 这是连续失败锁定的预期行为、不是 bug——5 分钟滑窗滚动后自动恢复；彻底解法见 backlog
+        # （热路径 CAPTCHA/邮箱验证）。throttle-first 选择「撞库防护真实有效」高于「不锁合法用户」。
+        m = self.m
+        m.limiter.enabled = False
+        try:
+            self.client.post("/api/auth/register",
+                             json={"username": "victim", "password": "right-123456", "invite_code": "JOIN"})
+            for _ in range(m._LOGIN_MAX_FAILS):   # 灌满桶
+                self.client.post("/api/auth/login",
+                                 json={"username": "victim", "password": "wrong-xxxxx"})
+            self.assertTrue(m._login_throttled("victim"))   # 桶确已满
+            resp = self.client.post("/api/auth/login",
+                                    json={"username": "victim", "password": "right-123456"})
+            self.assertEqual(resp.status_code, 429)          # 正确密码也被锁（deliberate）
+        finally:
+            m.limiter.enabled = True
+
+    def test_successful_login_clears_bucket(self):
+        # 合法用户不累积：桶未满时错几次再输对，登录成功并清桶（下次重新从 0 计）。
+        m = self.m
+        m.limiter.enabled = False
+        try:
+            self.client.post("/api/auth/register",
+                             json={"username": "victim", "password": "right-123456", "invite_code": "JOIN"})
+            for _ in range(m._LOGIN_MAX_FAILS - 1):   # 错 MAX-1 次（桶未满）
+                self.client.post("/api/auth/login",
+                                 json={"username": "victim", "password": "wrong-xxxxx"})
+            resp = self.client.post("/api/auth/login",
+                                    json={"username": "victim", "password": "right-123456"})
+            self.assertEqual(resp.status_code, 200)
+            self.assertIn("cra_session", resp.cookies)
+            self.assertFalse(m._login_throttled("victim"))   # 成功清桶
+        finally:
+            m.limiter.enabled = True
+
+    def test_login_fails_store_bounded(self):
+        # B4：登录是 pre-auth，攻击者可灌任意用户名。store 必须有界。
+        m = self.m
+        for i in range(m._MAX_TRACKED_LOGIN_KEYS + 500):
+            m._reserve_login_attempt(f"user-{i}")
+        self.assertLessEqual(len(m._LOGIN_FAILS), m._MAX_TRACKED_LOGIN_KEYS)
 
 
 class MeCostFieldsTests(AuthApiTestBase):

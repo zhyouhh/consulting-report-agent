@@ -33,7 +33,12 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertEqual(settings.model, settings.managed_model)
         self.assertEqual(settings.api_key, settings.managed_client_token)
 
-    def test_save_and_load_preserves_custom_fields_but_starts_in_managed_mode(self):
+    def test_save_and_load_preserves_custom_mode_and_fields(self):
+        # NOTE (B3 Task 4): custom mode 现持久化（save_settings 不再剔除 mode），
+        # 重启/reload 后仍生效——"激活 custom" 是端到端的，而非活不过一个请求。
+        # managed_base_url 服务端只读（Task 3）→ 强制回常量；custom 模式 runtime alias
+        # （api_base/model/api_key）从 custom_* 派生。
+        from backend.config import DEFAULT_MANAGED_BASE_URL
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             settings = Settings(
@@ -49,9 +54,36 @@ class SettingsPersistenceTests(unittest.TestCase):
                 save_settings(settings)
                 loaded = load_settings()
 
-        self.assertEqual(loaded.mode, "managed")
+        self.assertEqual(loaded.mode, "custom")
+        self.assertEqual(loaded.managed_base_url, DEFAULT_MANAGED_BASE_URL)
         self.assertEqual(loaded.custom_api_base, "https://custom.example/v1")
         self.assertEqual(loaded.custom_model, "gpt-4.1-mini")
+        # custom 模式 runtime alias 从 custom_* 派生
+        self.assertEqual(loaded.api_base, "https://custom.example/v1")
+        self.assertEqual(loaded.model, "gpt-4.1-mini")
+        self.assertEqual(loaded.api_key, "secret")
+
+    def test_legacy_config_with_custom_mode_still_coerced_to_managed_on_load(self):
+        # 迁移安全：磁盘上的 legacy 配置（config_version < 4）即使写了 mode="custom"，
+        # load 时也被强制回 managed——mode 持久化不削弱 legacy 迁移护栏。
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            (config_dir / "config.json").write_text(
+                """
+                {
+                  "config_version": 0,
+                  "mode": "custom",
+                  "custom_api_base": "https://custom.example/v1",
+                  "custom_api_key": "secret",
+                  "custom_model": "gpt-4.1-mini"
+                }
+                """,
+                encoding="utf-8",
+            )
+            with mock.patch("backend.config.get_user_config_dir", return_value=config_dir):
+                loaded = load_settings()
+
+        self.assertEqual(loaded.mode, "managed")
 
     def test_save_and_load_preserves_custom_context_limit_override(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -184,7 +216,11 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertNotIn("projects_dir", saved)
         self.assertNotIn("skill_dir", saved)
         self.assertNotIn("managed_client_token", saved)
-        self.assertNotIn('"mode"', saved)
+        # spec §8: managed_base_url 不进 per-user settings（load 时 normalize 强制回常量，故只读）。
+        self.assertNotIn("managed_base_url", saved)
+        # B3 Task 4: mode 现在持久化（用户的 managed/custom 选择必须跨 reload 存活）。
+        self.assertIn('"mode"', saved)
+        # 这些仍是 normalize 从 mode+custom_*/managed_* 派生的别名/运行时值，继续剥离。
         self.assertNotIn('"api_key"', saved)
         self.assertNotIn('"api_base"', saved)
         self.assertNotIn('"model"', saved)
