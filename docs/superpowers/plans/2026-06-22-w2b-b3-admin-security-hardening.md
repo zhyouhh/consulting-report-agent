@@ -54,7 +54,7 @@
 
 **背景:** `backend/chat.py:5771-5805` 已有 `_ensure_public_ip`（拦私网/loopback/link-local/CGNAT/metadata），但只服务 `fetch_url` 工具。B3 把这套 IP 判定抽成 url_guard 的纯函数单一真值源，chat.py 后续委派（Task 5b）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_url_guard.py
@@ -73,12 +73,12 @@ class PublicIpTests(unittest.TestCase):
         url_guard.assert_public_ip("8.8.8.8")
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_url_guard.py -v`
 Expected: FAIL（`ModuleNotFoundError: backend.url_guard`）
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 ```python
 # backend/url_guard.py
@@ -108,12 +108,12 @@ def assert_public_ip(ip_text: str) -> None:
         raise SsrfBlockedError("不允许访问本地或内网地址。")
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_url_guard.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/url_guard.py tests/test_url_guard.py
@@ -128,7 +128,7 @@ git commit -m "feat(b3): url_guard public-IP validation (SSRF leaf module)"
 - Modify: `backend/url_guard.py`
 - Test: `tests/test_url_guard.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_url_guard.py （追加）
@@ -171,12 +171,12 @@ class AllowlistTests(unittest.TestCase):
             )
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_url_guard.py::AllowlistTests -v`
 Expected: FAIL（`custom_api_allowed_hosts` 未定义）
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 ```python
 # backend/url_guard.py （追加）
@@ -276,12 +276,12 @@ def build_guarded_http_client(timeout) -> httpx.Client:
     )
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_url_guard.py -v`
 Expected: PASS（全部）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/url_guard.py tests/test_url_guard.py
@@ -299,7 +299,7 @@ git commit -m "feat(b3): custom API allowlist + guarded http client (SSRF)"
 **背景（Codex R1-BLOCKER2 + R2-BLOCKER2 — 修正）:** 仅删端点赋值**不够**。`normalize_settings_payload` 用 `setdefault` 保留已存 `managed_base_url`（`config.py:327`），managed runtime alias 继续用它（`config.py:347-348`），且 import 期 `heal_stale_managed_model(settings)` 也读旧值——历史污染配置仍可能生效。**正确修法**：① `normalize_settings_payload` **强制** `managed_base_url = DEFAULT_MANAGED_BASE_URL`（不再 setdefault）；② `SettingsUpdate.managed_base_url` 现为必填（`main.py:292`），改为 `Optional` 且服务端忽略（否则前端 Task 18 去字段后 422）；③ 端点删 `s.managed_base_url = update.managed_base_url`（`main.py:307`）。
 **⚠️ R2-BLOCKER2:** `SettingsUpdate` 还有**另一个必填** `managed_model`（`main.py:293`，保持必填——前端 managed 模型选择器一直发它）。故所有 `POST /api/settings` 测试 body **必须带 `managed_model`**，否则 422。本 plan 统一用 helper `_settings_body(**overrides)` 拼完整必填体（`mode` + `managed_model`，custom 时补 `custom_*`），所有 settings/CSRF POST 测试复用它。
 
-- [ ] **Step 1: 写失败测试 + 加测试 helper**
+- [x] **Step 1: 写失败测试 + 加测试 helper**
 
 ```python
 # tests/test_settings_api.py 顶部（模块级，供本文件 + CSRF/admin 测试复用思路）
@@ -331,12 +331,12 @@ def test_post_settings_ignores_client_managed_base_url(self):
     self.assertEqual(s.managed_base_url, DEFAULT_MANAGED_BASE_URL)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_settings_api.py -k "managed_base_url or without_managed" -v`
 Expected: FAIL
 
-- [ ] **Step 3a: 改 config.py `normalize_settings_payload`（327 行）** — 把 `setdefault` 改成强制覆盖：
+- [x] **Step 3a: 改 config.py `normalize_settings_payload`（327 行）** — 把 `setdefault` 改成强制覆盖：
 
 ```python
     normalized["managed_base_url"] = DEFAULT_MANAGED_BASE_URL   # 服务端只读，覆盖任何历史/客户端值
@@ -344,7 +344,7 @@ Expected: FAIL
 
 （其余 `managed_*` setdefault 保持不变；只 `managed_base_url` 强制。）
 
-- [ ] **Step 3b: 改 main.py `SettingsUpdate`（291 行）** — `managed_base_url` 改可选并忽略：
+- [x] **Step 3b: 改 main.py `SettingsUpdate`（291 行）** — `managed_base_url` 改可选并忽略：
 
 ```python
 class SettingsUpdate(BaseModel):
@@ -354,12 +354,12 @@ class SettingsUpdate(BaseModel):
 
 `POST /api/settings` 处理体里删除 `s.managed_base_url = update.managed_base_url`（managed_base_url 完全由 normalize 决定）。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_settings_api.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/config.py backend/main.py tests/test_settings_api.py
@@ -377,7 +377,7 @@ git commit -m "fix(b3): managed_base_url server read-only (normalize forces cons
 
 **背景:** `config.py:344-345` 无条件 `mode="managed"`。`model_post_init`/normalize 的 custom 分支（352-354）本就备好，一解锁即生效。legacy 配置（`config_version < DESKTOP_CONFIG_VERSION`）仍强制 managed（迁移安全）。保存 custom 时在端点用 `url_guard.validate_custom_api_base` 即时校验、给用户即时反馈。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_settings_api.py （追加）
@@ -410,12 +410,12 @@ def test_post_settings_custom_offlist_base_rejected(self):
     self.assertEqual(resp.status_code, 400)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_settings_api.py -k "custom_mode_honored or legacy_config or offlist" -v`
 Expected: FAIL
 
-- [ ] **Step 3: 改 config.py（342-345 行）**
+- [x] **Step 3: 改 config.py（342-345 行）**
 
 ```python
     # 桌面默认 managed；legacy 配置强制迁移到 managed；非 legacy 配置 honor 用户选择的 mode。
@@ -426,7 +426,7 @@ Expected: FAIL
         normalized["mode"] = requested if requested in ("managed", "custom") else "managed"
 ```
 
-- [ ] **Step 4: 改 main.py `POST /api/settings`** — 解析后若 mode==custom，校验 base：
+- [x] **Step 4: 改 main.py `POST /api/settings`** — 解析后若 mode==custom，校验 base：
 
 ```python
     from backend import url_guard
@@ -439,12 +439,12 @@ Expected: FAIL
 
 放在写入 settings 之前（校验失败不落盘）。
 
-- [ ] **Step 5: 运行确认通过**
+- [x] **Step 5: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_settings_api.py -v`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/config.py backend/main.py tests/test_settings_api.py
@@ -463,7 +463,7 @@ git commit -m "feat(b3): activate custom mode (normalize honors mode + validate 
 
 **背景:** 三处构建 OpenAI client 都用裸 `httpx.Client()`。B3 全部换成 `url_guard.build_guarded_http_client(timeout)`。managed 上游 `newapi.z0y0h.work` 在默认白名单内，故 managed/custom 统一走 guarded transport，无需分叉。`/api/models/list` 直收用户 `api_base`——额外用 `validate_custom_api_base` 卡。
 
-- [ ] **Step 1: 写失败测试（models/list 拒私网 + guarded client 注入）**
+- [x] **Step 1: 写失败测试（models/list 拒私网 + guarded client 注入）**
 
 ```python
 # tests/test_models.py （追加；沿用既有 setUp）
@@ -484,12 +484,12 @@ def test_chat_client_uses_guarded_http_client(self):
     self.assertNotRegex(src, r"http_client\s*=\s*httpx\.Client\(timeout=120")
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_models.py -k offlist tests/test_chat_runtime.py -k guarded -v`
 Expected: FAIL
 
-- [ ] **Step 3a: 改 chat.py client 构建（约 410 行）**
+- [x] **Step 3a: 改 chat.py client 构建（约 410 行）**
 
 ```python
         from backend import url_guard
@@ -502,7 +502,7 @@ Expected: FAIL
         self.client = metering.wrap_client_for_billing(raw_client, uid=self.uid, settings=settings)
 ```
 
-- [ ] **Step 3b: 改 independent_review.py `_build_client`（约 264 行）**
+- [x] **Step 3b: 改 independent_review.py `_build_client`（约 264 行）**
 
 ```python
         from backend import url_guard
@@ -513,7 +513,7 @@ Expected: FAIL
         return metering.wrap_client_for_billing(raw, uid=self.uid, settings=self.settings)
 ```
 
-- [ ] **Step 3c: 改 main.py `/api/models/list`（约 338-356 行）**
+- [x] **Step 3c: 改 main.py `/api/models/list`（约 338-356 行）**
 
 **Codex R1-BLOCKER4:** 现 handler 整段 `try ... except Exception -> 500`（`main.py:338`）。校验产生的 `HTTPException(400)` 会被宽 except 吞成 500、Task 5 测试不成立。**两处必改**：① `validate_custom_api_base` 放在宽 try **之外**（先校验再进探测）；② 宽 except 前加 `except HTTPException: raise`；③ `http_client` 用 `finally: http_client.close()`。
 
@@ -536,7 +536,7 @@ Expected: FAIL
         http_client.close()
 ```
 
-- [ ] **Step 3d: chat.py `_ensure_public_ip` 委派 url_guard（DRY）** — 把 `_ensure_public_ip`（5771-5805）体改为：
+- [x] **Step 3d: chat.py `_ensure_public_ip` 委派 url_guard（DRY）** — 把 `_ensure_public_ip`（5771-5805）体改为：
 
 ```python
     def _ensure_public_ip(self, ip):
@@ -546,12 +546,12 @@ Expected: FAIL
 
 （`fetch_url` 既有 hostname 黑名单逻辑保留；IP 判定单一真值源移到 url_guard。注意 `assert_public_ip` 抛 `SsrfBlockedError`(继承 `ValueError`)，与原 `ValueError` 兼容，调用方 catch 不变。）
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_models.py tests/test_chat_runtime.py -v`
 Expected: PASS（含既有 DeepSeek/tool-call 回归——注入 http_client 不改 provider message/tool_choice/reasoning_content 序列化）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/chat.py backend/independent_review.py backend/main.py tests/
@@ -570,7 +570,7 @@ git commit -m "feat(b3): route all LLM clients through guarded http client; mode
 
 **背景:** 当前只靠 `SameSite=Lax`，无 Origin 校验（探查确认）。B3 加中间件：对所有状态变更方法（POST/PUT/PATCH/DELETE）+ web 态（`auth_required`）校验 Origin（缺失则退 Referer）∈ 允许源；不匹配 403。桌面 loopback（`auth_required=False`）跳过。允许源 = env `CRA_ALLOWED_ORIGIN`（逗号分隔）∪ loopback。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_csrf.py （沿用 test_auth_api.py 的 AuthApiTestBase 隔离范式 + 设 auth_required=True）
@@ -601,12 +601,12 @@ class CsrfTests(unittest.TestCase):
     # （self.client 带默认 Origin，headers={} 不能删，必须 fresh TestClient）
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_csrf.py -v`
 Expected: FAIL（无 Origin 校验，跨站 POST 现在会通过）
 
-- [ ] **Step 3: 写实现（main.py）**
+- [x] **Step 3: 写实现（main.py）**
 
 ```python
 import os
@@ -646,7 +646,7 @@ async def csrf_origin_guard(request, call_next):
 
 **顺序/定义约束:** ① `allowed_origins()` 与 `_LOOPBACK_ORIGINS` 必须定义在 CORS middleware 注册之前（Task 7 的 `allow_origins=list(allowed_origins())` 在 import 期求值）。② 该中间件只检查 POST/PUT/PATCH/DELETE，不碰 OPTIONS preflight，与 CORS 顺序无强耦合；保持 CORSMiddleware 最后 add（最外层）即可。
 
-- [ ] **Step 3b: 迁移既有测试夹具（Codex R1-BLOCKER5，否则全套 POST 测试变 403）**
+- [x] **Step 3b: 迁移既有测试夹具（Codex R1-BLOCKER5，否则全套 POST 测试变 403）**
 
 现有大量 auth/settings/admin/project 测试直接 `.post(...)` 不带 Origin（如 `tests/test_auth_api.py:88`、`tests/test_settings_api.py:79`）。CSRF 中间件上线后这些会全 403。**统一修法**：在 web 态测试基类（`AuthApiTestBase` 及派生）给 TestClient 设默认 Origin header，一处覆盖：
 
@@ -670,7 +670,7 @@ def test_missing_origin_and_referer_rejected_on_state_change(self):
     self.assertEqual(resp.status_code, 403)
 ```
 
-- [ ] **Step 3c: 加 SSE 流式端点同源通过测试**
+- [x] **Step 3c: 加 SSE 流式端点同源通过测试**
 
 ```python
 # tests/test_csrf.py （追加）
@@ -682,12 +682,12 @@ def test_sse_chat_stream_same_origin_not_csrf_blocked(self):
     self.assertNotEqual(resp.status_code, 403)
 ```
 
-- [ ] **Step 4: 运行确认通过（含全套未被打爆）**
+- [x] **Step 4: 运行确认通过（含全套未被打爆）**
 
 Run: `.venv/bin/python -m pytest tests/test_csrf.py tests/test_auth_api.py tests/test_settings_api.py tests/test_main_api.py -v`
 Expected: PASS（既有用例经默认 Origin 头继续绿）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/main.py tests/
@@ -705,7 +705,7 @@ git commit -m "feat(b3): CSRF Origin/Referer guard + migrate test fixtures to se
 
 **背景:** 现 `allow_origins=["*"]` + `allow_credentials=True`（浏览器层非法组合）。改为 `allow_origins=list(allowed_origins())`。`run_web.py` 没设 `cookie_secure`（默认 False）→ web 态 cookie 无 Secure；改默认 True（部署在 https 后）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_csrf.py （追加）
@@ -730,12 +730,12 @@ def test_web_cookie_has_secure_flag(self):
     self.assertIn("Secure", resp.headers.get("set-cookie", ""))
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_csrf.py -k cors tests/test_auth_api.py -k secure -v`
 Expected: FAIL
 
-- [ ] **Step 3: 改 main.py CORS**
+- [x] **Step 3: 改 main.py CORS**
 
 ```python
 app.add_middleware(
@@ -747,7 +747,7 @@ app.add_middleware(
 )
 ```
 
-- [ ] **Step 4: 改 run_web.py（约 14 行后）**
+- [x] **Step 4: 改 run_web.py（约 14 行后）**
 
 ```python
     app.state.auth_required = True
@@ -768,12 +768,12 @@ app.add_middleware(
         print("⚠️ 未设 CRA_ALLOWED_ORIGIN：仅 loopback 来源的写请求会被 CSRF 放行；远程部署必须设为你的站点 origin（如 https://app.example.com）")
 ```
 
-- [ ] **Step 5: 运行确认通过**
+- [x] **Step 5: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_csrf.py tests/test_auth_api.py -v`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/main.py run_web.py tests/
@@ -790,7 +790,7 @@ git commit -m "feat(b3): tighten CORS to allowlist + Secure cookie in web mode"
 
 **背景:** 现仅 per-IP `10/minute`（slowapi）。撞库可轮换 IP 绕过。加 per-username 进程内滑窗：同一 username 5 分钟内失败 ≥10 次 → 429。`time.monotonic()` 计时。成功登录清该 username 计数。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 **R3-BLOCKER:** 端点已有 per-IP `@limiter.limit("10/minute")`（`main.py:222`）。同一 TestClient 连打 11 次会先吃 per-IP 429，**username throttle 没实现也会 429** → 假通过。两道隔离：① 直接测纯函数（与 slowapi 无关）；② 端点测试**关掉 slowapi**（`m.limiter.enabled = False`），让唯一 429 来源是 username throttle。
 
@@ -821,12 +821,12 @@ def test_login_per_username_throttle_endpoint(self):
         m.limiter.enabled = True
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_auth_api.py -k "throttle" -v`
 Expected: FAIL（纯函数 `_login_throttled` 未定义；端点 11 次仍 401）
 
-- [ ] **Step 3: 写实现（main.py）**
+- [x] **Step 3: 写实现（main.py）**
 
 ```python
 import threading
@@ -875,12 +875,12 @@ def _clear_login_fails(username: str) -> None:
 
 密码错误分支调 `_record_login_fail(payload.username)`；成功分支调 `_clear_login_fails(payload.username)`。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_auth_api.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/main.py tests/test_auth_api.py
@@ -897,7 +897,7 @@ git commit -m "feat(b3): per-username login throttle (anti credential-stuffing)"
 - Modify: `backend/accounts.py`
 - Test: `tests/test_accounts.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_accounts.py （追加；沿用隔离 setUp）
@@ -911,12 +911,12 @@ def test_list_all_users_returns_rows_without_password_hash(self):
         self.assertIn(k, rows[0])
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_accounts.py -k list_all_users -v`
 Expected: FAIL
 
-- [ ] **Step 3: 写实现（accounts.py）**
+- [x] **Step 3: 写实现（accounts.py）**
 
 ```python
 def list_all_users() -> list[dict]:
@@ -930,12 +930,12 @@ def list_all_users() -> list[dict]:
 
 （注意：不 SELECT `password_hash`——遵循 B1「公共查询剥 hash」铁律。）
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_accounts.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/accounts.py tests/test_accounts.py
@@ -952,7 +952,7 @@ git commit -m "feat(b3): accounts.list_all_users (no password_hash)"
 
 **背景:** B1 有 `set_user_password`（用户自改，清 `must_change_password`）。admin 强制改他人密码语义不同：**改密 + 撤销该用户全部会话 + 置 `must_change_password=1`**（强制对方下次登录改密）。一个事务内做。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_accounts.py （追加）
@@ -965,12 +965,12 @@ def test_admin_reset_password_sets_flag_and_revokes_sessions(self):
     self.assertTrue(accounts.get_user_by_uid(uid)["must_change_password"])
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_accounts.py -k admin_reset -v`
 Expected: FAIL
 
-- [ ] **Step 3: 写实现（accounts.py）**
+- [x] **Step 3: 写实现（accounts.py）**
 
 ```python
 def admin_reset_password(uid: str, new_password: str) -> None:
@@ -984,12 +984,12 @@ def admin_reset_password(uid: str, new_password: str) -> None:
         con.execute("DELETE FROM sessions WHERE uid=?", (uid,))
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_accounts.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/accounts.py tests/test_accounts.py
@@ -1006,7 +1006,7 @@ git commit -m "feat(b3): accounts.admin_reset_password (reset + force-change + r
 
 **背景:** 除轮换邀请码外，BLOCKER1 的「admin 可维护白名单」需要 app_config 持久化允许域名（admin 增删、无需重启）。两组都基于 `get_config`/`set_config`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_accounts.py （追加）
@@ -1024,12 +1024,12 @@ def test_custom_api_extra_hosts_roundtrip(self):
     self.assertEqual(set(accounts.get_custom_api_extra_hosts()), {"my.llm.cn", "other.host"})
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_accounts.py -k "rotate_invite or extra_hosts" -v`
 Expected: FAIL
 
-- [ ] **Step 3: 写实现（accounts.py）**
+- [x] **Step 3: 写实现（accounts.py）**
 
 ```python
 import secrets
@@ -1048,12 +1048,12 @@ def set_custom_api_extra_hosts(hosts) -> None:
     set_config("custom_api_allowed_hosts", ",".join(cleaned))
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_accounts.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/accounts.py tests/test_accounts.py
@@ -1070,7 +1070,7 @@ git commit -m "feat(b3): accounts.rotate_invite_code + custom API allowed-hosts 
 
 **背景:** 全部 `Depends(get_current_admin)`（B1 已有，403 非 admin）。返回每用户今日花费/有效 cap（复用 `metering.today_shanghai` + `get_usage_today` + `get_effective_daily_cap_micro`）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_admin_api.py （沿用 AuthApiTestBase 范式：起隔离 + bootstrap admin + 登录拿 cookie）
@@ -1103,12 +1103,12 @@ def test_admin_get_allowed_hosts(self):
     self.assertIn("api.openai.com", body["builtin_hosts"])
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_admin_api.py -k "get_users or invite_code or allowed_hosts" -v`
 Expected: FAIL
 
-- [ ] **Step 3: 写实现（main.py）**
+- [x] **Step 3: 写实现（main.py）**
 
 ```python
 @app.get("/api/admin/users")
@@ -1142,7 +1142,7 @@ def admin_get_allowed_hosts(admin_uid: str = Depends(get_current_admin)):
     }
 ```
 
-- [ ] **Step 3b: 启动时把 app_config 白名单注入 url_guard（main.py 模块加载/init_db 之后）**
+- [x] **Step 3b: 启动时把 app_config 白名单注入 url_guard（main.py 模块加载/init_db 之后）**
 
 ```python
 # main.py，init_db() 之后、app 建好后：
@@ -1154,12 +1154,12 @@ url_guard.set_runtime_allowed_hosts(
 
 （确保进程起来后 admin 之前存的允许域名即生效；admin 改动时端点会再调一次刷新——见 Task 13。）
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_admin_api.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/main.py tests/test_admin_api.py
@@ -1176,7 +1176,7 @@ git commit -m "feat(b3): admin read endpoints (users + invite-code + allowed-hos
 
 **背景:** 全部 POST + `Depends(get_current_admin)`（自动经 CSRF 中间件）。`cap` 接收 `daily_cost_yuan|null`（元，内部转微元）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_admin_api.py （追加）
@@ -1243,12 +1243,12 @@ def test_admin_set_allowed_hosts_rejects_malformed(self):
         self.assertEqual(resp.status_code, 400, bad)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_admin_api.py -k "reset_user or set_cap or disable_user or rotate_invite or allowed_hosts" -v`
 Expected: FAIL
 
-- [ ] **Step 3: 写实现（main.py）** — 先定义请求体模型，再写端点：
+- [x] **Step 3: 写实现（main.py）** — 先定义请求体模型，再写端点：
 
 ```python
 from decimal import Decimal, InvalidOperation
@@ -1322,12 +1322,12 @@ def admin_set_allowed_hosts(body: AllowedHostsBody, admin_uid: str = Depends(get
     return {"extra_hosts": accounts.get_custom_api_extra_hosts()}
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_admin_api.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/main.py tests/test_admin_api.py
@@ -1428,7 +1428,7 @@ git commit -m "feat(b3): route-level must_change_password enforcement"
 
 **背景:** 无 jsdom，AdminPanel 的行内编辑/校验/请求体组装抽成纯函数测。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```javascript
 // frontend/tests/adminApi.test.mjs
@@ -1457,12 +1457,12 @@ test('summarizeUser: 额度比例 [0,1]', () => {
 })
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd frontend && node --test tests/adminApi.test.mjs`
 Expected: FAIL（模块不存在）
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 ```javascript
 // frontend/src/utils/adminApi.js
@@ -1488,12 +1488,12 @@ export function summarizeUser(u) {
 }
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cd frontend && node --test tests/adminApi.test.mjs`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/src/utils/adminApi.js frontend/tests/adminApi.test.mjs
@@ -1512,7 +1512,7 @@ git commit -m "feat(b3): adminApi pure logic + tests"
 
 **背景:** AdminPanel 作 state 驱动弹窗（无 react-router），类似 SettingsModal。Sidebar 账号块仅 `is_admin` 显「👤 用户管理」入口。复用 `quotaFormat` + `adminApi`。axios 自带 `withCredentials`（api.js 已配）。
 
-- [ ] **Step 1: 写失败测试（source-guard）**
+- [x] **Step 1: 写失败测试（source-guard）**
 
 ```javascript
 // frontend/tests/adminPanel.source.test.mjs
@@ -1540,12 +1540,12 @@ test('Sidebar 账号块在 is_admin 时露用户管理入口', () => {
 })
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd frontend && node --test tests/adminPanel.source.test.mjs tests/sidebarQuota.source.test.mjs`
 Expected: FAIL
 
-- [ ] **Step 3: 写 AdminPanel.jsx**
+- [x] **Step 3: 写 AdminPanel.jsx**
 
 ```jsx
 // frontend/src/components/AdminPanel.jsx
@@ -1647,7 +1647,7 @@ export default function AdminPanel({ onClose }) {
 }
 ```
 
-- [ ] **Step 4: Sidebar 账号块加入口** — 在账号块（74-104）`authUser.username` 行附近：
+- [x] **Step 4: Sidebar 账号块加入口** — 在账号块（74-104）`authUser.username` 行附近：
 
 ```jsx
 {authUser?.is_admin && (
@@ -1659,14 +1659,14 @@ export default function AdminPanel({ onClose }) {
 
 并在 Sidebar props 增加 `onOpenAdmin`。
 
-- [ ] **Step 5: App.jsx 挂载** — 加 `const [showAdmin, setShowAdmin] = useState(false)`，给 Sidebar 传 `onOpenAdmin={() => setShowAdmin(true)}`，主界面渲染 `{showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}`。
+- [x] **Step 5: App.jsx 挂载** — 加 `const [showAdmin, setShowAdmin] = useState(false)`，给 Sidebar 传 `onOpenAdmin={() => setShowAdmin(true)}`，主界面渲染 `{showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}`。
 
-- [ ] **Step 6: 运行确认通过**
+- [x] **Step 6: 运行确认通过**
 
 Run: `cd frontend && node --test tests/ && npm run build`
 Expected: PASS + build 零错
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add frontend/src/components/AdminPanel.jsx frontend/src/components/Sidebar.jsx frontend/src/App.jsx frontend/tests/
@@ -1684,7 +1684,7 @@ git commit -m "feat(b3): AdminPanel + sidebar admin entry"
 
 **背景:** App.jsx 现 gating：`!authUser → Login`。B3 在登录后、主界面前插一道：`authUser.must_change_password → ForcePasswordChange`（不可关，改完刷新 authUser）。后端 Task 14 已硬拦业务路由（双保险）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```javascript
 // frontend/tests/forcePasswordChange.source.test.mjs
@@ -1704,12 +1704,12 @@ test('App 在 must_change_password 时挂强制改密屏', () => {
 })
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd frontend && node --test tests/forcePasswordChange.source.test.mjs`
 Expected: FAIL
 
-- [ ] **Step 3: 写 ForcePasswordChange.jsx**
+- [x] **Step 3: 写 ForcePasswordChange.jsx**
 
 ```jsx
 // frontend/src/components/ForcePasswordChange.jsx
@@ -1744,7 +1744,7 @@ export default function ForcePasswordChange({ onChanged }) {
 }
 ```
 
-- [ ] **Step 4: App.jsx gating 插入**（在 `!authUser → Login` 之后、主界面之前）：
+- [x] **Step 4: App.jsx gating 插入**（在 `!authUser → Login` 之后、主界面之前）：
 
 ```jsx
 if (authUser.must_change_password) {
@@ -1754,12 +1754,12 @@ if (authUser.must_change_password) {
 }
 ```
 
-- [ ] **Step 5: 运行确认通过**
+- [x] **Step 5: 运行确认通过**
 
 Run: `cd frontend && node --test tests/ && npm run build`
 Expected: PASS + build 零错
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/src/components/ForcePasswordChange.jsx frontend/src/App.jsx frontend/tests/
@@ -1777,7 +1777,7 @@ git commit -m "feat(b3): force password change screen on must_change_password"
 
 **背景:** 探查确认 SettingsModal custom UI 已存在且未被禁用（managed-forced 只在后端 normalize）。Task 4 后端解锁后 custom 即可用。前端两件小事：① SettingsModal 不再发送 `managed_base_url`（Task 3 已服务端只读，前端同步去掉避免误导）；② raw `fetch` 默认 `credentials: 'same-origin'`（同源会带 cookie），但显式加 `credentials: 'include'` 更稳健、与 CSRF 同源 Origin 校验一致。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```javascript
 // frontend/tests/settingsModal.source.test.mjs
@@ -1810,19 +1810,19 @@ test('IndependentReviewDrawer 两个 fetch（stream + discard）都带 credentia
 })
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd frontend && node --test tests/settingsModal.source.test.mjs tests/chatPanelCredentials.source.test.mjs`
 Expected: FAIL
 
-- [ ] **Step 3: 改实现** — SettingsModal 提交体里删 `managed_base_url`（若有）。ChatPanel/IndependentReviewDrawer 的 `fetch(url, { method:'POST', headers, body, signal })` 加 `credentials: 'include'`。
+- [x] **Step 3: 改实现** — SettingsModal 提交体里删 `managed_base_url`（若有）。ChatPanel/IndependentReviewDrawer 的 `fetch(url, { method:'POST', headers, body, signal })` 加 `credentials: 'include'`。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cd frontend && node --test tests/ && npm run build`
 Expected: PASS + build 零错
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/src/components/ tests/
@@ -1839,28 +1839,28 @@ git commit -m "feat(b3): custom UI confirm + raw fetch credentials"
 - Create: `docs/superpowers/cutover_report_2026-06-22_w2b-b3.md`
 - Modify: `docs/current-worklist.md`、`CLAUDE.md`（加「## W2-B/B3」段）
 
-- [ ] **Step 1: 后端全量回归**
+- [x] **Step 1: 后端全量回归**
 
 Run: `.venv/bin/python -m pytest tests/`
 Expected: 全绿（4 个已知 mac-realpath 环境差异除外）。**特别确认**：`tests/test_chat_runtime.py` 的 DeepSeek/tool-call follow-up 用例未回归（B3 注入 http_client 不碰 provider message/tool_choice/reasoning_content 序列化）；`tests/test_tenant_isolation.py` 跨租户隔离全绿（CSRF/admin 未破坏复合键归属）。
 
-- [ ] **Step 2: 前端全量回归 + build**
+- [x] **Step 2: 前端全量回归 + build**
 
 Run: `cd frontend && node --test tests/ && npm run build`
 Expected: 全绿 + build 零错
 
-- [ ] **Step 3: 手动安全验收（spec §12 B3 验收门）** — 用 TestClient/curl 逐项确认：
+- [x] **Step 3: 手动安全验收（spec §12 B3 验收门）** — 用 TestClient/curl 逐项确认：
   - CSRF：跨站 Origin 的 POST（含 admin）被 403。
   - SSRF：custom_api_base 设私网/loopback/metadata/非 https/非白名单 → 400；models/list 同。
   - 越权：非 admin 访问 `/api/admin/*` → 403；A 用户访问 B 项目 → 404（B1 隔离回归）。
   - custom 激活：mode=custom + 白名单 https base → 设置保存成功 + 对话走自带 key（不计入 ¥ 配额，custom 走裸 client）。
   - must_change_password：bootstrap admin 首登被强制改密屏挡住业务路由。
 
-- [ ] **Step 4: 写 cutover report** — 记录交付清单、红队修复、验收证据、已知限制（pinned-IP transport 后置、白名单需运维维护、`_LOGIN_FAILS` 单进程）。
+- [x] **Step 4: 写 cutover report** — 记录交付清单、红队修复、验收证据、已知限制（pinned-IP transport 后置、白名单需运维维护、`_LOGIN_FAILS` 单进程）。
 
-- [ ] **Step 5: 更新 worklist + CLAUDE.md** — worklist W2 段标 B3 完成；CLAUDE.md 加「## W2-B/B3 admin + 安全硬化 + custom 激活」段（url_guard 白名单 SSRF / CSRF 中间件 / admin 端点 / must_change_password / custom 解锁的硬约束）。
+- [x] **Step 5: 更新 worklist + CLAUDE.md** — worklist W2 段标 B3 完成；CLAUDE.md 加「## W2-B/B3 admin + 安全硬化 + custom 激活」段（url_guard 白名单 SSRF / CSRF 中间件 / admin 端点 / must_change_password / custom 解锁的硬约束）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add docs/ CLAUDE.md

@@ -262,6 +262,31 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **回归**：`tests/test_metering.py`（计价/usage fail-closed/reserve/settle/暂停/工厂/source-guard）、`test_accounts.py::UsageDailyTests`、`test_chat_runtime.py::B2BillingWiringTests`+`B2BillingSettleTests`（含真 reserve 集成 + reload 回归守卫 + 压缩/视觉真 settle）、`test_independent_review.py::B2ReviewBillingTests`、`test_main_api.py::B2ChatQuotaTests`、`test_auth_api.py::MeCostFieldsTests`、前端 `quotaFormat`/`sidebarQuota.source`。**B2 测试夹具**：reserve/settle 在 managed chat/review 单测里会真跑——base setUp 须隔离 `CRA_DATA_ROOT`+`init_db`+把两道闸门设不触发（巨大 cap + `MAX_CONSECUTIVE_USAGE_MISS`），pause/quota 真行为由 `test_metering.py` 独立覆盖。
 
+## W2-B/B3 admin 面板 + 安全硬化 + custom 激活（2026-06-23 实施完成；分支 `feat/w2b-b3-admin-security-hardening` 待 merge）
+
+给多租户 Web 基座补 admin 面板 + CSRF/CORS/SSRF 硬化 + throttle-first 登录限流 + `must_change_password` 路由级强制 + **custom 真激活**。改鉴权 / SSRF 护栏 / settings 持久化 / admin 端点 / 登录限流前必读。详尽交付与红队叙事见 `docs/superpowers/cutover_report_2026-06-23_w2b-b3.md`；plan `docs/superpowers/plans/2026-06-22-w2b-b3-admin-security-hardening.md`。
+
+**新增叶子模块 `backend/url_guard.py`**（**只依赖 httpx + stdlib，绝不 import chat/skill/main/config/accounts**——叶子铁律）：
+- `assert_public_ip`：拒私网/loopback/link-local/multicast/reserved/unspecified/CGNAT(100.64/10)/metadata。chat.py `_ensure_public_ip` 委派它（IP 判定单一真值源；`SsrfBlockedError` 继承 `ValueError`，调用方 catch 不变）。
+- **三层域名白名单 = 安全边界**：`builtin_allowed_hosts()`（managed 上游 + openai/deepseek/moonshot/智谱/通义）∪ `env_allowed_hosts()`（`CRA_CUSTOM_API_ALLOWED_HOSTS` bootstrap）∪ `_RUNTIME_ALLOWED_HOSTS`（app_config 运行时项，**admin 面板可增删、无需重启**，启动 `set_runtime_allowed_hosts` 注入）。**诚实定性**：白名单是「只有 admin 批准的主机能被连接」这一边界，**不声称通用防 DNS rebinding**——`_GuardedHTTPTransport` 未在连接层 pin IP、对「白名单内域名解析后到连接前翻转私网」仍有 TOCTOU；pinned-IP-with-SNI 为后置增强（spec §8.3 R3-NIT3 允许白名单为 B3 终态）。
+- `validate_custom_api_base`：https + 白名单主机 + 解析公网（`assert_resolves_public`）+ 拒 userinfo（防 httpx 注入 `Authorization: Basic` 覆盖用户 Bearer key）+ 拒坏端口。`build_guarded_http_client`（`trust_env=False` 忽略代理 / `follow_redirects=False` 防重定向私网 / `_GuardedHTTPTransport` 每请求重校验）供 OpenAI SDK 用；chat.py / independent_review.py / `/api/models/list` 三处 client 统一走它。`is_valid_hostname`（纯主机名，TLD label ≤63）供 admin 白名单输入校验。
+
+**custom 真激活（config.py）**：`normalize_settings_payload` 非 legacy honor `mode`（`config_version < DESKTOP_CONFIG_VERSION` 的 legacy 仍强制 managed 迁移安全）；**`mode` 现持久化**（从 `save_settings` 的剔除清单移除——之前被当运行时派生字段剔掉，导致 custom 选择存盘即丢、活不过一个请求，custom 从未端到端生效）；`managed_base_url` 服务端只读（normalize 强制回 `DEFAULT_MANAGED_BASE_URL` + 不持久化；`SettingsUpdate.managed_base_url` 改 Optional-ignore）。保存 custom 时端点用 `validate_custom_api_base` 即时校验（400）。
+
+**CSRF / CORS / cookie（main.py）**：`csrf_origin_guard` 中间件——web 态（`app.state.auth_required`）对 POST/PUT/PATCH/DELETE 校验 Origin（缺失退 Referer）∈ allowlist，不匹配 403；桌面 loopback（`auth_required=False`）跳过；**生产（auth + cookie_secure）不信任 loopback 源**（CSRF 层运行时 `allowed_origins(include_loopback=not is_production)` 收紧，CORS 维持 import 期 `list(allowed_origins())` 快照——两者刻意不同步）。CORS 从 `allow_origins=["*"]` 收紧到 allowlist（loopback ∪ `CRA_ALLOWED_ORIGIN`）；web `cookie_secure=True`（`CRA_COOKIE_INSECURE` 本地 http 调试豁免）。**夹具铁律**：CSRF 上线后 web 态测试 TestClient 须带默认 Origin；缺-Origin 用例用 fresh `TestClient`（httpx 合并默认头不删）。
+
+**登录限流 throttle-first（用户拍板，main.py）**：`_reserve_login_attempt` reserve-before-verify（login 处理体最前、验密之前调）、单锁原子（prune-this-key + 判上限 + append）、精确 username key（对齐大小写敏感账号查找，**不 casefold**）、有界 store（`deque(maxlen=_LOGIN_MAX_FAILS)` + `_MAX_TRACKED_LOGIN_KEYS=4096` + 增量 prune/evict）。**桶满直接 429 不验密 = 真封顶撞库**（verify-first 会架空撞库防护——密码仍被验、猜对即登入）；取舍 = 被攻击时该用户 ≤5min 临时锁定（自动恢复，用户选「撞库防护优先」）。成功登录 `_clear_login_fails`。per-IP slowapi `10/minute` 仍在（端点测试须 `m.limiter.enabled=False` 才隔离出 username 维度）。
+
+**admin（main.py + accounts.py）**：8 个 `/api/admin/*`（GET users[带今日花费/cap]/invite-code/allowed-hosts[builtin/env/extra 三类]；POST users/{uid}/password·cap·disabled、invite-code/rotate、allowed-hosts[即时刷新 `set_runtime_allowed_hosts`]）全 `Depends(get_current_admin)`。`accounts.admin_set_user_disabled` **单个 `BEGIN IMMEDIATE` 写事务原子守卫**（消除并发互禁 TOCTOU、活跃 admin 绝不归零；禁最后一个活跃 admin → `LastAdminError` → 端点 400）；`admin_reset_password`（改 hash + `must_change_password=1` + 撤销全部会话同一事务）；`list_all_users`（剥 password_hash）；`rotate_invite_code` / `get/set_custom_api_extra_hosts`（app_config）。cap 用 `Decimal` 解析（字符串入参，`AdminCapBody: str|None`）+ 限长限幅（¥1e6 上限 + `is_finite` 拒 NaN/Inf）→ 400 不 500；allowed-hosts 用 `is_valid_hostname` 校验（拒 scheme/port/path/通配符/空白）。
+
+**must_change_password 强制（main.py）**：`require_password_current`（web 态 `must_change_password` → 403、桌面短路）；**三层覆盖**——`require_project` 默认依赖（所有 path-param `{project_id}` 端点）+ `get_current_admin` 入参（所有 `/api/admin/*`）+ **显式 8 端点**（settings GET/POST、models/list、projects GET/POST、chat、chat/stream、桌面桥 select-workspace-folder/files——body-project 路由「先 `get_current_uid` 再手动调 `require_project`」改默认依赖覆盖不到，必须显式串）。豁免集精确 {me, change-password, logout, health}（否则死锁）。
+
+**DeepSeek 官渠兼容**：B3 全程只加 system prompt 文本 / Starlette 中间件 / 依赖 / httpx 传输层（注入 `http_client`），**不碰** provider message/tool-call/`reasoning_content`/`tool_choice` 序列化；`chat_runtime` DeepSeek + `compat_helpers_match` 不回归。
+
+**已知限制**：DNS rebinding TOCTOU 未彻底防（白名单=安全边界、非连接层 pin IP）；`_LOGIN_FAILS` + `_RUNTIME_ALLOWED_HOSTS` 单进程（多 worker 需共享/广播）；账户锁定 DoS（≤5min，用户接受）；FIFO eviction best-effort（>4096 不同用户名 flood 可复位桶）；custom_api_key 明文存 per-uid `config.json`（既有设计，custom 现激活使其生效）；软帽非原子（B2 沿用）。
+
+**回归**：`tests/test_url_guard.py`(17) / `test_csrf.py`(9) / `test_admin_api.py`(16) / `test_accounts.py`(admin 函数) / `test_auth_api.py`(throttle + must_change) / `test_settings_api.py`(custom/offlist/managed_base 只读) / `test_config.py`(custom mode 持久化跨 reload + legacy 仍 managed) / `test_models.py`(offlist) / `test_tenant_isolation.py` + `test_main_api.py::CrossTenantApiTests` + 前端 `adminApi`/`adminPanel.source`/`forcePasswordChange.source`/`settingsModal.source`/`chatPanelCredentials.source`/`appInitGating.source`。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
