@@ -2,7 +2,15 @@
 """中央计费叶子模块（只依赖 accounts/config；绝不 import chat/skill/main/independent_review）。"""
 from __future__ import annotations
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from backend.config import FALLBACK_MODEL_PRICING
+
+_SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def today_shanghai() -> str:
+    """配额日界（spec §6.3）：Asia/Shanghai 的 YYYY-MM-DD。UTC+8 固定偏移（中国无夏令时）。"""
+    return datetime.now(timezone.utc).astimezone(_SHANGHAI_TZ).strftime("%Y-%m-%d")
 
 
 @dataclass

@@ -63,3 +63,14 @@ class ExtractUsageTests(unittest.TestCase):
             {"prompt_tokens": 100, "prompt_cache_hit_tokens": 10,
              "prompt_cache_miss_tokens": 90, "completion_tokens": 5})
         self.assertEqual((bu.hit, bu.miss, bu.completion), (10, 90, 5))
+
+
+# tests/test_metering.py（追加）
+import datetime as _dt
+
+
+class DayBoundaryTests(unittest.TestCase):
+    def test_today_shanghai_is_yyyy_mm_dd(self):
+        s = metering.today_shanghai()
+        _dt.datetime.strptime(s, "%Y-%m-%d")  # 不抛即合法
+        self.assertEqual(len(s), 10)
