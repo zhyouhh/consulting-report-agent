@@ -25,3 +25,41 @@ class PriceTests(unittest.TestCase):
                                          pricing=DEFAULT_MANAGED_MODEL_PRICING)
         # 未知模型 → fallback 三档（按 deepseek 价保守），1000*3 = 3000
         self.assertEqual(cost, 3000)
+
+
+# tests/test_metering.py（追加）
+class _FakeUsage:
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+class ExtractUsageTests(unittest.TestCase):
+    def test_reads_deepseek_cache_fields(self):
+        u = _FakeUsage(prompt_tokens=1289, prompt_cache_hit_tokens=0,
+                       prompt_cache_miss_tokens=1289, completion_tokens=500)
+        bu = metering.extract_billing_usage(u)
+        self.assertEqual((bu.hit, bu.miss, bu.completion), (0, 1289, 500))
+
+    def test_hot_cache(self):
+        u = _FakeUsage(prompt_tokens=1289, prompt_cache_hit_tokens=1280,
+                       prompt_cache_miss_tokens=9, completion_tokens=500)
+        bu = metering.extract_billing_usage(u)
+        self.assertEqual((bu.hit, bu.miss, bu.completion), (1280, 9, 500))
+
+    def test_miss_falls_back_to_prompt_minus_hit_when_absent(self):
+        u = _FakeUsage(prompt_tokens=1000, prompt_cache_hit_tokens=200, completion_tokens=50)
+        bu = metering.extract_billing_usage(u)
+        self.assertEqual((bu.hit, bu.miss, bu.completion), (200, 800, 50))
+
+    def test_returns_none_when_usage_missing(self):
+        self.assertIsNone(metering.extract_billing_usage(None))
+
+    def test_returns_none_when_no_token_fields(self):
+        self.assertIsNone(metering.extract_billing_usage(_FakeUsage(foo=1)))
+
+    def test_accepts_dict_usage(self):
+        bu = metering.extract_billing_usage(
+            {"prompt_tokens": 100, "prompt_cache_hit_tokens": 10,
+             "prompt_cache_miss_tokens": 90, "completion_tokens": 5})
+        self.assertEqual((bu.hit, bu.miss, bu.completion), (10, 90, 5))
