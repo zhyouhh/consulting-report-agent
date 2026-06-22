@@ -58,6 +58,8 @@ from .trust_boundary import (
     _neutralize_attachment_data_markers,
 )
 
+logger = logging.getLogger("backend.chat")
+
 try:
     import tiktoken
     _encoding = tiktoken.get_encoding("cl100k_base")
@@ -2943,7 +2945,7 @@ class ChatHandler:
                 try:
                     response.close()
                 except Exception:
-                    pass
+                    logger.warning("metered stream response.close() failed", exc_info=True)
 
             yield from emit_parsed_stream_events(parser.flush())
             if self._looks_like_self_correction_loop(accumulated):

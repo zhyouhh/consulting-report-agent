@@ -14484,6 +14484,65 @@ class B2BillingWiringTests(ChatRuntimeTests):
         self.assertIn("finally:", window)
         self.assertIn("response.close()", window)
 
+    def test_chat_stream_consumption_closes_underlying_stream_and_settles_real_usage(self):
+        # Codex NIT#1 行为版（非 source-guard）：patch 底层 _raw create 返回**可关闭流对象**（非裸 iter），
+        # 跑真 chat_stream 消费到底 → 断言①底层流 close() 被调用 ②settle 进 usage_daily 的是**真 usage**
+        # （非 fail-closed 256k 封顶），证明 chat 消费 + close 经真 wrapper settle 了真用量。
+        from backend import accounts
+        import backend.metering as m
+        handler = self._make_handler_with_project()   # managed → MeteredManagedClient；主流式模型 gemini-3-flash
+
+        class _CloseableStream:
+            def __init__(self, chunks):
+                self._it = iter(chunks)
+                self.close_count = 0
+            def __iter__(self):
+                return self
+            def __next__(self):
+                return next(self._it)
+            def close(self):
+                self.close_count += 1
+
+        usage_chunk = self._make_usage_chunk(prompt_tokens=100, prompt_cache_hit_tokens=0,
+                                             prompt_cache_miss_tokens=100, completion_tokens=50)
+        stream = _CloseableStream([self._make_chunk(content="完成"), usage_chunk])
+        with mock.patch.object(handler.client._raw.chat.completions, "create", return_value=stream):
+            list(handler.chat_stream(self.project_id, "你好", [], []))
+
+        self.assertGreaterEqual(stream.close_count, 1)   # 底层 provider 流被关闭
+        row = accounts.get_usage_today(handler.uid, m.today_shanghai())
+        # gemini-3-flash 走 FALLBACK_MODEL_PRICING(0.025/3/6)：miss=100,completion=50 → 100*3+50*6=600 微元。
+        self.assertEqual(row["cache_miss_tokens"], 100)   # 真 usage，非 fail-closed 256k
+        self.assertEqual(row["cost_micro_yuan"], 600)
+
+    def test_stream_real_reserve_blocks_when_over_cap(self):
+        # Codex NIT#2：不 patch create——让真 MeteredManagedClient._reserve 自然抛 QuotaExceededError。
+        from backend import accounts
+        import backend.metering as m
+        handler = self._make_handler_with_project()
+        day = m.today_shanghai()
+        accounts.set_config("global_daily_cap_micro_yuan", "100")   # 局部覆盖 base setUp 的巨大 cap
+        accounts.add_usage(handler.uid, day, 100, 0, 0, 0)          # 顶满 → reserve 应拦
+        # spy 仅为断言 raw create 未被触达（reserve 在 create 之前跑，spy 不绕过 reserve）。
+        with mock.patch.object(handler.client._raw.chat.completions, "create") as raw_create:
+            events = list(handler.chat_stream(self.project_id, "你好", [], []))
+        self.assertTrue(any(e.get("type") == "error" and "额度" in str(e.get("data", ""))
+                            for e in events))
+        raw_create.assert_not_called()
+
+    def test_sync_real_reserve_blocks_when_over_cap(self):
+        # Codex NIT#2 非流式版：真 reserve 拦 → handler.chat() 返回友好 content、raw create 未调用。
+        from backend import accounts
+        import backend.metering as m
+        handler = self._make_handler_with_project()
+        day = m.today_shanghai()
+        accounts.set_config("global_daily_cap_micro_yuan", "100")
+        accounts.add_usage(handler.uid, day, 100, 0, 0, 0)
+        with mock.patch.object(handler.client._raw.chat.completions, "create") as raw_create:
+            result = handler.chat(self.project_id, "你好")
+        self.assertIn("额度", result["content"])
+        raw_create.assert_not_called()
+
 
 # Codex NIT: 子类化 ChatRuntimeTests 会继承其全部 test_；按 repo 既有 pattern
 # 置空继承的 test_，避免 targeted class run 重跑整个父套件。
