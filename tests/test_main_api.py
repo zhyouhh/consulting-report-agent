@@ -1747,6 +1747,85 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
         self.assertIsInstance(forwarded["report_mtime_ns"], str)
         self.assertEqual(forwarded["report_mtime_ns"], big_mtime)
 
+    # ------------------------------------------------------------------
+    # W2-C Task 7: SSE periodic heartbeat (anti Cloudflare idle drop).
+    # Both review + chat streams must emit ": keepalive" comment frames
+    # while the producer is idle (provider thinking > CF idle window).
+    # ------------------------------------------------------------------
+
+    @mock.patch("backend.main.SSE_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    @mock.patch("backend.main.IndependentReviewAgent")
+    def test_review_stream_emits_heartbeat_during_idle(self, mock_agent_cls):  # patch(值) 不注入参数
+        import time
+        from backend.independent_review import CANONICAL_REVIEW_PATH
+        project_id = "demo-hb"
+        run_id = "hb-run"
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+
+        def slow_run(project_id_arg, run_id=None, store=None, resume_snapshot=None,
+                     cancel_event=None, store_key=None, **kwargs):
+            del cancel_event, kwargs
+            time.sleep(0.2)  # 空闲：event_queue 空 → generate 应周期发心跳
+            canonical = os.path.join(tmpdir.name, "independent-review.md")
+            fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("final report")
+            mtime = store.atomic_commit_report(store_key, run_id, temp_path, canonical, {"messages": []})
+            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": mtime}
+
+        mock_agent_cls.return_value.run.side_effect = slow_run
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(project_id), run_id)
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": run_id},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(": keepalive", response.text)
+
+    @mock.patch("backend.main.SSE_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    @mock.patch("backend.main.get_chat_handler")
+    def test_chat_stream_emits_heartbeat_during_idle(self, mock_get_handler):  # patch(值) 不注入参数
+        import time
+        def slow_stream(*a, **k):
+            time.sleep(0.2)  # 空闲：多路复用包装应周期发心跳
+            yield {"type": "content", "data": "hi"}
+        handler = mock.Mock()
+        handler.chat_stream.side_effect = slow_stream
+        mock_get_handler.return_value = handler
+        response = self.client.post(
+            "/api/chat/stream",
+            json={"project_id": "demo", "message_text": "hi"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(": keepalive", response.text)
+        self.assertIn("data:", response.text)  # 真内容仍流出
+
+    def test_sse_heartbeat_closes_sync_generator_on_consumer_aclose(self):
+        import asyncio, time as _t
+        closed = []
+        def gen():
+            try:
+                yield "data: a\n\n"
+                yield "data: b\n\n"
+            finally:
+                closed.append(True)  # gen.close()（断连）或自然耗尽都会触发；两者都释放真实 chat 的锁
+
+        async def drive():
+            agen = main_module._sse_with_heartbeat(gen, interval=10)
+            first = await agen.__anext__()
+            await agen.aclose()      # 模拟消费侧断连
+            return first
+
+        first = asyncio.run(drive())
+        self.assertEqual(first, "data: a\n\n")
+        for _ in range(50):          # pump 线程异步收尾，轮询等 finally
+            if closed:
+                break
+            _t.sleep(0.02)
+        self.assertEqual(closed, [True])  # 不挂起 + generator finally 已运行
+
 
 class GetConversationSanitizeTests(_LocalMockEngineMixin, unittest.TestCase):
     def setUp(self):

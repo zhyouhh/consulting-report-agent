@@ -6,6 +6,7 @@ import secrets
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -838,6 +839,67 @@ class UserFileWrite(BaseModel):
 # 故保存线程 ≠ RLock owner，acquire 必真正阻塞到 chat 释放——互斥才成立。不要改回 run_in_threadpool。
 _USER_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="user-write")
 
+# W2-C Task 7: SSE 周期心跳——app 部署在 Cloudflare 后面，CF 会丢弃空闲（~100s 无字节）的流。
+# DeepSeek reasoner 可中途思考 > 100s 不出字节 → CF 杀连接。对策：两条 SSE 流在空闲时发周期
+# ': keepalive' 注释帧（SSE 注释行被消费侧忽略，零语义影响）。心跳只在 HTTP SSE 帧层注入。
+SSE_HEARTBEAT_INTERVAL_SECONDS = 20.0
+_CHAT_STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="chat-stream")
+
+
+async def _sse_with_heartbeat(sync_gen_factory, interval=None):
+    """在专用线程池跑同步 SSE 生成器；空闲 > interval 秒发 ': keepalive\\n\\n'。
+    心跳只在 HTTP SSE 帧层注入——不碰 chat.py 的 provider/tool-call/DeepSeek 逻辑、不碰 request lock。
+
+    断连正确性：finally 置 stop_event；pump 每轮**先判 stop 再 next(gen)**（不在断连后多推进一次
+    进新 provider/tool 阶段），随后 `gen.close()` 在 generator 当前 yield 点抛 GeneratorExit →
+    chat_stream 的 `with request_lock` finally 释放锁。**注意**：`gen.close()` 只能在 generator 挂起于
+    yield、或当前 `next()` 返回后生效，**无法中断已在途的 provider 调用**——故锁释放 / 停止烧 token 发生
+    在「当前阶段返回之后」，不是瞬时（与现状 Starlette 断连关闭同步 generator 行为一致）。
+    队列无界：体量受**单轮输出量 / app 的 token 限额**界定（非队列界定，慢客户端会让一条流缓存整轮输出）；
+    不用有界阻塞 put——断连后消费侧停抽、阻塞 put 会与 stop 死锁、pump 到不了 gen.close()、锁反泄漏。"""
+    if interval is None:
+        interval = SSE_HEARTBEAT_INTERVAL_SECONDS
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    DONE = object()
+    stop_event = threading.Event()
+
+    def pump():
+        gen = None
+        try:
+            gen = sync_gen_factory()
+            while not stop_event.is_set():           # 先判 stop 再推进
+                try:
+                    item = next(gen)
+                except StopIteration:
+                    break
+                if stop_event.is_set():
+                    break
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+        finally:
+            if gen is not None:
+                gen.close()  # 断连：GeneratorExit 抵达当前 yield → chat_stream finally 释放 request lock
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(queue.put_nowait, DONE)
+
+    fut = loop.run_in_executor(_CHAT_STREAM_EXECUTOR, pump)
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=interval)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if item is DONE:
+                break
+            yield item
+    finally:
+        stop_event.set()   # 断连/正常结束：令 pump 在下个 item 后停（不排空整轮、不漏锁）
+        if fut.done():
+            fut.exception()                                  # 取回异常避免 warning
+        else:
+            fut.add_done_callback(lambda f: f.exception())   # 后台收尾、不阻塞清理
+
 
 @app.post("/api/projects/{project_id}/files/{file_path:path}")
 async def write_user_file(
@@ -1045,6 +1107,7 @@ async def independent_review_stream_post(
 
         # worker + review-lock release 已在函数体创建（见上方 B3 注释）；generate 只消费 event_queue。
         # worker_task / event_queue 是函数体闭包变量（done 分支已在上方 return，到这里必为非 None）。
+        last_emit = time.monotonic()  # W2-C Task 7: 心跳计时锚点（每发任何帧都重置）
         try:
             while True:
                 if await request.is_disconnected():
@@ -1053,9 +1116,14 @@ async def independent_review_stream_post(
                 try:
                     event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
                 except asyncio.TimeoutError:
+                    # 空闲（审查 agent 仍在思考/无事件）：超 interval 发心跳，防 CF 切空闲流。
+                    if time.monotonic() - last_emit >= SSE_HEARTBEAT_INTERVAL_SECONDS:
+                        last_emit = time.monotonic()
+                        yield ": keepalive\n\n"
                     continue
                 if event is None:
                     break
+                last_emit = time.monotonic()
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:
             cancel_event.set()
@@ -1254,8 +1322,12 @@ def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'data': str(e)}, ensure_ascii=False)}\n\n"
 
+    # W2-C Task 7: 传 generate 函数本身（工厂），不是 generate()——多路复用包装在专用线程跑同步
+    # generator、空闲发心跳。无前导心跳：快路径（mock/短轮）输出与原行为字节一致，心跳只在真长空闲出现。
+    # 断连时 wrapper 的 gen.close() 让 GeneratorExit 抵达当前 yield → handler.chat_stream 的
+    # `with request_lock` finally 释放 per-project 锁（正确性见 _sse_with_heartbeat docstring）。
     return StreamingResponse(
-        generate(),
+        _sse_with_heartbeat(generate),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
