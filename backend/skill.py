@@ -1799,12 +1799,6 @@ class SkillEngine:
 
         return "\n\n".join(sections)
 
-    def get_script_path(self, script_name: str) -> str:
-        script_path = self.skill_dir / "scripts" / script_name
-        if not script_path.exists():
-            raise ValueError(f"脚本 {script_name} 不存在")
-        return str(script_path)
-
     def ensure_output_dir(self, project_ref: str) -> str:
         project_path = self.get_project_path(project_ref)
         if not project_path:

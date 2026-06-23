@@ -28,17 +28,7 @@
 
 ### 3.2 导出 `docx` 可审草稿
 
-Windows PowerShell：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/export_draft.ps1 -InputPath report.md -OutputDir output
-```
-
-macOS / Linux：
-
-```bash
-bash scripts/export_draft.sh report.md output
-```
+在工作区点击「导出可审草稿」按钮，系统会用 pandoc 生成 `output/report_draft_v1.docx` 并在浏览器下载。当前产物用于预审和传阅，不替代最终中文排版。
 
 ### 3.3 预览和抽查
 

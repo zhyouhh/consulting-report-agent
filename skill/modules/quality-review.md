@@ -133,4 +133,4 @@
 
 在工作区点"独立审查"按钮即可触发一次独立审查代理，它会读 data-log / analysis-notes / 正文 / references / outline，按 5 个维度（含「语言专业性·去 AI 味」）审查并落 `plan/independent-review.md`。
 
-如需导出 `docx` 预审版本，可结合 `modules/final-delivery.md` 使用导出脚本。
+如需导出 `docx` 预审版本，在工作区点击『导出可审草稿』按钮（见 `modules/final-delivery.md`）。
