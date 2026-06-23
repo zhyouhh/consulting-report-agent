@@ -36,6 +36,20 @@ class ResolvePandocTests(unittest.TestCase):
             m_base.return_value = Path(d)
             self.assertEqual(report_tools._resolve_pandoc(), str(Path(d) / "pandoc.exe"))
 
+    @mock.patch("backend.report_tools.shutil.which", return_value="/usr/bin/pandoc")
+    @mock.patch("backend.report_tools.get_base_path")
+    @mock.patch("backend.report_tools.sys")
+    def test_frozen_prefers_bundled_exe_even_on_non_windows(self, m_sys, m_base, m_which):
+        # spec：打包态（sys.frozen）即便非 Windows 也优先包内 pandoc.exe（锁 frozen 分支，
+        # 与 win32 分支独立）。
+        import tempfile
+        m_sys.platform = "linux"
+        m_sys.frozen = True
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "pandoc.exe").write_text("x")
+            m_base.return_value = Path(d)
+            self.assertEqual(report_tools._resolve_pandoc(), str(Path(d) / "pandoc.exe"))
+
     @mock.patch("backend.report_tools.shutil.which", return_value=None)
     @mock.patch("backend.report_tools.get_base_path")
     @mock.patch("backend.report_tools.sys")
@@ -62,17 +76,25 @@ class ExportReviewableDraftTests(unittest.TestCase):
     @mock.patch("backend.report_tools._resolve_pandoc", return_value="/usr/bin/pandoc")
     @mock.patch("backend.report_tools.subprocess.run")
     def test_atomic_publish_replaces_final_only_on_success(self, m_run, m_pandoc):
-        # pandoc 写 temp.docx（mock：真把内容写进 -o 路径），成功后 os.replace 到终名。
+        # pandoc 写同目录唯一 temp.docx（非直接写终名），成功后 os.replace 到终名。
+        seen = {}
         def fake_run(cmd, **kw):
-            Path(cmd[cmd.index("-o") + 1]).write_text("docx-bytes")
+            o_path = Path(cmd[cmd.index("-o") + 1])
+            seen["o"] = o_path
+            o_path.write_text("docx-bytes")
             return mock.Mock(returncode=0, stdout="", stderr="")
         m_run.side_effect = fake_run
         res = report_tools.export_reviewable_draft(str(self.report), str(self.out))
         self.assertEqual(res["status"], "ok")
         final = self.out / "report_draft_v1.docx"
+        # 锁死 temp + os.replace 机制：pandoc 的 -o 必须是 output 目录内的 temp 文件、且不是终名
+        # （直接写终名的实现会让以下两条断言失败）。
+        self.assertEqual(seen["o"].parent, self.out)
+        self.assertNotEqual(seen["o"], final)
         self.assertEqual(res["output_path"], str(final))
         self.assertEqual(res["filename"], "report_draft_v1.docx")
         self.assertTrue(final.exists())
+        self.assertEqual(final.read_text(), "docx-bytes")  # temp 内容经 replace 成为终名
         # 无残留 temp
         self.assertEqual([p.name for p in self.out.glob("*.docx")], ["report_draft_v1.docx"])
 
