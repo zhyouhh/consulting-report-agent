@@ -1515,6 +1515,41 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
             "export_draft 必须是同步 def 路由（线程池执行），否则阻塞事件循环掐住 SSE 心跳",
         )
 
+    def test_export_download_serves_deterministic_docx_for_owner(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "output"; out.mkdir()
+            (out / "report_draft_v1.docx").write_bytes(b"PKdocxbytes")
+            self.engine.ensure_output_dir.return_value = str(out)
+            resp = self.client.get("/api/projects/demo/export-draft/download")
+            self.assertEqual(resp.status_code, 200)
+            self.assertIn("attachment", resp.headers["content-disposition"])
+            self.assertIn("report_draft_v1.docx", resp.headers["content-disposition"])
+            self.assertEqual(resp.content, b"PKdocxbytes")  # FileResponse 真回文件，非 JSON
+
+    def test_export_download_404_when_not_generated(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "output"; out.mkdir()
+            self.engine.ensure_output_dir.return_value = str(out)
+            self.assertEqual(self.client.get("/api/projects/demo/export-draft/download").status_code, 404)
+
+    def test_export_download_rejects_symlink_escape(self):
+        import os, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "output"; out.mkdir()
+            secret = Path(d) / "secret.docx"; secret.write_bytes(b"SECRET")
+            try:
+                os.symlink(secret, out / "report_draft_v1.docx")  # 指向 output 目录外
+            except OSError:
+                self.skipTest("无 symlink 权限（Windows 非管理员）")
+            self.engine.ensure_output_dir.return_value = str(out)
+            # resolve() 后越界 → output_dir not in target.parents → 404（不外泄目录外文件）
+            self.assertEqual(self.client.get("/api/projects/demo/export-draft/download").status_code, 404)
+
     @mock.patch("backend.main.get_chat_handler")
     def test_chat_endpoint_returns_new_token_usage_shape(self, mock_get_chat_handler):
         handler = mock.Mock()
@@ -2229,6 +2264,10 @@ class CrossTenantApiTests(AuthApiTestBase):
         # require_project accepts a name alias; B must NOT resolve A's project by its display name.
         self._create(self.A, "A机密")
         self.assertEqual(self.B.get("/api/projects/A机密/workspace").status_code, 404)
+
+    def test_b_cannot_download_a_export(self):
+        pid = self._create(self.A, "A机密")
+        self.assertEqual(self.B.get(f"/api/projects/{pid}/export-draft/download").status_code, 404)
 
 
 class B2ChatQuotaTests(_LocalMockEngineMixin, unittest.TestCase):

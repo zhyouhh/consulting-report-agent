@@ -18,7 +18,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -1111,6 +1111,23 @@ def export_draft(scope: ProjectScope = Depends(require_project)):
         return export_reviewable_draft(report_path, output_dir)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+_EXPORT_DOWNLOAD_FILENAME = "report_draft_v1.docx"
+
+
+@app.get("/api/projects/{project_id}/export-draft/download")
+def export_draft_download(scope: ProjectScope = Depends(require_project)):
+    # 只服务确定文件名（不接受客户端任意 filename）；解析后校验仍在该项目 output 目录内。
+    output_dir = Path(scope.engine.ensure_output_dir(scope.project_id)).resolve()
+    target = (output_dir / _EXPORT_DOWNLOAD_FILENAME).resolve()
+    if output_dir not in target.parents or not target.is_file():
+        raise HTTPException(status_code=404, detail="尚未生成可审草稿，请先导出。")
+    return FileResponse(
+        path=str(target),
+        filename=_EXPORT_DOWNLOAD_FILENAME,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
 
 
 @app.delete("/api/projects/{project_id}")
