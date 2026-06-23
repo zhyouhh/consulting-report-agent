@@ -11,7 +11,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 > ⚠️ **W2-C（2026-06-23）也未反映**：导出已**去 Windows 化**（`report_tools.py` 纯 Python 调 pandoc，
 > 退役 `export_draft.{ps1,sh}` + 删 `get_script_path`；下方第 56-57 行的 PowerShell QA 记录、第 192 行的
 > 「仍剩 F2」、以及「## 项目定位」的「只承诺 Windows 分发」均已被超越）+ 新增 web 下载端点 + SSE 心跳 +
-> `run_web.py` env 化（部署前置）+ N6 F2 收口（4 个 legacy 解析器已删）。以 `CLAUDE.md`「## W2-C」段为准。
+> `run_web.py` env 化（部署前置）+ N6 F2 收口（4 个 legacy 解析器已删）。**Part C 已部署上线 `https://consulting.z0y0h.work`（kr-web-01 反代+CF，2026-06-23）——运维/踩坑见 `docs/current-worklist.md` 顶部 + 私有 memory `w2c-deploy-status`（密钥不入仓库）。** 以 `CLAUDE.md`「## W2-C」段为准。
 
 ## 项目定位
 
