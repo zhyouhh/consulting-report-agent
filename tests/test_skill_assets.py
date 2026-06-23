@@ -121,4 +121,3 @@ class SkillAssetTests(unittest.TestCase):
             # N7: lint-report.md is retired — no longer an official plan file, so it is rejected.
             with self.assertRaises(ValueError):
                 engine.validate_plan_write(project["id"], "plan/lint-report.md")
-
