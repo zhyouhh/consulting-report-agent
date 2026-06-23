@@ -6,27 +6,12 @@ import ChatPanel from './components/ChatPanel'
 import WorkspacePanel from './components/WorkspacePanel'
 import AdminPanel from './components/AdminPanel'
 import ForcePasswordChange from './components/ForcePasswordChange'
+import ErrorBoundary from './components/ErrorBoundary'
 import axios from 'axios'
 import { setUnauthedHandler } from './api'
 import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
 import { mergeMaterials, removeMaterialById } from './utils/chatMaterials'
 import { getCurrentProject, isSameProjectSelection, reconcileCurrentProjectId } from './utils/projectSelection'
-
-class ErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props)
-    this.state = { hasError: false }
-  }
-  static getDerivedStateFromError() {
-    return { hasError: true }
-  }
-  render() {
-    if (this.state.hasError) {
-      return <div className="flex items-center justify-center h-screen"><div className="text-red-600">应用出错，请刷新页面</div></div>
-    }
-    return this.props.children
-  }
-}
 
 function App() {
   const [projects, setProjects] = useState([])
