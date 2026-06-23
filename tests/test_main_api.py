@@ -472,8 +472,10 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
             )
 
             def run_clear():
+                # clear_conversation 现为同步 def（W2-C 终审 BLOCKER：不在事件循环上持锁）。
+                # 直接在本线程同步调用——阻塞等锁正是被测行为（真实路径里这发生在线程池 worker、非 loop）。
                 try:
-                    result_holder["result"] = asyncio.run(main_module.clear_conversation(scope))
+                    result_holder["result"] = main_module.clear_conversation(scope)
                 finally:
                     finished.set()
 
@@ -1515,6 +1517,16 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
             "export_draft 必须是同步 def 路由（线程池执行），否则阻塞事件循环掐住 SSE 心跳",
         )
 
+    def test_clear_conversation_route_not_blocking_async(self):
+        # W2-C 终审 BLOCKER 守卫：clear_conversation 在事件循环上持 request RLock 会冻结 loop、
+        # 掐死 SSE 心跳（聊天长 provider 调用持锁期间）。必须是同步 def（FastAPI 线程池跑），
+        # 阻塞等待落在 worker 而非事件循环。
+        import inspect
+        self.assertFalse(
+            inspect.iscoroutinefunction(main_module.clear_conversation),
+            "clear_conversation 必须是同步 def 路由，否则持锁阻塞事件循环掐住 SSE 心跳",
+        )
+
     def test_export_download_serves_deterministic_docx_for_owner(self):
         import tempfile
         from pathlib import Path
@@ -1803,28 +1815,34 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
         self.assertIn("data:", response.text)  # 真内容仍流出
 
     def test_sse_heartbeat_closes_sync_generator_on_consumer_aclose(self):
+        # 用「断连窗口内不会自然耗尽」的大生成器：确保 finally 只能经 gen.close()（断连）触发、
+        # 而非 eager-pump 预取耗尽——genuinely 测断连关闭路径（codex 终审 NIT）。真实 chat 里该
+        # finally 即释放 per-project request lock。
         import asyncio, time as _t
         closed = []
+        emitted = []
         def gen():
             try:
-                yield "data: a\n\n"
-                yield "data: b\n\n"
+                for i in range(100000):   # 远超 aclose 前 pump 能预取的量 → 正常窗口内永不耗尽
+                    emitted.append(i)
+                    yield f"data: {i}\n\n"
             finally:
-                closed.append(True)  # gen.close()（断连）或自然耗尽都会触发；两者都释放真实 chat 的锁
+                closed.append(True)       # 未耗尽前只能由 gen.close()（断连）触发
 
         async def drive():
             agen = main_module._sse_with_heartbeat(gen, interval=10)
-            first = await agen.__anext__()
-            await agen.aclose()      # 模拟消费侧断连
+            first = await agen.__anext__()   # 取第一块；pump 在后台继续 next()（不阻塞、不会耗尽）
+            await agen.aclose()              # 模拟消费侧断连
             return first
 
         first = asyncio.run(drive())
-        self.assertEqual(first, "data: a\n\n")
-        for _ in range(50):          # pump 线程异步收尾，轮询等 finally
+        self.assertEqual(first, "data: 0\n\n")
+        for _ in range(100):          # pump 线程异步收尾，轮询等 finally
             if closed:
                 break
             _t.sleep(0.02)
-        self.assertEqual(closed, [True])  # 不挂起 + generator finally 已运行
+        self.assertEqual(closed, [True])      # 不挂起 + generator finally 已运行
+        self.assertLess(len(emitted), 100000, "断连应在生成器自然耗尽前关闭它（证明经 gen.close 而非耗尽）")
 
 
 class GetConversationSanitizeTests(_LocalMockEngineMixin, unittest.TestCase):

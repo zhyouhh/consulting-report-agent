@@ -1285,7 +1285,11 @@ async def get_conversation(scope: ProjectScope = Depends(require_project)):
 
 
 @app.delete("/api/projects/{project_id}/conversation")
-async def clear_conversation(scope: ProjectScope = Depends(require_project)):
+def clear_conversation(scope: ProjectScope = Depends(require_project)):
+    # 同步 def 路由：FastAPI 在线程池执行，`with request_lock:` 的阻塞等待落在 worker 线程、
+    # 绝不卡事件循环（否则一次「清空对话」在聊天长 provider 调用持锁期间会冻结 loop → SSE 心跳
+    # 发不出 → CF 断流 + 单 worker 全员 stall）。与导出端点同款离 loop 策略（W2-C 终审 BLOCKER）。
+    # 该 worker 不是 _CHAT_STREAM_EXECUTOR 的 chat 生成器线程 → RLock 真阻塞、无重入绕过。
     project_path = scope.engine.get_project_path(scope.project_id)
     if not project_path:
         raise HTTPException(status_code=404, detail="项目不存在")
