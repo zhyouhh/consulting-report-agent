@@ -3,7 +3,7 @@ import axios from 'axios'
 import SettingsModal from './SettingsModal'
 import ProjectCreateModal from './ProjectCreateModal'
 import { describeConnectionMode } from '../utils/connectionMode'
-import { quotaLabel } from '../utils/quotaFormat.js'
+import { quotaLabel, quotaRatio } from '../utils/quotaFormat.js'
 
 export default function Sidebar({
   projects,
@@ -97,11 +97,40 @@ export default function Sidebar({
                 >登出</button>
               </div>
             )}
-            {typeof authUser.daily_cap_yuan === 'number' && (
-              <div className={`text-xs text-gray-400 ${authUser.uid !== 'local' ? 'mt-1' : ''}`}>
-                {quotaLabel(authUser.today_cost_yuan ?? 0, authUser.daily_cap_yuan)}
-              </div>
-            )}
+            {typeof authUser.daily_cap_yuan === 'number' && (() => {
+              // 统一归一：quotaLabel / quotaRatio / overCap 都用同一组 finite 值，避免边界不一致
+              // （daily_cap_yuan 虽是 number 但可能是 NaN，typeof 仍过——codex NIT）。
+              const used = Number.isFinite(authUser.today_cost_yuan) ? authUser.today_cost_yuan : 0
+              const cap = Number.isFinite(authUser.daily_cap_yuan) ? authUser.daily_cap_yuan : 0
+              const ratio = quotaRatio(used, cap)
+              // 触额度上限（含 cap<=0 被 admin 设 0 封禁）= 耗尽，统一红色 100%——否则
+              // cap=0 时 quotaRatio 返 0 会显示 0% 青色，与「已被封/无额度」矛盾（codex NIT）。
+              const overCap = cap <= 0 || used >= cap
+              const pct = overCap ? 100 : Math.round(ratio * 100)
+              // 配色随用量升级：<80% 主题青、≥80% 琥珀提醒、耗尽红。
+              const barColor = overCap ? '#ef4444' : ratio >= 0.8 ? '#f5a623' : '#64ffda'
+              return (
+                <div className={authUser.uid !== 'local' ? 'mt-2' : ''}>
+                  <div className="flex items-center justify-between text-[11px] mb-1">
+                    <span className="text-gray-400">{quotaLabel(used, cap)}</span>
+                    <span className="tabular-nums text-[#8f93c9]">{pct}%</span>
+                  </div>
+                  <div
+                    className="h-1.5 w-full rounded-full bg-[#0f1024] overflow-hidden"
+                    role="progressbar"
+                    aria-label="今日额度使用进度"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={pct}
+                  >
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{ width: `${pct}%`, backgroundColor: barColor }}
+                    />
+                  </div>
+                </div>
+              )
+            })()}
             {authUser?.is_admin && (
               <button
                 onClick={() => onOpenAdmin?.()}

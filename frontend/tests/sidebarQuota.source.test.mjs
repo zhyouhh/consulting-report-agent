@@ -32,3 +32,19 @@ test('Sidebar 账号块在 is_admin 时露用户管理入口', () => {
   assert.match(src, /authUser\??\.is_admin/);
   assert.match(src, /用户管理/);
 });
+
+// 额度进度条：用 quotaRatio 驱动一条 width 随用量变化的 bar（而非仅文字），并带 progressbar 语义。
+test('Sidebar 额度块渲染进度条（quotaRatio 驱动 width + progressbar 语义）', () => {
+  assert.match(src, /import\s*\{[^}]*quotaRatio[^}]*\}\s*from\s*['"][^'"]*quotaFormat/, '应从 quotaFormat 导入 quotaRatio');
+  assert.match(src, /quotaRatio\s*\(/, 'quotaRatio 应被实际调用驱动进度条');
+  assert.match(src, /role=["']progressbar["']/, '进度条应带 role="progressbar" 可访问性语义');
+  assert.match(src, /aria-label=["'][^"']+["']/, '进度条应有可访问名 aria-label（codex NIT）');
+  assert.match(src, /width:\s*`\$\{pct\}%`/, '进度条填充宽度应由百分比驱动');
+});
+
+// codex NIT：cap<=0（admin 设 0 封禁）必须显示耗尽（红 100%），不能因 quotaRatio 返 0 显 0% 青色。
+test('Sidebar 进度条把 cap<=0 / used>=cap 当耗尽处理（红 100%）', () => {
+  assert.match(src, /cap\s*<=\s*0\s*\|\|\s*used\s*>=\s*cap/, '应判定 overCap = cap<=0 || used>=cap');
+  assert.match(src, /overCap\s*\?\s*100\s*:/, 'overCap 时 pct 应为 100');
+  assert.match(src, /overCap\s*\?\s*['"]#ef4444['"]/, 'overCap 时进度条应红色');
+});

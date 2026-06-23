@@ -29,3 +29,50 @@ test('App: AdminPanel 挂载额外兜底 is_admin', () => {
     'AdminPanel 挂载应为 showAdmin && authUser?.is_admin && <AdminPanel ...>',
   )
 })
+
+// 侧边栏额度数字曾陈旧（只随初始 /me 拉一次）：聊天每轮结束 + 窗口聚焦时须刷新 /me 额度字段。
+test('App: 额度刷新 wiring（轮结束 + 聚焦都刷新 /me）', () => {
+  // refreshAuthQuota 重新 GET /me 并只并入 cost 字段（保 prev 在、不复活已登出用户）。
+  const refreshBlock = src.match(/const refreshAuthQuota[\s\S]*?\n  \}/)
+  assert.ok(refreshBlock, '应定义 refreshAuthQuota')
+  assert.match(refreshBlock[0], /axios\.get\(['"]\/api\/auth\/me['"]/, 'refreshAuthQuota 应重拉 /me')
+  assert.match(refreshBlock[0], /today_cost_yuan[\s\S]*?daily_cap_yuan/, '应并入 today_cost_yuan/daily_cap_yuan')
+  // codex BLOCKER：背景轮询跳过全局 401 登出副作用，防旧用户在途 /me 误踢新用户到登录页。
+  assert.match(refreshBlock[0], /skipUnauthedHandler:\s*true/, 'refreshAuthQuota 应带 skipUnauthedHandler')
+  // codex BLOCKER①：序号守卫——只让最后发起的 /me 回包落地，防同 uid 乱序回包覆盖回旧额度。
+  assert.match(refreshBlock[0], /\+\+quotaRefreshSeqRef\.current/, 'refreshAuthQuota 应自增请求序号')
+  assert.match(refreshBlock[0], /seq\s*!==\s*quotaRefreshSeqRef\.current[\s\S]{0,40}?return prev/, '非最新序号的回包应丢弃')
+  // codex BLOCKER②：合并前校验回包 uid 与当前 prev.uid 一致，防在途 /me 跨用户串号。
+  assert.match(refreshBlock[0], /r\.data\??\.uid\s*!==\s*prev\.uid[\s\S]{0,40}?return prev/, 'uid 不符则原样返回 prev')
+  // 统一回调 handleProjectMutated（刷 workspace + 刷额度），ChatPanel 与 WorkspacePanel 共用——
+  // 任一计费路径（聊天轮 / 独立审查后系统轮 / 文件保存）完成都即时刷额度。
+  assert.match(
+    src,
+    /const handleProjectMutated\s*=\s*\(\)\s*=>\s*\{[\s\S]{0,160}?refreshAuthQuota\(\)/,
+    'handleProjectMutated 应同时刷 workspace 与额度',
+  )
+  const panelMutatedWirings = src.match(/onProjectMutated=\{handleProjectMutated\}/g) || []
+  assert.ok(panelMutatedWirings.length >= 2, 'ChatPanel 与 WorkspacePanel 都应 onProjectMutated={handleProjectMutated}')
+  // 窗口重新聚焦也刷新（兜独立审查等非聊天计费路径 + 跨标签页）。
+  assert.match(
+    src,
+    /onFocus[\s\S]{0,120}?refreshAuthQuota\(\)[\s\S]{0,120}?addEventListener\(['"]focus['"]/,
+    'focus effect 应在聚焦时刷新额度',
+  )
+})
+
+// 回归守卫：initializeApp effect 必须只依赖稳定身份字段（uid + must_change_password），
+// 不可依赖整个 authUser 对象——否则 refreshAuthQuota 每轮造新 authUser 引用会重跑
+// initializeApp → setLoading(true) → 整树卸载重挂（黑屏闪 + 聊天/工具调用记录全丢）。
+test('App: initializeApp effect 依赖稳定身份字段而非整个 authUser（防额度刷新触发重初始化黑屏）', () => {
+  assert.match(
+    src,
+    /initializeApp\(\)\s*\n\s*\}\s*\n\s*\},\s*\[authUser\?\.uid,\s*authUser\?\.must_change_password\]\)/,
+    'initializeApp effect 依赖应为 [authUser?.uid, authUser?.must_change_password]',
+  )
+  assert.doesNotMatch(
+    src,
+    /initializeApp\(\)\s*\n\s*\}\s*\n\s*\},\s*\[authUser\]\)/,
+    'initializeApp effect 不应依赖整个 authUser 对象（额度刷新会触发重初始化黑屏）',
+  )
+})
