@@ -7,6 +7,11 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 > W2-B 多租户化后数据已改为 `data_root()`（`CRA_DATA_ROOT`，缺省 `~/.consulting-report/`）下的 per-uid 分层
 > `users/<uid>/`，且新增了鉴权/计费/admin/CSRF/SSRF/custom 激活（B1/B2/B3）。这些 AGENTS.md 全部缺失。
 > 接手前请以 `CLAUDE.md` 的「## W2-B 多租户基座」「## W2-B/B2」「## W2-B/B3」段为准。
+>
+> ⚠️ **W2-C（2026-06-23）也未反映**：导出已**去 Windows 化**（`report_tools.py` 纯 Python 调 pandoc，
+> 退役 `export_draft.{ps1,sh}` + 删 `get_script_path`；下方第 56-57 行的 PowerShell QA 记录、第 192 行的
+> 「仍剩 F2」、以及「## 项目定位」的「只承诺 Windows 分发」均已被超越）+ 新增 web 下载端点 + SSE 心跳 +
+> `run_web.py` env 化（部署前置）+ N6 F2 收口（4 个 legacy 解析器已删）。以 `CLAUDE.md`「## W2-C」段为准。
 
 ## 项目定位
 
