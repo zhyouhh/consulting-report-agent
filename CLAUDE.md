@@ -48,8 +48,8 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 已修复并打包验证：
 
 - 打包态 GUI 启动崩溃：`settings.mode` null 不再触发首页 error boundary。
-- `_internal\skill\scripts\export_draft.ps1` 在 Windows PowerShell 下的源码解析和 stdout 编码问题。
-- `export_draft.ps1` 优先使用包内 `pandoc.exe`，`consulting_report.spec` 会把 Pandoc 打入 `_internal`。
+- ~~`_internal\skill\scripts\export_draft.ps1` 在 Windows PowerShell 下的源码解析和 stdout 编码问题。~~（**W2-C 2026-06-23 已整条退役 PowerShell 导出脚本，导出改纯 Python 调 pandoc——见下方「## W2-C」段**）
+- `consulting_report.spec` 会把 Pandoc 打入 `_internal`；导出在打包/Windows 态优先用包内 `pandoc.exe`（现由后端 `report_tools._resolve_pandoc()` 直接解析调用，不再经 PowerShell 脚本）。
 - checkpoint endpoint 越级推进 / stage desync / legacy `<stage-ack>` runtime side effect。
 - 聊天气泡 Markdown GFM 表格渲染。
 
@@ -287,6 +287,32 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **回归**：`tests/test_url_guard.py`(17) / `test_csrf.py`(9) / `test_admin_api.py`(16) / `test_accounts.py`(admin 函数) / `test_auth_api.py`(throttle + must_change) / `test_settings_api.py`(custom/offlist/managed_base 只读) / `test_config.py`(custom mode 持久化跨 reload + legacy 仍 managed) / `test_models.py`(offlist) / `test_tenant_isolation.py` + `test_main_api.py::CrossTenantApiTests` + 前端 `adminApi`/`adminPanel.source`/`forcePasswordChange.source`/`settingsModal.source`/`chatPanelCredentials.source`/`appInitGating.source`。
 
+## W2-C 去 Windows 化导出 + web 下载 + 部署前置（Part A+B，2026-06-23 实施完成 + 本地全绿 + Codex 4-cluster 双轨审 APPROVED + 整分支自审 SHIP-READY；分支 `feat/w2c-de-windows-export`，**待 merge + Part C 部署交互式执行**）
+
+把导出做成跨平台（Linux/mac/Windows）+ web 用户真能下载 docx，并补齐部署前置代码。改导出 / SSE 流 / web 入口前必读。spec `docs/superpowers/specs/2026-06-23-w2c-deploy-and-de-windows-design.md`、plan `docs/superpowers/plans/2026-06-23-w2c-de-windows-export-and-deploy-prep.md`。
+
+**导出（去 Windows 化，`backend/report_tools.py` 全 Python，无 PowerShell）**：
+- `_resolve_pandoc()` 平台守卫：**仅 `sys.frozen` 或 `win32` 才优先包内 `pandoc.exe`**（防 Linux 误 exec 仓库根的 Windows 二进制——`get_base_path()` 开发/服务器态=仓库根），否则 `shutil.which("pandoc")`。**不可放宽**成「非 Windows 也试 .exe」（`test_report_tools.py` source 锁）。
+- `export_reviewable_draft(report_path, output_dir)`（**2 参，去掉旧 `script_path`**）原子发布：`mkstemp` 在 output 目录建唯一 temp.docx → pandoc 写 temp → **`os.replace` 到终名**；pandoc 失败/`OSError` 清 temp + 保留旧终名。**全程锁外**（依赖 R3 原子写不变式）。
+- 端点 `POST .../export-draft` 改**同步 `def`**（FastAPI 线程池跑、不阻塞事件循环掐 SSE 心跳）、**不取 request lock**。`get_script_path` 已从 `skill.py` 删除（导出唯一消费者）。
+- **web 下载契约**：新 `GET .../export-draft/download` `FileResponse`——**确定文件名 `report_draft_v1.docx`**（不接受客户端 filename）+ `Path.resolve()` + `output_dir not in target.parents` 穿越/symlink-file 守卫 + `require_project` 属主隔离（跨租户 404）。前端 `WorkspacePanel.exportDraft` 按 `status!=='ok'` 判失败 showError+return、成功创建同源 `<a>` `.click()` 触发浏览器下载（带 cookie）。
+
+**SSE 防 CF ~100s 切空闲流（`backend/main.py`，两条流都周期心跳）**：
+- 审查流（async generator）：`event_queue` timeout 路径按 `SSE_HEARTBEAT_INTERVAL_SECONDS`(20s) 计时发 `: keepalive`。
+- 聊天流（sync generator 阻塞在 `handler.chat_stream` 内）：`_sse_with_heartbeat(generate)` **线程+队列多路复用**包装（`generate` 作工厂传入、不是 `generate()`）——专用 `_CHAT_STREAM_EXECUTOR`(8 worker) 跑 pump，主循环空闲>interval 发心跳。**硬约束**：心跳只在 HTTP SSE 帧层注入，**不碰 chat.py 的 provider/tool-call/`reasoning_content`/`tool_choice`/DeepSeek 逻辑、不碰 request lock**；**不加 leading 心跳**（快路径输出与现状字节一致=零回归）。
+- **锁释放正确性（必须保）**：pump `finally` 里 `gen.close()` → GeneratorExit 抵达 generator 当前 yield → chat 的 `with request_lock` finally 释放锁。pump **先判 stop_event 再 `next(gen)`**；in-loop 与 DONE 两处 `loop.call_soon_threadsafe` 都 try/except `RuntimeError`（loop 关竞态不漏 `gen.close()`）；pump 异常经 `_log_pump_exception` 记日志（不静默吞）。`gen.close()` 无法中断**已在途**的 provider 调用——锁释放发生在「当前阶段返回之后」，非瞬时（与 Starlette 原生断连一致）。
+- **跨任务不变式（保住 R3 用户写 CAS）**：聊天 generator 现跑在 `_CHAT_STREAM_EXECUTOR`，与用户写的 `_USER_WRITE_EXECUTOR` 仍是**不同专用池** → 「用户写 `acquire` 靠 RLock 真阻塞到 chat 释放」的 CAS 防绕过性质不变（甚至更隔离）。
+
+**web 入口（`run_web.py`）**：host/port 读 `CRA_BIND_HOST`(默 127.0.0.1)/`CRA_BIND_PORT`(默 8888)；uvicorn `proxy_headers=True` + `forwarded_allow_ips` 读 `CRA_FORWARDED_ALLOW_IPS`(默 127.0.0.1，nginx 走 ::1/bridge 时须设)；`cookie_secure=True`（`CRA_COOKIE_INSECURE` 本地调试豁免）；**未设 `CRA_ALLOWED_ORIGIN` 会告警**（生产 cookie_secure 态 CSRF fail-closed 403 所有写）。
+
+**N6 F2 收口**：`skill.py` 删 4 个 legacy 解析器（`_legacy_read_document`/`_read_docx`/`_read_xlsx`/`_read_pdf`）；`_converter_read_document` 无 converter → `raise ValueError`（不再静默回退）、converter-present 委派 `convert_document` 并映射 `MaterialConversionError`→`ValueError`（`_execute_tool` 据此回 `{status:error}`）。生产无裸 SkillEngine 路径（`ChatHandler.__init__` 必先 wire converter）。
+
+**Trial accepted-risk / 后置硬化（已与 Codex 议定，非 bug）**：① `_sse_with_heartbeat` eager-drain + 无界队列——慢/半开客户端会缓存整轮输出 + 烧发起者自己配额（有 token cap 上界、单 worker、按用户计费），**锁释放不变差（更早）**；后置硬化=背压保持版（一次一个 in-flight `next()`、await-timeout 心跳、yield 门控下次提交）+ 前端 EOF-without-`[DONE]`=interrupted。② `_CHAT_STREAM_EXECUTOR` 8 worker = 单 worker 上 >8 并发长流会串行化（trial 用户量不触及，记此）。③ `FileResponse` stat→open 与并发 `os.replace` 的 TOCTOU 可能 Content-Length 错配（UI 顺序流不触发、自愈重下；后置硬化=pin fd 流式）。④ symlinked output 目录绕守卫需服务器 FS 访问前提（web 用户不可达）。
+
+**Part C 部署 runbook（不在 TDD plan，交互式执行）**：kr-web-01（腾讯云首尔，与 jp-app-01 分机）反代+CF（`consulting.z0y0h.work`，CF Origin Cert+橙云）+ nginx[SSE 关 buffering + `set_real_ip_from` CF 段 `real_ip_header CF-Connecting-IP`] + systemd **单 worker**（B2/B3 进程内状态）+ env[`CRA_DATA_ROOT=/var/lib/consulting-report`/`CRA_INVITE_CODE`/`CRA_ALLOWED_ORIGIN`/bootstrap admin] + 装 pandoc+libreoffice。**风险**：kr-web-01 非自有账号，`managed_client_token`+搜索池凭据落非自有机，转生产换实例时轮换。
+
+**回归**：`tests/test_report_tools.py`(7：resolver 守卫含 frozen 分支/原子发布断言 temp -o 路径) / `test_run_web.py`(source-guard) / `test_main_api.py`(导出端点 sync def 守卫/下载属主·未生成·symlink越界·跨租户404/两流心跳/`_sse_with_heartbeat` 断连 finally) / `test_skill_engine.py`(无 converter raise + `MaterialConversionError`→`ValueError`) / `test_skill_assets.py`(脚本退役 source-guard) + 前端 `workspacePanelExport.source`/`sseHeartbeat`。DeepSeek 兼容 + 跨租户隔离不回归。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
@@ -350,7 +376,7 @@ cd frontend && npm install && npm run build && cd ..   # 必须 build，否则 S
 **三个 macOS 上需要注意的点**：
 
 1. **私有文件不在 git 里，要从 Windows 机拷过去**：`managed_client_token.txt`、`managed_search_pool.json`（`.gitignore` 忽略）放仓库根，否则 managed 模式认证不了 / 内置搜索不工作。临时方案：设置里切 `custom` 模式自填 OpenAI 兼容 key，无需这两个文件也能跑通对话与写作。
-2. **S5「导出可审草稿」会报错**：`export_draft.ps1` 经 `backend/report_tools.py` 调硬编码的 `powershell` 命令，macOS 无此命令会失败。属 S5 晚期功能，S0–S4 日常开发碰不到；彻底解决见 worklist「去 Windows 化」（改 Python）。
+2. **S5「导出可审草稿」需本机装 pandoc**（W2-C 已去 Windows 化）：导出改纯 Python 调 pandoc（`report_tools._resolve_pandoc()`：打包/Windows 态优先包内 `pandoc.exe`，否则走系统 `pandoc`）。mac 开发态须 `brew install pandoc`，否则导出返回友好错误「未找到 pandoc」。原 `export_draft.ps1` 硬编码 `powershell` 的问题已不存在（脚本已删）。见下方「## W2-C」段。
 3. **4 个测试在 mac 上失败属环境差异、非真 bug**：`test_skill_engine.py` / `test_workspace_materials.py` 里涉及 `tempfile` 路径比对的用例，因 macOS `/var`→`/private/var` symlink、临时路径未解析 vs 已解析不相等而失败，**Windows 上通过**。要 mac 全绿需把这些用例的临时路径断言改走 `os.path.realpath`/`.resolve()`（独立小活，见 worklist N-section）。
 
 ## 文档与追踪

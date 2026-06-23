@@ -472,8 +472,10 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
             )
 
             def run_clear():
+                # clear_conversation 现为同步 def（W2-C 终审 BLOCKER：不在事件循环上持锁）。
+                # 直接在本线程同步调用——阻塞等锁正是被测行为（真实路径里这发生在线程池 worker、非 loop）。
                 try:
-                    result_holder["result"] = asyncio.run(main_module.clear_conversation(scope))
+                    result_holder["result"] = main_module.clear_conversation(scope)
                 finally:
                     finished.set()
 
@@ -1486,24 +1488,79 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
 
     @mock.patch("backend.main.export_reviewable_draft")
     def test_export_draft_endpoint_returns_output_path(self, mock_export_draft):
-        self.engine.get_primary_report_path.return_value = "D:/tmp/report.md"
-        self.engine.get_script_path.return_value = "D:/skill/scripts/export_draft.ps1"
-        self.engine.ensure_output_dir.return_value = "D:/tmp/output"
+        self.engine.get_primary_report_path.return_value = "/tmp/report_draft_v1.md"
+        self.engine.ensure_output_dir.return_value = "/tmp/output"
         mock_export_draft.return_value = {
             "status": "ok",
-            "output": "已生成可审草稿: D:/tmp/output/report.docx",
-            "output_path": "D:/tmp/output/report.docx",
+            "output": "已生成可审草稿: /tmp/output/report_draft_v1.docx",
+            "output_path": "/tmp/output/report_draft_v1.docx",
+            "filename": "report_draft_v1.docx",
         }
 
         response = self.client.post("/api/projects/demo/export-draft")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["output_path"], "D:/tmp/output/report.docx")
+        self.assertEqual(response.json()["output_path"], "/tmp/output/report_draft_v1.docx")
+        self.assertEqual(response.json()["filename"], "report_draft_v1.docx")
+        # 新签名：不再传 script_path
         mock_export_draft.assert_called_once_with(
-            "D:/tmp/report.md",
-            "D:/tmp/output",
-            "D:/skill/scripts/export_draft.ps1",
+            "/tmp/report_draft_v1.md",
+            "/tmp/output",
         )
+
+    def test_export_draft_route_not_blocking_async(self):
+        # spec §3.2 守卫：导出端点必须是同步 def（FastAPI 跑线程池）或经 run_in_threadpool，
+        # 不得在 async 路由里直接同步调 pandoc 阻塞事件循环。
+        import inspect
+        self.assertFalse(
+            inspect.iscoroutinefunction(main_module.export_draft),
+            "export_draft 必须是同步 def 路由（线程池执行），否则阻塞事件循环掐住 SSE 心跳",
+        )
+
+    def test_clear_conversation_route_not_blocking_async(self):
+        # W2-C 终审 BLOCKER 守卫：clear_conversation 在事件循环上持 request RLock 会冻结 loop、
+        # 掐死 SSE 心跳（聊天长 provider 调用持锁期间）。必须是同步 def（FastAPI 线程池跑），
+        # 阻塞等待落在 worker 而非事件循环。
+        import inspect
+        self.assertFalse(
+            inspect.iscoroutinefunction(main_module.clear_conversation),
+            "clear_conversation 必须是同步 def 路由，否则持锁阻塞事件循环掐住 SSE 心跳",
+        )
+
+    def test_export_download_serves_deterministic_docx_for_owner(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "output"; out.mkdir()
+            (out / "report_draft_v1.docx").write_bytes(b"PKdocxbytes")
+            self.engine.ensure_output_dir.return_value = str(out)
+            resp = self.client.get("/api/projects/demo/export-draft/download")
+            self.assertEqual(resp.status_code, 200)
+            self.assertIn("attachment", resp.headers["content-disposition"])
+            self.assertIn("report_draft_v1.docx", resp.headers["content-disposition"])
+            self.assertEqual(resp.content, b"PKdocxbytes")  # FileResponse 真回文件，非 JSON
+
+    def test_export_download_404_when_not_generated(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "output"; out.mkdir()
+            self.engine.ensure_output_dir.return_value = str(out)
+            self.assertEqual(self.client.get("/api/projects/demo/export-draft/download").status_code, 404)
+
+    def test_export_download_rejects_symlink_escape(self):
+        import os, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "output"; out.mkdir()
+            secret = Path(d) / "secret.docx"; secret.write_bytes(b"SECRET")
+            try:
+                os.symlink(secret, out / "report_draft_v1.docx")  # 指向 output 目录外
+            except OSError:
+                self.skipTest("无 symlink 权限（Windows 非管理员）")
+            self.engine.ensure_output_dir.return_value = str(out)
+            # resolve() 后越界 → output_dir not in target.parents → 404（不外泄目录外文件）
+            self.assertEqual(self.client.get("/api/projects/demo/export-draft/download").status_code, 404)
 
     @mock.patch("backend.main.get_chat_handler")
     def test_chat_endpoint_returns_new_token_usage_shape(self, mock_get_chat_handler):
@@ -1701,6 +1758,91 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
         forwarded = handler.chat_stream.call_args.kwargs["trigger_metadata"]
         self.assertIsInstance(forwarded["report_mtime_ns"], str)
         self.assertEqual(forwarded["report_mtime_ns"], big_mtime)
+
+    # ------------------------------------------------------------------
+    # W2-C Task 7: SSE periodic heartbeat (anti Cloudflare idle drop).
+    # Both review + chat streams must emit ": keepalive" comment frames
+    # while the producer is idle (provider thinking > CF idle window).
+    # ------------------------------------------------------------------
+
+    @mock.patch("backend.main.SSE_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    @mock.patch("backend.main.IndependentReviewAgent")
+    def test_review_stream_emits_heartbeat_during_idle(self, mock_agent_cls):  # patch(值) 不注入参数
+        import time
+        from backend.independent_review import CANONICAL_REVIEW_PATH
+        project_id = "demo-hb"
+        run_id = "hb-run"
+        self.engine.get_workspace_summary.return_value = {"stage_code": "S5"}
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+
+        def slow_run(project_id_arg, run_id=None, store=None, resume_snapshot=None,
+                     cancel_event=None, store_key=None, **kwargs):
+            del cancel_event, kwargs
+            time.sleep(0.2)  # 空闲：event_queue 空 → generate 应周期发心跳
+            canonical = os.path.join(tmpdir.name, "independent-review.md")
+            fd, temp_path = tempfile.mkstemp(dir=tmpdir.name, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("final report")
+            mtime = store.atomic_commit_report(store_key, run_id, temp_path, canonical, {"messages": []})
+            yield {"type": "review-completed", "path": CANONICAL_REVIEW_PATH, "report_mtime_ns": mtime}
+
+        mock_agent_cls.return_value.run.side_effect = slow_run
+        self.addCleanup(main_module._REVIEW_SESSION_STORE.discard, self._skey(project_id), run_id)
+        response = self.client.post(
+            f"/api/projects/{project_id}/independent-review/stream",
+            json={"resume": False, "run_id": run_id},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(": keepalive", response.text)
+
+    @mock.patch("backend.main.SSE_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    @mock.patch("backend.main.get_chat_handler")
+    def test_chat_stream_emits_heartbeat_during_idle(self, mock_get_handler):  # patch(值) 不注入参数
+        import time
+        def slow_stream(*a, **k):
+            time.sleep(0.2)  # 空闲：多路复用包装应周期发心跳
+            yield {"type": "content", "data": "hi"}
+        handler = mock.Mock()
+        handler.chat_stream.side_effect = slow_stream
+        mock_get_handler.return_value = handler
+        response = self.client.post(
+            "/api/chat/stream",
+            json={"project_id": "demo", "message_text": "hi"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(": keepalive", response.text)
+        self.assertIn("data:", response.text)  # 真内容仍流出
+
+    def test_sse_heartbeat_closes_sync_generator_on_consumer_aclose(self):
+        # 用「断连窗口内不会自然耗尽」的大生成器：确保 finally 只能经 gen.close()（断连）触发、
+        # 而非 eager-pump 预取耗尽——genuinely 测断连关闭路径（codex 终审 NIT）。真实 chat 里该
+        # finally 即释放 per-project request lock。
+        import asyncio, time as _t
+        closed = []
+        emitted = []
+        def gen():
+            try:
+                for i in range(100000):   # 远超 aclose 前 pump 能预取的量 → 正常窗口内永不耗尽
+                    emitted.append(i)
+                    yield f"data: {i}\n\n"
+            finally:
+                closed.append(True)       # 未耗尽前只能由 gen.close()（断连）触发
+
+        async def drive():
+            agen = main_module._sse_with_heartbeat(gen, interval=10)
+            first = await agen.__anext__()   # 取第一块；pump 在后台继续 next()（不阻塞、不会耗尽）
+            await agen.aclose()              # 模拟消费侧断连
+            return first
+
+        first = asyncio.run(drive())
+        self.assertEqual(first, "data: 0\n\n")
+        for _ in range(100):          # pump 线程异步收尾，轮询等 finally
+            if closed:
+                break
+            _t.sleep(0.02)
+        self.assertEqual(closed, [True])      # 不挂起 + generator finally 已运行
+        self.assertLess(len(emitted), 100000, "断连应在生成器自然耗尽前关闭它（证明经 gen.close 而非耗尽）")
 
 
 class GetConversationSanitizeTests(_LocalMockEngineMixin, unittest.TestCase):
@@ -2219,6 +2361,10 @@ class CrossTenantApiTests(AuthApiTestBase):
         # require_project accepts a name alias; B must NOT resolve A's project by its display name.
         self._create(self.A, "A机密")
         self.assertEqual(self.B.get("/api/projects/A机密/workspace").status_code, 404)
+
+    def test_b_cannot_download_a_export(self):
+        pid = self._create(self.A, "A机密")
+        self.assertEqual(self.B.get(f"/api/projects/{pid}/export-draft/download").status_code, 404)
 
 
 class B2ChatQuotaTests(_LocalMockEngineMixin, unittest.TestCase):

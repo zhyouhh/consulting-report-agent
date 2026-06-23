@@ -283,6 +283,7 @@ const ChatPanel = forwardRef(function ChatPanel({
   }
 
   const clearConversation = async () => {
+    if (loading || uploading) return  // 生成/上传中禁清空：避免与持锁的聊天轮竞争（后端端点已离 loop，前端再加一道）
     if (!confirm('确定要清空对话历史吗？')) return
     try {
       await axios.delete(`/api/projects/${encodeURIComponent(projectId)}/conversation`)
@@ -811,7 +812,11 @@ const ChatPanel = forwardRef(function ChatPanel({
         </div>
         <div className="flex gap-2">
           {projectId && (
-            <button onClick={clearConversation} className="text-sm text-[#8888a8] hover:text-[#e2e2f0]">
+            <button
+              onClick={clearConversation}
+              disabled={loading || uploading}
+              className="text-sm text-[#8888a8] hover:text-[#e2e2f0] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-[#8888a8]"
+            >
               清空对话
             </button>
           )}

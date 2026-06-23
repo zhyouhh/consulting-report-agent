@@ -1651,7 +1651,7 @@ class SkillEngine:
 
     def _converter_read_document(self, project_ref, material_path):
         if getattr(self, "_material_converter", None) is None:
-            return self._legacy_read_document(material_path)   # 无 converter 的纯单测回退
+            raise ValueError("当前环境无法读取该材料（缺少文档转换组件）")
         from backend.material_conversion import MaterialConversionError
 
         try:
@@ -1672,23 +1672,6 @@ class SkillEngine:
             return converter.transcribe_image(material_path, mime)
         except MaterialConversionError as exc:
             raise ValueError(str(exc)) from exc
-
-    def _legacy_read_document(self, material_path: Path) -> str:
-        suffix = material_path.suffix.lower()
-
-        if suffix in self.TEXT_SUFFIXES:
-            return material_path.read_text(encoding="utf-8")
-        if suffix == ".docx":
-            return self._read_docx(material_path)
-        if suffix == ".xlsx":
-            return self._read_xlsx(material_path)
-        if suffix == ".pdf":
-            return self._read_pdf(material_path)
-
-        try:
-            return material_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError(f"当前暂不支持读取 {suffix} 材料") from exc
 
     def _get_raw_material(self, project_record: dict, material_id: str) -> dict:
         """N6 Fix4（perf）：按 id 取 RAW 材料记录，不做 conversion_status 富化。
@@ -1798,12 +1781,6 @@ class SkillEngine:
             sections.append("## 可用项目材料\n" + "\n".join(material_lines))
 
         return "\n\n".join(sections)
-
-    def get_script_path(self, script_name: str) -> str:
-        script_path = self.skill_dir / "scripts" / script_name
-        if not script_path.exists():
-            raise ValueError(f"脚本 {script_name} 不存在")
-        return str(script_path)
 
     def ensure_output_dir(self, project_ref: str) -> str:
         project_path = self.get_project_path(project_ref)
@@ -3051,44 +3028,3 @@ class SkillEngine:
 
     def _normalize_text(self, text: str) -> str:
         return re.sub(r"\s+", " ", text).strip()
-
-    def _read_docx(self, material_path: Path) -> str:
-        from docx import Document
-
-        document = Document(material_path)
-        lines = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
-        for table in document.tables:
-            for row in table.rows:
-                cells = [cell.text.strip() for cell in row.cells]
-                if any(cells):
-                    lines.append(" | ".join(cells))
-        return "\n".join(lines).strip()
-
-    def _read_xlsx(self, material_path: Path) -> str:
-        import openpyxl
-
-        workbook = openpyxl.load_workbook(material_path, data_only=True, read_only=True)
-        sections = []
-        for sheet in workbook.worksheets:
-            rows = []
-            for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-                values = ["" if value is None else str(value) for value in row]
-                if any(values):
-                    rows.append(" | ".join(values))
-                if row_index >= 50:
-                    break
-            sections.append(f"## {sheet.title}\n" + "\n".join(rows))
-        return "\n\n".join(section for section in sections if section.strip()).strip()
-
-    def _read_pdf(self, material_path: Path) -> str:
-        from pypdf import PdfReader
-
-        reader = PdfReader(str(material_path))
-        sections = []
-        for index, page in enumerate(reader.pages, start=1):
-            text = (page.extract_text() or "").strip()
-            if text:
-                sections.append(f"## 第{index}页\n{text}")
-        if sections:
-            return "\n\n".join(sections)
-        raise ValueError("PDF 未提取到文本，当前版本暂不支持扫描版 PDF。")

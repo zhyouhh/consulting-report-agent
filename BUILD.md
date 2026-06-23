@@ -126,7 +126,7 @@ PyInstaller 把所有 `datas` 收到 `_internal/` 下面，`sys._MEIPASS` 在运
 
 ### 可审草稿导出
 
-- `export_draft.ps1` 优先使用发布包内的 `_internal\pandoc.exe`。
+- 可审草稿导出优先使用发布包内的 `_internal\pandoc.exe`（由后端 Python 直接调用，不再经 PowerShell 脚本）。
 - 构建时必须能解析到可分发的 Pandoc；打包后同事机器不再依赖系统 Pandoc。
 - Pandoc 会明显增加包体积，当前完整 `dist\咨询报告助手\` 约 307 MB。
 

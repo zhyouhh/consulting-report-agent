@@ -8,7 +8,6 @@ class SkillAssetTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         required_files = [
             root / "skill" / "evals" / "capability-map.json",
-            root / "skill" / "scripts" / "export_draft.sh",
         ]
 
         for file_path in required_files:
@@ -18,29 +17,20 @@ class SkillAssetTests(unittest.TestCase):
         self.assertFalse((root / "skill" / "scripts" / "quality_check.sh").exists())
         self.assertFalse((root / "skill" / "scripts" / "quality_check.ps1").exists())
 
-    def test_windows_powershell_scripts_use_utf8_bom(self):
+    def test_active_docs_no_longer_reference_export_scripts(self):
         root = Path(__file__).resolve().parents[1]
-        ps1_files = [
-            root / "skill" / "scripts" / "export_draft.ps1",
-        ]
-
-        for file_path in ps1_files:
-            self.assertTrue(file_path.exists(), f"缺少 PowerShell 脚本: {file_path}")
-            self.assertTrue(
-                file_path.read_bytes().startswith(b"\xef\xbb\xbf"),
-                f"{file_path.name} 必须带 UTF-8 BOM，否则 Windows PowerShell 会按 ANSI 解析中文并报错",
-            )
-
-    def test_windows_powershell_scripts_force_utf8_stdout(self):
-        root = Path(__file__).resolve().parents[1]
-        ps1_files = [
-            root / "skill" / "scripts" / "export_draft.ps1",
-        ]
-
-        for file_path in ps1_files:
-            text = file_path.read_text(encoding="utf-8-sig")
-            self.assertIn("[Console]::OutputEncoding", text)
-            self.assertIn("$OutputEncoding", text)
+        # 扫 skill 文档 + 根 BUILD/WINDOWS_BUILD（BUILD.md 也引用 export_draft.ps1）
+        targets = list((root / "skill").rglob("*.md")) + [root / "BUILD.md", root / "WINDOWS_BUILD.md"]
+        offenders = []
+        for p in targets:
+            if not p.exists():
+                continue
+            text = p.read_text(encoding="utf-8")
+            if "export_draft.ps1" in text or "export_draft.sh" in text or "scripts/export_draft" in text:
+                offenders.append(str(p.relative_to(root)))
+        self.assertEqual(offenders, [], f"文档仍引用退役导出脚本: {offenders}")
+        self.assertFalse((root / "skill" / "scripts" / "export_draft.ps1").exists())
+        self.assertFalse((root / "skill" / "scripts" / "export_draft.sh").exists())
 
     def test_formal_plan_files_includes_independent_review_output(self):
         from backend.skill import SkillEngine
@@ -131,15 +121,3 @@ class SkillAssetTests(unittest.TestCase):
             # N7: lint-report.md is retired — no longer an official plan file, so it is rejected.
             with self.assertRaises(ValueError):
                 engine.validate_plan_write(project["id"], "plan/lint-report.md")
-
-    def test_export_draft_ps1_prefers_bundled_pandoc_before_system_path(self):
-        root = Path(__file__).resolve().parents[1]
-        script = (root / "skill" / "scripts" / "export_draft.ps1").read_text(
-            encoding="utf-8-sig"
-        )
-
-        bundled_probe = "..\\..\\pandoc.exe"
-        self.assertIn(bundled_probe, script)
-        self.assertLess(script.index(bundled_probe), script.index("Get-Command pandoc"))
-        self.assertIn("应用包内", script)
-        self.assertIn("系统 PATH", script)

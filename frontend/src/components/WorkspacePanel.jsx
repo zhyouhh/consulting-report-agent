@@ -227,7 +227,18 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     if (!projectId) return
     try {
       const res = await axios.post(`/api/projects/${encodeURIComponent(projectId)}/export-draft`)
-      showSuccess(`已导出可审草稿：${res.data.output_path}`)
+      if (res.data?.status !== 'ok') {
+        showError('导出失败: ' + (res.data?.output || '未知错误'))
+        return
+      }
+      // 触发浏览器下载（带 cookie 凭据；同源 anchor 即可）
+      const a = document.createElement('a')
+      a.href = `/api/projects/${encodeURIComponent(projectId)}/export-draft/download`
+      a.rel = 'noopener'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      showSuccess('已导出可审草稿，正在下载…')
       onProjectMutated?.()
     } catch (error) {
       showError('导出失败: ' + (error.response?.data?.detail || error.message))

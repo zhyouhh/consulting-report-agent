@@ -6,6 +6,7 @@ import secrets
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -838,6 +839,79 @@ class UserFileWrite(BaseModel):
 # 故保存线程 ≠ RLock owner，acquire 必真正阻塞到 chat 释放——互斥才成立。不要改回 run_in_threadpool。
 _USER_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="user-write")
 
+# W2-C Task 7: SSE 周期心跳——app 部署在 Cloudflare 后面，CF 会丢弃空闲（~100s 无字节）的流。
+# DeepSeek reasoner 可中途思考 > 100s 不出字节 → CF 杀连接。对策：两条 SSE 流在空闲时发周期
+# ': keepalive' 注释帧（SSE 注释行被消费侧忽略，零语义影响）。心跳只在 HTTP SSE 帧层注入。
+SSE_HEARTBEAT_INTERVAL_SECONDS = 20.0
+_CHAT_STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="chat-stream")
+
+
+async def _sse_with_heartbeat(sync_gen_factory, interval=None):
+    """在专用线程池跑同步 SSE 生成器；空闲 > interval 秒发 ': keepalive\\n\\n'。
+    心跳只在 HTTP SSE 帧层注入——不碰 chat.py 的 provider/tool-call/DeepSeek 逻辑、不碰 request lock。
+
+    断连正确性：finally 置 stop_event；pump 每轮**先判 stop 再 next(gen)**（不在断连后多推进一次
+    进新 provider/tool 阶段），随后 `gen.close()` 在 generator 当前 yield 点抛 GeneratorExit →
+    chat_stream 的 `with request_lock` finally 释放锁。**注意**：`gen.close()` 只能在 generator 挂起于
+    yield、或当前 `next()` 返回后生效，**无法中断已在途的 provider 调用**——故锁释放 / 停止烧 token 发生
+    在「当前阶段返回之后」，不是瞬时（与现状 Starlette 断连关闭同步 generator 行为一致）。
+    队列无界：体量受**单轮输出量 / app 的 token 限额**界定（非队列界定，慢客户端会让一条流缓存整轮输出）；
+    不用有界阻塞 put——断连后消费侧停抽、阻塞 put 会与 stop 死锁、pump 到不了 gen.close()、锁反泄漏。"""
+    if interval is None:
+        interval = SSE_HEARTBEAT_INTERVAL_SECONDS
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    DONE = object()
+    stop_event = threading.Event()
+
+    def pump():
+        gen = None
+        try:
+            gen = sync_gen_factory()
+            while not stop_event.is_set():           # 先判 stop 再推进
+                try:
+                    item = next(gen)
+                except StopIteration:
+                    break
+                if stop_event.is_set():
+                    break
+                try:
+                    loop.call_soon_threadsafe(queue.put_nowait, item)
+                except RuntimeError:
+                    break  # loop 已关（消费侧消失）→ 停推进，finally 仍 gen.close() 释放锁
+        finally:
+            if gen is not None:
+                gen.close()  # 断连：GeneratorExit 抵达当前 yield → chat_stream finally 释放 request lock
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, DONE)
+            except RuntimeError:
+                pass  # loop 已关，消费侧已走，无需再发 DONE
+
+    def _log_pump_exception(f):
+        # pump 异常被 future 捕获——主动取回并记日志（不再静默吞掉：loop-close 竞态等
+        # wrapper 级故障否则会变成无 [DONE] 的干净 EOF，难排查）。
+        exc = f.exception()
+        if exc is not None:
+            logger.warning("SSE heartbeat pump raised: %s", exc, exc_info=exc)
+
+    fut = loop.run_in_executor(_CHAT_STREAM_EXECUTOR, pump)
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=interval)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if item is DONE:
+                break
+            yield item
+    finally:
+        stop_event.set()   # 断连/正常结束：令 pump 在下个 item 后停（不排空整轮、不漏锁）
+        if fut.done():
+            _log_pump_exception(fut)
+        else:
+            fut.add_done_callback(_log_pump_exception)   # 后台收尾、不阻塞清理
+
 
 @app.post("/api/projects/{project_id}/files/{file_path:path}")
 async def write_user_file(
@@ -1045,6 +1119,7 @@ async def independent_review_stream_post(
 
         # worker + review-lock release 已在函数体创建（见上方 B3 注释）；generate 只消费 event_queue。
         # worker_task / event_queue 是函数体闭包变量（done 分支已在上方 return，到这里必为非 None）。
+        last_emit = time.monotonic()  # W2-C Task 7: 心跳计时锚点（每发任何帧都重置）
         try:
             while True:
                 if await request.is_disconnected():
@@ -1053,9 +1128,14 @@ async def independent_review_stream_post(
                 try:
                     event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
                 except asyncio.TimeoutError:
+                    # 空闲（审查 agent 仍在思考/无事件）：超 interval 发心跳，防 CF 切空闲流。
+                    if time.monotonic() - last_emit >= SSE_HEARTBEAT_INTERVAL_SECONDS:
+                        last_emit = time.monotonic()
+                        yield ": keepalive\n\n"
                     continue
                 if event is None:
                     break
+                last_emit = time.monotonic()
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:
             cancel_event.set()
@@ -1102,14 +1182,32 @@ async def independent_review_discard(
 
 
 @app.post("/api/projects/{project_id}/export-draft")
-async def export_draft(scope: ProjectScope = Depends(require_project)):
+def export_draft(scope: ProjectScope = Depends(require_project)):
+    # 同步 def 路由：FastAPI 在线程池执行，pandoc 阻塞子进程不卡事件循环（spec §3.2）。
+    # 导出不取 per-project request lock（spec §3.6：chat_stream 整轮持 RLock，R3 原子写保证锁外读安全）。
     try:
         report_path = scope.engine.get_primary_report_path(scope.project_id)
         output_dir = scope.engine.ensure_output_dir(scope.project_id)
-        script_path = scope.engine.get_script_path("export_draft.ps1")
-        return export_reviewable_draft(report_path, output_dir, script_path)
+        return export_reviewable_draft(report_path, output_dir)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+_EXPORT_DOWNLOAD_FILENAME = "report_draft_v1.docx"
+
+
+@app.get("/api/projects/{project_id}/export-draft/download")
+def export_draft_download(scope: ProjectScope = Depends(require_project)):
+    # 只服务确定文件名（不接受客户端任意 filename）；解析后校验仍在该项目 output 目录内。
+    output_dir = Path(scope.engine.ensure_output_dir(scope.project_id)).resolve()
+    target = (output_dir / _EXPORT_DOWNLOAD_FILENAME).resolve()
+    if output_dir not in target.parents or not target.is_file():
+        raise HTTPException(status_code=404, detail="尚未生成可审草稿，请先导出。")
+    return FileResponse(
+        path=str(target),
+        filename=_EXPORT_DOWNLOAD_FILENAME,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
 
 
 @app.delete("/api/projects/{project_id}")
@@ -1187,7 +1285,11 @@ async def get_conversation(scope: ProjectScope = Depends(require_project)):
 
 
 @app.delete("/api/projects/{project_id}/conversation")
-async def clear_conversation(scope: ProjectScope = Depends(require_project)):
+def clear_conversation(scope: ProjectScope = Depends(require_project)):
+    # 同步 def 路由：FastAPI 在线程池执行，`with request_lock:` 的阻塞等待落在 worker 线程、
+    # 绝不卡事件循环（否则一次「清空对话」在聊天长 provider 调用持锁期间会冻结 loop → SSE 心跳
+    # 发不出 → CF 断流 + 单 worker 全员 stall）。与导出端点同款离 loop 策略（W2-C 终审 BLOCKER）。
+    # 该 worker 不是 _CHAT_STREAM_EXECUTOR 的 chat 生成器线程 → RLock 真阻塞、无重入绕过。
     project_path = scope.engine.get_project_path(scope.project_id)
     if not project_path:
         raise HTTPException(status_code=404, detail="项目不存在")
@@ -1236,8 +1338,12 @@ def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'data': str(e)}, ensure_ascii=False)}\n\n"
 
+    # W2-C Task 7: 传 generate 函数本身（工厂），不是 generate()——多路复用包装在专用线程跑同步
+    # generator、空闲发心跳。无前导心跳：快路径（mock/短轮）输出与原行为字节一致，心跳只在真长空闲出现。
+    # 断连时 wrapper 的 gen.close() 让 GeneratorExit 抵达当前 yield → handler.chat_stream 的
+    # `with request_lock` finally 释放 per-project 锁（正确性见 _sse_with_heartbeat docstring）。
     return StreamingResponse(
-        generate(),
+        _sse_with_heartbeat(generate),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
