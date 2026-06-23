@@ -12,6 +12,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 > 退役 `export_draft.{ps1,sh}` + 删 `get_script_path`；下方第 56-57 行的 PowerShell QA 记录、第 192 行的
 > 「仍剩 F2」、以及「## 项目定位」的「只承诺 Windows 分发」均已被超越）+ 新增 web 下载端点 + SSE 心跳 +
 > `run_web.py` env 化（部署前置）+ N6 F2 收口（4 个 legacy 解析器已删）。**Part C 已部署上线 `https://consulting.z0y0h.work`（kr-web-01 反代+CF，2026-06-23）——运维/踩坑见 `docs/current-worklist.md` 顶部 + 私有 memory `w2c-deploy-status`（密钥不入仓库）。** 以 `CLAUDE.md`「## W2-C」段为准。
+>
+> ⚠️ **2026-06-23 Part C 上线后 3 笔小修**（commit `c30b903`/`d552579`/`3bff742`，未 push）也未反映：① 前端 sidebar 额度实时刷新 + 进度条（**init effect 依赖须 `[uid, must_change_password]`、绝不退回整 `authUser`**，否则额度刷新每轮重挂 ChatPanel→黑屏 + 聊天记录丢；`refreshAuthQuota` 带 seq+uid 守卫 + `skipUnauthedHandler`）；② 后端 `backend/main.py:_SPAStaticFiles` 给 SPA shell 发 `no-cache`（潜在隐患修复「陈旧 bundle 404→空白页」，**别退回裸 `StaticFiles`**）；③ **登录页 422 白屏修复**（`Login.jsx`/`utils/authError.js`/`components/ErrorBoundary.jsx`/`main.jsx`）——短用户名/短密码→后端 422 数组 `detail` 直接 `setErr`→React「Objects are not valid as a React child」→登录页整树卸载白屏（= 用户当时报的真因，缓存②是误判）；**任何把后端 `detail` 给 UI 的地方必须经 `normalizeAuthError` 归一成字符串、整个 App 必须被 `main.jsx` 的 `ErrorBoundary` 包裹**。以 `CLAUDE.md`「## 前端额度实时化 + SPA 缓存头」段为准。
 
 ## 项目定位
 

@@ -313,6 +313,30 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **回归**：`tests/test_report_tools.py`(7：resolver 守卫含 frozen 分支/原子发布断言 temp -o 路径) / `test_run_web.py`(source-guard) / `test_main_api.py`(导出端点 sync def 守卫/下载属主·未生成·symlink越界·跨租户404/两流心跳/`_sse_with_heartbeat` 断连 finally) / `test_skill_engine.py`(无 converter raise + `MaterialConversionError`→`ValueError`) / `test_skill_assets.py`(脚本退役 source-guard) + 前端 `workspacePanelExport.source`/`sseHeartbeat`。DeepSeek 兼容 + 跨租户隔离不回归。
 
+## 前端额度实时化 + SPA 缓存头（2026-06-23，Part C 上线后小修）
+
+两笔 Part C 后小修，Codex 审 APPROVED，commit 本地 main（`c30b903` 额度 / `d552579` 缓存，**未 push**），已部署 kr-web-01 并实地验证。
+
+**额度实时化**（`frontend/src/App.jsx` / `Sidebar.jsx` / `api.js`）：sidebar 今日额度原只登录拉一次 `/me`→用掉额度后陈旧（与 admin 面板对不上）。现 `handleProjectMutated`（ChatPanel + WorkspacePanel 共用回调）每轮结束 + `window` focus 调 `refreshAuthQuota` 刷 `/me` 的 cost 字段。**硬约束**：
+
+- `refreshAuthQuota` 三重守卫缺一不可：`quotaRefreshSeqRef` 序号（只让最后发起的回包落地，防同 uid 并发 `/me` 乱序覆盖回旧额度）+ `r.data?.uid === prev.uid`（防在途 `/me` 跨用户串号）+ `axios.get(..., {skipUnauthedHandler:true})`（背景轮询不触发全局 401 登出——`api.js` 拦截器据 `error.config?.skipUnauthedHandler` 跳过 `onUnauthed`，否则旧用户在途 `/me` 返 401 会误踢已登录的新用户）。
+- **init effect 依赖必须是 `[authUser?.uid, authUser?.must_change_password]`，绝不能退回整个 `[authUser]`**——否则额度刷新每轮造新 `authUser` 引用 → 重跑 `initializeApp` → `loadProjects` 置 `loading=true` → 命中 `if(loading)` 早返回 → 整树卸载重挂 → 黑屏闪 + ChatPanel 内存里的消息/工具调用记录全丢。`frontend/tests/appInitGating.source.test.mjs` 锁死。
+- 进度条由 `quotaRatio` 驱动；`overCap`（`cap<=0` 含 admin 设 0 封禁，或 `used>=cap`）渲染红 100%。回归 `sidebarQuota`/`appInitGating`/`apiUnauthed` source-guard。
+
+**SPA 缓存头**（`backend/main.py:_SPAStaticFiles`）：`StaticFiles` 默认只发 ETag/Last-Modified、**不发 Cache-Control** → 浏览器对 index.html 启发式缓存 → 部署原子 swap（`mv dist dist.old && mv dist.new dist`）删旧 hash bundle → 陈旧 shell 指向已删 bundle 返 404 → React 没挂载 → 空 `#root` 满屏深色空白页（控制台静默 404、UI 无报错）。**硬约束**：
+
+- SPA shell（根目录请求 / 显式 `*.html`）→ `no-cache, must-revalidate`；`assets/*`（带内容 hash）→ `immutable`。**别退回裸 `StaticFiles`**（重现空白页 bug）。
+- 缓存头**按规范化路径判定**（`_cache_control_for`），不仅看 content-type——因为条件请求命中时 `NotModifiedResponse`(304) 不带 content-type，只按 content-type 判会漏掉 304、旧缓存学不到 no-cache。`tests/test_static_cache_headers.py`(6，含 304 revalidation 用例) 锁死。
+- nginx 给 `.js` 资源另发 `expires`（盖掉 immutable 成 `max-age=14400`），无害（资源带 hash）；nginx gzip 会剥 ETag，shell revalidation 走 Last-Modified（`If-Modified-Since`→304 仍带 no-cache，已实地验证）。
+- **⚠️ 归因更正**：上面这条 SPA 缓存修复是真实的潜在隐患修复，但 **不是**用户当时报的「登录后空白页」真因——真因是下面的「登录页 422 白屏」。当时误判成缓存，被无痕窗口仍白屏否证、nginx 日志的 422 锁定真因。
+
+**登录页 422 白屏修复**（`frontend/src/components/Login.jsx` / `utils/authError.js` / `components/ErrorBoundary.jsx` / `main.jsx`，commit `3bff742`）：短用户名(<3)/短密码(<6) → 后端 `LoginPayload`/`RegisterPayload` 的 Pydantic `min_length` 校验失败返 **422**，其 `detail` 是**数组** `[{loc,msg,type}]`（非字符串）；旧 `Login.jsx` `setErr(detail)` → 渲染 `{err}` 触发 React **"Objects are not valid as a React child"** → 登录页（App 早返回分支、**不在** App 内层 ErrorBoundary 里）整树卸载 → 空 `#root` 满屏深色白屏（UI 无报错）。**硬约束**：
+
+- 任何把后端错误 `detail` 显示给用户的地方，**必须经 `normalizeAuthError`（或同类归一）** 把 string/数组/对象都转成字符串——**绝不把后端 `detail` 直接塞进 React 子节点**（422 是数组、会白屏）。
+- 整个 `<App/>` 由 `main.jsx` 的 `ErrorBoundary` 包裹（共享组件，从 App.jsx 抽出）——App 的早返回分支（Login/ForcePasswordChange/loading）**不在** App 内层 ErrorBoundary 里，没这层外包则它们渲染崩溃=整树白屏。**别移除外层 ErrorBoundary**。
+- `Login.jsx` 提交前客户端校验长度（对齐后端 `min_length`：用户名≥3、密码≥6）+ 提交 **trim 后的用户名**（密码不 trim）。`frontend/tests/authError.test.mjs` + `loginErrorHandling.source.test.mjs` 锁死。
+- **已知 follow-up（非阻塞，已记 worklist）**：`IndependentReviewDrawer.jsx` 有同类「把 detail 直接进渲染态」写法——当前不可达（审查端点手解析返回字符串 detail）且已被新全局 ErrorBoundary 兜底；彻底治理可抽共享 `normalizeApiErrorDetail`。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
