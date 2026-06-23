@@ -3028,4 +3028,3 @@ class SkillEngine:
 
     def _normalize_text(self, text: str) -> str:
         return re.sub(r"\s+", " ", text).strip()
-
