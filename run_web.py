@@ -8,6 +8,9 @@ import uvicorn
 if __name__ == "__main__":
     host = (os.environ.get("CRA_BIND_HOST") or "127.0.0.1").strip()
     port = int((os.environ.get("CRA_BIND_PORT") or "8888").strip())
+    # 反代同机走 IPv4 loopback 时默认 127.0.0.1 即可；若 nginx 经 ::1 / Docker bridge / 其它私网跳，
+    # 须设 CRA_FORWARDED_ALLOW_IPS 为上游地址，否则 uvicorn 忽略 X-Forwarded-For → 登录限流误锁代理 IP。
+    forwarded_allow_ips = (os.environ.get("CRA_FORWARDED_ALLOW_IPS") or "127.0.0.1").strip()
     print(f"\n🚀 启动 Web 服务... 监听 {host}:{port}（反代/HTTPS 在前）\n")
 
     app.state.auth_required = True
@@ -29,5 +32,5 @@ if __name__ == "__main__":
         port=port,
         log_level="info",
         proxy_headers=True,            # 信任 nginx 注入的 X-Forwarded-For（配合 §5.7 real_ip）
-        forwarded_allow_ips="127.0.0.1",
+        forwarded_allow_ips=forwarded_allow_ips,
     )

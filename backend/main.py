@@ -875,12 +875,24 @@ async def _sse_with_heartbeat(sync_gen_factory, interval=None):
                     break
                 if stop_event.is_set():
                     break
-                loop.call_soon_threadsafe(queue.put_nowait, item)
+                try:
+                    loop.call_soon_threadsafe(queue.put_nowait, item)
+                except RuntimeError:
+                    break  # loop 已关（消费侧消失）→ 停推进，finally 仍 gen.close() 释放锁
         finally:
             if gen is not None:
                 gen.close()  # 断连：GeneratorExit 抵达当前 yield → chat_stream finally 释放 request lock
-            if not loop.is_closed():
+            try:
                 loop.call_soon_threadsafe(queue.put_nowait, DONE)
+            except RuntimeError:
+                pass  # loop 已关，消费侧已走，无需再发 DONE
+
+    def _log_pump_exception(f):
+        # pump 异常被 future 捕获——主动取回并记日志（不再静默吞掉：loop-close 竞态等
+        # wrapper 级故障否则会变成无 [DONE] 的干净 EOF，难排查）。
+        exc = f.exception()
+        if exc is not None:
+            logger.warning("SSE heartbeat pump raised: %s", exc, exc_info=exc)
 
     fut = loop.run_in_executor(_CHAT_STREAM_EXECUTOR, pump)
     try:
@@ -896,9 +908,9 @@ async def _sse_with_heartbeat(sync_gen_factory, interval=None):
     finally:
         stop_event.set()   # 断连/正常结束：令 pump 在下个 item 后停（不排空整轮、不漏锁）
         if fut.done():
-            fut.exception()                                  # 取回异常避免 warning
+            _log_pump_exception(fut)
         else:
-            fut.add_done_callback(lambda f: f.exception())   # 后台收尾、不阻塞清理
+            fut.add_done_callback(_log_pump_exception)   # 后台收尾、不阻塞清理
 
 
 @app.post("/api/projects/{project_id}/files/{file_path:path}")

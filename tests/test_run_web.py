@@ -12,7 +12,12 @@ class RunWebConfigTests(unittest.TestCase):
 
     def test_uvicorn_trusts_proxy_headers(self):
         self.assertIn("proxy_headers=True", self.src)
-        self.assertIn('forwarded_allow_ips="127.0.0.1"', self.src)
+        self.assertIn("forwarded_allow_ips=forwarded_allow_ips", self.src)
+
+    def test_forwarded_allow_ips_env_configurable_default_loopback(self):
+        # 默认 127.0.0.1（反代同机），可经 CRA_FORWARDED_ALLOW_IPS 覆盖（nginx 走 ::1/bridge 时）
+        self.assertIn("CRA_FORWARDED_ALLOW_IPS", self.src)
+        self.assertIn('"127.0.0.1"', self.src)
 
     def test_no_stale_hardcoded_external_ip(self):
         self.assertNotIn("57.129.103.127", self.src)
