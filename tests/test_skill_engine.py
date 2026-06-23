@@ -59,6 +59,14 @@ class SkillEngineTests(unittest.TestCase):
                     engine.read_material_file(pid, mats[0]["id"])
             self.assertIn("过大", str(ctx.exception))
 
+    def test_read_document_without_converter_raises_not_legacy(self):
+        # F2：删 legacy 回退后，无 converter 必须明确报错（不再有 _legacy_read_document）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            self.assertFalse(hasattr(engine, "_legacy_read_document"))
+            with self.assertRaises(ValueError):
+                engine._converter_read_document("nonexistent", Path(tmp) / "x.txt")
+
     def test_add_materials_rejects_oversized_import(self):
         """add_materials raises ValueError before copying an oversized file."""
         from backend import material_limits as _ml
