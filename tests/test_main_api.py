@@ -1486,23 +1486,33 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
 
     @mock.patch("backend.main.export_reviewable_draft")
     def test_export_draft_endpoint_returns_output_path(self, mock_export_draft):
-        self.engine.get_primary_report_path.return_value = "D:/tmp/report.md"
-        self.engine.get_script_path.return_value = "D:/skill/scripts/export_draft.ps1"
-        self.engine.ensure_output_dir.return_value = "D:/tmp/output"
+        self.engine.get_primary_report_path.return_value = "/tmp/report_draft_v1.md"
+        self.engine.ensure_output_dir.return_value = "/tmp/output"
         mock_export_draft.return_value = {
             "status": "ok",
-            "output": "已生成可审草稿: D:/tmp/output/report.docx",
-            "output_path": "D:/tmp/output/report.docx",
+            "output": "已生成可审草稿: /tmp/output/report_draft_v1.docx",
+            "output_path": "/tmp/output/report_draft_v1.docx",
+            "filename": "report_draft_v1.docx",
         }
 
         response = self.client.post("/api/projects/demo/export-draft")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["output_path"], "D:/tmp/output/report.docx")
+        self.assertEqual(response.json()["output_path"], "/tmp/output/report_draft_v1.docx")
+        self.assertEqual(response.json()["filename"], "report_draft_v1.docx")
+        # 新签名：不再传 script_path
         mock_export_draft.assert_called_once_with(
-            "D:/tmp/report.md",
-            "D:/tmp/output",
-            "D:/skill/scripts/export_draft.ps1",
+            "/tmp/report_draft_v1.md",
+            "/tmp/output",
+        )
+
+    def test_export_draft_route_not_blocking_async(self):
+        # spec §3.2 守卫：导出端点必须是同步 def（FastAPI 跑线程池）或经 run_in_threadpool，
+        # 不得在 async 路由里直接同步调 pandoc 阻塞事件循环。
+        import inspect
+        self.assertFalse(
+            inspect.iscoroutinefunction(main_module.export_draft),
+            "export_draft 必须是同步 def 路由（线程池执行），否则阻塞事件循环掐住 SSE 心跳",
         )
 
     @mock.patch("backend.main.get_chat_handler")

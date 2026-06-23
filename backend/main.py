@@ -1102,12 +1102,13 @@ async def independent_review_discard(
 
 
 @app.post("/api/projects/{project_id}/export-draft")
-async def export_draft(scope: ProjectScope = Depends(require_project)):
+def export_draft(scope: ProjectScope = Depends(require_project)):
+    # 同步 def 路由：FastAPI 在线程池执行，pandoc 阻塞子进程不卡事件循环（spec §3.2）。
+    # 导出不取 per-project request lock（spec §3.6：chat_stream 整轮持 RLock，R3 原子写保证锁外读安全）。
     try:
         report_path = scope.engine.get_primary_report_path(scope.project_id)
         output_dir = scope.engine.ensure_output_dir(scope.project_id)
-        script_path = scope.engine.get_script_path("export_draft.ps1")
-        return export_reviewable_draft(report_path, output_dir, script_path)
+        return export_reviewable_draft(report_path, output_dir)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
