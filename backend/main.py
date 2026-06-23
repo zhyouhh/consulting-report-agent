@@ -1353,9 +1353,50 @@ def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(
     )
 
 
+class _SPAStaticFiles(StaticFiles):
+    """SPA 静态服务 + 正确缓存头。
+
+    StaticFiles 默认只发 ETag/Last-Modified、**不发 Cache-Control** → 浏览器对 index.html
+    做启发式缓存，重新部署后陈旧 shell 仍指向旧 hash bundle；旧 bundle 被原子 swap 删除后
+    返回 404 → React 脚本加载失败 → 空 #root → 满屏深色空白页（控制台静默 404、UI 无报错）。
+    （2026-06-23 调试定位。）
+
+    修复（判定基于请求 path——当前 Vite dist 只有根 index.html，无嵌套 index.html / 深链回退）：
+    - 根目录请求 + 显式 `*.html` 请求 → `no-cache, must-revalidate`：每次带条件请求校验，
+      确保始终拿到最新 bundle 引用（ETag 命中走 304、不重传，开销极小）。
+    - 带内容 hash 的 `assets/*` → `immutable` 长缓存：hash 变即换 URL，永不陈旧。
+
+    缓存头**按规范化路径**判定（不仅看 content-type）——因为条件请求命中时 StaticFiles 返回
+    `NotModifiedResponse`(304)，它不带 content-type，只按 content-type 判会漏掉 304 → 旧缓存
+    学不到 no-cache（codex BLOCKER）。按 path 判则 200 与 304 都覆盖。
+    """
+
+    @staticmethod
+    def _cache_control_for(path):
+        # Starlette 的 path：根目录请求为 "."；Windows 下分隔符可能是 "\\" → 先规范化。
+        norm = path.replace("\\", "/").strip("/")
+        if norm in ("", "."):                       # 根目录请求 → 渲染 index.html
+            return "no-cache, must-revalidate"
+        base = norm.rsplit("/", 1)[-1]
+        if base.lower().endswith(".html"):          # 显式 .html 请求（大小写不敏感）
+            return "no-cache, must-revalidate"
+        if norm.split("/", 1)[0] == "assets":       # 仅根级 assets/（按路径组件，非子串误命中）
+            return "public, max-age=31536000, immutable"
+        return None
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        cache_control = self._cache_control_for(path)
+        if cache_control:
+            # 200 FileResponse 与 304 NotModifiedResponse 都是带可变 headers 的 Response，
+            # 设头不该失败；若失败是真回归，不静默吞（codex NIT：去掉宽 except）。
+            response.headers["Cache-Control"] = cache_control
+        return response
+
+
 frontend_dist = get_base_path() / "frontend" / "dist"
 if frontend_dist.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="static")
+    app.mount("/", _SPAStaticFiles(directory=str(frontend_dist), html=True), name="static")
 
 
 def start_server():
