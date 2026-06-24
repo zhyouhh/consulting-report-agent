@@ -7,6 +7,7 @@ import { showError, showSuccess } from '../utils/toast'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { getDefaultPreviewFile } from '../utils/workspaceFiles'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
+import { DEFAULT_WORKSPACE_WIDTH } from '../utils/workspaceResize'
 
 const WorkspacePanel = forwardRef(function WorkspacePanel({
   projectId,
@@ -20,6 +21,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   onInsertPrompt,
   onTriggerSystemTurn,
   onDropPendingReviewTriggers,
+  width,
 }, ref) {
   const [activeTab, setActiveTab] = useState('stage')
   const filePreviewRef = useRef(null)
@@ -260,7 +262,10 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   const wsSummary = summarizeWorkspace(workspace)
 
   return (
-    <div className="w-[28rem] bg-[#1a1a2e] border-l border-[#2a2a4a] flex flex-col">
+    <div
+      className="bg-[#1a1a2e] border-l border-[#2a2a4a] flex flex-col flex-shrink-0"
+      style={{ width: width ?? DEFAULT_WORKSPACE_WIDTH }}
+    >
       <div className="p-4 border-b border-[#2a2a4a]">
         <div className="flex gap-2">
           <button

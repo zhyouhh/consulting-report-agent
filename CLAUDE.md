@@ -337,6 +337,21 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - `Login.jsx` 提交前客户端校验长度（对齐后端 `min_length`：用户名≥3、密码≥6）+ 提交 **trim 后的用户名**（密码不 trim）。`frontend/tests/authError.test.mjs` + `loginErrorHandling.source.test.mjs` 锁死。
 - **已知 follow-up（非阻塞，已记 worklist）**：`IndependentReviewDrawer.jsx` 有同类「把 detail 直接进渲染态」写法——当前不可达（审查端点手解析返回字符串 detail）且已被新全局 ErrorBoundary 兜底；彻底治理可抽共享 `normalizeApiErrorDetail`。
 
+## 中右分栏拖动 + 输入框乐观清空（2026-06-25）
+
+两个纯前端 UX 修复（后端/DeepSeek/信任边界/租户隔离零改动）。改主布局或聊天发送逻辑前必读。
+
+**输入框乐观清空**（`ChatPanel.jsx`）：原 `setInput('')` 在 `startStream` 末尾（流式整轮结束才清），消息发出后滞留输入框直到回答完。现 `sendMessage` 点发送即 `setInput('')`（chatbox 风格），`startStream` 成功分支**不再** `setInput`。失败/上传失败/中止经 `restoreInputForRetry()` **双重守卫**回填原文，缺一不可：① `sendSeqRef.current !== sendSeq`（其间发起了更新的发送）则不回填——防旧的被中止发送盖回已被下一条发送清空的输入框；② `setInput(prev => prev === '' ? trimmedInput : prev)`——仅输入框仍空才回填，防点「停止」提前解锁输入框后覆盖用户新打的字。**别改回无守卫的 `setInput(trimmedInput)`**（codex 红队两轮挖出的 abort race）。锁测 `frontend/tests/chatPanelComposerClear.source.test.mjs`。
+
+**中右分栏可拖动**（`App.jsx` + `WorkspacePanel.jsx` + `utils/workspaceResize.js`）：`WorkspacePanel` 根 div 从写死 `w-[28rem]` 改为接 `width` prop（`style={{ width }}` + `flex-shrink-0`）；`App.jsx` 持 `workspaceWidth` state + 竖向拖动条（`cursor-col-resize`，`role="separator"`，沿用 `FilePreviewPanel` 上下拖动的 window 监听 + cleanup ref 模式）+ localStorage(`cra:workspaceWidth`) 持久化。宽度数学抽纯函数 `workspaceResize.js`（`clampWorkspaceWidth`/`computeWorkspaceWidth`/`parseStoredWorkspaceWidth`）。**关键不变式（codex 双轨 + 2 轮红队的 5 BLOCKER）**：
+- 容器 ref 必须挂在**排除固定宽 Sidebar 的内层 wrapper**（`<div ref={setContainerRef} className="flex flex-1 min-w-0">` 内含 ChatPanel + 手柄 + WorkspacePanel）。clamp 按这个可调区域预留 `MIN_CHAT_WIDTH`——**绝不**把整窗宽（含 Sidebar）算进去，否则聊天区被挤到 ~100px。
+- 存储宽度经 **callback ref `setContainerRef`** 在容器挂载（登录后）时按真实 `getBoundingClientRect().width` **重夹一次**（防存的宽超出当前窗口、启动就挤没聊天区）；window `resize` 另有 effect 持续重夹。
+- `clampWorkspaceWidth` 容器窄于 `MIN_CHAT_WIDTH` 时 floor 0（不返回负宽）；`parseStoredWorkspaceWidth` 显式判 null/""（`Number(null)===0` 会被误夹到 MIN）。
+- 中间列 `ChatPanel`(flex-1) + 其输入框/上下文用量框靠 flexbox 自动重排，**无需手动同步宽度**。
+- 回归：`frontend/tests/workspaceResize.test.mjs`（纯函数）+ `workspaceResize.source.test.mjs`（接线/容器排除 Sidebar/callback-ref 重夹）。
+
+**部署（前端 only 的通用流程）**：`dist` gitignore、服务器不 build → 本地 `npm run build` → tar → `VPS-fix-private/.push-file.py kr-web-01` 推 → 服务器解到 `dist.new` + `chmod -R a+rX` + 原子 `mv dist dist.old && mv dist.new dist`，**无须重启 systemd**（`_SPAStaticFiles` 按请求读盘、SPA shell no-cache 用户免硬刷），`dist.old` 留回滚。本次 bundle `index-D9CspGtr.js`。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。

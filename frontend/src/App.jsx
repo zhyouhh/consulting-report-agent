@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Toaster } from 'react-hot-toast'
 import Sidebar from './components/Sidebar'
 import Login from './components/Login'
@@ -12,6 +12,9 @@ import { setUnauthedHandler } from './api'
 import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
 import { mergeMaterials, removeMaterialById } from './utils/chatMaterials'
 import { getCurrentProject, isSameProjectSelection, reconcileCurrentProjectId } from './utils/projectSelection'
+import { clampWorkspaceWidth, computeWorkspaceWidth, parseStoredWorkspaceWidth } from './utils/workspaceResize'
+
+const WORKSPACE_WIDTH_STORAGE_KEY = 'cra:workspaceWidth'
 
 function App() {
   const [projects, setProjects] = useState([])
@@ -27,9 +30,18 @@ function App() {
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
   const [showAdmin, setShowAdmin] = useState(false)
+  // 中右分栏宽度（px），可拖动；初始从 localStorage 读上次偏好（坏值回落默认 28rem）。
+  const [workspaceWidth, setWorkspaceWidth] = useState(() =>
+    parseStoredWorkspaceWidth(
+      typeof localStorage !== 'undefined' ? localStorage.getItem(WORKSPACE_WIDTH_STORAGE_KEY) : null,
+    ),
+  )
   const activeProjectRef = useRef(currentProjectId)
   const chatPanelRef = useRef(null)
   const workspacePanelRef = useRef(null)
+  const containerRef = useRef(null)            // 主 flex 行：给 computeWorkspaceWidth 提供矩形
+  const workspaceResizeCleanupRef = useRef(null) // 活跃拖动的 window 监听清理器
+  const latestWorkspaceWidthRef = useRef(null)   // 拖动中最新宽度，松手时落 localStorage（避闭包旧值）
   const quotaRefreshSeqRef = useRef(0)   // 额度刷新请求序号：只让最后发起的 /me 回包落地（防同 uid 乱序覆盖）
 
   useEffect(() => {
@@ -248,6 +260,58 @@ function App() {
     proceed()
   }
 
+  // 容器 = 「聊天区 + 分隔条 + 工作区」可调区域（排除固定宽的左侧 Sidebar）——clamp 须按这个区域
+  // 预留 MIN_CHAT_WIDTH，否则把整窗宽（含 Sidebar）算进去会让聊天区被挤到 ~100px。容器在主界面
+  // 渲染（登录后）才挂载，故用 callback ref：挂载即用真实宽度把存储宽度夹一次（修「存的宽超出当前窗口、
+  // 启动就把聊天区挤没」）。
+  const setContainerRef = useCallback((node) => {
+    containerRef.current = node
+    if (node) {
+      const rect = node.getBoundingClientRect()
+      setWorkspaceWidth((prev) => clampWorkspaceWidth(prev, rect.width))
+    }
+  }, [])
+
+  // 中右分隔条拖动：沿用 FilePreviewPanel 上下拖动模式（mousedown 绑 window mousemove/mouseup，
+  // cleanup ref 防重复绑定/泄漏）。工作区宽度变 → ChatPanel(flex-1) 与其内部输入框/用量框
+  // 自动重排，无需手动同步宽度。松手时把最终宽度落 localStorage 记住偏好。
+  const startWorkspaceResize = (e) => {
+    e.preventDefault()
+    workspaceResizeCleanupRef.current?.()
+    const prevUserSelect = document.body.style.userSelect
+    document.body.style.userSelect = 'none' // 拖动期间不蓝选文本
+    const onMove = (ev) => {
+      const next = computeWorkspaceWidth(ev.clientX, containerRef.current?.getBoundingClientRect())
+      latestWorkspaceWidthRef.current = next
+      setWorkspaceWidth(next)
+    }
+    const cleanup = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', cleanup)
+      document.body.style.userSelect = prevUserSelect // 还原拖动前的原值，不抹掉已有内联值
+      workspaceResizeCleanupRef.current = null
+      if (latestWorkspaceWidthRef.current != null) {
+        try { localStorage.setItem(WORKSPACE_WIDTH_STORAGE_KEY, String(latestWorkspaceWidthRef.current)) } catch { /* 隐私模式忽略 */ }
+      }
+    }
+    workspaceResizeCleanupRef.current = cleanup
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', cleanup)
+  }
+
+  // 卸载兜底：拖动中途卸载不留泄漏监听。
+  useEffect(() => () => workspaceResizeCleanupRef.current?.(), [])
+
+  // 窗口缩小后重新夹宽度，防工作区占满把聊天区挤没（拖动时的 clamp 不覆盖 resize 场景）。
+  useEffect(() => {
+    const onResize = () => {
+      const rect = containerRef.current?.getBoundingClientRect()
+      setWorkspaceWidth((prev) => clampWorkspaceWidth(prev, rect?.width))
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
   const handleMaterialsMerged = (incomingMaterials) => {
     setMaterials(prev => mergeMaterials(prev, incomingMaterials))
     setWorkspace(prev => {
@@ -306,35 +370,49 @@ function App() {
           onLoggedOut={() => setAuthUser(null)}
           onOpenAdmin={() => setShowAdmin(true)}
         />
-        <ChatPanel
-          ref={chatPanelRef}
-          projectId={currentProjectId}
-          project={currentProject}
-          settings={settings}
-          workspace={workspace}
-          materials={materials}
-          onMaterialsMerged={handleMaterialsMerged}
-          onProjectMutated={handleProjectMutated}
-          onToggleWorkspacePanel={handleToggleWorkspacePanel}
-          injectedPrompt={injectedPrompt}
-          onInjectedPromptConsumed={() => setInjectedPrompt(null)}
-        />
-        {showWorkspacePanel && (
-          <WorkspacePanel
-            ref={workspacePanelRef}
+        {/* 可调区域（不含固定宽 Sidebar）：clamp 的 MIN_CHAT_WIDTH 须按这个区域预留。 */}
+        <div ref={setContainerRef} className="flex flex-1 min-w-0">
+          <ChatPanel
+            ref={chatPanelRef}
             projectId={currentProjectId}
             project={currentProject}
+            settings={settings}
             workspace={workspace}
             materials={materials}
-            refreshToken={workspaceRefreshToken}
-            onMaterialDeleted={handleMaterialDeleted}
+            onMaterialsMerged={handleMaterialsMerged}
             onProjectMutated={handleProjectMutated}
-            onCheckpointSet={loadWorkspace}
-            onInsertPrompt={(text) => setInjectedPrompt(text)}
-            onTriggerSystemTurn={(triggerType, metadata) => chatPanelRef.current?.triggerSystemTurn(triggerType, metadata)}
-            onDropPendingReviewTriggers={(triggerType) => chatPanelRef.current?.dropPendingReviewTriggers(triggerType)}
+            onToggleWorkspacePanel={handleToggleWorkspacePanel}
+            injectedPrompt={injectedPrompt}
+            onInjectedPromptConsumed={() => setInjectedPrompt(null)}
           />
-        )}
+          {showWorkspacePanel && (
+            <>
+              {/* 中右分隔条：左右拖动调整工作区宽度。手柄随面板一起显隐。 */}
+              <div
+                onMouseDown={startWorkspaceResize}
+                role="separator"
+                aria-orientation="vertical"
+                className="w-1.5 cursor-col-resize bg-[#2a2a4a] hover:bg-[#3a3a6a] flex-shrink-0"
+                title="拖动调整宽度"
+              />
+              <WorkspacePanel
+                ref={workspacePanelRef}
+                projectId={currentProjectId}
+                project={currentProject}
+                workspace={workspace}
+                materials={materials}
+                refreshToken={workspaceRefreshToken}
+                width={workspaceWidth}
+                onMaterialDeleted={handleMaterialDeleted}
+                onProjectMutated={handleProjectMutated}
+                onCheckpointSet={loadWorkspace}
+                onInsertPrompt={(text) => setInjectedPrompt(text)}
+                onTriggerSystemTurn={(triggerType, metadata) => chatPanelRef.current?.triggerSystemTurn(triggerType, metadata)}
+                onDropPendingReviewTriggers={(triggerType) => chatPanelRef.current?.dropPendingReviewTriggers(triggerType)}
+              />
+            </>
+          )}
+        </div>
         {showAdmin && authUser?.is_admin && <AdminPanel onClose={() => setShowAdmin(false)} />}
       </div>
     </ErrorBoundary>

@@ -76,6 +76,9 @@ const ChatPanel = forwardRef(function ChatPanel({
   const contentFlushTimersRef = useRef(new Map())
   // C5: queued system triggers (independent-review completions that arrived while the chat was busy).
   const pendingTriggerQueueRef = useRef([])
+  // 每次普通发送自增的序号；失败恢复时校验「仍是最近一次发送」，防旧的被中止发送把原文盖回
+  // 已被新发送清空的输入框（codex 红队 abort race v2）。
+  const sendSeqRef = useRef(0)
   const connection = describeConnectionMode(settings || {})
   const workspaceSummary = summarizeWorkspace(workspace || {})
   const selectedMaterials = materials.filter(material => selectedMaterialIds.includes(material.id))
@@ -617,7 +620,7 @@ const ChatPanel = forwardRef(function ChatPanel({
       setLoading(false)
       setAbortController(current => (current === controller ? null : current))
       if (!streamFailed && renderUserBubble) {
-        setInput('')
+        // 输入框清空已由 sendMessage 乐观完成；此处只清材料选择 / 附件队列。
         setSelectedMaterialIds([])
         clearPendingAttachmentQueue()
       } else if (streamFailed && renderUserBubble) {
@@ -703,6 +706,18 @@ const ChatPanel = forwardRef(function ChatPanel({
     const trimmedInput = input.trim()
     if (!trimmedInput || !projectId || uploading) return
 
+    // chatbox 风格乐观清空：点发送即把消息转移到气泡、输入框立刻清空（不再等这一轮回答结束）。
+    // 任一失败路径（上传失败 / 发送失败 / 中止）再把原文恢复回输入框，保留可重试体验。
+    // 恢复经 restoreInputForRetry 双重守卫：① 序号未变（其间未发起更新的发送）② 输入框仍为空
+    //（用户未另起新输入）。两者缺一都不回填——既防 abort 后覆盖用户新打的字，也防旧的被中止
+    // 发送把原文盖回已被「下一条发送」清空的输入框。
+    const sendSeq = ++sendSeqRef.current
+    const restoreInputForRetry = () => {
+      if (sendSeqRef.current !== sendSeq) return
+      setInput(prev => prev === '' ? trimmedInput : prev)
+    }
+    setInput('')
+
     const persistentDocumentFiles = pendingDocumentAttachments.map(attachment => attachment.file)
     let requestAttachedMaterialIds = selectedMaterialIds
     let transientAttachmentsPayload = []
@@ -730,18 +745,22 @@ const ChatPanel = forwardRef(function ChatPanel({
         const prefix = preparationStage === 'images' ? '处理图片失败: ' : '上传材料失败: '
         showError(prefix + detail)
         setUploading(false)
+        restoreInputForRetry() // 上传失败：守卫式回填原文便于重试
         return
       }
       setUploading(false)
     }
 
-    await startStream({
+    const streamOk = await startStream({
       messageText: trimmedInput,
       systemTrigger: null,
       attachedMaterialIds: requestAttachedMaterialIds,
       transientAttachments: transientAttachmentsPayload,
       renderUserBubble: true,
     })
+    if (!streamOk) {
+      restoreInputForRetry() // 发送失败 / 用户中止：守卫式回填原文便于重试
+    }
   }
 
   const handleSelectFiles = (event) => {
