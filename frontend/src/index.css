@@ -45,3 +45,6 @@ body{margin:0;font-family:'Hanken Grotesk','PingFang SC','Microsoft YaHei','Noto
 .thinking-block{margin:8px 0;padding:6px 10px;border-left:3px solid rgb(var(--col));background:rgb(var(--card2));font-size:12px;color:rgb(var(--t2));border-radius:7px;}
 .thinking-block summary{cursor:pointer;font-weight:500;color:rgb(var(--text));user-select:none;}
 .thinking-block .thinking-content{margin-top:6px;max-height:240px;overflow-y:auto;font-family:'IBM Plex Mono',monospace;white-space:pre-wrap;word-break:break-word;color:rgb(var(--t2));}
+
+@keyframes btn-highlight-pulse{0%,100%{opacity:.72}50%{opacity:1}}
+.btn-highlight-pulse{animation:btn-highlight-pulse 1.4s ease-in-out infinite;}

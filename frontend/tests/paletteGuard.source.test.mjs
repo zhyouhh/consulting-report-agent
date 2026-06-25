@@ -11,7 +11,7 @@ const ALLOW_PENDING = new Set([
   'AdminPanel.jsx','FilePreviewPanel.jsx',
   'IndependentReviewDrawer.jsx',
   'ProjectCreateModal.jsx','SettingsModal.jsx',
-  'StagePanel.jsx','WorkspacePanel.jsx',
+  'WorkspacePanel.jsx',
 ])
 function* walk(d){ for (const e of readdirSync(d, {withFileTypes:true})) {
   const p = d + e.name; if (e.isDirectory()) { if (e.name!=='assets') yield* walk(p+'/') }

@@ -3,6 +3,7 @@ import { summarizeWorkspace, shouldShowPresentationStage, getStageName } from '.
 import { getStageButtonState } from '../utils/stagePanelButtons'
 import StageAdvanceControl from './StageAdvanceControl'
 import RollbackMenu from './RollbackMenu'
+import { IconCheck } from './icons'
 
 // ── §9.6 Progress bar ────────────────────────────────────────────────────────
 // Labels come from the single STAGE_NAMES source of truth (see
@@ -20,47 +21,59 @@ function getStageIndex(code) {
   return STAGE_ORDER.indexOf(code)
 }
 
-function ProgressBar({ stageCode, deliveryMode, checkpoints }) {
+function Stepper({ stageCode, deliveryMode }) {
   const stages = shouldShowPresentationStage(deliveryMode)
     ? REPORT_AND_PRESENTATION_STAGES
     : REPORT_ONLY_STAGES
 
   const currentIdx = getStageIndex(stageCode)
   const isDone = stageCode === 'done'
+  const total = stages.length
+
+  // Compute fill percentage: from first dot to current dot
+  // Each dot is at position i/(total-1) * 100%
+  const currentDotPos = isDone
+    ? 100
+    : total > 1 ? (currentIdx / (total - 1)) * 100 : 0
+  const stepPct = currentDotPos
 
   return (
-    <div className="flex gap-0.5 mt-3">
-      {stages.map(({ code, label }) => {
-        const segIdx = getStageIndex(code)
-        const isCompleted = isDone || segIdx < currentIdx
-        const isCurrent = !isDone && segIdx === currentIdx
+    <div className="relative mt-[18px] px-1">
+      {/* Track line */}
+      <div className="absolute left-[11px] right-[11px] top-[6px] h-[2px] bg-track" />
+      {/* Fill line */}
+      <div
+        className="absolute left-[11px] top-[6px] h-[2px] bg-abright transition-all duration-500"
+        style={{ width: `calc(${stepPct}% * (100% - 22px) / 100%)` }}
+      />
+      {/* Dots row */}
+      <div className="relative flex justify-between">
+        {stages.map(({ code, label }, i) => {
+          const segIdx = getStageIndex(code)
+          const isCompleted = isDone || segIdx < currentIdx
+          const isCurrent = !isDone && segIdx === currentIdx
 
-        const bgColor = isCompleted
-          ? 'bg-[#4a5fcc]'
-          : isCurrent
-            ? 'bg-[#3b4fa8]'
-            : 'bg-[#1e2140]'
-
-        const borderColor = isCurrent ? 'border-[#6070e0]' : 'border-transparent'
-
-        return (
-          <div
-            key={code}
-            className="flex-1 group relative"
-            title={`${label}${isCompleted ? ' ✓' : isCurrent ? ' （当前）' : ''}`}
-          >
-            <div className={`h-1.5 rounded-full border ${bgColor} ${borderColor} transition-all`} />
-            {/* Hover tooltip */}
-            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-30 pointer-events-none">
-              <div className="bg-[#0e1020] border border-[#2f3158] rounded-lg px-2.5 py-1.5 text-xs text-[#c8ccee] whitespace-nowrap shadow-lg">
+          return (
+            <div key={code} className="flex flex-col items-center gap-[7px]">
+              {isCompleted ? (
+                <div className="w-[13px] h-[13px] rounded-full bg-stepdone" />
+              ) : isCurrent ? (
+                <div className="w-[15px] h-[15px] rounded-full bg-card border-4 border-abright" />
+              ) : (
+                <div className="w-[13px] h-[13px] rounded-full bg-card border-2 border-dotfuture" />
+              )}
+              <span
+                className={[
+                  'text-[9px] whitespace-nowrap',
+                  isCurrent ? 'text-abright font-medium' : 'text-t3',
+                ].join(' ')}
+              >
                 {label}
-                {isCompleted && <span className="ml-1 text-[#64ffda]">✓</span>}
-                {isCurrent && <span className="ml-1 text-[#a8b0ff]">当前</span>}
-              </div>
+              </span>
             </div>
-          </div>
-        )
-      })}
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -91,19 +104,19 @@ function QualityProgressBar({ qualityProgress, stalledSince, stageCode }) {
     : null
 
   return (
-    <div className="mt-3 space-y-1.5">
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-[#8f93c9]">{displayLabel}</span>
-        <span className="text-xs text-[#5a5e80]">{Math.round(pct)}%</span>
+    <div className="mt-5">
+      <div className="flex justify-between items-baseline mb-[6px]">
+        <span className="text-12 text-t2">正文字数</span>
+        <span className="text-12 text-text font-mono tabular-nums">{displayLabel}</span>
       </div>
-      <div className="h-1 rounded-full bg-[#1e2140] overflow-hidden">
+      <div className="h-[6px] rounded-[3px] bg-track overflow-hidden">
         <div
-          className="h-full rounded-full bg-[#4a5fcc] transition-all duration-500"
+          className="h-full rounded-[3px] bg-abright transition-all duration-500"
           style={{ width: `${pct}%` }}
         />
       </div>
       {stalledMessage && (
-        <p className="text-xs text-[#5a5e80] italic mt-1">{stalledMessage}</p>
+        <p className="text-12 text-t3 italic mt-1">{stalledMessage}</p>
       )}
     </div>
   )
@@ -133,6 +146,17 @@ export default function StagePanel({
     lengthFallbackUsed,
     checkpoints,
   } = summary
+
+  const stages = shouldShowPresentationStage(deliveryMode)
+    ? REPORT_AND_PRESENTATION_STAGES
+    : REPORT_ONLY_STAGES
+  const totalStages = stages.length
+
+  const stageNum = (() => {
+    const idx = stages.findIndex(s => s.code === stageCode)
+    return idx >= 0 ? idx + 1 : (stageCode === 'done' ? totalStages : '?')
+  })()
+
   const independentReviewButton = getStageButtonState(
     'independent_review',
     stageCode,
@@ -140,23 +164,30 @@ export default function StagePanel({
     { reviewRunning },
   )
   const exportButton = getStageButtonState('export_draft', stageCode, summary.flags)
+
   const s5ToolButtonClass = (state) => [
-    'flex-1 px-3 py-2 rounded-lg text-sm transition-colors disabled:bg-[#20203a] disabled:text-[#77789a]',
+    'flex-1 px-3 py-2 rounded-btn text-13 font-medium transition-colors disabled:opacity-40',
     state.highlighted
-      ? 'btn-highlight-pulse bg-[#38645b] text-[#f4fffb] hover:bg-[#43776c]'
-      : 'bg-[#26315d] text-[#eef1ff] hover:bg-[#32407a]',
+      ? 'btn-highlight-pulse bg-accent text-white hover:opacity-90'
+      : 'border border-col bg-card2 text-text hover:bg-track',
   ].join(' ')
 
   return (
-    <div className="flex-1 overflow-y-auto p-5 bg-[#101224]">
-      <div className="rounded-2xl border border-[#2f3158] bg-[#171a31] p-5 mb-4">
+    <div className="flex-1 overflow-y-auto p-4 bg-ws">
 
-        {/* Header row: stage label + rollback menu */}
-        <div className="flex items-start justify-between gap-3 mb-1">
+      {/* Stage card */}
+      <div className="bg-card border border-border rounded-card p-[15px]">
+
+        {/* Header row */}
+        <div className="flex justify-between items-start">
           <div>
-            <div className="text-xs uppercase tracking-[0.24em] text-[#64ffda] mb-2">Workspace</div>
-            <h3 className="text-xl font-semibold text-[#eef1ff]">当前阶段 {stageLabel}</h3>
-            <p className="text-sm text-[#8f93c9] mt-1">状态：{statusLabel}</p>
+            <div className="text-11 text-t3">
+              当前阶段 · {stageNum} / {totalStages}
+            </div>
+            <div className="text-xl font-bold text-text mt-[3px] tracking-tight">
+              {stageLabel}
+            </div>
+            <div className="text-12 text-t2 mt-[2px]">状态：{statusLabel}</div>
           </div>
           <RollbackMenu
             projectId={projectId}
@@ -166,12 +197,8 @@ export default function StagePanel({
           />
         </div>
 
-        {/* §9.6 Progress bar */}
-        <ProgressBar
-          stageCode={stageCode}
-          deliveryMode={deliveryMode}
-          checkpoints={checkpoints}
-        />
+        {/* Stepper */}
+        <Stepper stageCode={stageCode} deliveryMode={deliveryMode} />
 
         {/* §9.3 Inline quality counter for S2/S3 */}
         {(stageCode === 'S2' || stageCode === 'S3') && (
@@ -207,7 +234,7 @@ export default function StagePanel({
             <button
               type="button"
               onClick={onExportDraft}
-              className="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700 transition-colors"
+              className="flex-1 px-3 py-2 rounded-btn border border-asoftb bg-asoft text-asoftt text-13 font-medium hover:opacity-90 transition-colors"
             >
               导出可审草稿
             </button>
@@ -215,27 +242,64 @@ export default function StagePanel({
         </div>
       </div>
 
-      {/* Completed / next-actions grid */}
-      <div className="rounded-2xl border border-[#2f3158] bg-[#171a31] p-5 mb-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div className="rounded-xl bg-[#111428] border border-[#272a4f] p-4">
-            <div className="text-sm font-medium text-[#64ffda] mb-3">已完成</div>
-            <div className="space-y-2">
-              {completedItems.length > 0 ? completedItems.map(item => (
-                <div key={item} className="text-sm text-[#d9dcf5]">[x] {item}</div>
-              )) : <div className="text-sm text-[#8f93c9]">还没有已完成项</div>}
+      {/* Completed / next-actions checklist card */}
+      <div className="bg-card border border-border rounded-card mt-[13px]">
+
+        {/* Completed section */}
+        {completedItems.length > 0 && (
+          <div className="px-[15px] pt-[13px] pb-[3px]">
+            <div className="text-11 font-bold tracking-[0.04em] text-success mb-[2px]">
+              已完成
             </div>
+            {completedItems.map((item, i) => (
+              <div
+                key={item}
+                className={[
+                  'flex gap-[10px] items-center py-2',
+                  i > 0 ? 'border-t border-hair' : '',
+                ].join(' ')}
+              >
+                <IconCheck size={14} className="text-success flex-shrink-0" />
+                <span className="text-13 text-text">{item}</span>
+              </div>
+            ))}
           </div>
-          <div className="rounded-xl bg-[#111428] border border-[#272a4f] p-4">
-            <div className="text-sm font-medium text-[#64ffda] mb-3">下一步</div>
-            <div className="space-y-2">
-              {nextActions.length > 0 ? nextActions.map(item => (
-                <div key={item} className="text-sm text-[#d9dcf5]">[ ] {item}</div>
-              )) : <div className="text-sm text-[#8f93c9]">暂无下一步建议</div>}
+        )}
+
+        {/* Divider between sections */}
+        {completedItems.length > 0 && nextActions.length > 0 && (
+          <div className="h-px bg-hair" />
+        )}
+
+        {/* Next actions section */}
+        {nextActions.length > 0 && (
+          <div className="px-[15px] pt-[13px] pb-[13px]">
+            <div className="text-11 font-bold tracking-[0.04em] text-abright mb-[2px]">
+              下一步
             </div>
+            {nextActions.map((item, i) => (
+              <div
+                key={item}
+                className={[
+                  'flex gap-[10px] items-center py-2',
+                  i > 0 ? 'border-t border-hair' : '',
+                ].join(' ')}
+              >
+                <div className="w-[14px] h-[14px] rounded-full border-[1.6px] border-dotfuture flex-shrink-0" />
+                <span className="text-13 text-t2">{item}</span>
+              </div>
+            ))}
           </div>
-        </div>
+        )}
+
+        {/* Empty state */}
+        {completedItems.length === 0 && nextActions.length === 0 && (
+          <div className="px-[15px] py-[13px]">
+            <span className="text-13 text-t3">暂无进度信息</span>
+          </div>
+        )}
       </div>
+
     </div>
   )
 }
