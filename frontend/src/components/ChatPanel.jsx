@@ -42,6 +42,7 @@ import { summarizeWorkspace } from '../utils/workspaceSummary'
 import ThinkingBlock from './ThinkingBlock'
 // Shared markdown rendering fragment, reused by the S5 ReviewChatWindow (same look & feel).
 import { assistantMarkdownComponents } from './MarkdownMessage'
+import { IconTrash, IconSidebar, IconPaperclip, IconSend, IconStop, IconClose, IconCheck } from './icons'
 
 const ChatPanel = forwardRef(function ChatPanel({
   projectId,
@@ -819,47 +820,57 @@ const ChatPanel = forwardRef(function ChatPanel({
   }
 
   return (
-    <div className="flex-1 flex flex-col bg-[#1a1a2e]">
-      <div className="p-4 border-b border-[#2a2a4a] flex justify-between items-center">
-        <div>
-          <h2 className="font-semibold text-[#e2e2f0]">{project?.name || '请选择或创建项目'}</h2>
+    <div className="flex-1 min-w-0 bg-chat flex flex-col">
+      <div className="h-[60px] flex-shrink-0 border-b border-track px-[22px] flex items-center justify-between">
+        <div className="min-w-0">
+          <h2 className="text-base font-bold text-text tracking-tight truncate">{project?.name || '请选择或创建项目'}</h2>
           {projectId && (
-            <p className="text-xs text-[#8888a8] mt-1">
+            <p className="text-xs text-t3 mt-[1px] truncate">
               {connection.title} · 当前阶段 {workspaceSummary.stageLabel}
             </p>
           )}
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-[6px] flex-shrink-0">
           {projectId && (
             <button
               onClick={clearConversation}
               disabled={loading || uploading}
-              className="text-sm text-[#8888a8] hover:text-[#e2e2f0] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-[#8888a8]"
+              title="清空对话"
+              className="flex items-center justify-center w-8 h-8 border border-border bg-card2 rounded-ibtn text-t2 hover:text-text disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-t2"
             >
-              清空对话
+              <IconTrash size={15} />
             </button>
           )}
-          <button onClick={onToggleWorkspacePanel} className="text-sm text-[#8888a8] hover:text-[#e2e2f0]">
-            切换工作区
+          <button
+            onClick={onToggleWorkspacePanel}
+            title="切换工作区"
+            className="flex items-center justify-center w-8 h-8 border border-border bg-card2 rounded-ibtn text-accent hover:bg-card2/70"
+          >
+            <IconSidebar size={15} />
           </button>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto px-6 py-[22px] flex flex-col gap-[18px]">
         {messages.map((msg) => {
-          // §9 system_notice — distinct warning block, yellow-orange tone
+          // §9 system_notice — distinct warning block, warn tone
           if (msg.role === 'system_notice') {
             if (!shouldRenderSystemNoticeMessage(msg)) {
               return null
             }
             return (
-              <div key={msg.id} className="flex justify-start">
-                <div className="max-w-2xl w-full rounded-xl border border-[#6b4f1a] bg-[#2a1e0a] px-4 py-3 flex gap-3 items-start selectable-content">
-                  <span className="text-lg leading-none mt-0.5 flex-shrink-0" aria-hidden="true">⚠️</span>
-                  <div className="space-y-1 min-w-0">
-                    <p className="text-sm text-[#e8b060] leading-snug">{msg.reason}</p>
-                    <p className="text-xs text-[#c8904a] leading-snug">{msg.user_action}</p>
-                  </div>
+              <div key={msg.id} className="flex gap-[10px] items-start border border-warn/30 bg-warn/10 rounded-[9px] px-[13px] py-[10px] selectable-content">
+                <svg
+                  width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                  className="text-warn flex-shrink-0 mt-[1px]" aria-hidden="true"
+                >
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                  <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                </svg>
+                <div className="space-y-1 min-w-0">
+                  <p className="text-13 text-warn leading-snug">{msg.reason}</p>
+                  <p className="text-xs text-warn/80 leading-snug">{msg.user_action}</p>
                 </div>
               </div>
             )
@@ -872,89 +883,111 @@ const ChatPanel = forwardRef(function ChatPanel({
             ? splitAssistantMessageBlocks(cleanContent)
             : [{ type: 'text', content: cleanContent }]
 
-          return (
-            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-2xl px-4 py-2 rounded-lg relative group selectable-content ${
-                msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-[#252545] text-[#e2e2f0]'
-              }`}>
-                {msg.attachedMaterialIds?.length > 0 && (
-                  <div className="mb-2 flex flex-wrap gap-2">
-                    {msg.attachedMaterialIds.map(materialId => {
-                      const attachedMaterial = materials.find(material => material.id === materialId)
-                      return (
-                        <span key={materialId} className="text-[11px] px-2 py-1 rounded-full bg-[#1a1a2e] border border-[#3a3a5a] text-[#b8bbe8]">
-                          {attachedMaterial?.display_name || materialId}
-                        </span>
-                      )
-                    })}
-                  </div>
-                )}
-                {msg.transientAttachments?.length > 0 && (
-                  <div className="mb-2 flex flex-wrap gap-2">
-                    {msg.transientAttachments.map(attachment => (
-                      <span
-                        key={attachment.id || attachment.name}
-                        className={`text-[11px] px-2 py-1 rounded-full border ${
-                          attachment.transcriptionStatus === 'failed'
-                            ? 'bg-[#3a1a1a] border-[#6b3a3a] text-[#f0b8b8]'
-                            : 'bg-[#1a1a2e] border-[#3a3a5a] text-[#b8bbe8]'
-                        }`}
-                      >
-                        {attachment.transcribed
-                          ? '📎 已转写图片'
-                          : attachment.transcriptionStatus === 'failed'
-                          ? `⚠️ 图片没读出来：${attachment.name || '图片'}`
-                          : `🖼️ ${attachment.name || '图片'}`}
+          // 附件 / 转写指示行（用户气泡内复用，token 配色）
+          const attachmentIndicators = (
+            <>
+              {msg.attachedMaterialIds?.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {msg.attachedMaterialIds.map(materialId => {
+                    const attachedMaterial = materials.find(material => material.id === materialId)
+                    return (
+                      <span key={materialId} className="text-11 px-2 py-1 rounded-tag bg-white/10 border border-white/20 text-white/85">
+                        {attachedMaterial?.display_name || materialId}
                       </span>
-                    ))}
-                  </div>
-                )}
-                {/* N6 Fix2: reloaded-history transcripts (no live transientAttachments) — same
-                    indicator branch as above so a refreshed chat keeps the 已转写图片 / 没读出来 note. */}
-                {msg.historyTranscripts?.length > 0 && (
-                  <div className="mb-2 flex flex-wrap gap-2">
-                    {msg.historyTranscripts.map(indicator => (
-                      <span
-                        key={indicator.id}
-                        className={`text-[11px] px-2 py-1 rounded-full border ${
-                          indicator.status === 'failed'
-                            ? 'bg-[#3a1a1a] border-[#6b3a3a] text-[#f0b8b8]'
-                            : 'bg-[#1a1a2e] border-[#3a3a5a] text-[#b8bbe8]'
-                        }`}
-                      >
-                        {indicator.status === 'parsed'
-                          ? '📎 已转写图片'
-                          : `⚠️ 图片没读出来：${indicator.name || '图片'}`}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {msg.role === 'assistant' ? (
-                  <div className="space-y-2">
-                    {assistantBlocks.map((block, index) => block.type === 'tool' ? (
-                      <div key={index} className="text-xs bg-[#1a1a2e] px-2 py-1 rounded border border-[#3a3a5a] text-[#8888a8] font-mono">
-                        {block.content}
-                      </div>
-                    ) : block.type === 'thinking' ? (
-                      <ThinkingBlock key={index} text={block.content} />
-                    ) : (
-                      <ReactMarkdown
-                        key={index}
-                        className="prose prose-invert prose-sm max-w-none"
-                        remarkPlugins={[remarkGfm]}
-                        components={assistantMarkdownComponents}
-                      >
-                        {block.content}
-                      </ReactMarkdown>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="whitespace-pre-wrap">{msg.content}</div>
-                )}
+                    )
+                  })}
+                </div>
+              )}
+              {msg.transientAttachments?.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {msg.transientAttachments.map(attachment => (
+                    <span
+                      key={attachment.id || attachment.name}
+                      className={`text-11 px-2 py-1 rounded-tag border ${
+                        attachment.transcriptionStatus === 'failed'
+                          ? 'bg-error/20 border-error/40 text-white'
+                          : 'bg-white/10 border-white/20 text-white/85'
+                      }`}
+                    >
+                      {attachment.transcribed
+                        ? '已转写图片'
+                        : attachment.transcriptionStatus === 'failed'
+                        ? `图片没读出来：${attachment.name || '图片'}`
+                        : `${attachment.name || '图片'}`}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {/* N6 Fix2: reloaded-history transcripts (no live transientAttachments) — same
+                  indicator branch as above so a refreshed chat keeps the 已转写图片 / 没读出来 note. */}
+              {msg.historyTranscripts?.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {msg.historyTranscripts.map(indicator => (
+                    <span
+                      key={indicator.id}
+                      className={`text-11 px-2 py-1 rounded-tag border ${
+                        indicator.status === 'failed'
+                          ? 'bg-error/20 border-error/40 text-white'
+                          : 'bg-white/10 border-white/20 text-white/85'
+                      }`}
+                    >
+                      {indicator.status === 'parsed'
+                        ? '已转写图片'
+                        : `图片没读出来：${indicator.name || '图片'}`}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </>
+          )
 
+          if (msg.role === 'assistant') {
+            // 助手消息：圆点 + 助手标签 + 无底色正文（非气泡）
+            return (
+              <div key={msg.id} className="relative group selectable-content">
+                <div className="flex items-center gap-[7px] mb-[9px]">
+                  <span className="w-[6px] h-[6px] rounded-full bg-abright flex-shrink-0" aria-hidden="true" />
+                  <span className="text-13 font-semibold text-text">助手</span>
+                </div>
+                <div className="space-y-2 text-15 leading-[1.68] text-text">
+                  {assistantBlocks.map((block, index) => block.type === 'tool' ? (
+                    <div key={index} className="inline-flex items-center gap-[9px] border border-border rounded-ibtn bg-card2 px-[11px] py-[7px] font-mono">
+                      <span className="text-15 text-text">{block.content}</span>
+                      <IconCheck size={14} className="text-success flex-shrink-0" />
+                    </div>
+                  ) : block.type === 'thinking' ? (
+                    <ThinkingBlock key={index} text={block.content} />
+                  ) : (
+                    <ReactMarkdown
+                      key={index}
+                      className="prose prose-invert prose-sm max-w-none"
+                      remarkPlugins={[remarkGfm]}
+                      components={assistantMarkdownComponents}
+                    >
+                      {block.content}
+                    </ReactMarkdown>
+                  ))}
+                </div>
                 <button
                   onClick={() => copyMessage(msg.content)}
-                  className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 text-xs px-2 py-1 bg-[#1a1a2e] rounded hover:bg-[#2a2a4a] transition-opacity"
+                  className="absolute top-0 right-0 opacity-0 group-hover:opacity-100 text-11 px-2 py-1 bg-card2 border border-border rounded-tag text-t2 hover:text-text transition-opacity"
+                  title="复制"
+                >
+                  复制
+                </button>
+              </div>
+            )
+          }
+
+          // 用户消息：右对齐气泡
+          return (
+            <div key={msg.id} className="flex justify-end">
+              <div className="relative group self-end max-w-[500px] bg-userbub text-white rounded-[13px_13px_4px_13px] px-[14px] py-[10px] text-15 leading-[1.55] selectable-content">
+                {attachmentIndicators}
+                <div className="whitespace-pre-wrap">{msg.content}</div>
+                <button
+                  onClick={() => copyMessage(msg.content)}
+                  className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 text-11 px-2 py-1 bg-white/15 rounded-tag text-white hover:bg-white/25 transition-opacity"
                   title="复制"
                 >
                   复制
@@ -964,42 +997,43 @@ const ChatPanel = forwardRef(function ChatPanel({
           )
         })}
         {loading && (
-          <div className="flex justify-start">
-            <div className="bg-[#252545] px-4 py-2 rounded-lg text-[#8888a8]">正在思考...</div>
+          <div className="flex items-center gap-2 text-t3 text-13">
+            <span className="w-[6px] h-[6px] rounded-full bg-abright animate-pulse flex-shrink-0" aria-hidden="true" />
+            正在思考...
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
       {tokenUsage && (
-        <div className="border-t border-[#2a2a4a] px-4 py-3 text-xs text-[#8888a8]">
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="flex-shrink-0 border-t border-track px-6 py-2 text-11 text-t3">
+          <div className="flex flex-wrap items-center gap-[10px]">
             <span>{contextUsage.label}</span>
-            <div className="h-1.5 min-w-[160px] flex-1 rounded-full bg-[#252545] overflow-hidden">
+            <div className="h-1 min-w-[120px] max-w-[190px] flex-1 rounded-full bg-track overflow-hidden">
               <div
-                className={`h-full rounded-full transition-all ${contextUsagePercent == null ? 'bg-[#545d8d]/55' : 'bg-blue-500'}`}
+                className={`h-full rounded-full transition-all ${contextUsagePercent == null ? 'bg-t3/55' : 'bg-abright'}`}
                 style={{ width: contextUsagePercent == null ? '100%' : `${contextUsagePercent}%` }}
               />
             </div>
-            <span>{contextUsage.detail}</span>
-            <span className="rounded-full border border-[#3a3a5a] px-2 py-0.5 text-[#c9cdf7]">
+            <span className="text-text font-mono">{contextUsage.detail}</span>
+            <span className="ml-auto text-2xs text-asoftt bg-asoft border border-asoftb px-2 py-px rounded-chip">
               {contextUsage.modeTag}
             </span>
             {contextUsage.compressedTag && (
-              <span className="rounded-full border border-[#5a4d28] px-2 py-0.5 text-yellow-400">
+              <span className="text-2xs text-warn border border-warn/40 px-2 py-px rounded-chip">
                 {contextUsage.compressedTag}
               </span>
             )}
           </div>
           {contextUsage.compactedStatus && (
-            <div className="mt-2 text-[#9da3d9]">{contextUsage.compactedStatus}</div>
+            <div className="mt-2 text-t3">{contextUsage.compactedStatus}</div>
           )}
           {contextUsage.fields?.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+            <div className="mt-2 flex flex-wrap gap-2 text-11">
               {contextUsage.fields.map(field => (
                 <span
                   key={field.label}
-                  className="rounded-full border border-[#31355e] bg-[#171a33] px-2 py-1 text-[#b8bee9]"
+                  className="rounded-chip border border-border bg-card2 px-2 py-1 text-t2"
                 >
                   {field.label}: {field.value}
                 </span>
@@ -1010,26 +1044,31 @@ const ChatPanel = forwardRef(function ChatPanel({
       )}
 
       <div
-        className={`p-4 border-t border-[#2a2a4a] ${dragActive ? 'bg-[#20284f]' : ''}`}
+        className="flex-shrink-0 px-6 pt-3 pb-[18px]"
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        {dragActive && (
+          <div className="mb-[9px] border border-dashed border-abright bg-asoft rounded-btn px-3 py-2 text-12 text-asoftt">
+            松开鼠标即可加入待发送附件
+          </div>
+        )}
         {pendingAttachments.length > 0 && (
           <div className="mb-3">
-            <div className="mb-2 text-xs uppercase tracking-[0.2em] text-[#8f93c9]">待发送附件</div>
+            <div className="mb-2 text-11 uppercase tracking-[0.2em] text-t3">待发送附件</div>
             <div className="flex flex-wrap gap-3">
               {pendingAttachments.map(attachment => attachment.kind === 'image' ? (
-                <div key={attachment.id} className="relative w-28 rounded-xl border border-[#3a3a5a] bg-[#12142a] p-2">
+                <div key={attachment.id} className="relative w-28 rounded-card border border-border bg-card2 p-2">
                   <button
                     type="button"
                     onClick={() => removePendingAttachmentById(attachment.id)}
-                    className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#0d0f20] text-[11px] text-[#e2e2f0] hover:bg-[#232852]"
+                    className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-card2 border border-border text-t2 hover:text-text"
                     title="移除附件"
                   >
-                    ×
+                    <IconClose size={11} />
                   </button>
-                  <div className="mb-2 h-16 overflow-hidden rounded-lg bg-[#0f1226]">
+                  <div className="mb-2 h-16 overflow-hidden rounded-btn bg-field">
                     {attachment.previewUrl ? (
                       <img
                         src={attachment.previewUrl}
@@ -1037,32 +1076,32 @@ const ChatPanel = forwardRef(function ChatPanel({
                         className="h-full w-full object-cover"
                       />
                     ) : (
-                      <div className="flex h-full items-center justify-center text-xs text-[#8f93c9]">IMAGE</div>
+                      <div className="flex h-full items-center justify-center text-12 text-t3">IMAGE</div>
                     )}
                   </div>
-                  <div className="truncate text-xs text-[#e2e2f0]">{attachment.displayName}</div>
-                  <div className="mt-1 inline-flex rounded-full bg-[#253464] px-2 py-0.5 text-[10px] text-[#dce5ff]">
+                  <div className="truncate text-12 text-text">{attachment.displayName}</div>
+                  <div className="mt-1 inline-flex rounded-chip bg-asoft border border-asoftb px-2 py-0.5 text-2xs text-asoftt">
                     本轮临时
                   </div>
                 </div>
               ) : (
-                <div key={attachment.id} className="relative flex min-w-[220px] items-center gap-3 rounded-xl border border-[#3a3a5a] bg-[#12142a] px-3 py-2">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#243057] text-[11px] font-semibold text-[#dce5ff]">
+                <div key={attachment.id} className="relative flex min-w-[220px] items-center gap-3 rounded-card border border-border bg-card2 px-3 py-2">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-btn bg-asoft text-11 font-semibold text-asoftt">
                     {getDocumentExtension(attachment.displayName)}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm text-[#e2e2f0]">{attachment.displayName}</div>
-                    <div className="mt-1 inline-flex rounded-full bg-[#1f3c2f] px-2 py-0.5 text-[10px] text-[#dff7e7]">
+                    <div className="truncate text-13 text-text">{attachment.displayName}</div>
+                    <div className="mt-1 inline-flex rounded-chip bg-success/15 border border-success/30 px-2 py-0.5 text-2xs text-success">
                       发送前入库
                     </div>
                   </div>
                   <button
                     type="button"
                     onClick={() => removePendingAttachmentById(attachment.id)}
-                    className="flex h-6 w-6 items-center justify-center rounded-full bg-[#0d0f20] text-xs text-[#e2e2f0] hover:bg-[#232852]"
+                    className="flex h-6 w-6 items-center justify-center rounded-full bg-card2 border border-border text-t2 hover:text-text"
                     title="移除附件"
                   >
-                    ×
+                    <IconClose size={12} />
                   </button>
                 </div>
               ))}
@@ -1076,9 +1115,10 @@ const ChatPanel = forwardRef(function ChatPanel({
                 key={material.id}
                 type="button"
                 onClick={() => setSelectedMaterialIds(prev => toggleMaterialSelection(prev, material.id))}
-                className="text-xs px-2 py-1 rounded-full bg-[#23234a] border border-[#3a3a5a] text-[#d6d8f6]"
+                className="text-12 px-2 py-1 rounded-tag bg-asoft border border-asoftb text-asoftt inline-flex items-center gap-1 hover:bg-asoft/70"
               >
-                {material.display_name} ×
+                <span>{material.display_name}</span>
+                <IconClose size={11} />
               </button>
             ))}
           </div>
@@ -1092,22 +1132,22 @@ const ChatPanel = forwardRef(function ChatPanel({
                   key={material.id}
                   type="button"
                   onClick={() => setSelectedMaterialIds(prev => toggleMaterialSelection(prev, material.id))}
-                  className={`text-xs px-2 py-1 rounded-full border inline-flex items-center gap-1 ${
+                  className={`text-12 px-2 py-1 rounded-tag border inline-flex items-center gap-1 ${
                     selectedMaterialIds.includes(material.id)
-                      ? 'bg-blue-600 border-blue-500 text-white'
-                      : 'bg-[#15162d] border-[#2f3158] text-[#b6b8de]'
+                      ? 'bg-accent border-accent text-white'
+                      : 'bg-card2 border-border text-t2 hover:text-text'
                   }`}
                 >
                   <span>{material.display_name}</span>
                   {statusChip && (
                     <span
                       title={statusChip.title || undefined}
-                      className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                      className={`text-2xs px-1.5 py-0.5 rounded-chip ${
                         statusChip.tone === 'failed'
-                          ? 'bg-[#3a1a1a] text-[#f0b8b8]'
+                          ? 'bg-error/20 text-error'
                           : statusChip.tone === 'not_parsed'
-                          ? 'bg-[#1e1f3a] text-[#8e92bd]'
-                          : 'bg-[#15402a] text-[#9fe0bd]'
+                          ? 'bg-track text-t3'
+                          : 'bg-success/15 text-success'
                       }`}
                     >
                       {statusChip.label}
@@ -1118,12 +1158,7 @@ const ChatPanel = forwardRef(function ChatPanel({
             })}
           </div>
         )}
-        {dragActive && (
-          <div className="mb-3 rounded border border-dashed border-[#6d8cff] px-3 py-2 text-sm text-[#d9e2ff]">
-            松开鼠标即可加入待发送附件
-          </div>
-        )}
-        <div className="flex gap-2">
+        <div className="flex items-end gap-[9px] border border-track rounded-card bg-field px-[7px] py-[7px] pl-[10px]">
           <input
             ref={uploadInputRef}
             type="file"
@@ -1135,10 +1170,10 @@ const ChatPanel = forwardRef(function ChatPanel({
             type="button"
             onClick={() => uploadInputRef.current?.click()}
             disabled={!projectId || loading || uploading}
-            className="border border-[#3a3a5a] text-[#e2e2f0] px-4 py-2 rounded-lg hover:bg-[#222244] disabled:bg-[#20203a] disabled:text-[#77789a]"
+            className="flex items-center justify-center w-8 h-8 flex-shrink-0 rounded-btn border border-border bg-card2 text-t2 hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
             title="添加待发送附件"
           >
-            {uploading ? '处理中...' : '+'}
+            {uploading ? <span className="text-2xs">处理中</span> : <IconPaperclip size={16} />}
           </button>
           <textarea
             ref={composerInputRef}
@@ -1160,22 +1195,24 @@ const ChatPanel = forwardRef(function ChatPanel({
             rows={1}
             placeholder="输入消息...（Enter 发送，Shift+Enter 换行）"
             disabled={loading || uploading}
-            className="flex-1 resize-none bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
+            className="flex-1 resize-none border-none outline-none bg-transparent text-15 text-text py-[7px] max-h-[120px] placeholder:text-t3"
           />
           {loading ? (
             <button
               onClick={stopGeneration}
-              className="bg-red-600 text-white px-6 py-2 rounded-lg hover:bg-red-700"
+              className="flex items-center gap-[6px] h-8 px-4 flex-shrink-0 rounded-btn border border-error/50 text-error text-13 font-medium hover:bg-error/10"
             >
+              <IconStop size={13} />
               停止
             </button>
           ) : (
             <button
               onClick={sendMessage}
               disabled={!projectId || uploading}
-              className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 disabled:bg-[#3a3a5a]"
+              className="flex items-center gap-[6px] h-8 px-4 flex-shrink-0 rounded-btn bg-accent text-white text-13 font-medium hover:bg-accent/90 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               发送
+              <IconSend size={13} />
             </button>
           )}
         </div>
