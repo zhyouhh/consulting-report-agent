@@ -8,10 +8,10 @@ const HEX = /#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{4}|[0-9a-fA-F]{3})\b/
 const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u
 // 起始放全部仍含旧色的文件名：17 个组件 .jsx + 'App.jsx' + 'toast.js'（index.css 已在 0b 迁移、不入）；每 task 完成后移除对应文件，迁移完为空
 const ALLOW_PENDING = new Set([
-  'AdminPanel.jsx','ConfirmDialog.jsx','FilePreviewPanel.jsx',
+  'AdminPanel.jsx','FilePreviewPanel.jsx',
   'IndependentReviewDrawer.jsx',
-  'ProjectCreateModal.jsx','RollbackMenu.jsx','SettingsModal.jsx',
-  'StageAdvanceControl.jsx','StagePanel.jsx','WorkspacePanel.jsx',
+  'ProjectCreateModal.jsx','SettingsModal.jsx',
+  'StagePanel.jsx','WorkspacePanel.jsx',
 ])
 function* walk(d){ for (const e of readdirSync(d, {withFileTypes:true})) {
   const p = d + e.name; if (e.isDirectory()) { if (e.name!=='assets') yield* walk(p+'/') }

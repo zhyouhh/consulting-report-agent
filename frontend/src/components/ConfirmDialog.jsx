@@ -69,29 +69,29 @@ export default function ConfirmDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/45 dark:bg-scrim/60"
       onClick={onCancel}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="bg-[#1e2140] border border-[#3a3f6d] rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl"
+        className="bg-card border border-border rounded-win p-6 max-w-sm w-full mx-4 shadow-popover"
         onClick={e => e.stopPropagation()}
       >
-        <h3 id={titleId} className="text-base font-semibold text-[#eef1ff] mb-3">{title}</h3>
-        <p className="text-sm text-[#a8accc] leading-relaxed whitespace-pre-line mb-6">{body}</p>
+        <h3 id={titleId} className="text-base font-semibold text-text mb-3">{title}</h3>
+        <p className="text-sm text-t2 leading-relaxed whitespace-pre-line mb-6">{body}</p>
         <div className="flex gap-3 justify-end">
           <button
             ref={cancelRef}
             onClick={onCancel}
-            className="px-4 py-2 rounded-lg text-sm bg-[#262a4c] text-[#8f93c9] hover:bg-[#30365a] focus:outline-none focus:ring-2 focus:ring-[#6070e0]"
+            className="px-4 py-2 rounded-btn text-sm bg-card2 text-t2 hover:bg-asoft focus:outline-none focus:ring-2 focus:ring-accent"
           >
             {cancelText}
           </button>
           <button
             onClick={onConfirm}
-            className="px-4 py-2 rounded-lg text-sm bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] focus:outline-none focus:ring-2 focus:ring-[#6070e0]"
+            className="px-4 py-2 rounded-btn text-sm bg-accent text-white hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent"
           >
             {confirmText}
           </button>
