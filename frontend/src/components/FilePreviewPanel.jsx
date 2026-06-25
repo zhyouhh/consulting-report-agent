@@ -7,8 +7,8 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import rehypeHighlight from 'rehype-highlight'
 import rehypeRaw from 'rehype-raw'
-import 'highlight.js/styles/github-dark.css'
 import 'katex/dist/katex.min.css'
+import { IconFile } from './icons'
 import { buildFileTree } from '../utils/fileTree'
 import {
   initialEditState, enterEdit, editDraft, startSaving,
@@ -20,39 +20,42 @@ import { showError } from '../utils/toast'
 const markdownComponents = {
   code: ({ inline, className, children, ...props }) => (
     inline ? (
-      <code className="px-1.5 py-0.5 bg-[#1a1a2e] text-[#64ffda] rounded text-sm font-mono" {...props}>
+      <code className="px-1.5 py-0.5 bg-asoft text-asoftt rounded text-sm font-mono" {...props}>
         {children}
       </code>
     ) : (
       <code className={className} {...props}>{children}</code>
     )
   ),
+  pre: ({ children }) => (
+    <pre className="my-4 overflow-x-auto rounded-ibtn border border-border bg-card2 p-3">{children}</pre>
+  ),
   table: ({ children }) => (
     <div className="overflow-x-auto my-4">
-      <table className="min-w-full border-collapse border border-[#2a2a4a]">{children}</table>
+      <table className="min-w-full border-collapse border border-border">{children}</table>
     </div>
   ),
   th: ({ children }) => (
-    <th className="border border-[#2a2a4a] bg-[#1a1a2e] px-4 py-2 text-left text-[#64ffda] font-semibold">{children}</th>
+    <th className="border border-border bg-card2 px-4 py-2 text-left text-text font-semibold">{children}</th>
   ),
   td: ({ children }) => (
-    <td className="border border-[#2a2a4a] px-4 py-2 text-[#e2e2f0]">{children}</td>
+    <td className="border border-border px-4 py-2 text-text">{children}</td>
   ),
   img: ({ src, alt }) => (
-    <img src={src} alt={alt} className="max-w-full h-auto rounded-lg shadow-lg my-4" />
+    <img src={src} alt={alt} className="max-w-full h-auto rounded-lg shadow-card my-4" />
   ),
   a: ({ href, children }) => (
-    <a href={href} className="text-[#64ffda] hover:text-[#52e0c2] underline" target="_blank" rel="noopener noreferrer">{children}</a>
+    <a href={href} className="text-abright underline underline-offset-2" target="_blank" rel="noopener noreferrer">{children}</a>
   ),
   blockquote: ({ children }) => (
-    <blockquote className="border-l-4 border-[#64ffda] pl-4 py-2 my-4 bg-[#1a1a2e] text-[#c8c8e0] italic">{children}</blockquote>
+    <blockquote className="border-l-4 border-abright pl-4 py-2 my-4 bg-card2 text-t2 italic">{children}</blockquote>
   ),
-  h1: ({ children }) => <h1 className="text-3xl font-bold text-[#e2e2f0] mt-6 mb-4 pb-2 border-b border-[#2a2a4a]">{children}</h1>,
-  h2: ({ children }) => <h2 className="text-2xl font-bold text-[#e2e2f0] mt-5 mb-3">{children}</h2>,
-  h3: ({ children }) => <h3 className="text-xl font-semibold text-[#e2e2f0] mt-4 mb-2">{children}</h3>,
-  p: ({ children }) => <p className="text-[#c8c8e0] leading-7 mb-4">{children}</p>,
-  ul: ({ children }) => <ul className="list-disc list-inside text-[#c8c8e0] mb-4 space-y-2">{children}</ul>,
-  ol: ({ children }) => <ol className="list-decimal list-inside text-[#c8c8e0] mb-4 space-y-2">{children}</ol>,
+  h1: ({ children }) => <h1 className="text-3xl font-bold text-text mt-6 mb-4 pb-2 border-b border-border">{children}</h1>,
+  h2: ({ children }) => <h2 className="text-2xl font-bold text-text mt-5 mb-3">{children}</h2>,
+  h3: ({ children }) => <h3 className="text-xl font-semibold text-text mt-4 mb-2">{children}</h3>,
+  p: ({ children }) => <p className="text-text leading-7 mb-4">{children}</p>,
+  ul: ({ children }) => <ul className="list-disc list-inside text-text mb-4 space-y-2">{children}</ul>,
+  ol: ({ children }) => <ol className="list-decimal list-inside text-text mb-4 space-y-2">{children}</ol>,
 }
 
 const DRAFT_PATH = 'content/report_draft_v1.md'
@@ -256,7 +259,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
     <div ref={containerRef} className="flex-1 flex flex-col min-h-0 relative">
       {/* 文件树（分组 + 当前阶段置顶 + 中文名），默认占三成，分隔条可拖动 */}
       <div
-        className="overflow-y-auto text-sm flex-shrink-0"
+        className="overflow-y-auto flex-shrink-0 py-2"
         style={{ height: `${treePct}%` }}
       >
         {groups.map((group) => {
@@ -265,24 +268,32 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
             <div key={group.group}>
               <div
                 onClick={() => setCollapsed((c) => ({ ...c, [group.group]: !isCollapsed }))}
-                className="px-3 py-1.5 cursor-pointer text-xs text-[#8f93c9] tracking-wide hover:bg-[#1c1c38] flex items-center justify-between"
+                className="px-[14px] py-[6px] cursor-pointer text-[10.5px] tracking-[0.04em] text-t3 hover:bg-card2 flex items-center justify-between"
               >
                 <span>{group.label}</span>
                 <span>{isCollapsed ? '▸' : '▾'}</span>
               </div>
-              {!isCollapsed && group.files.map((file) => (
-                <div
-                  key={file.path}
-                  onClick={() => handleSelectFile(file.path)}
-                  className={`px-4 py-2 cursor-pointer text-sm flex items-center gap-2 ${
-                    currentFile === file.path ? 'bg-[#1e1e4a] text-blue-400' : 'hover:bg-[#222244] text-[#c8c8e0]'
-                  } ${file.isCurrentStage ? 'border-l-2 border-[#64ffda]' : 'border-l-2 border-transparent'}`}
-                >
-                  <span className="truncate flex-1">{file.label}</span>
-                  {file.isCurrentStage && <span className="text-[10px] text-[#64ffda]">当前</span>}
-                  {!file.editable && <span className="text-[10px] text-[#6a6a8a]">只读</span>}
-                </div>
-              ))}
+              {!isCollapsed && group.files.map((file) => {
+                const isSelected = currentFile === file.path
+                return (
+                  <div
+                    key={file.path}
+                    onClick={() => handleSelectFile(file.path)}
+                    className={`px-[14px] py-[7px] cursor-pointer flex items-center gap-2 border-l-2 ${
+                      isSelected
+                        ? 'bg-sel border-abright'
+                        : file.isCurrentStage
+                          ? 'border-abright hover:bg-card2'
+                          : 'border-transparent hover:bg-card2'
+                    }`}
+                  >
+                    <IconFile size={14} className={isSelected ? 'text-white shrink-0' : 'text-t3 shrink-0'} />
+                    <span className={`truncate flex-1 text-13 ${isSelected ? 'text-white' : 'text-text'}`}>{file.label}</span>
+                    {file.isCurrentStage && <span className="text-[9.5px] text-abright">当前</span>}
+                    {!file.editable && <span className="text-[9.5px] text-t3">只读</span>}
+                  </div>
+                )
+              })}
             </div>
           )
         })}
@@ -291,7 +302,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
       {/* 可拖动上下分隔条：调整文件树 / 预览框高度 */}
       <div
         onMouseDown={startTreeResize}
-        className="h-1.5 cursor-row-resize bg-[#2a2a4a] hover:bg-[#3a3a6a] flex-shrink-0"
+        className="h-[6px] cursor-row-resize bg-col hover:bg-abright flex-shrink-0"
         role="separator"
         aria-orientation="horizontal"
         title="拖动调整上下高度"
@@ -299,39 +310,42 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
 
       {/* review_stale advisory（仅正文页显示） */}
       {isDraft && reviewStale && (
-        <div className="px-4 py-2 text-xs text-[#c8a060] bg-[#2a1e10] border-b border-[#5a3a10]" role="note">
+        <div className="px-[14px] py-2 text-11 text-warn bg-warn/10 border-b border-warn/30" role="note">
           正文已改动，建议重新审查（独立审查报告可能已过期）。
         </div>
       )}
 
       {/* 工具栏 */}
-      <div className="px-4 py-2 border-b border-[#2a2a4a] flex items-center gap-2 min-h-[2.75rem]">
+      <div className="px-[14px] py-2 border-b border-border flex items-center gap-2 min-h-[42px]">
         {!inEdit && currentEditable && (
-          <button onClick={handleEnterEdit} className="px-3 py-1 rounded text-xs bg-[#28366b] text-white">编辑</button>
+          <button onClick={handleEnterEdit} className="px-3 py-[5px] rounded-ibtn text-12 bg-accent text-white">编辑</button>
         )}
         {inEdit && (
           <>
-            <button onClick={handleSave} disabled={edit.saving} className="px-3 py-1 rounded text-xs bg-[#2f7d52] text-white disabled:opacity-50">
+            <button onClick={handleSave} disabled={edit.saving} className="px-3 py-[5px] rounded-ibtn text-12 bg-success text-white disabled:opacity-50">
               {edit.saving ? '保存中…' : '保存'}
             </button>
-            <button onClick={handleCancel} disabled={edit.saving} className="px-3 py-1 rounded text-xs bg-[#15162d] text-[#8f93c9] disabled:opacity-50">
+            <button onClick={handleCancel} disabled={edit.saving} className="px-3 py-[5px] rounded-ibtn text-12 border border-border bg-card2 text-t2 disabled:opacity-50">
               取消
             </button>
           </>
         )}
+        {currentFile && (
+          <span className="ml-auto text-11 text-t3 font-mono truncate">{currentFile}</span>
+        )}
       </div>
 
       {/* 正文区：编辑态 textarea / 预览态 markdown */}
-      <div className="flex-1 overflow-y-auto p-6 bg-[#0d0d1a]">
+      <div className="flex-1 overflow-y-auto p-[18px] bg-field">
         {inEdit ? (
           <textarea
             value={edit.draft}
             onChange={(e) => setEdit((prev) => editDraft(prev, e.target.value))}
-            className="w-full h-full min-h-[20rem] bg-[#0d0d1a] text-[#e2e2f0] font-mono text-sm leading-6 outline-none resize-none"
+            className="w-full h-full min-h-[20rem] bg-transparent text-text font-mono text-13 leading-[1.7] outline-none resize-none"
             spellCheck={false}
           />
         ) : (
-          <div className="markdown-body max-w-none selectable-content">
+          <div className="markdown-body max-w-none selectable-content text-text">
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={[rehypeKatex, rehypeHighlight, rehypeRaw]}
@@ -346,17 +360,17 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
       {/* 脏离开三按钮对话框（保存 / 放弃修改 / 取消）——延后动作模式（spec §7.2 v1）。
           beforeunload（整页刷新/关窗）受原生限制仍走二选一，无法升级为三按钮。 */}
       {leaveDialog && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50" role="dialog" aria-modal="true" aria-label="未保存的修改">
-          <div className="w-80 rounded-lg border border-[#2a2a4a] bg-[#1a1a2e] p-5 shadow-xl">
-            <div className="mb-4 text-sm text-[#e2e2f0]">当前文件有未保存的修改，如何处理？</div>
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-scrim/45 dark:bg-scrim/60" role="dialog" aria-modal="true" aria-label="未保存的修改">
+          <div className="w-[280px] rounded-card border border-border bg-card p-[18px] shadow-popover">
+            <div className="mb-[14px] text-13 text-text">当前文件有未保存的修改，如何处理？</div>
             <div className="flex flex-col gap-2">
-              <button onClick={handleLeaveSave} disabled={edit.saving} className="px-3 py-2 rounded text-sm bg-[#2f7d52] text-white disabled:opacity-50">
+              <button onClick={handleLeaveSave} disabled={edit.saving} className="bg-success text-white rounded-ibtn py-[9px] text-sm disabled:opacity-50">
                 {edit.saving ? '保存中…' : '保存'}
               </button>
-              <button onClick={handleLeaveDiscard} disabled={edit.saving} className="px-3 py-2 rounded text-sm bg-[#5a2a2a] text-[#f0c8c8] disabled:opacity-50">
+              <button onClick={handleLeaveDiscard} disabled={edit.saving} className="bg-error text-white rounded-ibtn py-[9px] text-sm disabled:opacity-50">
                 放弃修改
               </button>
-              <button onClick={closeLeaveDialog} disabled={edit.saving} className="px-3 py-2 rounded text-sm bg-[#15162d] text-[#8f93c9] disabled:opacity-50">
+              <button onClick={closeLeaveDialog} disabled={edit.saving} className="border border-border bg-card2 text-t2 rounded-ibtn py-[9px] text-sm disabled:opacity-50">
                 取消
               </button>
             </div>

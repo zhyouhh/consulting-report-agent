@@ -19,6 +19,7 @@
   --sel:27 42 74; --userbub:27 42 74; --stepdone:27 42 74; --dotfuture:200 200 204;
   --scrim:20 22 30; --scrim-a:0.45;
   --success:52 168 83; --warn:183 121 31; --error:217 83 79;
+  --hl-comment:106 115 125;--hl-keyword:215 58 73;--hl-string:34 134 58;--hl-number:0 92 197;--hl-title:111 66 193;--hl-attr:0 92 197;--hl-builtin:227 98 9;
   color-scheme:light;
 }
 .dark{
@@ -31,6 +32,7 @@
   --sel:43 62 98; --userbub:54 82 126; --stepdone:90 115 171; --dotfuture:74 75 81;
   --scrim:0 0 0; --scrim-a:0.6;
   --success:70 176 106; --warn:201 162 74; --error:217 83 79;
+  --hl-comment:139 148 158;--hl-keyword:255 123 114;--hl-string:165 214 255;--hl-number:121 192 255;--hl-title:210 168 255;--hl-attr:121 192 255;--hl-builtin:255 166 87;
   color-scheme:dark;
 }
 
@@ -48,3 +50,14 @@ body{margin:0;font-family:'Hanken Grotesk','PingFang SC','Microsoft YaHei','Noto
 
 @keyframes btn-highlight-pulse{0%,100%{opacity:.72}50%{opacity:1}}
 .btn-highlight-pulse{animation:btn-highlight-pulse 1.4s ease-in-out infinite;}
+
+/* highlight.js 双主题：颜色全由 token 变量驱动，浅深随 .dark 自动切（不 import 全局 hljs CSS） */
+.hljs{color:rgb(var(--text));background:transparent;}
+.hljs-comment,.hljs-quote{color:rgb(var(--hl-comment));font-style:italic;}
+.hljs-keyword,.hljs-selector-tag,.hljs-literal,.hljs-section,.hljs-doctag,.hljs-name{color:rgb(var(--hl-keyword));}
+.hljs-string,.hljs-meta .hljs-string,.hljs-regexp,.hljs-addition{color:rgb(var(--hl-string));}
+.hljs-number,.hljs-symbol,.hljs-bullet,.hljs-link{color:rgb(var(--hl-number));}
+.hljs-title,.hljs-title.function_{color:rgb(var(--hl-title));}
+.hljs-attr,.hljs-attribute,.hljs-variable,.hljs-template-variable,.hljs-type,.hljs-selector-attr,.hljs-selector-pseudo{color:rgb(var(--hl-attr));}
+.hljs-built_in,.hljs-class .hljs-title{color:rgb(var(--hl-builtin));}
+.hljs-emphasis{font-style:italic;}.hljs-strong{font-weight:600;}
