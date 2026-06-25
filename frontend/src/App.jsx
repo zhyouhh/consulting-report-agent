@@ -427,7 +427,6 @@ function App() {
               <WorkspacePanel
                 ref={workspacePanelRef}
                 projectId={currentProjectId}
-                project={currentProject}
                 workspace={workspace}
                 materials={materials}
                 refreshToken={workspaceRefreshToken}

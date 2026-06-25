@@ -12,7 +12,6 @@ import { IconFile, IconTrash, IconUpload } from './icons'
 
 const WorkspacePanel = forwardRef(function WorkspacePanel({
   projectId,
-  project,
   workspace,
   materials,
   refreshToken,
