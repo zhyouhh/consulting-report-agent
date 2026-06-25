@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>咨询报告写作助手</title>
+  <script>
+    try {
+      if (localStorage.getItem('cra:theme') === 'dark') {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
+    } catch (e) {}
+  </script>
   </head>
   <body>
     <div id="root"></div>
