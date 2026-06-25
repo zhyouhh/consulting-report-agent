@@ -16,6 +16,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   workspace,
   materials,
   refreshToken,
+  onMaterialsMerged,
   onMaterialDeleted,
   onProjectMutated,
   onCheckpointSet,
@@ -25,7 +26,9 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   width,
 }, ref) {
   const [activeTab, setActiveTab] = useState('stage')
+  const [materialUploading, setMaterialUploading] = useState(false)
   const filePreviewRef = useRef(null)
+  const uploadInputRef = useRef(null)
 
   useImperativeHandle(ref, () => ({
     // App 切项目 / 收起面板前调用：把离开动作转交 FilePreviewPanel 的 attemptLeave
@@ -248,6 +251,47 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     }
   }
 
+  // 材料 tab 直接上传到项目材料库（复用聊天回形针同一个 /materials/upload 端点）。
+  // 与聊天「待发送附件」不同：这里上传即入库、立即出现在「已上传材料」列表。
+  const uploadMaterialFiles = useCallback(async (fileList) => {
+    const files = Array.from(fileList || [])
+    if (!files.length || !projectId || materialUploading) return
+    const requestProject = projectId
+    setMaterialUploading(true)
+    try {
+      const formData = new FormData()
+      files.forEach(file => formData.append('files', file))
+      const res = await axios.post(
+        `/api/projects/${encodeURIComponent(requestProject)}/materials/upload`,
+        formData,
+      )
+      // 上传途中可能切了项目：只把结果应用到仍激活的项目，避免把旧项目材料并进新项目列表。
+      if (!shouldApplyProjectResponse({
+        requestProject,
+        activeProject: activeProjectRef.current,
+      })) {
+        return
+      }
+      const uploaded = res.data.materials || []
+      if (uploaded.length > 0) {
+        onMaterialsMerged?.(uploaded)
+        onProjectMutated?.()
+        showSuccess(`已上传 ${uploaded.length} 份材料`)
+      } else {
+        showError('未能上传任何材料')
+      }
+    } catch (error) {
+      showError('上传材料失败: ' + (error.response?.data?.detail || error.message))
+    } finally {
+      setMaterialUploading(false)
+    }
+  }, [projectId, materialUploading, onMaterialsMerged, onProjectMutated])
+
+  const handleSelectUploadFiles = (event) => {
+    uploadMaterialFiles(event.target.files)
+    event.target.value = '' // 允许连选同一文件再次触发 change
+  }
+
   const deleteMaterial = async (materialId) => {
     if (!projectId) return
     try {
@@ -323,22 +367,28 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
           {/* 顶部：标题 + 上传按钮 */}
           <div className="flex items-center justify-between mb-3">
             <span className="text-12 text-t2">已上传材料 · {materials.length}</span>
+            <input
+              ref={uploadInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={handleSelectUploadFiles}
+            />
             <button
               type="button"
-              className="flex items-center gap-[6px] px-[11px] py-[5px] rounded-ibtn border border-border bg-card2 text-text text-12"
-              onClick={() => {
-                // 上传通过聊天输入框的加号触发，此按钮作提示入口
-              }}
-              title="在聊天输入框左侧通过加号上传新材料"
+              className="flex items-center gap-[6px] px-[11px] py-[5px] rounded-ibtn border border-border bg-card2 text-text text-12 hover:bg-card2/70 disabled:opacity-40 disabled:cursor-not-allowed"
+              onClick={() => uploadInputRef.current?.click()}
+              disabled={!projectId || materialUploading}
+              title="上传项目材料"
             >
               <IconUpload size={13} />
-              上传
+              {materialUploading ? '上传中…' : '上传'}
             </button>
           </div>
 
           {materials.length === 0 ? (
             <div className="rounded-card border border-border border-dashed p-4 text-13 text-t2">
-              暂无项目材料。可以在聊天输入框左侧通过加号上传新材料。
+              暂无项目材料。点击右上角「上传」按钮，或在聊天输入框左侧的回形针添加材料。
             </div>
           ) : (
             materials.map(material => (

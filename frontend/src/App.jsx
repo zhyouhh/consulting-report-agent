@@ -432,6 +432,7 @@ function App() {
                 materials={materials}
                 refreshToken={workspaceRefreshToken}
                 width={workspaceWidth}
+                onMaterialsMerged={handleMaterialsMerged}
                 onMaterialDeleted={handleMaterialDeleted}
                 onProjectMutated={handleProjectMutated}
                 onCheckpointSet={loadWorkspace}
