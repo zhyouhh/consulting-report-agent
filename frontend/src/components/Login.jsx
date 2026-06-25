@@ -29,18 +29,54 @@ export default function Login({ onAuthed }) {
     }
   }
   return (
-    <div className="flex items-center justify-center h-screen bg-[#0f0f23]">
-      <form onSubmit={submit} className="bg-[#1a1a2e] p-8 rounded-xl w-80 border border-[#2a2a4a]">
-        <h1 className="text-lg font-semibold text-[#e2e2f0] mb-4">咨询报告助手 · {mode === 'login' ? '登录' : '注册'}</h1>
-        <input className="w-full mb-3 px-3 py-2 rounded bg-[#15162d] text-[#e2e2f0]" placeholder="用户名" value={username} onChange={(e) => setUsername(e.target.value)} />
-        <input type="password" className="w-full mb-3 px-3 py-2 rounded bg-[#15162d] text-[#e2e2f0]" placeholder="密码" value={password} onChange={(e) => setPassword(e.target.value)} />
-        {mode === 'register' && <input className="w-full mb-3 px-3 py-2 rounded bg-[#15162d] text-[#e2e2f0]" placeholder="邀请码" value={invite} onChange={(e) => setInvite(e.target.value)} />}
-        {err && <div className="text-red-400 text-sm mb-3">{err}</div>}
-        <button type="submit" disabled={submitting} className="w-full bg-blue-600 text-white py-2 rounded mb-2 disabled:opacity-60 disabled:cursor-not-allowed">{submitting ? '处理中…' : (mode === 'login' ? '登录' : '注册并登录')}</button>
-        <button type="button" className="w-full text-[#8888a8] text-sm" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>
-          {mode === 'login' ? '没有账号？去注册' : '已有账号？去登录'}
-        </button>
-      </form>
+    <div className="flex items-center justify-center h-screen bg-bg">
+      <div className="w-[344px]">
+        {/* wordmark 行 */}
+        <div className="flex items-center justify-center gap-[11px] mb-[22px]">
+          <div className="w-[34px] h-[34px] rounded-[9px] bg-accent text-white flex items-center justify-center text-base font-bold">R</div>
+          <span className="text-lg font-bold text-text tracking-tight">咨询报告助手</span>
+        </div>
+        {/* form 卡片 */}
+        <form onSubmit={submit} className="bg-card border border-border rounded-win p-6 shadow-[0_18px_50px_rgba(0,0,0,0.12)]">
+          <h1 className="text-base font-semibold text-text mb-4">{mode === 'login' ? '登录' : '注册'}</h1>
+          <input
+            className="w-full h-10 px-3 rounded-btn border border-border bg-field text-text text-15 placeholder-t3 mb-[11px]"
+            placeholder="用户名"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
+          <input
+            type="password"
+            className="w-full h-10 px-3 rounded-btn border border-border bg-field text-text text-15 placeholder-t3 mb-[11px]"
+            placeholder="密码"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          {mode === 'register' && (
+            <input
+              className="w-full h-10 px-3 rounded-btn border border-border bg-field text-text text-15 placeholder-t3 mb-[11px]"
+              placeholder="邀请码"
+              value={invite}
+              onChange={(e) => setInvite(e.target.value)}
+            />
+          )}
+          {err && <div className="text-error text-12 mb-[11px]">{err}</div>}
+          <button
+            type="submit"
+            disabled={submitting}
+            className="w-full h-10 rounded-btn bg-accent text-white text-15 font-medium mb-2 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {submitting ? '处理中…' : (mode === 'login' ? '登录' : '注册并登录')}
+          </button>
+          <button
+            type="button"
+            className="w-full text-t3 text-13"
+            onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
+          >
+            {mode === 'login' ? '没有账号？去注册' : '已有账号？去登录'}
+          </button>
+        </form>
+      </div>
     </div>
   )
 }
