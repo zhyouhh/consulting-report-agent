@@ -7,6 +7,7 @@ import WorkspacePanel from './components/WorkspacePanel'
 import AdminPanel from './components/AdminPanel'
 import ForcePasswordChange from './components/ForcePasswordChange'
 import ErrorBoundary from './components/ErrorBoundary'
+import { IconSidebar } from './components/icons'
 import axios from 'axios'
 import { setUnauthedHandler } from './api'
 import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
@@ -26,6 +27,10 @@ function App() {
   const [materials, setMaterials] = useState([])
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0)
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(true)
+  // 左侧栏可整列收起（往左消失，聊天区变宽）；偏好持久化。收起后左上角留浮动按钮可再展开。
+  const [showSidebar, setShowSidebar] = useState(() => {
+    try { return localStorage.getItem('cra:showSidebar') !== '0' } catch { return true }
+  })
   const [loading, setLoading] = useState(true)
   const [injectedPrompt, setInjectedPrompt] = useState(null)
   const [authUser, setAuthUser] = useState(null)
@@ -316,6 +321,22 @@ function App() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
+  // 侧栏显隐改变了可调区域宽度：显隐后按新容器宽度重夹一次，防再次显示侧栏时把聊天区挤到
+  // MIN_CHAT 以下（与 window resize 重夹同理，只是触发源是侧栏 toggle）。
+  useEffect(() => {
+    const rect = containerRef.current?.getBoundingClientRect()
+    setWorkspaceWidth((prev) => clampWorkspaceWidth(prev, rect?.width))
+  }, [showSidebar])
+
+  // 收起/展开左侧栏并持久化偏好。next 省略则翻转。
+  const toggleSidebar = useCallback((next) => {
+    setShowSidebar((prev) => {
+      const v = typeof next === 'boolean' ? next : !prev
+      try { localStorage.setItem('cra:showSidebar', v ? '1' : '0') } catch { /* 隐私模式忽略 */ }
+      return v
+    })
+  }, [])
+
   const handleMaterialsMerged = (incomingMaterials) => {
     setMaterials(prev => mergeMaterials(prev, incomingMaterials))
     setWorkspace(prev => {
@@ -362,20 +383,33 @@ function App() {
     <ErrorBoundary>
       <Toaster position="top-right" />
       <div className="flex h-screen bg-bg">
-        <Sidebar
-          projects={projects}
-          currentProjectId={currentProjectId}
-          settings={settings}
-          onSelectProject={handleSelectProject}
-          onCreateProject={createProject}
-          onDeleteProject={deleteProject}
-          onSettingsSaved={loadSettings}
-          authUser={authUser}
-          onLoggedOut={() => setAuthUser(null)}
-          onOpenAdmin={() => setShowAdmin(true)}
-          theme={theme}
-          onToggleTheme={onToggleTheme}
-        />
+        {showSidebar && (
+          <Sidebar
+            projects={projects}
+            currentProjectId={currentProjectId}
+            settings={settings}
+            onSelectProject={handleSelectProject}
+            onCreateProject={createProject}
+            onDeleteProject={deleteProject}
+            onSettingsSaved={loadSettings}
+            authUser={authUser}
+            onLoggedOut={() => setAuthUser(null)}
+            onOpenAdmin={() => setShowAdmin(true)}
+            theme={theme}
+            onToggleTheme={onToggleTheme}
+            onCollapseSidebar={() => toggleSidebar(false)}
+          />
+        )}
+        {!showSidebar && (
+          <button
+            onClick={() => toggleSidebar(true)}
+            title="显示侧栏"
+            aria-label="显示侧栏"
+            className="fixed left-2 top-2 z-40 flex h-8 w-8 items-center justify-center rounded-ibtn border border-border bg-card2 text-t2 shadow-card hover:text-text"
+          >
+            <IconSidebar size={16} />
+          </button>
+        )}
         {/* 可调区域（不含固定宽 Sidebar）：clamp 的 MIN_CHAT_WIDTH 须按这个区域预留。 */}
         <div ref={setContainerRef} className="flex flex-1 min-w-0">
           <ChatPanel
