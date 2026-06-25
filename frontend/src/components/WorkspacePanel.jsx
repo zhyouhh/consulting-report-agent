@@ -401,11 +401,6 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
             </button>
           </div>
 
-          {/* 工作目录展示（功能全保：原版材料 tab 顶部即显示项目工作目录） */}
-          <div className="text-11 text-t3 font-mono break-all mb-3">
-            {project?.workspace_dir || workspace?.workspace_dir || '未设置工作目录'}
-          </div>
-
           {materials.length === 0 ? (
             <div className="rounded-card border border-border border-dashed p-4 text-13 text-t2">
               暂无项目材料。点击右上角「上传」按钮，或在聊天输入框左侧的回形针添加材料。

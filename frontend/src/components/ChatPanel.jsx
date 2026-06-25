@@ -1021,15 +1021,17 @@ const ChatPanel = forwardRef(function ChatPanel({
       {tokenUsage && (
         <div className="flex-shrink-0 border-t border-track px-6 py-2 text-11 text-t3">
           <div className="flex flex-wrap items-center gap-[10px]">
-            <span>{contextUsage.label}</span>
-            <div className="h-1 min-w-[120px] max-w-[190px] flex-1 rounded-full bg-track overflow-hidden">
+            <span className="flex-shrink-0">{contextUsage.label}</span>
+            {/* 进度条 flex-1 随聊天窗口伸缩；去掉 max-w 和 modeTag 的 ml-auto，让条变长、
+                把「用量/上限」数字推到贴近右侧 Provider 标签处（用户反馈：条太短、数字该更靠右）。 */}
+            <div className="h-1 flex-1 min-w-[140px] rounded-full bg-track overflow-hidden">
               <div
                 className={`h-full rounded-full transition-all ${contextUsagePercent == null ? 'bg-t3/55' : 'bg-abright'}`}
                 style={{ width: contextUsagePercent == null ? '100%' : `${contextUsagePercent}%` }}
               />
             </div>
-            <span className="text-text font-mono">{contextUsage.detail}</span>
-            <span className="ml-auto text-2xs text-asoftt bg-asoft border border-asoftb px-2 py-px rounded-chip">
+            <span className="text-text font-mono flex-shrink-0">{contextUsage.detail}</span>
+            <span className="text-2xs text-asoftt bg-asoft border border-asoftb px-2 py-px rounded-chip flex-shrink-0">
               {contextUsage.modeTag}
             </span>
             {contextUsage.compressedTag && (
