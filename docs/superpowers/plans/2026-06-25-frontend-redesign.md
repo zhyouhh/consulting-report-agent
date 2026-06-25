@@ -32,8 +32,9 @@
 - `frontend/src/assets/fonts/*.woff2` — 自托管 Hanken Grotesk(400/500/600/700) + IBM Plex Mono(400/500)
 - `frontend/tests/theme.test.mjs` — theme.js 纯函数测
 - `frontend/tests/themeBootstrap.source.test.mjs` — index.html bootstrap 顺序/语义 guard
-- `frontend/tests/paletteGuard.source.test.mjs` — 旧 palette/emoji 扫描 guard
-- `frontend/tests/tokenContract.source.test.mjs` — tailwind token 含 `<alpha-value>` guard
+- `frontend/tests/paletteGuard.source.test.mjs` — 递归扫 src 旧 palette/裸 hex/emoji guard
+- `frontend/tests/tokenContract.source.test.mjs` — tailwind 每个 color token 含 `<alpha-value>` guard
+- `frontend/tests/darkClassGuard.source.test.mjs` — 仅遮罩允许 `dark:`、其余 dark: 全拒 guard
 
 **改写（重绘表现层，保留逻辑）**
 - 地基：`frontend/src/index.css`、`frontend/tailwind.config.js`、`frontend/index.html`
@@ -220,9 +221,22 @@ git commit -m "feat(theme): map semantic Tailwind color/type/radius tokens"
 
 ```js
 // frontend/tests/theme.test.mjs
-import { test } from 'node:test'
+import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeTheme, nextTheme } from '../src/utils/theme.js'
+import { normalizeTheme, nextTheme, getInitialTheme, applyTheme, toggleTheme } from '../src/utils/theme.js'
+
+// 极简 mock：localStorage + document.documentElement.classList
+beforeEach(() => {
+  const store = {}
+  globalThis.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v) },
+  }
+  const classes = new Set()
+  globalThis.document = { documentElement: { classList: {
+    add: (c) => classes.add(c), remove: (c) => classes.delete(c), contains: (c) => classes.has(c),
+  } } }
+})
 
 test('normalizeTheme: 只认 dark，其余回 light', () => {
   assert.equal(normalizeTheme('dark'), 'dark')
@@ -234,6 +248,27 @@ test('normalizeTheme: 只认 dark，其余回 light', () => {
 test('nextTheme 翻转', () => {
   assert.equal(nextTheme('light'), 'dark')
   assert.equal(nextTheme('dark'), 'light')
+})
+test('getInitialTheme 读 localStorage、缺省 light、异常吞掉', () => {
+  assert.equal(getInitialTheme(), 'light')               // 空存储
+  globalThis.localStorage.setItem('cra:theme', 'dark')
+  assert.equal(getInitialTheme(), 'dark')
+  globalThis.localStorage.getItem = () => { throw new Error('blocked') }
+  assert.equal(getInitialTheme(), 'light')               // try/catch 兜底
+})
+test('applyTheme 加/去 .dark 并返回归一值', () => {
+  assert.equal(applyTheme('dark'), 'dark')
+  assert.ok(globalThis.document.documentElement.classList.contains('dark'))
+  assert.equal(applyTheme('light'), 'light')
+  assert.ok(!globalThis.document.documentElement.classList.contains('dark'))
+  applyTheme('garbage')                                   // 非 dark → 移除
+  assert.ok(!globalThis.document.documentElement.classList.contains('dark'))
+})
+test('toggleTheme 翻转 + 持久化 + 应用', () => {
+  const t = toggleTheme('light')
+  assert.equal(t, 'dark')
+  assert.equal(globalThis.localStorage.getItem('cra:theme'), 'dark')
+  assert.ok(globalThis.document.documentElement.classList.contains('dark'))
 })
 ```
 
@@ -297,8 +332,9 @@ test('bootstrap 在 head 内、排在 module script 之前', () => {
   assert.ok(boot !== -1 && boot < headEnd, 'bootstrap 应在 </head> 之前')
   assert.ok(mod === -1 || boot < mod, 'bootstrap 应排在 module script 之前')
 })
-test('bootstrap 语义：try/catch + 只 dark 加 .dark', () => {
+test('bootstrap 语义：try/catch + 只 dark 加 .dark + 非 dark 移除', () => {
   assert.match(html, /try\s*\{[\s\S]*cra:theme[\s\S]*===\s*['"]dark['"][\s\S]*classList\.add\(['"]dark['"]\)[\s\S]*\}\s*catch/)
+  assert.match(html, /classList\.remove\(['"]dark['"]\)/)   // else 分支必须移除（防陈旧 .dark 残留）
 })
 ```
 
@@ -363,11 +399,11 @@ git add frontend/src/components/icons.jsx
 git commit -m "feat(icons): shared linear SVG icon set (currentColor)"
 ```
 
-### Task 0g: 地基验收 + palette/token guard
+### Task 0g: 地基验收 + palette/token/dark guard
 
-**Files:** Create `frontend/tests/paletteGuard.source.test.mjs`、`frontend/tests/tokenContract.source.test.mjs`
+**Files:** Create `frontend/tests/paletteGuard.source.test.mjs`、`frontend/tests/tokenContract.source.test.mjs`、`frontend/tests/darkClassGuard.source.test.mjs`
 
-- [ ] **Step 1: 写 token 契约 guard**
+- [ ] **Step 1: 写 token 契约 guard（枚举每个 color token 都用 `<alpha-value>`）**
 
 ```js
 // frontend/tests/tokenContract.source.test.mjs
@@ -375,48 +411,86 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 const cfg = readFileSync(new URL('../tailwind.config.js', import.meta.url), 'utf8')
-test('颜色 token 走 <alpha-value> 通道形式', () => {
+// 必须用 helper c() 而非裸字符串，确保每个 color 都带 <alpha-value>
+const EXPECTED_TOKENS = ['--bg','--chat','--ws','--card','--card2','--field','--border','--col',
+  '--hair','--track','--text','--t2','--t3','--accent','--abright','--asoft','--asoftb','--asoftt',
+  '--sel','--userbub','--stepdone','--dotfuture','--scrim','--success','--warn','--error']
+test('helper 用 <alpha-value> 通道形式 + darkMode class', () => {
   assert.match(cfg, /rgb\(var\(\$\{v\}\) \/ <alpha-value>\)/)
   assert.match(cfg, /darkMode:\s*['"]class['"]/)
 })
+test('每个 color token 都经 c() helper（无裸 var(--x) 丢透明度）', () => {
+  for (const t of EXPECTED_TOKENS) assert.match(cfg, new RegExp(`c\\(['"]${t}['"]\\)`), `${t} 未经 c()`)
+  // 禁止颜色条目里出现裸 var(--x)（绕过 helper）
+  assert.ok(!/:\s*['"]var\(--[a-z0-9-]+\)['"]/.test(cfg), '存在裸 var(--x) 颜色映射、丢 <alpha-value>')
+})
 ```
 
-- [ ] **Step 2: 写 palette/emoji 扫描 guard（allowlist 制）**
+- [ ] **Step 2: 写 palette/emoji 扫描 guard（[R1 review] 递归扫全 src，精确 allowlist）**
 
 ```js
 // frontend/tests/paletteGuard.source.test.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
-const dir = new URL('../src/components/', import.meta.url)
-// 扫所有组件：任意值颜色工具类 + JS 裸 hex（允许 currentColor/transparent）
+import { fileURLToPath } from 'node:url'
+const SRC = fileURLToPath(new URL('../src/', import.meta.url))
+// 任意值颜色工具类 + JS/inline/CSS 裸 hex（覆盖 #RGB/#RGBA/#RRGGBB/#RRGGBBAA，长度优先匹配防误吞）
 const ARB = /\b(?:bg|text|border|ring|placeholder|fill|stroke)-\[#[0-9a-fA-F]{3,8}\]/
+const HEX = /#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{4}|[0-9a-fA-F]{3})\b/
 const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u
-test('组件无遗留任意值颜色类（迁移完成后启用，逐组件解除 allowlist）', () => {
-  // 初始 allowlist=尚未迁移的组件文件名集合；每个组件 task 完成后从此集合移除该文件。
-  const ALLOW = new Set([/* 见下：随迁移进度缩小 */])
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.jsx') || ALLOW.has(f)) continue
-    const src = readFileSync(new URL(f, dir), 'utf8')
-    assert.ok(!ARB.test(src), `${f} 仍有任意值颜色类`)
-    assert.ok(!EMOJI.test(src), `${f} 仍有 emoji（协议常量在 utils 不在组件，组件应无 emoji）`)
+// 迁移后 token 走 RGB channel、shadow 走 rgba()，src 任何文件都不该再有裸 hex —— 不给整文件豁免。
+// 若某处确有不可避免的合法 hex，加窄行内 allowlist，不放整文件。
+const ALLOW_PENDING = new Set([/* 起始放全部仍含旧色的文件名：17 个组件 .jsx + 'App.jsx' + 'toast.js'（index.css 已在 0b 迁移、不入）；每 task 完成后移除对应文件，迁移完为空 */])
+function* walk(d){ for (const e of readdirSync(d, {withFileTypes:true})) {
+  const p = d + e.name; if (e.isDirectory()) { if (e.name!=='assets') yield* walk(p+'/') }
+  else if (/\.(jsx?|css)$/.test(e.name)) yield { name:e.name, path:p } } }
+test('全 src 无遗留旧 palette / 裸 hex / emoji（迁移完 ALLOW_PENDING 空）', () => {
+  for (const { name, path } of walk(SRC)) {
+    if (ALLOW_PENDING.has(name)) continue
+    const src = readFileSync(path, 'utf8')
+    assert.ok(!ARB.test(src), `${name} 仍有任意值颜色类`)
+    assert.ok(!HEX.test(src), `${name} 仍有裸 hex 色值（token 用 RGB channel、shadow 用 rgba）`)
+    // emoji 禁所有 JSX UI 文件（含 App.jsx）；协议常量在 utils/*.js（非 .jsx）天然豁免
+    if (/\.jsx$/.test(name)) assert.ok(!EMOJI.test(src), `${name} 仍有 emoji`)
   }
 })
 ```
 
-> ALLOW 初始放**全部尚未迁移的组件 .jsx**（批次 1–6 起始集合）；每完成一个组件 task，从 ALLOW 移除该文件——guard 随迁移收紧，迁移完 ALLOW 空。emoji 协议常量在 `utils/chatPresentation.js`，不在扫描目录（spec §6 [R2]）。
+- [ ] **Step 3: 写 `dark:` 上限 guard（[R1 review] token 单一真值源，仅遮罩例外）**
 
-- [ ] **Step 3: 跑全套 + 手动双主题冒烟**
+```js
+// frontend/tests/darkClassGuard.source.test.mjs
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync, readdirSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+const SRC = fileURLToPath(new URL('../src/', import.meta.url))
+const ALLOW_DARK = /dark:bg-scrim\/\d+/                  // 唯一允许的 dark: 例外＝遮罩
+function* walk(d){ for (const e of readdirSync(d,{withFileTypes:true})){const p=d+e.name
+  if(e.isDirectory()){if(e.name!=='assets')yield* walk(p+'/')}else if(/\.jsx?$/.test(e.name))yield p}}
+test('除遮罩外不得用 dark:（颜色靠 token 自动切，防真值源漂移）', () => {
+  for (const p of walk(SRC)) {
+    const src = readFileSync(p, 'utf8')
+    const offenders = (src.match(/\bdark:[a-z0-9:/[\]#.-]+/g) || []).filter(s => !ALLOW_DARK.test(s))
+    assert.deepEqual(offenders, [], `${p} 有非遮罩 dark: 类：${offenders.join(', ')}`)
+  }
+})
+```
+
+> ALLOW_PENDING 初始放**全部仍含旧色的文件名**：17 个组件 `.jsx` + `App.jsx` + `toast.js`（`index.css` 已在 Task 0b 迁移、不入）；每完成一个 task 从中移除对应文件——guard 随迁移收紧，迁移完为空。**无整文件 hex 豁免**：迁移后 token 走 RGB channel、shadow 走 `rgba()`，`index.css`/`tailwind.config.js` 也不该有裸 hex（Task 0b/0c 已如此）；个别不可避免的合法 hex 用窄行内 allowlist。emoji 禁所有 `.jsx`（含 `App.jsx`）；`utils/*.js`（含 `chatPresentation.js` 协议常量）是 `.js` 非 `.jsx`，天然不被 emoji 扫（spec §6 [R2]）。
+
+- [ ] **Step 4: 跑全套 + 手动双主题冒烟**
 
 Run: `cd frontend && node --test tests/`
 Expected: PASS。
 再 `cd .. && .venv/bin/python run_web.py`，chrome-devtools 截首屏：默认浅色；`localStorage.setItem('cra:theme','dark');location.reload()` 后深色无 FOUC。（此刻组件多数仍旧样式，只验地基切换通路。）
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/tests/paletteGuard.source.test.mjs frontend/tests/tokenContract.source.test.mjs
-git commit -m "test(theme): token contract + palette/emoji migration guards"
+git add frontend/tests/paletteGuard.source.test.mjs frontend/tests/tokenContract.source.test.mjs frontend/tests/darkClassGuard.source.test.mjs
+git commit -m "test(theme): token contract + palette/emoji/dark-class migration guards"
 ```
 
 ---
@@ -425,7 +499,7 @@ git commit -m "test(theme): token contract + palette/emoji migration guards"
 
 ### Task 1: App.jsx 三栏骨架 + 主题接线
 
-**Files:** Modify `frontend/src/App.jsx`（必要时 `frontend/src/components/ErrorBoundary.jsx`、`frontend/src/utils/toast.js`）
+**Files:** Modify `frontend/src/App.jsx`、`frontend/src/components/ErrorBoundary.jsx`、`frontend/src/utils/toast.js`
 
 **原型屏**：整窗三栏布局（README 布局骨架）。
 
@@ -459,18 +533,22 @@ const onToggleTheme = () => setTheme(t => toggleTheme(t))
 
 - [ ] **Step 3b: 迁移 `utils/toast.js` 的硬编码色（app 全局反馈）**
 
-`toast.js` 是 `react-hot-toast` 的自定义样式（`toast.js:6-7` 等带旧 hex），不在 paletteGuard 扫描目录（`components/`）内。改成主题感知：成功/错误/普通 toast 的底/字/边用 `rgb(var(--card))`/`rgb(var(--text))`/`rgb(var(--success))`/`rgb(var(--error))`（toast 是运行时 JS、用 `getComputedStyle(document.documentElement).getPropertyValue` 或直接 `rgb(var(--x))` 字符串），随 `.dark` 自动切。`showSuccess`/`showError` 等调用签名**不动**。
+`toast.js` 是 `react-hot-toast` 的自定义样式（`toast.js:6-7` 等带旧 hex）。改成主题感知：成功/错误/普通 toast 的底/字/边直接用 `rgb(var(--card))`/`rgb(var(--text))`/`rgb(var(--success))`/`rgb(var(--error))` 字符串（CSS 变量随 `.dark` 自动切，无需 JS 读取）。`showSuccess`/`showError` 等调用签名**不动**。（递归 paletteGuard 现已扫到 `utils/toast.js`，旧 hex 不清会红。）
+
+- [ ] **Step 3c: 迁移 `ErrorBoundary.jsx` + App loading 态 + 滚动条/原生控件（spec §4.5）**
+
+`ErrorBoundary.jsx`（`ErrorBoundary.jsx:20` 一带带旧色的 fallback UI）与 `App.jsx` 的 loading 分支（`App.jsx:341` 一带）改 token 类（`bg-bg`/`text-text`/`text-t2` 等），浅深都对。滚动条/`color-scheme` 已在 Task 0b 的 `index.css` 变量化（确认覆盖）。ErrorBoundary 的 `componentDidCatch`/`getDerivedStateFromError` 逻辑**不动**，只换 fallback 的 className。
 
 - [ ] **Step 4: 验**
 
 Run: `cd frontend && node --test tests/ && npm run build`
 Expected: PASS。web 截浅深两张，三栏布局对原型；拖宽仍可用、刷新不闪。
 
-- [ ] **Step 5: 从 paletteGuard ALLOW 移除 `App.jsx`（若 App 在扫描范围；App 在 src/ 非 components/，则单列断言或纳入扩展扫描）+ Commit**
+- [ ] **Step 5: 从 paletteGuard `ALLOW_PENDING` 移除 `App.jsx` / `toast.js` / `ErrorBoundary.jsx`（递归 guard 现已覆盖 `src/` 全部）+ Commit**
 
 ```bash
-git add frontend/src/App.jsx frontend/tests/
-git commit -m "feat(redesign): App shell three-column layout + theme wiring"
+git add frontend/src/App.jsx frontend/src/components/ErrorBoundary.jsx frontend/src/utils/toast.js frontend/tests/
+git commit -m "feat(redesign): App shell + theme wiring + ErrorBoundary/toast/loading tokens"
 ```
 
 ---
@@ -521,8 +599,8 @@ git commit -m "feat(redesign): App shell three-column layout + theme wiring"
 
 ### Task 4a: MarkdownMessage.jsx
 
-**不变式（spec §4.5）**：项目无 Tailwind typography 依赖；现有硬编码暗色 markdown 样式（表格/工具卡/链接/code/blockquote/KaTeX）改成 token 驱动、浅深都对；`react-markdown` + remark/rehype 链不动。
-- [ ] Step 1 盘点（列出所有硬编码色的渲染元素）。Step 2 换皮成 token 类（两主题都验）。Step 3 验 `node --test tests/ && npm run build` + web 截一条含表格/代码/公式的消息浅深两张。Step 4 ALLOW 移除 + Commit `feat(redesign): MarkdownMessage token-driven dual theme`。
+**不变式（spec §4.5）**：项目无 Tailwind typography 依赖；现有硬编码暗色 markdown 样式（表格/工具卡/链接/code/blockquote）改成 token 驱动、浅深都对；`react-markdown` + remark/rehype 链不动。（KaTeX 公式样式归 Task 5d 处理——核对哪个渲染器真 import `rehype-katex`，在该组件 task 做 KaTeX 双主题。）
+- [ ] Step 1 盘点（列出所有硬编码色的渲染元素 + 确认本组件是否走 KaTeX）。Step 2 换皮成 token 类（两主题都验）。Step 3 验 `node --test tests/ && npm run build` + web 截一条含表格/代码的消息浅深两张。Step 4 ALLOW 移除 + Commit `feat(redesign): MarkdownMessage token-driven dual theme`。
 
 ### Task 4b: ThinkingBlock.jsx + index.css thinking 样式
 
@@ -571,7 +649,7 @@ git commit -m "feat(redesign): App shell three-column layout + theme wiring"
 
 **原型屏**：文件树（默认 30%）/ 预览，可上下拖。
 **不变式（spec §5/§4.5）**：树/预览拖动（`filePanelLayout` 纯函数复用、cleanup ref）；脏离开三按钮守卫（`fileEditState.guardLeave`）；编辑/保存/取消工具栏（仅 editable）；`base_mtime_ns` opaque 字符串透传；`react-markdown` 预览链不动；**代码高亮不 import 两套无 scope 全局 CSS**（改 CSS 变量版或 scope 到 `:root`/`.dark`，spec §4.5 [R3]）。
-- [ ] Step 1 盘点（含 `FilePreviewPanel.jsx:10` 固定深色 highlight import）。Step 2 换皮 + highlight 改双主题（推荐 CSS 变量高亮规则在 index.css 按 token）。Step 3 验 + web 截 markdown 文件 + 代码文件预览浅深，验编辑态 + 脏离开弹窗。Step 4 ALLOW 移除 + Commit `feat(redesign): FilePreviewPanel + scoped dual-theme highlight`。
+- [ ] Step 1 盘点（含 `FilePreviewPanel.jsx:10` 固定深色 highlight import；确认本组件 `rehype-katex`/KaTeX 真实导入面）。Step 2 换皮 + highlight 改双主题（推荐 CSS 变量高亮规则在 index.css 按 token）+ **KaTeX 公式样式双主题**（若本组件走 KaTeX）。Step 3 验 + web 截 markdown 文件 + 代码文件 + 含公式预览浅深，验编辑态 + 脏离开弹窗。Step 4 ALLOW 移除 + Commit `feat(redesign): FilePreviewPanel + scoped dual-theme highlight + KaTeX`。
 
 ### Task 5e: RollbackMenu.jsx
 
@@ -614,12 +692,26 @@ git commit -m "feat(redesign): App shell three-column layout + theme wiring"
 
 ### Task 7: 全量验收 + 护栏收紧
 
-- [ ] **Step 1: paletteGuard ALLOW 应为空**（所有组件已迁移）；若 `App.jsx` 在 `src/` 根需单独扫描，补一条断言扫 `src/App.jsx`。Run: `cd frontend && node --test tests/` → PASS。
+- [ ] **Step 1: paletteGuard `ALLOW_PENDING` 应为空 + dark guard 绿**（递归扫 `src/` 全部已覆盖 App/index.css/toast）。Run: `cd frontend && node --test tests/` → PASS。
 - [ ] **Step 2: 全套测试 + build**：`node --test tests/ && npm run build` → 全绿。
-- [ ] **Step 3: 对比度按角色测**（spec §6 [R3]）：正文/主文本/操作文字对应 token 算 ≥4.5:1；`t3` 弱文本单独低阈值/豁免。可写一个小脚本读 index.css token 算对比度，正文类断言、弱文本记录不 fail。
-- [ ] **Step 4: 双平台逐屏视觉对照**：web 起服务，mac Chrome + Windows Chrome 各截全部屏浅深两套，对照 `Prototype-standalone.html`；核对清单（无 emoji/无紫/线性图标/等宽数字/圆角≤14px/主色/深色强调/hover）+ 中文系统栈在 Windows 雅黑下可接受。
-- [ ] **Step 5: Codex 双轨审整分支**（CLAUDE.md 惯例）：spec 轨 + quality 轨独立审 diff，「审→修→再审」到 APPROVED。
-- [ ] **Step 6: finishing-a-development-branch**：决定 merge/PR/cleanup。
+- [ ] **Step 3: 对比度按角色测**（spec §6 [R3]）：正文/主文本/操作文字对应 token 算 ≥4.5:1；`t3` 弱文本单独低阈值/豁免。写小脚本读 index.css token 算对比度，正文类断言、弱文本记录不 fail。
+- [ ] **Step 4: 字体加载硬门（[R1 review]，防误过）**：截图前在页面 eval `await document.fonts.ready`，并断言关键字族真 loaded：
+  ```js
+  // chrome-devtools evaluate / CDP —— 强制 load 再断言 face 真存在且 loaded（check() 会对未声明字体假 true，禁用）
+  const specs = ['500 12px "Hanken Grotesk"', '400 12px "IBM Plex Mono"'];
+  for (const s of specs) {
+    const faces = await document.fonts.load(s);          // 触发实际下载；URL 错则下载失败
+    const fam = s.split('"')[1];
+    const got = [...document.fonts].filter(ff => ff.family === fam && ff.status === 'loaded');
+    if (faces.length === 0 || got.length === 0)
+      throw new Error(`自托管字体未加载: ${fam}（@font-face 缺失或 url 写错，会截到系统 fallback）`);
+  }
+  await document.fonts.ready;
+  ```
+  字体未真加载即 fail，不靠肉眼（URL 写错时系统 fallback 也稳定、肉眼看不出）。`document.fonts.check()` 对未声明字族也可能返 true，**禁用**，必须走 `load()` + 遍历 `document.fonts` 验 `status==='loaded'`。
+- [ ] **Step 5: 双平台逐屏视觉对照**：web 起服务，mac Chrome + Windows Chrome 各截全部屏浅深两套（每张先过 Step 4 字体门），对照 `Prototype-standalone.html`；核对清单（无 emoji/无紫/线性图标/等宽数字/圆角≤14px/主色/深色强调/hover）+ 中文系统栈在 Windows 雅黑下可接受。
+- [ ] **Step 6: Codex 双轨审整分支**（CLAUDE.md 惯例：code review = spec + quality **双轨不合并**）：「审→修→再审」到 APPROVED。
+- [ ] **Step 7: finishing-a-development-branch**：决定 merge/PR/cleanup。
 
 ---
 
