@@ -4,110 +4,40 @@
 @font-face{font-family:'Hanken Grotesk';font-style:normal;font-weight:700;font-display:swap;src:url('./assets/fonts/HankenGrotesk-700.woff2') format('woff2');}
 @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400;font-display:swap;src:url('./assets/fonts/IBMPlexMono-400.woff2') format('woff2');}
 @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:500;font-display:swap;src:url('./assets/fonts/IBMPlexMono-500.woff2') format('woff2');}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
-  -webkit-font-smoothing: antialiased;
-  background-color: #0f0f23;
-  color: #e2e2f0;
+:root{
+  --bg:241 241 243; --chat:255 255 255; --ws:244 244 246;
+  --card:255 255 255; --card2:250 250 251; --field:255 255 255;
+  --border:227 227 229; --col:220 220 223; --hair:240 240 242; --track:232 232 234;
+  --text:29 29 31; --t2:110 110 115; --t3:142 142 147;
+  --accent:27 42 74; --abright:27 42 74;
+  --asoft:233 236 242; --asoftb:215 220 232; --asoftt:27 42 74;
+  --sel:27 42 74; --userbub:27 42 74; --stepdone:27 42 74; --dotfuture:200 200 204;
+  --scrim:20 22 30; --scrim-a:0.45;
+  --success:52 168 83; --warn:183 121 31; --error:217 83 79;
+  color-scheme:light;
+}
+.dark{
+  --bg:28 29 33; --chat:32 32 36; --ws:28 29 33;
+  --card:38 39 44; --card2:44 45 49; --field:38 39 44;
+  --border:52 53 59; --col:44 45 49; --hair:48 49 55; --track:52 53 59;
+  --text:236 236 238; --t2:162 163 169; --t3:110 111 117;
+  --accent:54 82 126; --abright:126 151 204;
+  --asoft:46 60 87; --asoftb:60 74 102; --asoftt:157 176 216;
+  --sel:43 62 98; --userbub:54 82 126; --stepdone:90 115 171; --dotfuture:74 75 81;
+  --scrim:0 0 0; --scrim-a:0.6;
+  --success:70 176 106; --warn:201 162 74; --error:217 83 79;
+  color-scheme:dark;
 }
 
-/* 深色滚动条 */
-::-webkit-scrollbar {
-  width: 6px;
-}
-::-webkit-scrollbar-track {
-  background: #0f0f23;
-}
-::-webkit-scrollbar-thumb {
-  background: #3a3a5a;
-  border-radius: 3px;
-}
+body{margin:0;font-family:'Hanken Grotesk','PingFang SC','Microsoft YaHei','Noto Sans SC',system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;background-color:rgb(var(--chat));color:rgb(var(--text));}
+::-webkit-scrollbar{width:9px;height:9px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:rgb(var(--t3)/.4);border-radius:5px;border:2px solid transparent;background-clip:padding-box;}
 
-/* 原生控件深色适配 */
-select, input, textarea {
-  color-scheme: dark;
-}
-
-/* 允许消息气泡和预览区域的文本被选中复制 */
-.selectable-content,
-.selectable-content * {
-  user-select: text;
-  -webkit-user-select: text;
-}
-
-/* Markdown 内容深色适配 */
-.prose-dark {
-  color: #c8c8e0;
-}
-.prose-dark h1, .prose-dark h2, .prose-dark h3, .prose-dark h4 {
-  color: #e2e2f0;
-}
-.prose-dark a {
-  color: #60a5fa;
-}
-.prose-dark code {
-  color: #a5b4fc;
-  background: #252545;
-  padding: 2px 4px;
-  border-radius: 3px;
-}
-.prose-dark pre {
-  background: #16163a;
-  border: 1px solid #2a2a4a;
-}
-.prose-dark blockquote {
-  border-left-color: #3a3a5a;
-  color: #8888a8;
-}
-.prose-dark table th, .prose-dark table td {
-  border-color: #2a2a4a;
-}
-.prose-dark hr {
-  border-color: #2a2a4a;
-}
-.prose-dark strong {
-  color: #e2e2f0;
-}
-.prose-dark ul, .prose-dark ol {
-  color: #c8c8e0;
-}
-
-.thinking-block {
-  margin: 8px 0;
-  padding: 6px 10px;
-  border-left: 3px solid #3a3a5a;
-  background: #1a1a2e;
-  font-size: 0.85rem;
-  color: #8888a8;
-  border-radius: 4px;
-}
-
-.thinking-block summary {
-  cursor: pointer;
-  font-weight: 500;
-  color: #c8c8e0;
-  user-select: none;
-}
-
-.thinking-block .thinking-content {
-  margin-top: 6px;
-  max-height: 240px;
-  overflow-y: auto;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-@keyframes btn-highlight-pulse {
-  0%, 100% { opacity: 0.72; }
-  50% { opacity: 1; }
-}
-
-.btn-highlight-pulse {
-  animation: btn-highlight-pulse 1.4s ease-in-out infinite;
-}
+.selectable-content,.selectable-content *{user-select:text;-webkit-user-select:text;}
