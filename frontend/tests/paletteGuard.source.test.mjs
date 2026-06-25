@@ -10,7 +10,7 @@ const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u
 const ALLOW_PENDING = new Set([
   'AdminPanel.jsx','ChatPanel.jsx','ConfirmDialog.jsx','FilePreviewPanel.jsx',
   'IndependentReviewDrawer.jsx','MarkdownMessage.jsx',
-  'ProjectCreateModal.jsx','RollbackMenu.jsx','SettingsModal.jsx','Sidebar.jsx',
+  'ProjectCreateModal.jsx','RollbackMenu.jsx','SettingsModal.jsx',
   'StageAdvanceControl.jsx','StagePanel.jsx','ThinkingBlock.jsx','WorkspacePanel.jsx',
 ])
 function* walk(d){ for (const e of readdirSync(d, {withFileTypes:true})) {

@@ -46,5 +46,5 @@ test('Sidebar 额度块渲染进度条（quotaRatio 驱动 width + progressbar �
 test('Sidebar 进度条把 cap<=0 / used>=cap 当耗尽处理（红 100%）', () => {
   assert.match(src, /cap\s*<=\s*0\s*\|\|\s*used\s*>=\s*cap/, '应判定 overCap = cap<=0 || used>=cap');
   assert.match(src, /overCap\s*\?\s*100\s*:/, 'overCap 时 pct 应为 100');
-  assert.match(src, /overCap\s*\?\s*['"]#ef4444['"]/, 'overCap 时进度条应红色');
+  assert.match(src, /overCap\s*\?\s*['"]bg-error['"]/, 'overCap 时进度条应用 error token');
 });
