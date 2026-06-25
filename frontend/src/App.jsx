@@ -7,7 +7,6 @@ import WorkspacePanel from './components/WorkspacePanel'
 import AdminPanel from './components/AdminPanel'
 import ForcePasswordChange from './components/ForcePasswordChange'
 import ErrorBoundary from './components/ErrorBoundary'
-import { IconSidebar } from './components/icons'
 import axios from 'axios'
 import { setUnauthedHandler } from './api'
 import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
@@ -397,18 +396,7 @@ function App() {
             onOpenAdmin={() => setShowAdmin(true)}
             theme={theme}
             onToggleTheme={onToggleTheme}
-            onCollapseSidebar={() => toggleSidebar(false)}
           />
-        )}
-        {!showSidebar && (
-          <button
-            onClick={() => toggleSidebar(true)}
-            title="显示侧栏"
-            aria-label="显示侧栏"
-            className="fixed left-2 top-2 z-40 flex h-8 w-8 items-center justify-center rounded-ibtn border border-border bg-card2 text-t2 shadow-card hover:text-text"
-          >
-            <IconSidebar size={16} />
-          </button>
         )}
         {/* 可调区域（不含固定宽 Sidebar）：clamp 的 MIN_CHAT_WIDTH 须按这个区域预留。 */}
         <div ref={setContainerRef} className="flex flex-1 min-w-0">
@@ -421,6 +409,7 @@ function App() {
             materials={materials}
             onMaterialsMerged={handleMaterialsMerged}
             onProjectMutated={handleProjectMutated}
+            onToggleSidebar={() => toggleSidebar()}
             onToggleWorkspacePanel={handleToggleWorkspacePanel}
             injectedPrompt={injectedPrompt}
             onInjectedPromptConsumed={() => setInjectedPrompt(null)}

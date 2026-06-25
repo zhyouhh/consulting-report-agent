@@ -42,7 +42,7 @@ import { summarizeWorkspace } from '../utils/workspaceSummary'
 import ThinkingBlock from './ThinkingBlock'
 // Shared markdown rendering fragment, reused by the S5 ReviewChatWindow (same look & feel).
 import { assistantMarkdownComponents } from './MarkdownMessage'
-import { IconTrash, IconSidebar, IconPaperclip, IconSend, IconStop, IconClose, IconCheck } from './icons'
+import { IconTrash, IconSidebar, IconPanelRight, IconPaperclip, IconSend, IconStop, IconClose, IconCheck } from './icons'
 
 const ChatPanel = forwardRef(function ChatPanel({
   projectId,
@@ -52,6 +52,7 @@ const ChatPanel = forwardRef(function ChatPanel({
   materials,
   onMaterialsMerged,
   onProjectMutated,
+  onToggleSidebar,
   onToggleWorkspacePanel,
   injectedPrompt,
   onInjectedPromptConsumed,
@@ -821,14 +822,26 @@ const ChatPanel = forwardRef(function ChatPanel({
 
   return (
     <div className="flex-1 min-w-0 bg-chat flex flex-col">
-      <div className="h-[60px] flex-shrink-0 border-b border-track px-[22px] flex items-center justify-between">
-        <div className="min-w-0">
-          <h2 className="text-base font-bold text-text tracking-tight truncate">{project?.name || '请选择或创建项目'}</h2>
-          {projectId && (
-            <p className="text-xs text-t3 mt-[1px] truncate">
-              {connection.title} · 当前阶段 {workspaceSummary.stageLabel}
-            </p>
+      <div className="h-[60px] flex-shrink-0 border-b border-track px-[22px] flex items-center justify-between gap-2">
+        <div className="flex items-center gap-[10px] min-w-0">
+          {onToggleSidebar && (
+            <button
+              onClick={onToggleSidebar}
+              title="切换侧栏"
+              aria-label="切换侧栏"
+              className="flex items-center justify-center w-8 h-8 flex-shrink-0 border border-border bg-card2 rounded-ibtn text-t2 hover:text-text"
+            >
+              <IconSidebar size={15} />
+            </button>
           )}
+          <div className="min-w-0">
+            <h2 className="text-base font-bold text-text tracking-tight truncate">{project?.name || '请选择或创建项目'}</h2>
+            {projectId && (
+              <p className="text-xs text-t3 mt-[1px] truncate">
+                {connection.title} · 当前阶段 {workspaceSummary.stageLabel}
+              </p>
+            )}
+          </div>
         </div>
         <div className="flex gap-[6px] flex-shrink-0">
           {projectId && (
@@ -846,7 +859,7 @@ const ChatPanel = forwardRef(function ChatPanel({
             title="切换工作区"
             className="flex items-center justify-center w-8 h-8 border border-border bg-card2 rounded-ibtn text-accent hover:bg-card2/70"
           >
-            <IconSidebar size={15} />
+            <IconPanelRight size={15} />
           </button>
         </div>
       </div>

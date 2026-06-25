@@ -4,7 +4,7 @@ import SettingsModal from './SettingsModal'
 import ProjectCreateModal from './ProjectCreateModal'
 import { describeConnectionMode } from '../utils/connectionMode'
 import { quotaLabel, quotaRatio } from '../utils/quotaFormat.js'
-import { IconPlus, IconFile, IconTrash, IconShield, IconLogout, IconGear, IconSun, IconMoon, IconSidebar } from './icons'
+import { IconPlus, IconFile, IconTrash, IconShield, IconLogout, IconGear, IconSun, IconMoon } from './icons'
 
 const PROJECT_TYPE_LABELS = {
   'strategy-consulting': '战略咨询',
@@ -29,7 +29,6 @@ export default function Sidebar({
   onOpenAdmin,
   theme,
   onToggleTheme,
-  onCollapseSidebar,
 }) {
   const [showModal, setShowModal] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -46,22 +45,12 @@ export default function Sidebar({
 
   return (
     <div className="w-[264px] flex-shrink-0 bg-bg border-r border-col flex flex-col">
-      {/* 1) Wordmark 区 + 收起按钮 */}
-      <div className="flex items-center justify-between" style={{ padding: '18px 16px 12px' }}>
-        <div className="flex items-center gap-[9px] min-w-0">
-          <div className="flex items-center justify-center w-[26px] h-[26px] rounded-ibtn bg-accent text-white text-[13px] font-bold flex-shrink-0">
-            R
-          </div>
-          <span className="text-[14.5px] font-bold text-text tracking-tight truncate">咨询报告助手</span>
+      {/* 1) Wordmark 区 */}
+      <div className="flex items-center gap-[9px]" style={{ padding: '18px 16px 12px' }}>
+        <div className="flex items-center justify-center w-[26px] h-[26px] rounded-ibtn bg-accent text-white text-[13px] font-bold flex-shrink-0">
+          R
         </div>
-        <button
-          onClick={() => onCollapseSidebar?.()}
-          title="收起侧栏"
-          aria-label="收起侧栏"
-          className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-t3 hover:bg-card2 hover:text-text flex-shrink-0"
-        >
-          <IconSidebar size={15} />
-        </button>
+        <span className="text-[14.5px] font-bold text-text tracking-tight truncate">咨询报告助手</span>
       </div>
 
       {/* 2) 新建报告按钮区 */}
