@@ -8,6 +8,7 @@ import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { getDefaultPreviewFile } from '../utils/workspaceFiles'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 import { DEFAULT_WORKSPACE_WIDTH } from '../utils/workspaceResize'
+import { IconFile, IconTrash, IconUpload } from './icons'
 
 const WorkspacePanel = forwardRef(function WorkspacePanel({
   projectId,
@@ -263,35 +264,31 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
 
   return (
     <div
-      className="bg-[#1a1a2e] border-l border-[#2a2a4a] flex flex-col flex-shrink-0"
+      className="bg-ws flex flex-col flex-shrink-0 min-w-0"
       style={{ width: width ?? DEFAULT_WORKSPACE_WIDTH }}
     >
-      <div className="p-4 border-b border-[#2a2a4a]">
-        <div className="flex gap-2">
-          <button
-            onClick={() => handleTabClick('stage')}
-            className={`px-3 py-2 rounded-lg text-sm ${activeTab === 'stage' ? 'bg-[#28366b] text-white' : 'bg-[#15162d] text-[#8f93c9]'}`}
-          >
-            阶段
-          </button>
-          <button
-            onClick={() => handleTabClick('files')}
-            className={`px-3 py-2 rounded-lg text-sm ${activeTab === 'files' ? 'bg-[#28366b] text-white' : 'bg-[#15162d] text-[#8f93c9]'}`}
-          >
-            文件
-          </button>
-          <button
-            onClick={() => handleTabClick('materials')}
-            className={`px-3 py-2 rounded-lg text-sm ${activeTab === 'materials' ? 'bg-[#28366b] text-white' : 'bg-[#15162d] text-[#8f93c9]'}`}
-          >
-            材料
-          </button>
+      {/* tabs 段控区 */}
+      <div className="px-4 pt-[14px] pb-3">
+        <div className="flex bg-track rounded-btn p-[2px]">
+          {[['stage', '阶段'], ['files', '文件'], ['materials', '材料']].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => handleTabClick(key)}
+              className={`flex-1 text-center text-13 py-[5px] rounded-tag cursor-pointer transition-colors ${
+                activeTab === key
+                  ? 'bg-card shadow-card text-text font-medium'
+                  : 'text-t2 font-normal'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
         {/* §9.3 length_fallback hint — non-interactive; user adjusts length via chat */}
         {wsSummary.lengthFallbackUsed && (
           <div
-            className="mt-2 w-full px-3 py-1.5 rounded-lg bg-[#2a1e10] border border-[#5a3a10] text-xs text-[#c8a060]"
+            className="mt-2 w-full px-3 py-1.5 rounded-btn bg-asoft border border-col text-12 text-asoftt"
             role="note"
           >
             预期字数：3000（默认值）
@@ -322,32 +319,49 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
           onReloadFile={reloadFile}
         />
       ) : (
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          <div className="text-sm text-[#8f93c9]">
-            {project?.workspace_dir || workspace?.workspace_dir || '未设置工作目录'}
+        <div className="flex-1 overflow-y-auto p-4">
+          {/* 顶部：标题 + 上传按钮 */}
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-12 text-t2">已上传材料 · {materials.length}</span>
+            <button
+              type="button"
+              className="flex items-center gap-[6px] px-[11px] py-[5px] rounded-ibtn border border-border bg-card2 text-text text-12"
+              onClick={() => {
+                // 上传通过聊天输入框的加号触发，此按钮作提示入口
+              }}
+              title="在聊天输入框左侧通过加号上传新材料"
+            >
+              <IconUpload size={13} />
+              上传
+            </button>
           </div>
+
           {materials.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-[#3a3a5a] p-4 text-sm text-[#8f93c9]">
+            <div className="rounded-card border border-border border-dashed p-4 text-13 text-t2">
               暂无项目材料。可以在聊天输入框左侧通过加号上传新材料。
             </div>
           ) : (
             materials.map(material => (
-              <div key={material.id} className="rounded-lg border border-[#2f3158] bg-[#15162d] p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-sm text-[#e2e2f0] break-all">{material.display_name}</div>
-                    <div className="mt-1 text-xs text-[#8f93c9]">
-                      {material.source_type} · {material.file_type || '未知类型'}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => deleteMaterial(material.id)}
-                    className="text-xs text-red-300 hover:text-red-200"
-                  >
-                    删除
-                  </button>
+              <div key={material.id} className="flex items-center gap-[11px] px-[13px] py-[11px] bg-card border border-border rounded-[10px] mb-2">
+                {/* 图标 */}
+                <div className="w-[30px] h-[30px] rounded-ibtn bg-asoft text-asoftt flex items-center justify-center flex-shrink-0">
+                  <IconFile size={15} />
                 </div>
+                {/* 文件信息 */}
+                <div className="min-w-0 flex-1">
+                  <div className="text-13 font-medium text-text truncate">{material.display_name}</div>
+                  <div className="text-11 text-t3 mt-[2px]">
+                    {material.source_type} · {material.file_type || '未知类型'}
+                  </div>
+                </div>
+                {/* 删除按钮 */}
+                <button
+                  type="button"
+                  onClick={() => deleteMaterial(material.id)}
+                  className="w-[26px] h-[26px] rounded-md text-t3 hover:bg-card2 hover:text-error flex items-center justify-center flex-shrink-0"
+                >
+                  <IconTrash size={14} />
+                </button>
               </div>
             ))
           )}

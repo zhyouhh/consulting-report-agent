@@ -115,3 +115,12 @@ export const IconPanelRight = ({size=16, className=''}) => (
     <line x1="15" y1="3" x2="15" y2="21"/>
   </svg>
 )
+
+export const IconUpload = ({size=16, className=''}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+    <path d="M17 8l-5-5-5 5"/>
+    <path d="M12 3v12"/>
+  </svg>
+)
