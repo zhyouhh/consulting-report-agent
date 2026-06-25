@@ -352,6 +352,24 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **部署（前端 only 的通用流程）**：`dist` gitignore、服务器不 build → 本地 `npm run build` → tar → `VPS-fix-private/.push-file.py kr-web-01` 推 → 服务器解到 `dist.new` + `chmod -R a+rX` + 原子 `mv dist dist.old && mv dist.new dist`，**无须重启 systemd**（`_SPAStaticFiles` 按请求读盘、SPA shell no-cache 用户免硬刷），`dist.old` 留回滚。本次 bundle `index-D9CspGtr.js`。
 
+## 前端 UX 翻新：海军蓝双主题设计系统（2026-06-26 实施完成 + 每批及整分支 Codex 双轨审全 APPROVED + merge main `d794ae0`（--no-ff）+ 部署 kr-web-01；分支 `feat/frontend-redesign` 保留）
+
+把 web 前端从「深紫黑 `#0f0f23` + 薄荷绿 `#64ffda` + emoji」翻新为「海军蓝 `#1B2A4A` accent + 浅/深双主题 + 线性 SVG 图标 + 自托管字体」。**纯前端、零后端改动、业务逻辑只换皮、功能零退化**。改前端配色 / 主题 / 图标 / 字体前必读。spec `docs/superpowers/specs/2026-06-25-frontend-redesign-design.md`、plan `docs/superpowers/plans/2026-06-25-frontend-redesign.md`（含「## 实施期范围增补」）。
+
+**Token 单一真值源（别绕开）**：`frontend/src/index.css` 的 `:root`（浅）/`.dark`（深）定义**通道形式** CSS 变量 `--x: R G B`（如 `--accent: 27 42 74`）；`frontend/tailwind.config.js` 用 `c(v)=\`rgb(var(${v}) / <alpha-value>)\`` 映射成语义类（`bg-* text-* border-*` 等，全集见 config `colors`：bg/chat/ws/card/card2/field/border/col/hair/track/text/t2/t3/accent/abright/asoft·b·t/sel/userbub/stepdone/dotfuture/scrim/success/warn/error）+ radius(chip/tag/ibtn/btn/card/win) + shadow(card/popover/float) + fontSize(2xs/11/xs/12/13/sm/15/base/lg/xl)。**`<alpha-value>` 形式是硬约束**——让 Tailwind 透明度修饰符（`bg-accent/90`）生效；新增 token 必须走 `c()`、不写死 rgb。
+
+**主题切换**：`<html>.dark` class（`darkMode:'class'`）+ localStorage `cra:theme` + `index.html` head **同步 bootstrap** 防 FOUC（只 `==='dark'` 加 `.dark`、catch 里也 remove 兜底默认浅）。`utils/theme.js`（`getInitialTheme/applyTheme/toggleTheme`），`App.jsx` theme state + **独立** effect `applyTheme`（**别并进 init effect**——会每轮重挂黑屏，同既有 `[uid,must_change_password]` 雷区）。**深色一律靠 token 自动切，源码里禁用 `dark:` 前缀，唯一例外 `dark:bg-scrim/N`（弹窗遮罩）**。
+
+**自托管字体**：`src/assets/fonts/*.woff2`（Hanken Grotesk 400/500/600/700 + IBM Plex Mono 400/500，走 Vite hash 管线），`index.css` `@font-face` 用 `./assets/fonts/` 相对路径；中文走系统栈（PingFang SC / Microsoft YaHei）。线性 SVG 图标全在 `src/components/icons.jsx`（`currentColor` 自动随主题）。
+
+**护栏（迁移完整性 = 这些测试，改前端必须保绿）**：`frontend/tests/` 下 `paletteGuard`（**ALLOW_PENDING 已空**=全量迁移；扫到裸 hex / `bg-[#..]` 任意色 / emoji 即失败——**新组件别引入**）、`tokenContract`（每 token 经 `c()` + `<alpha-value>`）、`darkClassGuard`（只许 `dark:bg-scrim/N`）、`themeBootstrap`、`theme.test`。前端 **414 测试**（Node `node:test`）。
+
+**用户批准的范围增补**（非纯换皮，已记 plan）：① 左侧栏可收起/展开（`App.jsx` `showSidebar` + `cra:showSidebar` 持久化 + 聊天 header 内开关、与右侧工作区开关镜像图标 `IconSidebar`↔`IconPanelRight`）；② 材料 tab 直接上传（`WorkspacePanel` 复用聊天回形针同一 `/materials/upload`；忙态按 projectId 作用域 + project-switch/unmount/StrictMode 守卫）。
+
+**复审挖出并修的真坑（改这些组件当心回归）**：材料 tab 原显示**绝对 workspace_dir 路径**——desktop 无害但 **web 部署会泄露 VPS 文件路径，已删**（产品/安全决策，覆盖早期「功能全保」复审结论）；上传忙态守卫的 `mountedRef` **必须 setup 置 true + cleanup 置 false**（只 cleanup 会被 StrictMode 重放永久 false → 上传静默失效）；`activeProjectRef` **渲染期赋值**（被动 useEffect 留切项目窗口）；StagePanel stepper 用**本地 stage 列表索引**算填充（用全局 STAGE_ORDER 会让 report-only S7 算出 116% 溢出）；S2/S3 进度条左标签是「有效来源/证据引用」**不是「正文字数」**；任何把后端 `detail` 显示给用户的地方走 `utils/authError.js:normalizeApiErrorDetail`（422 是数组、直接渲染会崩）。
+
+**未做（follow-up，已记 `docs/current-worklist.md`）**：工具调用卡片重设计 + 去 emoji（现渲染成多行原始日志 + ✏️/🛠️/✅ emoji，emoji 来自后端 SSE tool 事件文本故 paletteGuard 扫不到；目标对齐原型优雅单行 pill、保信息量；需结构化解析器 + call/result 配对 + 复制/strip 逻辑 + 测试，**先写 plan 再做**）。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
