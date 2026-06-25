@@ -56,6 +56,10 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   const [reviewRunning, setReviewRunning] = useState(false)
   const previousProjectRef = useRef(projectId)
   const activeProjectRef = useRef(projectId)
+  // 挂载守卫：activeProjectRef 只在 useEffect 被动更新，面板隐藏（unmount）后会冻在旧项目，
+  // 不足以拦「上传中途收起面板 + 切项目 → 旧上传完成把旧项目材料并进新项目」（codex 红队 BLOCKER）。
+  // 配合 stillActive() 一起：unmount 后一律不再回调父级 / 弹提示。
+  const mountedRef = useRef(true)
   // 最新文件请求标记：丢弃乱序返回的旧 GET，防它覆盖更新的预览内容（codex 前端 quality NIT）。
   const latestFileRequestRef = useRef(null)
 
@@ -88,6 +92,8 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   useEffect(() => {
     activeProjectRef.current = projectId
   }, [projectId])
+
+  useEffect(() => () => { mountedRef.current = false }, [])
 
   const loadFiles = useCallback(async () => {
     const requestProject = projectId
@@ -260,7 +266,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     setMaterialUploading(true)
     // 上传途中可能切了项目：结果与提示都只对仍激活的项目生效，避免把旧项目材料并进新项目列表
     // （成功路径），也避免在新项目界面弹旧项目的失败提示（失败路径，codex 红队 BLOCKER）。
-    const stillActive = () => shouldApplyProjectResponse({
+    const stillActive = () => mountedRef.current && shouldApplyProjectResponse({
       requestProject,
       activeProject: activeProjectRef.current,
     })
