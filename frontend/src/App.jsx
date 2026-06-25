@@ -13,6 +13,7 @@ import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
 import { mergeMaterials, removeMaterialById } from './utils/chatMaterials'
 import { getCurrentProject, isSameProjectSelection, reconcileCurrentProjectId } from './utils/projectSelection'
 import { clampWorkspaceWidth, computeWorkspaceWidth, parseStoredWorkspaceWidth } from './utils/workspaceResize'
+import { getInitialTheme, applyTheme, toggleTheme } from './utils/theme'
 
 const WORKSPACE_WIDTH_STORAGE_KEY = 'cra:workspaceWidth'
 
@@ -30,6 +31,9 @@ function App() {
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
   const [showAdmin, setShowAdmin] = useState(false)
+  const [theme, setTheme] = useState(getInitialTheme)
+  useEffect(() => { applyTheme(theme) }, [theme])
+  const onToggleTheme = () => setTheme(t => toggleTheme(t))
   // 中右分栏宽度（px），可拖动；初始从 localStorage 读上次偏好（坏值回落默认 28rem）。
   const [workspaceWidth, setWorkspaceWidth] = useState(() =>
     parseStoredWorkspaceWidth(
@@ -53,7 +57,7 @@ function App() {
   // 强制改密用户登录后，业务路由会被后端 403（Phase 4 强制）→ 若此时 initializeApp 会闪
   // 「加载项目列表失败」错误弹窗。故只在「已登录且无需强制改密」时才加载；改密成功刷新
   // authUser（must_change_password 变 false）后此 effect 重跑，这时才加载主界面。
-  // ⚠️ 依赖必须是「稳定身份字段（uid + must_change_password）」而非整个 authUser 对象：
+  // 注意：依赖必须是「稳定身份字段（uid + must_change_password）」而非整个 authUser 对象：
   // refreshAuthQuota 每轮用 {...prev, 新额度} 造新引用，若依赖整 authUser → 每轮重跑
   // initializeApp → loadProjects 置 loading=true → 命中 if(loading) 早返回 → 整树卸载重挂
   // （黑屏闪 + ChatPanel 内存里的消息/工具调用记录全丢）。额度只是显示数据，不该触发重初始化。
@@ -338,7 +342,7 @@ function App() {
     })
   }
 
-  if (!authChecked) return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
+  if (!authChecked) return <div className="flex items-center justify-center h-screen bg-bg"><div className="text-t2">加载中...</div></div>
   // 登录成功只 setAuthUser；初始化交给 authUser effect（按 must_change_password gate，codex NIT 1）。
   if (!authUser) return <Login onAuthed={(u) => { setAuthUser(u) }} />
 
@@ -351,13 +355,13 @@ function App() {
   }
 
   if (loading) {
-    return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
+    return <div className="flex items-center justify-center h-screen bg-bg"><div className="text-t2">加载中...</div></div>
   }
 
   return (
     <ErrorBoundary>
       <Toaster position="top-right" />
-      <div className="flex h-screen bg-[#0f0f23]">
+      <div className="flex h-screen bg-bg">
         <Sidebar
           projects={projects}
           currentProjectId={currentProjectId}
@@ -369,6 +373,8 @@ function App() {
           authUser={authUser}
           onLoggedOut={() => setAuthUser(null)}
           onOpenAdmin={() => setShowAdmin(true)}
+          theme={theme}
+          onToggleTheme={onToggleTheme}
         />
         {/* 可调区域（不含固定宽 Sidebar）：clamp 的 MIN_CHAT_WIDTH 须按这个区域预留。 */}
         <div ref={setContainerRef} className="flex flex-1 min-w-0">
@@ -392,7 +398,7 @@ function App() {
                 onMouseDown={startWorkspaceResize}
                 role="separator"
                 aria-orientation="vertical"
-                className="w-1.5 cursor-col-resize bg-[#2a2a4a] hover:bg-[#3a3a6a] flex-shrink-0"
+                className="w-1.5 cursor-col-resize bg-col hover:bg-abright/40 flex-shrink-0"
                 title="拖动调整宽度"
               />
               <WorkspacePanel

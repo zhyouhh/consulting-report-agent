@@ -4,9 +4,9 @@ export const showSuccess = (message) => {
   toast.success(message, {
     duration: 3000,
     style: {
-      background: '#1a1a2e',
-      color: '#64ffda',
-      border: '1px solid #2a2a4a',
+      background: 'rgb(var(--card))',
+      color: 'rgb(var(--success))',
+      border: '1px solid rgb(var(--border))',
     },
   })
 }
@@ -15,9 +15,9 @@ export const showError = (message) => {
   toast.error(message, {
     duration: 4000,
     style: {
-      background: '#1a1a2e',
-      color: '#ff6b6b',
-      border: '1px solid #2a2a4a',
+      background: 'rgb(var(--card))',
+      color: 'rgb(var(--error))',
+      border: '1px solid rgb(var(--border))',
     },
   })
 }
@@ -26,9 +26,9 @@ export const showInfo = (message) => {
   toast(message, {
     duration: 3000,
     style: {
-      background: '#1a1a2e',
-      color: '#e2e2f0',
-      border: '1px solid #2a2a4a',
+      background: 'rgb(var(--card))',
+      color: 'rgb(var(--text))',
+      border: '1px solid rgb(var(--border))',
     },
   })
 }
