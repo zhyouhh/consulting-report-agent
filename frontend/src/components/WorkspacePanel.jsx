@@ -56,9 +56,13 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   const [reviewRunning, setReviewRunning] = useState(false)
   const previousProjectRef = useRef(projectId)
   const activeProjectRef = useRef(projectId)
-  // 挂载守卫：activeProjectRef 只在 useEffect 被动更新，面板隐藏（unmount）后会冻在旧项目，
-  // 不足以拦「上传中途收起面板 + 切项目 → 旧上传完成把旧项目材料并进新项目」（codex 红队 BLOCKER）。
-  // 配合 stillActive() 一起：unmount 后一律不再回调父级 / 弹提示。
+  // 渲染期同步更新（与 ChatPanel 一致）：被动 useEffect 会在 commit 后才赋值，留下「UI 已切到 B、
+  // ref 仍是 A」的窗口，late 上传完成可能 stillActive 通过、把 A 的结果并进 B（codex 红队 BLOCKER）。
+  // 渲染期赋值消除切项目窗口；unmount 场景另由 mountedRef 兜底。
+  activeProjectRef.current = projectId
+  // 挂载守卫：面板隐藏（unmount）后渲染不再发生、activeProjectRef 冻在旧项目，render 期赋值救不了
+  // 「上传中途收起面板 + 切项目」；mountedRef 在 unmount 置 false，配合 stillActive() → unmount 后
+  // 一律不再回调父级 / 弹提示。
   const mountedRef = useRef(true)
   // 最新文件请求标记：丢弃乱序返回的旧 GET，防它覆盖更新的预览内容（codex 前端 quality NIT）。
   const latestFileRequestRef = useRef(null)
@@ -87,10 +91,6 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
       }
       setContent('文件不存在或无法读取')
     }
-  }, [projectId])
-
-  useEffect(() => {
-    activeProjectRef.current = projectId
   }, [projectId])
 
   useEffect(() => () => { mountedRef.current = false }, [])
