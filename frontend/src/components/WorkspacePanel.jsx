@@ -93,7 +93,12 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     }
   }, [projectId])
 
-  useEffect(() => () => { mountedRef.current = false }, [])
+  // setup 必须把 mountedRef 置回 true：StrictMode（dev）会 setup→cleanup→setup 重放，
+  // 只在 cleanup 置 false、setup 不复位 → 重放后永久 false → stillActive() 恒假、上传全静默（codex 红队）。
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const loadFiles = useCallback(async () => {
     const requestProject = projectId
