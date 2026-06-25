@@ -37,7 +37,7 @@ export default function Login({ onAuthed }) {
           <span className="text-lg font-bold text-text tracking-tight">咨询报告助手</span>
         </div>
         {/* form 卡片 */}
-        <form onSubmit={submit} className="bg-card border border-border rounded-win p-6 shadow-[0_18px_50px_rgba(0,0,0,0.12)]">
+        <form onSubmit={submit} className="bg-card border border-border rounded-win p-6 shadow-popover">
           <h1 className="text-base font-semibold text-text mb-4">{mode === 'login' ? '登录' : '注册'}</h1>
           <input
             className="w-full h-10 px-3 rounded-btn border border-border bg-field text-text text-15 placeholder-t3 mb-[11px]"

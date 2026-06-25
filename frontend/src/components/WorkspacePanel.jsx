@@ -26,7 +26,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   width,
 }, ref) {
   const [activeTab, setActiveTab] = useState('stage')
-  const [materialUploading, setMaterialUploading] = useState(false)
+  const [materialUploading, setMaterialUploading] = useState(null) // 正在上传的 projectId（按项目作用域），无则 null
   const filePreviewRef = useRef(null)
   const uploadInputRef = useRef(null)
 
@@ -266,9 +266,11 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   // 与聊天「待发送附件」不同：这里上传即入库、立即出现在「已上传材料」列表。
   const uploadMaterialFiles = useCallback(async (fileList) => {
     const files = Array.from(fileList || [])
-    if (!files.length || !projectId || materialUploading) return
+    // 上传忙态按项目作用域（materialUploading 存正在上传的 projectId）：只挡同项目重复上传，
+    // 切到别的项目仍可上传——否则 A 的慢上传会卡住 B 的按钮（codex 整分支 NIT）。
+    if (!files.length || !projectId || materialUploading === projectId) return
     const requestProject = projectId
-    setMaterialUploading(true)
+    setMaterialUploading(requestProject)
     // 上传途中可能切了项目：结果与提示都只对仍激活的项目生效，避免把旧项目材料并进新项目列表
     // （成功路径），也避免在新项目界面弹旧项目的失败提示（失败路径，codex 红队 BLOCKER）。
     const stillActive = () => mountedRef.current && shouldApplyProjectResponse({
@@ -295,7 +297,8 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
       if (!stillActive()) return
       showError('上传材料失败: ' + (error.response?.data?.detail || error.message))
     } finally {
-      setMaterialUploading(false)
+      // 只清掉本次上传的标记，不误清其它项目正在进行的上传忙态。
+      setMaterialUploading(prev => (prev === requestProject ? null : prev))
     }
   }, [projectId, materialUploading, onMaterialsMerged, onProjectMutated])
 
@@ -390,11 +393,11 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
               type="button"
               className="flex items-center gap-[6px] px-[11px] py-[5px] rounded-ibtn border border-border bg-card2 text-text text-12 hover:bg-card2/70 disabled:opacity-40 disabled:cursor-not-allowed"
               onClick={() => uploadInputRef.current?.click()}
-              disabled={!projectId || materialUploading}
+              disabled={!projectId || materialUploading === projectId}
               title="上传项目材料"
             >
               <IconUpload size={13} />
-              {materialUploading ? '上传中…' : '上传'}
+              {materialUploading === projectId ? '上传中…' : '上传'}
             </button>
           </div>
 

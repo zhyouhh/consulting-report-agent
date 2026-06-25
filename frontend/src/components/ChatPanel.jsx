@@ -973,7 +973,7 @@ const ChatPanel = forwardRef(function ChatPanel({
                   ) : (
                     <ReactMarkdown
                       key={index}
-                      className="prose prose-invert prose-sm max-w-none"
+                      className="max-w-none"
                       remarkPlugins={[remarkGfm]}
                       components={assistantMarkdownComponents}
                     >
