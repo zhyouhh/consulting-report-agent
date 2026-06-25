@@ -41,3 +41,7 @@ body{margin:0;font-family:'Hanken Grotesk','PingFang SC','Microsoft YaHei','Noto
 ::-webkit-scrollbar-thumb{background:rgb(var(--t3)/.4);border-radius:5px;border:2px solid transparent;background-clip:padding-box;}
 
 .selectable-content,.selectable-content *{user-select:text;-webkit-user-select:text;}
+
+.thinking-block{margin:8px 0;padding:6px 10px;border-left:3px solid rgb(var(--col));background:rgb(var(--card2));font-size:12px;color:rgb(var(--t2));border-radius:7px;}
+.thinking-block summary{cursor:pointer;font-weight:500;color:rgb(var(--text));user-select:none;}
+.thinking-block .thinking-content{margin-top:6px;max-height:240px;overflow-y:auto;font-family:'IBM Plex Mono',monospace;white-space:pre-wrap;word-break:break-word;color:rgb(var(--t2));}
