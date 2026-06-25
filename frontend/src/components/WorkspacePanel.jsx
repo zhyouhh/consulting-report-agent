@@ -258,6 +258,12 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     if (!files.length || !projectId || materialUploading) return
     const requestProject = projectId
     setMaterialUploading(true)
+    // 上传途中可能切了项目：结果与提示都只对仍激活的项目生效，避免把旧项目材料并进新项目列表
+    // （成功路径），也避免在新项目界面弹旧项目的失败提示（失败路径，codex 红队 BLOCKER）。
+    const stillActive = () => shouldApplyProjectResponse({
+      requestProject,
+      activeProject: activeProjectRef.current,
+    })
     try {
       const formData = new FormData()
       files.forEach(file => formData.append('files', file))
@@ -265,13 +271,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
         `/api/projects/${encodeURIComponent(requestProject)}/materials/upload`,
         formData,
       )
-      // 上传途中可能切了项目：只把结果应用到仍激活的项目，避免把旧项目材料并进新项目列表。
-      if (!shouldApplyProjectResponse({
-        requestProject,
-        activeProject: activeProjectRef.current,
-      })) {
-        return
-      }
+      if (!stillActive()) return
       const uploaded = res.data.materials || []
       if (uploaded.length > 0) {
         onMaterialsMerged?.(uploaded)
@@ -281,6 +281,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
         showError('未能上传任何材料')
       }
     } catch (error) {
+      if (!stillActive()) return
       showError('上传材料失败: ' + (error.response?.data?.detail || error.message))
     } finally {
       setMaterialUploading(false)
@@ -386,6 +387,11 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
             </button>
           </div>
 
+          {/* 工作目录展示（功能全保：原版材料 tab 顶部即显示项目工作目录） */}
+          <div className="text-11 text-t3 font-mono break-all mb-3">
+            {project?.workspace_dir || workspace?.workspace_dir || '未设置工作目录'}
+          </div>
+
           {materials.length === 0 ? (
             <div className="rounded-card border border-border border-dashed p-4 text-13 text-t2">
               暂无项目材料。点击右上角「上传」按钮，或在聊天输入框左侧的回形针添加材料。
@@ -408,6 +414,8 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
                 <button
                   type="button"
                   onClick={() => deleteMaterial(material.id)}
+                  title={`删除材料：${material.display_name}`}
+                  aria-label={`删除材料：${material.display_name}`}
                   className="w-[26px] h-[26px] rounded-md text-t3 hover:bg-card2 hover:text-error flex items-center justify-center flex-shrink-0"
                 >
                   <IconTrash size={14} />

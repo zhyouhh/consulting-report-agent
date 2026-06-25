@@ -15,26 +15,21 @@ const REPORT_AND_PRESENTATION_CODES = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6',
 const REPORT_ONLY_STAGES = REPORT_ONLY_CODES.map(code => ({ code, label: getStageName(code) }))
 const REPORT_AND_PRESENTATION_STAGES = REPORT_AND_PRESENTATION_CODES.map(code => ({ code, label: getStageName(code) }))
 
-const STAGE_ORDER = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'done']
-
-function getStageIndex(code) {
-  return STAGE_ORDER.indexOf(code)
-}
-
 function Stepper({ stageCode, deliveryMode }) {
   const stages = shouldShowPresentationStage(deliveryMode)
     ? REPORT_AND_PRESENTATION_STAGES
     : REPORT_ONLY_STAGES
 
-  const currentIdx = getStageIndex(stageCode)
+  // Index within the ACTIVE stage list (report-only drops S6). Using the global stage
+  // order here would make the S7 fill compute 7/6 → 116% in report-only mode (codex spec NIT).
+  const currentIdx = stages.findIndex(s => s.code === stageCode)
   const isDone = stageCode === 'done'
   const total = stages.length
 
-  // Compute fill percentage: from first dot to current dot
-  // Each dot is at position i/(total-1) * 100%
+  // Compute fill percentage: from first dot to current dot. Each dot is at i/(total-1) * 100%.
   const currentDotPos = isDone
     ? 100
-    : total > 1 ? (currentIdx / (total - 1)) * 100 : 0
+    : (total > 1 && currentIdx >= 0 ? (currentIdx / (total - 1)) * 100 : 0)
   const stepPct = currentDotPos
 
   return (
@@ -49,9 +44,8 @@ function Stepper({ stageCode, deliveryMode }) {
       {/* Dots row */}
       <div className="relative flex justify-between">
         {stages.map(({ code, label }, i) => {
-          const segIdx = getStageIndex(code)
-          const isCompleted = isDone || segIdx < currentIdx
-          const isCurrent = !isDone && segIdx === currentIdx
+          const isCompleted = isDone || (currentIdx >= 0 && i < currentIdx)
+          const isCurrent = !isDone && i === currentIdx
 
           return (
             <div key={code} className="flex flex-col items-center gap-[7px]">
@@ -87,11 +81,14 @@ function QualityProgressBar({ qualityProgress, stalledSince, stageCode }) {
   const isS2 = stageCode === 'S2'
   const isS3 = stageCode === 'S3'
 
-  const displayLabel = isS2
-    ? `已收集有效来源 ${current} / ${target} 条`
+  // 这个计数器只在 S2（采集来源）/ S3（证据引用）出现，绝不表示正文字数。
+  // 左标签语义化、右侧显示计数；不再硬编「正文字数」（codex 双轨 NIT）。
+  const metricLabel = isS2 ? '有效来源' : isS3 ? '证据引用' : (label || '进度')
+  const valueLabel = isS2
+    ? `${current} / ${target} 条`
     : isS3
-      ? `已完成证据引用 ${current} / ${target} 个`
-      : `${label}：${current} / ${target}`
+      ? `${current} / ${target} 个`
+      : `${current} / ${target}`
 
   const pct = target > 0 ? Math.min((current / target) * 100, 100) : 0
 
@@ -106,8 +103,8 @@ function QualityProgressBar({ qualityProgress, stalledSince, stageCode }) {
   return (
     <div className="mt-5">
       <div className="flex justify-between items-baseline mb-[6px]">
-        <span className="text-12 text-t2">正文字数</span>
-        <span className="text-12 text-text font-mono tabular-nums">{displayLabel}</span>
+        <span className="text-12 text-t2">{metricLabel}</span>
+        <span className="text-12 text-text font-mono tabular-nums">{valueLabel}</span>
       </div>
       <div className="h-[6px] rounded-[3px] bg-track overflow-hidden">
         <div
