@@ -41,12 +41,12 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-[#1a1a2e] rounded-lg p-6 w-[560px] border border-[#2f3158]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/45 dark:bg-scrim/60">
+      <div className="bg-card rounded-win p-6 w-[560px] border border-border shadow-popover">
         <select
           value={formData.project_type}
           onChange={e => setFormData({ ...formData, project_type: e.target.value })}
-          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-3"
+          className="w-full bg-field border border-border text-text rounded-btn px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-accent"
         >
           <option value="strategy-consulting">战略咨询</option>
           <option value="market-research">市场研究</option>
@@ -61,33 +61,33 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
           placeholder="报告主题"
           value={formData.theme}
           onChange={e => setFormData({ ...formData, theme: e.target.value })}
-          className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2 mb-3"
+          className="w-full bg-field border border-border text-text rounded-btn px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-accent"
         />
 
         <div className="grid grid-cols-2 gap-3 mb-3">
           <div>
-            <div className="text-sm text-[#c5c7ef] mb-2">截止日期</div>
+            <div className="text-sm text-t2 mb-2">截止日期</div>
             <input
               type="date"
               value={formData.deadline}
               onChange={e => setFormData({ ...formData, deadline: e.target.value })}
-              className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2"
+              className="w-full bg-field border border-border text-text rounded-btn px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent"
             />
           </div>
           <div>
-            <div className="text-sm text-[#c5c7ef] mb-2">预期篇幅</div>
+            <div className="text-sm text-t2 mb-2">预期篇幅</div>
             <input
               placeholder="例如 3000字"
               value={formData.expected_length}
               onChange={e => setFormData({ ...formData, expected_length: e.target.value })}
-              className="w-full bg-[#16163a] border border-[#3a3a5a] text-[#e2e2f0] rounded px-3 py-2"
+              className="w-full bg-field border border-border text-text rounded-btn px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent"
             />
           </div>
         </div>
 
         <div className="flex gap-2">
-          <button onClick={onClose} className="flex-1 border border-[#3a3a5a] text-[#e2e2f0] px-4 py-2 rounded hover:bg-[#222244]">取消</button>
-          <button onClick={handleCreate} disabled={saving} className="flex-1 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:bg-[#3a3a5a]">
+          <button onClick={onClose} className="flex-1 border border-border text-text px-4 py-2 rounded-btn hover:bg-card2">取消</button>
+          <button onClick={handleCreate} disabled={saving} className="flex-1 bg-accent text-white px-4 py-2 rounded-btn hover:bg-accent/90 disabled:opacity-60">
             {saving ? '创建中...' : '创建'}
           </button>
         </div>
