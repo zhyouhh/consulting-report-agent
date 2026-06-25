@@ -8,6 +8,7 @@ import {
   parseDrawerEvent,
   reviewWindowReducer,
 } from '../utils/independentReviewDrawer'
+import { normalizeApiErrorDetail } from '../utils/authError'
 import { MarkdownMessage, ToolCard } from './MarkdownMessage'
 
 // S5 ReviewChatWindow: a draggable, closeable mini-chat that streams the independent-review
@@ -84,8 +85,10 @@ export default function ReviewChatWindow({
       return false
     }
     if (!response.ok) {
-      const detail = await response.json().catch(() => ({ detail: response.statusText }))
-      applyEvent({ type: 'error', message: detail.detail || '启动审查失败' })
+      const body = await response.json().catch(() => ({ detail: response.statusText }))
+      // detail 可能是 FastAPI 422 校验数组 / 对象——必须归一成字符串再进 windowState.error，
+      // 否则渲染「错误：{windowState.error}」会把数组/对象塞进 React 子节点导致整窗崩溃（codex spec BLOCKER）。
+      applyEvent({ type: 'error', message: normalizeApiErrorDetail(body?.detail, '启动审查失败') })
       return true
     }
 

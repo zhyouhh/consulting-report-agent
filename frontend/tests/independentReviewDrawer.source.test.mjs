@@ -61,6 +61,16 @@ test("ReviewChatWindow generates a stable run_id and sends it in the body", () =
   assert.match(src, /run_id: runId/);
 });
 
+test("ReviewChatWindow normalizes non-OK error detail to a string before rendering", () => {
+  const src = drawerSrc();
+  // windowState.error is rendered directly (错误：{windowState.error}); a FastAPI 422 detail is an
+  // array → rendering it would crash the window ("Objects are not valid as a React child"). The
+  // non-OK branch must route detail through normalizeApiErrorDetail, never pass raw detail.detail.
+  assert.match(src, /import \{ normalizeApiErrorDetail \} from ['"]\.\.\/utils\/authError['"]/);
+  assert.match(src, /normalizeApiErrorDetail\(\s*body\?\.detail/);
+  assert.doesNotMatch(src, /message: detail\.detail/);
+});
+
 test("ReviewChatWindow error state persists (no auto-close setTimeout)", () => {
   const src = drawerSrc();
   // The old behaviour auto-closed the window 3s after an error; that is removed.
