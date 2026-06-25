@@ -99,20 +99,24 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
       <div className="relative" ref={menuRef}>
         <button
           onClick={() => { setOpen(v => !v); setAdvancedOpen(false) }}
-          className="p-1.5 rounded-lg text-[#5a5e80] hover:text-[#a8accc] hover:bg-[#1e2140] transition-colors"
+          className="w-[28px] h-[28px] flex items-center justify-center border border-border rounded-ibtn bg-card2 text-t3 hover:text-text transition-colors"
           title="更多选项"
         >
-          <span className="text-lg leading-none select-none">⋯</span>
+          <svg width="16" height="4" viewBox="0 0 16 4" fill="currentColor" aria-hidden="true">
+            <circle cx="2" cy="2" r="1.5"/>
+            <circle cx="8" cy="2" r="1.5"/>
+            <circle cx="14" cy="2" r="1.5"/>
+          </svg>
         </button>
 
         {open && (
-          <div className="absolute right-0 top-8 z-40 w-56 rounded-xl border border-[#2f3158] bg-[#1a1e3a] shadow-xl py-1">
+          <div className="absolute right-0 top-[34px] z-40 w-[226px] bg-card border border-border rounded-card shadow-popover p-[5px]">
 
             {/* First-level option */}
             {firstLevel ? (
               <button
                 onClick={handleFirstLevelClick}
-                className="w-full text-left px-4 py-2.5 text-sm text-[#c8ccee] hover:bg-[#222645] transition-colors"
+                className="w-full text-left px-3 py-[9px] rounded-ibtn text-13 text-text hover:bg-card2 transition-colors"
               >
                 {firstLevel.label}
               </button>
@@ -122,12 +126,12 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
             )}
 
             {/* Divider before advanced section */}
-            {firstLevel && <div className="my-1 border-t border-[#2a2e52]" />}
+            {firstLevel && <div className="h-px bg-hair mx-1.5 my-1" />}
 
             {/* §9.4 Advanced section — disclosure icon + grey text, NOT a button */}
             <button
               onClick={() => setAdvancedOpen(v => !v)}
-              className="w-full text-left px-4 py-2 flex items-center gap-1.5 text-xs text-[#5a5e80] hover:text-[#8f93c9] transition-colors"
+              className="w-full text-left px-3 py-[7px] rounded-ibtn text-12 text-t3 hover:text-text flex items-center gap-[7px] transition-colors"
             >
               <span className={`transition-transform duration-150 ${advancedOpen ? 'rotate-90' : ''}`}>▸</span>
               更多回退选项
@@ -151,7 +155,7 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
                         )
                       }
                     }}
-                    className="w-full text-left px-6 py-2 text-sm text-[#c8ccee] hover:bg-[#222645] transition-colors"
+                    className="w-full text-left pl-[26px] pr-3 py-2 rounded-ibtn text-13 text-text hover:bg-card2 transition-colors"
                   >
                     {opt.label}
                   </button>
@@ -159,7 +163,7 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
 
                 {/* Divider before legacy advanced options */}
                 {advancedOptions.length > 0 && (
-                  <div className="mx-4 my-1 border-t border-[#2a2e52]" />
+                  <div className="h-px bg-hair mx-1.5 my-1" />
                 )}
 
                 {/* "完全重置大纲确认" */}
@@ -174,7 +178,7 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
                       }
                     )
                   }
-                  className="w-full text-left px-6 py-2 text-sm text-[#c8ccee] hover:bg-[#222645] transition-colors"
+                  className="w-full text-left pl-[26px] pr-3 py-2 rounded-ibtn text-13 text-text hover:bg-card2 transition-colors"
                 >
                   完全重置大纲确认
                 </button>
@@ -191,7 +195,7 @@ export default function RollbackMenu({ projectId, stageCode, onCheckpointSet, on
                       }
                     )
                   }
-                  className="w-full text-left px-6 py-2 text-sm text-[#c8ccee] hover:bg-[#222645] transition-colors"
+                  className="w-full text-left pl-[26px] pr-3 py-2 rounded-ibtn text-13 text-text hover:bg-card2 transition-colors"
                 >
                   撤回归档
                 </button>

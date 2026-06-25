@@ -54,16 +54,16 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
         <button
           onClick={() => postCheckpoint('outline-confirmed')}
           disabled={!outlineExists || pending}
-          className={`w-full py-2.5 px-4 rounded-xl text-sm font-medium transition-colors ${
+          className={`w-full py-2.5 px-4 rounded-btn text-13 font-medium transition-colors ${
             outlineExists && !pending
-              ? 'bg-[#3b4fa8] text-white hover:bg-[#4a5fcc]'
-              : 'bg-[#1e2140] text-[#4a4f72] cursor-not-allowed'
+              ? 'bg-accent text-white hover:bg-accent/90'
+              : 'bg-card2 text-t3 cursor-not-allowed'
           }`}
         >
           {pending ? '处理中…' : '确认大纲，进入资料采集'}
         </button>
         {!outlineExists && !pending && disabledReason && (
-          <p className="mt-2 text-xs text-[#5a5e80] text-center">{disabledReason}</p>
+          <p className="mt-2 text-xs text-t3 text-center">{disabledReason}</p>
         )}
       </div>
     )
@@ -84,10 +84,10 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
         <div className="flex gap-2">
           <button
             onClick={() => onInsertPrompt?.('请继续扩写正文')}
-            className={`flex-1 py-2.5 px-4 rounded-xl text-sm font-medium transition-colors ${
+            className={`flex-1 py-2.5 px-4 rounded-btn text-13 font-medium transition-colors ${
               reviewVisible
-                ? 'bg-[#262a4c] text-[#a8accc] hover:bg-[#30365a]'
-                : 'bg-[#3b4fa8] text-white hover:bg-[#4a5fcc]'
+                ? 'border border-col bg-card2 text-text hover:bg-asoft'
+                : 'bg-accent text-white hover:bg-accent/90'
             }`}
           >
             继续扩写
@@ -96,14 +96,14 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
             <button
               onClick={() => postCheckpoint('review-started')}
               disabled={pending}
-              className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex-1 py-2.5 px-4 rounded-btn text-13 font-medium bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {pending ? '处理中…' : '完成撰写，开始审查'}
             </button>
           )}
         </div>
         {targetVal > 0 && (
-          <p className="text-xs text-[#5a5e80] text-center">
+          <p className="text-xs text-t3 text-center">
             当前 {wordCount} 字 / 目标 {targetVal} 字
           </p>
         )}
@@ -119,7 +119,7 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
           <button
             onClick={() => postCheckpoint('review-passed')}
             disabled={pending || stageToolsRunning}
-            className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex-1 py-2.5 px-4 rounded-btn text-13 font-medium bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {pending ? '处理中…' : '审查通过，准备交付'}
           </button>
@@ -135,7 +135,7 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
               )
             }
             disabled={pending || stageToolsRunning}
-            className="flex-1 py-2.5 px-4 rounded-xl text-sm font-medium bg-[#262a4c] text-[#a8accc] hover:bg-[#30365a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex-1 py-2.5 px-4 rounded-btn text-13 font-medium border border-col bg-card2 text-text hover:bg-asoft transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             回去再改
           </button>
@@ -158,7 +158,7 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
         <button
           onClick={() => postCheckpoint('presentation-ready')}
           disabled={pending}
-          className="w-full py-2.5 px-4 rounded-xl text-sm font-medium bg-[#3b4fa8] text-white hover:bg-[#4a5fcc] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full py-2.5 px-4 rounded-btn text-13 font-medium bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {pending ? '处理中…' : '演示准备完成'}
         </button>
@@ -173,7 +173,7 @@ export default function StageAdvanceControl({ projectId, summary, onCheckpointSe
         <button
           onClick={() => postCheckpoint('delivery-archived')}
           disabled={pending}
-          className="w-full py-2.5 px-4 rounded-xl text-sm font-medium bg-[#26315d] text-[#a8accc] hover:bg-[#32407a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full py-2.5 px-4 rounded-btn text-13 font-medium bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {pending ? '处理中…' : '归档，结束项目'}
         </button>

@@ -8,6 +8,7 @@ import {
   parseDrawerEvent,
   reviewWindowReducer,
 } from '../utils/independentReviewDrawer'
+import { normalizeApiErrorDetail } from '../utils/authError'
 import { MarkdownMessage, ToolCard } from './MarkdownMessage'
 
 // S5 ReviewChatWindow: a draggable, closeable mini-chat that streams the independent-review
@@ -84,8 +85,10 @@ export default function ReviewChatWindow({
       return false
     }
     if (!response.ok) {
-      const detail = await response.json().catch(() => ({ detail: response.statusText }))
-      applyEvent({ type: 'error', message: detail.detail || '启动审查失败' })
+      const body = await response.json().catch(() => ({ detail: response.statusText }))
+      // detail 可能是 FastAPI 422 校验数组 / 对象——必须归一成字符串再进 windowState.error，
+      // 否则渲染「错误：{windowState.error}」会把数组/对象塞进 React 子节点导致整窗崩溃（codex spec BLOCKER）。
+      applyEvent({ type: 'error', message: normalizeApiErrorDetail(body?.detail, '启动审查失败') })
       return true
     }
 
@@ -250,28 +253,28 @@ export default function ReviewChatWindow({
     <div
       ref={dragRef}
       style={style}
-      className="fixed bottom-4 right-4 w-[480px] h-[600px] bg-[#171a31] border border-[#2f3158] rounded-2xl shadow-2xl z-50 flex flex-col"
+      className="fixed bottom-4 right-4 w-[480px] h-[600px] bg-card border border-border rounded-win shadow-float z-50 flex flex-col"
     >
       <div
         onMouseDown={handleDragStart}
-        className="px-4 py-3 border-b border-[#2f3158] flex items-center justify-between cursor-move select-none"
+        className="px-4 py-3 border-b border-border flex items-center justify-between cursor-move select-none"
       >
         <div className="flex flex-col">
-          <span className="text-sm font-medium text-[#eef1ff]">
+          <span className="text-sm font-medium text-text">
             {windowState.status === 'completed'
               ? '审查完成'
               : windowState.status === 'errored'
                 ? '审查已暂停'
                 : '独立审查代理工作中…'}
           </span>
-          <span className="text-xs text-[#8f93c9]">
+          <span className="text-xs text-t2">
             第 {windowState.round} 轮 · {windowState.action}
           </span>
         </div>
         <button
           type="button"
           onClick={handleActiveClose}
-          className="text-[#8f93c9] hover:text-[#eef1ff] text-lg leading-none px-2"
+          className="text-t2 hover:text-text text-lg leading-none px-2"
           title="关闭"
           aria-label="关闭"
         >
@@ -279,7 +282,7 @@ export default function ReviewChatWindow({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-2 text-sm text-[#d9dcf5]">
+      <div className="flex-1 overflow-y-auto p-4 space-y-2 text-sm text-text">
         {bubbles.map((bubble, i) => {
           if (bubble.kind === 'assistant') {
             return (
@@ -297,27 +300,27 @@ export default function ReviewChatWindow({
           return null
         })}
         {windowState.status === 'errored' && (
-          <div className="mt-4 rounded-lg border border-[#5a2330] bg-[#2a1218] p-3 text-red-300">
+          <div className="mt-4 rounded-card border border-error/40 bg-error/10 p-3 text-error">
             <div>错误：{windowState.error}</div>
             <textarea
               value={supplementInput}
               onChange={e => setSupplementInput(e.target.value)}
               placeholder="可补充审查重点或修正方向（可选）；直接点「继续审查」则从断处接着审"
               rows={2}
-              className="mt-2 w-full rounded bg-[#1b1d35] border border-[#3a3d6a] px-2 py-1 text-xs text-[#d9dcf5] placeholder-[#6e72a8] resize-none focus:outline-none focus:border-[#4a4e85]"
+              className="mt-2 w-full rounded-btn bg-field border border-border px-2 py-1 text-xs text-text placeholder-t3 resize-none focus:outline-none focus:ring-2 focus:ring-accent"
             />
             <div className="mt-2 flex gap-2">
               <button
                 type="button"
                 onClick={handleRestart}
-                className="px-3 py-1 rounded bg-[#28366b] text-[#eef1ff] text-xs hover:bg-[#324485]"
+                className="px-3 py-1 rounded-btn bg-accent text-white text-xs hover:bg-accent/90"
               >
                 继续审查
               </button>
               <button
                 type="button"
                 onClick={handleActiveClose}
-                className="px-3 py-1 rounded bg-[#252545] text-[#b8bbe8] text-xs hover:bg-[#2f2f55]"
+                className="px-3 py-1 rounded-btn bg-card2 border border-border text-t2 text-xs hover:bg-asoft"
               >
                 关闭
               </button>

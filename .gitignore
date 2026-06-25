@@ -70,3 +70,6 @@ htmlcov/
 .codex-run/
 .superpowers/
 .gstack/
+
+# 前端翻新设计交付包（本地参考，含 6.7MB standalone HTML，不入 git）
+design_handoff_frontend_redesign/

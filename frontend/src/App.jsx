@@ -13,6 +13,7 @@ import { shouldApplyProjectResponse } from './utils/projectRequestOwnership'
 import { mergeMaterials, removeMaterialById } from './utils/chatMaterials'
 import { getCurrentProject, isSameProjectSelection, reconcileCurrentProjectId } from './utils/projectSelection'
 import { clampWorkspaceWidth, computeWorkspaceWidth, parseStoredWorkspaceWidth } from './utils/workspaceResize'
+import { getInitialTheme, applyTheme, toggleTheme } from './utils/theme'
 
 const WORKSPACE_WIDTH_STORAGE_KEY = 'cra:workspaceWidth'
 
@@ -25,11 +26,18 @@ function App() {
   const [materials, setMaterials] = useState([])
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0)
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(true)
+  // 左侧栏可整列收起（往左消失，聊天区变宽）；偏好持久化。收起后左上角留浮动按钮可再展开。
+  const [showSidebar, setShowSidebar] = useState(() => {
+    try { return localStorage.getItem('cra:showSidebar') !== '0' } catch { return true }
+  })
   const [loading, setLoading] = useState(true)
   const [injectedPrompt, setInjectedPrompt] = useState(null)
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
   const [showAdmin, setShowAdmin] = useState(false)
+  const [theme, setTheme] = useState(getInitialTheme)
+  useEffect(() => { applyTheme(theme) }, [theme])
+  const onToggleTheme = () => setTheme(t => toggleTheme(t))
   // 中右分栏宽度（px），可拖动；初始从 localStorage 读上次偏好（坏值回落默认 28rem）。
   const [workspaceWidth, setWorkspaceWidth] = useState(() =>
     parseStoredWorkspaceWidth(
@@ -53,7 +61,7 @@ function App() {
   // 强制改密用户登录后，业务路由会被后端 403（Phase 4 强制）→ 若此时 initializeApp 会闪
   // 「加载项目列表失败」错误弹窗。故只在「已登录且无需强制改密」时才加载；改密成功刷新
   // authUser（must_change_password 变 false）后此 effect 重跑，这时才加载主界面。
-  // ⚠️ 依赖必须是「稳定身份字段（uid + must_change_password）」而非整个 authUser 对象：
+  // 注意：依赖必须是「稳定身份字段（uid + must_change_password）」而非整个 authUser 对象：
   // refreshAuthQuota 每轮用 {...prev, 新额度} 造新引用，若依赖整 authUser → 每轮重跑
   // initializeApp → loadProjects 置 loading=true → 命中 if(loading) 早返回 → 整树卸载重挂
   // （黑屏闪 + ChatPanel 内存里的消息/工具调用记录全丢）。额度只是显示数据，不该触发重初始化。
@@ -312,6 +320,22 @@ function App() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
+  // 侧栏显隐改变了可调区域宽度：显隐后按新容器宽度重夹一次，防再次显示侧栏时把聊天区挤到
+  // MIN_CHAT 以下（与 window resize 重夹同理，只是触发源是侧栏 toggle）。
+  useEffect(() => {
+    const rect = containerRef.current?.getBoundingClientRect()
+    setWorkspaceWidth((prev) => clampWorkspaceWidth(prev, rect?.width))
+  }, [showSidebar])
+
+  // 收起/展开左侧栏并持久化偏好。next 省略则翻转。
+  const toggleSidebar = useCallback((next) => {
+    setShowSidebar((prev) => {
+      const v = typeof next === 'boolean' ? next : !prev
+      try { localStorage.setItem('cra:showSidebar', v ? '1' : '0') } catch { /* 隐私模式忽略 */ }
+      return v
+    })
+  }, [])
+
   const handleMaterialsMerged = (incomingMaterials) => {
     setMaterials(prev => mergeMaterials(prev, incomingMaterials))
     setWorkspace(prev => {
@@ -338,7 +362,7 @@ function App() {
     })
   }
 
-  if (!authChecked) return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
+  if (!authChecked) return <div className="flex items-center justify-center h-screen bg-bg"><div className="text-t2">加载中...</div></div>
   // 登录成功只 setAuthUser；初始化交给 authUser effect（按 must_change_password gate，codex NIT 1）。
   if (!authUser) return <Login onAuthed={(u) => { setAuthUser(u) }} />
 
@@ -351,25 +375,29 @@ function App() {
   }
 
   if (loading) {
-    return <div className="flex items-center justify-center h-screen"><div className="text-[#8888a8]">加载中...</div></div>
+    return <div className="flex items-center justify-center h-screen bg-bg"><div className="text-t2">加载中...</div></div>
   }
 
   return (
     <ErrorBoundary>
       <Toaster position="top-right" />
-      <div className="flex h-screen bg-[#0f0f23]">
-        <Sidebar
-          projects={projects}
-          currentProjectId={currentProjectId}
-          settings={settings}
-          onSelectProject={handleSelectProject}
-          onCreateProject={createProject}
-          onDeleteProject={deleteProject}
-          onSettingsSaved={loadSettings}
-          authUser={authUser}
-          onLoggedOut={() => setAuthUser(null)}
-          onOpenAdmin={() => setShowAdmin(true)}
-        />
+      <div className="flex h-screen bg-bg">
+        {showSidebar && (
+          <Sidebar
+            projects={projects}
+            currentProjectId={currentProjectId}
+            settings={settings}
+            onSelectProject={handleSelectProject}
+            onCreateProject={createProject}
+            onDeleteProject={deleteProject}
+            onSettingsSaved={loadSettings}
+            authUser={authUser}
+            onLoggedOut={() => setAuthUser(null)}
+            onOpenAdmin={() => setShowAdmin(true)}
+            theme={theme}
+            onToggleTheme={onToggleTheme}
+          />
+        )}
         {/* 可调区域（不含固定宽 Sidebar）：clamp 的 MIN_CHAT_WIDTH 须按这个区域预留。 */}
         <div ref={setContainerRef} className="flex flex-1 min-w-0">
           <ChatPanel
@@ -381,6 +409,7 @@ function App() {
             materials={materials}
             onMaterialsMerged={handleMaterialsMerged}
             onProjectMutated={handleProjectMutated}
+            onToggleSidebar={() => toggleSidebar()}
             onToggleWorkspacePanel={handleToggleWorkspacePanel}
             injectedPrompt={injectedPrompt}
             onInjectedPromptConsumed={() => setInjectedPrompt(null)}
@@ -392,17 +421,17 @@ function App() {
                 onMouseDown={startWorkspaceResize}
                 role="separator"
                 aria-orientation="vertical"
-                className="w-1.5 cursor-col-resize bg-[#2a2a4a] hover:bg-[#3a3a6a] flex-shrink-0"
+                className="w-1.5 cursor-col-resize bg-col hover:bg-abright/40 flex-shrink-0"
                 title="拖动调整宽度"
               />
               <WorkspacePanel
                 ref={workspacePanelRef}
                 projectId={currentProjectId}
-                project={currentProject}
                 workspace={workspace}
                 materials={materials}
                 refreshToken={workspaceRefreshToken}
                 width={workspaceWidth}
+                onMaterialsMerged={handleMaterialsMerged}
                 onMaterialDeleted={handleMaterialDeleted}
                 onProjectMutated={handleProjectMutated}
                 onCheckpointSet={loadWorkspace}

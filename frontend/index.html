@@ -4,6 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>咨询报告写作助手</title>
+  <script>
+    try {
+      if (localStorage.getItem('cra:theme') === 'dark') {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
+    } catch (e) {
+      // localStorage 不可用（隐私模式等）：默认浅色，显式去掉 .dark 保证精确兜底（非依赖静态 HTML 无该类）。
+      document.documentElement.classList.remove('dark');
+    }
+  </script>
   </head>
   <body>
     <div id="root"></div>

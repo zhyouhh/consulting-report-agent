@@ -8,13 +8,14 @@ import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { getDefaultPreviewFile } from '../utils/workspaceFiles'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 import { DEFAULT_WORKSPACE_WIDTH } from '../utils/workspaceResize'
+import { IconFile, IconTrash, IconUpload } from './icons'
 
 const WorkspacePanel = forwardRef(function WorkspacePanel({
   projectId,
-  project,
   workspace,
   materials,
   refreshToken,
+  onMaterialsMerged,
   onMaterialDeleted,
   onProjectMutated,
   onCheckpointSet,
@@ -24,7 +25,9 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   width,
 }, ref) {
   const [activeTab, setActiveTab] = useState('stage')
+  const [materialUploading, setMaterialUploading] = useState(null) // 正在上传的 projectId（按项目作用域），无则 null
   const filePreviewRef = useRef(null)
+  const uploadInputRef = useRef(null)
 
   useImperativeHandle(ref, () => ({
     // App 切项目 / 收起面板前调用：把离开动作转交 FilePreviewPanel 的 attemptLeave
@@ -52,6 +55,14 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   const [reviewRunning, setReviewRunning] = useState(false)
   const previousProjectRef = useRef(projectId)
   const activeProjectRef = useRef(projectId)
+  // 渲染期同步更新（与 ChatPanel 一致）：被动 useEffect 会在 commit 后才赋值，留下「UI 已切到 B、
+  // ref 仍是 A」的窗口，late 上传完成可能 stillActive 通过、把 A 的结果并进 B（codex 红队 BLOCKER）。
+  // 渲染期赋值消除切项目窗口；unmount 场景另由 mountedRef 兜底。
+  activeProjectRef.current = projectId
+  // 挂载守卫：面板隐藏（unmount）后渲染不再发生、activeProjectRef 冻在旧项目，render 期赋值救不了
+  // 「上传中途收起面板 + 切项目」；mountedRef 在 unmount 置 false，配合 stillActive() → unmount 后
+  // 一律不再回调父级 / 弹提示。
+  const mountedRef = useRef(true)
   // 最新文件请求标记：丢弃乱序返回的旧 GET，防它覆盖更新的预览内容（codex 前端 quality NIT）。
   const latestFileRequestRef = useRef(null)
 
@@ -81,9 +92,12 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     }
   }, [projectId])
 
+  // setup 必须把 mountedRef 置回 true：StrictMode（dev）会 setup→cleanup→setup 重放，
+  // 只在 cleanup 置 false、setup 不复位 → 重放后永久 false → stillActive() 恒假、上传全静默（codex 红队）。
   useEffect(() => {
-    activeProjectRef.current = projectId
-  }, [projectId])
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const loadFiles = useCallback(async () => {
     const requestProject = projectId
@@ -247,6 +261,51 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     }
   }
 
+  // 材料 tab 直接上传到项目材料库（复用聊天回形针同一个 /materials/upload 端点）。
+  // 与聊天「待发送附件」不同：这里上传即入库、立即出现在「已上传材料」列表。
+  const uploadMaterialFiles = useCallback(async (fileList) => {
+    const files = Array.from(fileList || [])
+    // 上传忙态按项目作用域（materialUploading 存正在上传的 projectId）：只挡同项目重复上传，
+    // 切到别的项目仍可上传——否则 A 的慢上传会卡住 B 的按钮（codex 整分支 NIT）。
+    if (!files.length || !projectId || materialUploading === projectId) return
+    const requestProject = projectId
+    setMaterialUploading(requestProject)
+    // 上传途中可能切了项目：结果与提示都只对仍激活的项目生效，避免把旧项目材料并进新项目列表
+    // （成功路径），也避免在新项目界面弹旧项目的失败提示（失败路径，codex 红队 BLOCKER）。
+    const stillActive = () => mountedRef.current && shouldApplyProjectResponse({
+      requestProject,
+      activeProject: activeProjectRef.current,
+    })
+    try {
+      const formData = new FormData()
+      files.forEach(file => formData.append('files', file))
+      const res = await axios.post(
+        `/api/projects/${encodeURIComponent(requestProject)}/materials/upload`,
+        formData,
+      )
+      if (!stillActive()) return
+      const uploaded = res.data.materials || []
+      if (uploaded.length > 0) {
+        onMaterialsMerged?.(uploaded)
+        onProjectMutated?.()
+        showSuccess(`已上传 ${uploaded.length} 份材料`)
+      } else {
+        showError('未能上传任何材料')
+      }
+    } catch (error) {
+      if (!stillActive()) return
+      showError('上传材料失败: ' + (error.response?.data?.detail || error.message))
+    } finally {
+      // 只清掉本次上传的标记，不误清其它项目正在进行的上传忙态。
+      setMaterialUploading(prev => (prev === requestProject ? null : prev))
+    }
+  }, [projectId, materialUploading, onMaterialsMerged, onProjectMutated])
+
+  const handleSelectUploadFiles = (event) => {
+    uploadMaterialFiles(event.target.files)
+    event.target.value = '' // 允许连选同一文件再次触发 change
+  }
+
   const deleteMaterial = async (materialId) => {
     if (!projectId) return
     try {
@@ -263,35 +322,31 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
 
   return (
     <div
-      className="bg-[#1a1a2e] border-l border-[#2a2a4a] flex flex-col flex-shrink-0"
+      className="bg-ws flex flex-col flex-shrink-0 min-w-0"
       style={{ width: width ?? DEFAULT_WORKSPACE_WIDTH }}
     >
-      <div className="p-4 border-b border-[#2a2a4a]">
-        <div className="flex gap-2">
-          <button
-            onClick={() => handleTabClick('stage')}
-            className={`px-3 py-2 rounded-lg text-sm ${activeTab === 'stage' ? 'bg-[#28366b] text-white' : 'bg-[#15162d] text-[#8f93c9]'}`}
-          >
-            阶段
-          </button>
-          <button
-            onClick={() => handleTabClick('files')}
-            className={`px-3 py-2 rounded-lg text-sm ${activeTab === 'files' ? 'bg-[#28366b] text-white' : 'bg-[#15162d] text-[#8f93c9]'}`}
-          >
-            文件
-          </button>
-          <button
-            onClick={() => handleTabClick('materials')}
-            className={`px-3 py-2 rounded-lg text-sm ${activeTab === 'materials' ? 'bg-[#28366b] text-white' : 'bg-[#15162d] text-[#8f93c9]'}`}
-          >
-            材料
-          </button>
+      {/* tabs 段控区 */}
+      <div className="px-4 pt-[14px] pb-3">
+        <div className="flex bg-track rounded-btn p-[2px]">
+          {[['stage', '阶段'], ['files', '文件'], ['materials', '材料']].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => handleTabClick(key)}
+              className={`flex-1 text-center text-13 py-[5px] rounded-tag cursor-pointer transition-colors ${
+                activeTab === key
+                  ? 'bg-card shadow-card text-text font-medium'
+                  : 'text-t2 font-normal'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
         {/* §9.3 length_fallback hint — non-interactive; user adjusts length via chat */}
         {wsSummary.lengthFallbackUsed && (
           <div
-            className="mt-2 w-full px-3 py-1.5 rounded-lg bg-[#2a1e10] border border-[#5a3a10] text-xs text-[#c8a060]"
+            className="mt-2 w-full px-3 py-1.5 rounded-btn bg-asoft border border-col text-12 text-asoftt"
             role="note"
           >
             预期字数：3000（默认值）
@@ -322,32 +377,57 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
           onReloadFile={reloadFile}
         />
       ) : (
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          <div className="text-sm text-[#8f93c9]">
-            {project?.workspace_dir || workspace?.workspace_dir || '未设置工作目录'}
+        <div className="flex-1 overflow-y-auto p-4">
+          {/* 顶部：标题 + 上传按钮 */}
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-12 text-t2">已上传材料 · {materials.length}</span>
+            <input
+              ref={uploadInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={handleSelectUploadFiles}
+            />
+            <button
+              type="button"
+              className="flex items-center gap-[6px] px-[11px] py-[5px] rounded-ibtn border border-border bg-card2 text-text text-12 hover:bg-card2/70 disabled:opacity-40 disabled:cursor-not-allowed"
+              onClick={() => uploadInputRef.current?.click()}
+              disabled={!projectId || materialUploading === projectId}
+              title="上传项目材料"
+            >
+              <IconUpload size={13} />
+              {materialUploading === projectId ? '上传中…' : '上传'}
+            </button>
           </div>
+
           {materials.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-[#3a3a5a] p-4 text-sm text-[#8f93c9]">
-              暂无项目材料。可以在聊天输入框左侧通过加号上传新材料。
+            <div className="rounded-card border border-border border-dashed p-4 text-13 text-t2">
+              暂无项目材料。点击右上角「上传」按钮，或在聊天输入框左侧的回形针添加材料。
             </div>
           ) : (
             materials.map(material => (
-              <div key={material.id} className="rounded-lg border border-[#2f3158] bg-[#15162d] p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-sm text-[#e2e2f0] break-all">{material.display_name}</div>
-                    <div className="mt-1 text-xs text-[#8f93c9]">
-                      {material.source_type} · {material.file_type || '未知类型'}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => deleteMaterial(material.id)}
-                    className="text-xs text-red-300 hover:text-red-200"
-                  >
-                    删除
-                  </button>
+              <div key={material.id} className="flex items-center gap-[11px] px-[13px] py-[11px] bg-card border border-border rounded-[10px] mb-2">
+                {/* 图标 */}
+                <div className="w-[30px] h-[30px] rounded-ibtn bg-asoft text-asoftt flex items-center justify-center flex-shrink-0">
+                  <IconFile size={15} />
                 </div>
+                {/* 文件信息 */}
+                <div className="min-w-0 flex-1">
+                  <div className="text-13 font-medium text-text truncate">{material.display_name}</div>
+                  <div className="text-11 text-t3 mt-[2px]">
+                    {material.source_type} · {material.file_type || '未知类型'}
+                  </div>
+                </div>
+                {/* 删除按钮 */}
+                <button
+                  type="button"
+                  onClick={() => deleteMaterial(material.id)}
+                  title={`删除材料：${material.display_name}`}
+                  aria-label={`删除材料：${material.display_name}`}
+                  className="w-[26px] h-[26px] rounded-md text-t3 hover:bg-card2 hover:text-error flex items-center justify-center flex-shrink-0"
+                >
+                  <IconTrash size={14} />
+                </button>
               </div>
             ))
           )}

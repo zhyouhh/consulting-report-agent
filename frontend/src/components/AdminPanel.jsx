@@ -49,42 +49,42 @@ export default function AdminPanel({ onClose }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-[#15162d] rounded-xl p-6 w-[680px] max-h-[80vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/45 dark:bg-scrim/60" onClick={onClose}>
+      <div className="bg-card border border-border rounded-win p-6 w-[680px] max-h-[80vh] overflow-auto shadow-popover" onClick={(e) => e.stopPropagation()}>
         <div className="flex justify-between mb-4">
-          <h2 className="text-[#e2e2f0] font-semibold">用户管理</h2>
-          <button onClick={onClose} className="text-[#8888a8]">关闭</button>
+          <h2 className="text-text font-semibold">用户管理</h2>
+          <button onClick={onClose} className="text-t2 hover:text-text">关闭</button>
         </div>
-        {err && <div className="text-red-400 text-sm mb-2">{err}</div>}
-        <div className="mb-4 text-sm text-[#e2e2f0]">
-          邀请码：<code>{invite}</code>
-          <button onClick={rotateInvite} className="ml-3 text-[#64ffda]">轮换</button>
+        {err && <div className="text-error text-sm mb-2">{err}</div>}
+        <div className="mb-4 text-sm text-text">
+          邀请码：<code className="font-mono">{invite}</code>
+          <button onClick={rotateInvite} className="ml-3 text-abright hover:text-accent">轮换</button>
         </div>
-        <div className="mb-4 text-sm text-[#e2e2f0]">
+        <div className="mb-4 text-sm text-text">
           <div className="mb-1">自定义 API 允许域名（每行一个，同事要用别的服务在这里加）：</div>
-          <div className="text-[11px] text-[#8888a8] mb-1">默认内置：{defaultHosts.join('、')}</div>
+          <div className="text-11 text-t3 mb-1">默认内置：{defaultHosts.join('、')}</div>
           <textarea value={hosts} onChange={(e) => setHosts(e.target.value)} rows={3}
-                    className="w-full bg-[#0f0f23] px-2 py-1 text-[#e2e2f0]" placeholder="my.llm.cn" />
-          <button onClick={saveHosts} className="mt-1 text-[#64ffda]">保存允许域名</button>
+                    className="w-full bg-field border border-border rounded-btn px-2 py-1 text-text focus:outline-none focus:ring-2 focus:ring-accent" placeholder="my.llm.cn" />
+          <button onClick={saveHosts} className="mt-1 text-abright hover:text-accent">保存允许域名</button>
         </div>
-        <table className="w-full text-sm text-[#e2e2f0]">
-          <thead><tr className="text-[#8888a8]"><th>用户</th><th>今日</th><th>额度</th><th>状态</th><th>操作</th></tr></thead>
+        <table className="w-full text-sm text-text">
+          <thead><tr className="text-t3"><th>用户</th><th>今日</th><th>额度</th><th>状态</th><th>操作</th></tr></thead>
           <tbody>
             {users.map((u) => (
               <tr key={u.uid}>
                 <td>{u.username}{u.is_admin ? ' (admin)' : ''}</td>
                 <td>{formatYuan(u.today_cost_yuan)}</td>
                 <td>
-                  <input defaultValue={u.daily_cap_yuan} className="w-16 bg-[#0f0f23] px-1"
+                  <input defaultValue={u.daily_cap_yuan} className="w-16 bg-field border border-border rounded-tag px-1 focus:outline-none focus:ring-2 focus:ring-accent"
                          onBlur={(e) => setCap(u.uid, e.target.value)} />
                 </td>
                 <td>{u.disabled ? '已禁用' : '正常'}</td>
                 <td>
-                  <button onClick={() => toggleDisabled(u.uid, !u.disabled)} className="text-[#64ffda] mr-2">
+                  <button onClick={() => toggleDisabled(u.uid, !u.disabled)} className="text-abright hover:text-accent mr-2">
                     {u.disabled ? '启用' : '禁用'}
                   </button>
                   <button onClick={() => { const pw = prompt('新密码（≥8 位）'); if (pw) resetPassword(u.uid, pw) }}
-                          className="text-[#64ffda]">改密</button>
+                          className="text-abright hover:text-accent">改密</button>
                 </td>
               </tr>
             ))}
