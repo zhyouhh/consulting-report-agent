@@ -1112,13 +1112,28 @@ class SkillEngine:
 
     def list_projects(self) -> list:
         registry = self._load_registry()
-        return [
-            {
-                **project,
-                "path": project["project_dir"],
-            }
-            for project in registry["projects"]
-        ]
+        projects = []
+        for project in registry["projects"]:
+            # 侧栏副标题需要「报告类型 · 阶段名」，阶段名由前端按 stage_code 映射（getStageName）。
+            # stage_code 与 get_workspace_summary 同源 _infer_stage_state（只读链路），保证侧栏与
+            # 工作区面板阶段一致。advisory：单项目目录损坏一律降级 None、绝不让列表端点 500。
+            # 频率：前端仅在 init/新建/删除时拉 /api/projects（无逐轮轮询），试用规模 per-project
+            # 推断成本可接受。
+            stage_code = None
+            try:
+                project_path = Path(project["project_dir"])
+                if project_path.exists():
+                    stage_code = self._infer_stage_state(project_path)["stage_code"]
+            except Exception:
+                stage_code = None
+            projects.append(
+                {
+                    **project,
+                    "path": project["project_dir"],
+                    "stage_code": stage_code,
+                }
+            )
+        return projects
 
     def list_materials(self, project_ref: str) -> list[dict]:
         project_record = self.get_project_record(project_ref)

@@ -23,6 +23,9 @@ function App() {
   const [currentProject, setCurrentProject] = useState(null)
   const [settings, setSettings] = useState(null)
   const [workspace, setWorkspace] = useState(null)
+  // workspace 归属的项目 id：切项目时 workspace 仍短暂持有旧项目数据（异步 fetch 间隙），
+  // 侧栏副标题据此判断「实时 stage 是否属于当前活动项目」，避免旧 stage 瞬时覆盖新项目（codex NIT）。
+  const [workspaceProjectId, setWorkspaceProjectId] = useState(null)
   const [materials, setMaterials] = useState([])
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0)
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(true)
@@ -156,6 +159,7 @@ function App() {
     const requestProject = currentProjectId
     if (!requestProject) {
       setWorkspace(null)
+      setWorkspaceProjectId(null)
       return
     }
     try {
@@ -167,6 +171,7 @@ function App() {
         return
       }
       setWorkspace(res.data)
+      setWorkspaceProjectId(requestProject)
     } catch (error) {
       if (!shouldApplyProjectResponse({
         requestProject,
@@ -176,6 +181,7 @@ function App() {
       }
       console.error('加载工作区失败:', error)
       setWorkspace(null)
+      setWorkspaceProjectId(null)
     }
   }
 
@@ -234,6 +240,7 @@ function App() {
         setCurrentProjectId(null)
         setCurrentProject(null)
         setWorkspace(null)
+        setWorkspaceProjectId(null)
         setMaterials([])
       }
       await loadProjects()
@@ -251,6 +258,7 @@ function App() {
     }
     const proceed = () => {
       setWorkspace(null)
+      setWorkspaceProjectId(null)
       setMaterials([])
       setCurrentProjectId(project?.id || null)
       setCurrentProject(project || null)
@@ -396,6 +404,7 @@ function App() {
             onOpenAdmin={() => setShowAdmin(true)}
             theme={theme}
             onToggleTheme={onToggleTheme}
+            currentStageCode={workspaceProjectId === currentProjectId ? workspace?.stage_code : undefined}
           />
         )}
         {/* 可调区域（不含固定宽 Sidebar）：clamp 的 MIN_CHAT_WIDTH 须按这个区域预留。 */}

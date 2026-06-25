@@ -83,6 +83,27 @@ class SkillEngineTests(unittest.TestCase):
                 engine._converter_read_document("proj", Path(tmp) / "x.docx")
             self.assertIn("boom", str(ctx.exception))
 
+    def test_list_projects_includes_stage_code(self):
+        # 侧栏副标题要显示「报告类型 · 阶段名」，阶段名由前端按 stage_code 映射（getStageName）。
+        # list_projects 必须为每个项目带 stage_code，且与 get_workspace_summary 同源
+        # （_infer_stage_state），保证侧栏与工作区面板阶段一致。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = self._create_engine_and_project(tmp)
+            projects = engine.list_projects()
+            self.assertEqual(len(projects), 1)
+            self.assertIn("stage_code", projects[0])
+            summary = engine.get_workspace_summary(projects[0]["id"])
+            self.assertEqual(projects[0]["stage_code"], summary["stage_code"])
+
+    def test_list_projects_stage_code_degrades_to_none_on_broken_project(self):
+        # list 是 advisory 列表端点，绝不能因单个项目目录损坏而 500——stage_code 降级 None。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, project_dir = self._create_engine_and_project(tmp)
+            shutil.rmtree(project_dir)
+            projects = engine.list_projects()
+            self.assertEqual(len(projects), 1)
+            self.assertIsNone(projects[0]["stage_code"])
+
     def test_add_materials_rejects_oversized_import(self):
         """add_materials raises ValueError before copying an oversized file."""
         from backend import material_limits as _ml
