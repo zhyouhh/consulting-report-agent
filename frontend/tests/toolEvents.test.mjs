@@ -10,8 +10,16 @@ test('reduceToolEvent：call 建 pending，result 按 id 更新且不丢 arg、�
 test('reduceToolEvent：result 先到也建条目', () => {
   assert.equal(reduceToolEvent([], { type: 'tool_result', id: 'z', tool: 'x', status: 'error', summary: 'b' })[0].status, 'error')
 })
+test('reduceToolEvent：result 先到、call 后到——status 不被退回 pending、arg 补齐', () => {
+  let m = reduceToolEvent([], { type: 'tool_result', id: 'z', tool: 'read_file', status: 'error', summary: 'b' })
+  m = reduceToolEvent(m, { type: 'tool_call', id: 'z', tool: 'read_file', arg: 'a.md' })
+  assert.deepEqual(m, [{ id: 'z', tool: 'read_file', arg: 'a.md', status: 'error', summary: 'b' }])
+})
 test('firstArgValue：取首值截断', () => {
   assert.equal(firstArgValue({ file_path: 'a.md' }), 'a.md')
   assert.equal(firstArgValue({}), '')
   assert.equal(firstArgValue({ q: 'x'.repeat(50) }).length, 40)
+})
+test('firstArgValue：数组守卫返回空串', () => {
+  assert.equal(firstArgValue(['a.md', 'b.md']), '')
 })

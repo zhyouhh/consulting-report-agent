@@ -7,7 +7,7 @@
  * @returns {string}
  */
 export function firstArgValue(args) {
-  const d = args && typeof args === 'object' ? args : {}
+  const d = args && typeof args === 'object' && !Array.isArray(args) ? args : {}
   const keys = Object.keys(d)
   if (!keys.length) return ''
   const val = String(d[keys[0]])
@@ -47,9 +47,10 @@ export function reduceToolEvent(list = [], event = {}) {
       // result 先到，建条目
       return [...list, { id, tool: event.tool || '', arg: '', status: event.status || 'error', summary: event.summary ?? '' }]
     }
-    // 更新已有条目
+    // 更新已有条目：条目已由 tool_call（或更早 result）建立、tool/arg 已正确，
+    // 这里只更新 status/summary。
     const c = list.slice()
-    c[idx] = { ...c[idx], tool: event.tool ?? c[idx].tool, status: event.status || 'error', summary: event.summary ?? '' }
+    c[idx] = { ...c[idx], status: event.status || 'error', summary: event.summary ?? '' }
     return c
   }
 
