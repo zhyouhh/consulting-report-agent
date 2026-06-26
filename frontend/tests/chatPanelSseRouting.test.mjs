@@ -70,3 +70,44 @@ test("ChatPanel renders thinking blocks with ThinkingBlock", () => {
   assert.match(source, /block\.type === 'thinking'/);
   assert.match(source, /<ThinkingBlock key=\{index\} text=\{block\.content\} \/>/);
 });
+
+test("ChatPanel keeps the legacy diagnostic type:'tool' SSE branch (warnings)", () => {
+  const source = readFileSync(
+    new URL("../src/components/ChatPanel.jsx", import.meta.url),
+    "utf-8",
+  );
+  // 诊断类工具文本事件（禁工具/畸形/自修正/漏写重试/过多调用）仍走旧分支，appendToolEventContent。
+  assert.match(source, /parsed\.type === 'tool'/);
+  assert.match(source, /appendToolEventContent\(m\.content, parsed\.data\)/);
+});
+
+test("ChatPanel routes structured tool_call/tool_result into msg.toolEvents via reduceToolEvent", () => {
+  const source = readFileSync(
+    new URL("../src/components/ChatPanel.jsx", import.meta.url),
+    "utf-8",
+  );
+  assert.match(source, /import \{ reduceToolEvent \} from '\.\.\/utils\/toolEvents'/);
+  assert.match(source, /parsed\.type === 'tool_call' \|\| parsed\.type === 'tool_result'/);
+  assert.match(source, /toolEvents:\s*reduceToolEvent\(m\.toolEvents \|\| \[\], parsed\)/);
+  // tool_call 到来时先冲刷已排队的流式文本，让 pill 落在正文之上的正确位置。
+  assert.match(source, /parsed\.type === 'tool_call' && shouldFlushStreamingQueueImmediately\('tool'\)/);
+});
+
+test("ChatPanel maps reload tool_events sibling onto msg.toolEvents", () => {
+  const source = readFileSync(
+    new URL("../src/components/ChatPanel.jsx", import.meta.url),
+    "utf-8",
+  );
+  assert.match(source, /toolEvents:\s*m\.tool_events \|\| \[\]/);
+});
+
+test("ChatPanel renders ToolCallList above assistant prose (no inline emoji tool pill)", () => {
+  const source = readFileSync(
+    new URL("../src/components/ChatPanel.jsx", import.meta.url),
+    "utf-8",
+  );
+  assert.match(source, /import ToolCallList from '\.\/ToolCallList'/);
+  assert.match(source, /<ToolCallList toolEvents=\{msg\.toolEvents\} \/>/);
+  // 旧的「从 content 文本认 emoji 工具行 → 内联 pill」整段移除。
+  assert.doesNotMatch(source, /block\.type === 'tool'/);
+});

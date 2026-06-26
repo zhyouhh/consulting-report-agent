@@ -74,37 +74,27 @@ test("shouldContinueSseStream stops immediately for explicit done or reader comp
   );
 });
 
-test("splitAssistantMessageBlocks preserves tool and text ordering", () => {
-  assert.deepEqual(
-    splitAssistantMessageBlocks([
-      "先给一句正文",
-      "🔧 调用工具: web_search({\"query\":\"猪猪侠\"})",
-      "✅ 结果: {'status':'success'}",
-      "再继续第二句正文",
-    ].join("\n")),
-    [
-      { type: "text", content: "先给一句正文" },
-      { type: "tool", content: "🔧 调用工具: web_search({\"query\":\"猪猪侠\"})" },
-      { type: "tool", content: "✅ 结果: {'status':'success'}" },
-      { type: "text", content: "再继续第二句正文" },
-    ],
-  );
+test("splitAssistantMessageBlocks no longer carves emoji lines into tool blocks", () => {
+  // 工具 pill 已改走结构化 tool_call/tool_result 事件（toolEvents），不再从 content 文本认工具行。
+  const blocks = splitAssistantMessageBlocks("🔧 调用工具: x\n✅ 结果: y");
+  assert.ok(blocks.every(block => block.type !== "tool"), "不得再产出 type:'tool' block");
+  assert.deepEqual(blocks, [{ type: "text", content: "🔧 调用工具: x\n✅ 结果: y" }]);
 });
 
-test("appendToolEventContent terminates tool events before following assistant text", () => {
+test("splitAssistantMessageBlocks keeps emoji-prefixed diagnostic text as plain text around real prose", () => {
+  // 诊断类 type:"tool" SSE 事件经 appendToolEventContent 进入 content；移除 emoji 识别后它们是普通文本。
   const content = appendToolEventContent(
-    appendToolEventContent("", "✅ 结果: xxx"),
-    "✅ 结果: yyy",
-  ) + "正文段";
-
-  assert.deepEqual(
-    splitAssistantMessageBlocks(content),
-    [
-      { type: "tool", content: "✅ 结果: xxx" },
-      { type: "tool", content: "✅ 结果: yyy" },
-      { type: "text", content: "正文段" },
-    ],
+    appendToolEventContent("先给一句正文", "⚠️ 结果: 拒绝该工具调用"),
+    "再继续第二句正文",
   );
+  const blocks = splitAssistantMessageBlocks(content);
+  assert.ok(blocks.every(block => block.type !== "tool"));
+  // thinking 仍切块，但纯文本与 emoji 诊断行都归到 text。
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].type, "text");
+  assert.match(blocks[0].content, /先给一句正文/);
+  assert.match(blocks[0].content, /⚠️ 结果: 拒绝该工具调用/);
+  assert.match(blocks[0].content, /再继续第二句正文/);
 });
 
 test("getStreamResponseError returns null for successful SSE responses", async () => {

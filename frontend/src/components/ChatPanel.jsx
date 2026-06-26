@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm'
 import { showError, showInfo, showSuccess } from '../utils/toast'
 import { buildChatRequest, buildTransientAttachmentsPayload, conversionStatusChip, toggleMaterialSelection } from '../utils/chatMaterials'
 import { applyAttachmentTranscribed, historyTranscriptIndicators } from '../utils/sseEvents'
+import { reduceToolEvent } from '../utils/toolEvents'
 import {
   createPendingTriggerItem,
   dequeuePendingTrigger,
@@ -40,9 +41,10 @@ import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { stripToolLogComments } from '../utils/toolLogStrip.mjs'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 import ThinkingBlock from './ThinkingBlock'
+import ToolCallList from './ToolCallList'
 // Shared markdown rendering fragment, reused by the S5 ReviewChatWindow (same look & feel).
 import { assistantMarkdownComponents } from './MarkdownMessage'
-import { IconTrash, IconSidebar, IconPanelRight, IconPaperclip, IconSend, IconStop, IconClose, IconCheck } from './icons'
+import { IconTrash, IconSidebar, IconPanelRight, IconPaperclip, IconSend, IconStop, IconClose } from './icons'
 
 const ChatPanel = forwardRef(function ChatPanel({
   projectId,
@@ -155,6 +157,9 @@ const ChatPanel = forwardRef(function ChatPanel({
                 id: `${Date.now()}-${i}`,
                 role: m.role,
                 content: m.content,
+                // Tool-pill reload: 后端 /conversation 给每条 assistant 返回结构化 tool_events
+                // 并列字段（老消息无字段→[]），直接进 msg.toolEvents 由 ToolCallList 渲染。
+                toolEvents: m.tool_events || [],
                 attachedMaterialIds: m.attached_material_ids || [],
                 // N6 Fix2: carry persisted image transcripts so a reloaded chat re-shows the
                 // 已转写图片 / 图片没读出来 indicator (live-in-turn transientAttachments are gone).
@@ -540,6 +545,19 @@ const ChatPanel = forwardRef(function ChatPanel({
                 }
                 setMessages(prev => prev.map(m =>
                   m.id === assistantId ? { ...m, content: appendToolEventContent(m.content, parsed.data) } : m
+                ))
+              } else if (parsed.type === 'tool_call' || parsed.type === 'tool_result') {
+                // 结构化工具事件（tool-pill）：tool_call 到来时先冲刷已排队的流式文本，
+                // 让 pill 成组渲染在正文之上（与诊断 type:"tool" 文本分流，互不影响）。
+                if (parsed.type === 'tool_call' && shouldFlushStreamingQueueImmediately('tool')) {
+                  flushStreamingQueueImmediately(assistantId, requestProjectId)
+                }
+                if (!isActiveProjectRequest(requestProjectId)) {
+                  streamCompleted = true
+                  break
+                }
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantId ? { ...m, toolEvents: reduceToolEvent(m.toolEvents || [], parsed) } : m
                 ))
               } else if (parsed.type === 'usage') {
                 if (!isActiveProjectRequest(requestProjectId)) {
@@ -963,12 +981,9 @@ const ChatPanel = forwardRef(function ChatPanel({
                   <span className="text-13 font-semibold text-text">助手</span>
                 </div>
                 <div className="space-y-2 text-15 leading-[1.68] text-text">
-                  {assistantBlocks.map((block, index) => block.type === 'tool' ? (
-                    <div key={index} className="inline-flex items-center gap-[9px] border border-border rounded-ibtn bg-card2 px-[11px] py-[7px] font-mono">
-                      <span className="text-15 text-text">{block.content}</span>
-                      <IconCheck size={14} className="text-success flex-shrink-0" />
-                    </div>
-                  ) : block.type === 'thinking' ? (
+                  {/* 工具调用 pill 成组渲染在正文上方（live SSE reduceToolEvent / reload tool_events）。 */}
+                  <ToolCallList toolEvents={msg.toolEvents} />
+                  {assistantBlocks.map((block, index) => block.type === 'thinking' ? (
                     <ThinkingBlock key={index} text={block.content} />
                   ) : (
                     <ReactMarkdown
