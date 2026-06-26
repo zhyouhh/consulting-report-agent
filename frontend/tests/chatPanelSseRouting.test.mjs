@@ -112,14 +112,16 @@ test("ChatPanel renders ToolCallList above assistant prose (no inline emoji tool
   assert.doesNotMatch(source, /block\.type === 'tool'/);
 });
 
-test("ChatPanel closes pending tool pills on abort and on network failure", () => {
+test("ChatPanel closes pending tool pills on abort, network failure, and in-stream error", () => {
   const source = readFileSync(
     new URL("../src/components/ChatPanel.jsx", import.meta.url),
     "utf-8",
   );
   // 后端在 GeneratorExit（中止 / 断连）上不发收尾 tool_result，前端必须自己收尾仍 pending 的 pill，
-  // 否则留永久转圈。两条 catch 路径都调 closePendingToolEvents（中止→已停止生成、失败→连接中断）。
+  // 否则留永久转圈。三处都调 closePendingToolEvents（中止→已停止生成、失败→连接中断、
+  // in-stream error→生成出错，最后一处防御性自洽、不依赖后端先 flush）。
   assert.match(source, /import \{ closePendingToolEvents, reduceToolEvent \} from '\.\.\/utils\/toolEvents'/);
   assert.match(source, /toolEvents:\s*closePendingToolEvents\(m\.toolEvents,\s*'已停止生成'\)/);
   assert.match(source, /toolEvents:\s*closePendingToolEvents\(m\.toolEvents,\s*'连接中断'\)/);
+  assert.match(source, /toolEvents:\s*closePendingToolEvents\(m\.toolEvents,\s*'生成出错'\)/);
 });

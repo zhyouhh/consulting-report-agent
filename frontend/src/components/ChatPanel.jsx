@@ -599,8 +599,12 @@ const ChatPanel = forwardRef(function ChatPanel({
                   streamCompleted = true
                   break
                 }
+                // 防御性：万一未来某后端路径在 tool_call 后发裸 error 不先 flush 收尾 tool_result，
+                // 前端自洽地收尾仍 pending 的工具 pill（当前后端先 flush，故多数情况是 no-op）。
                 setMessages(prev => prev.map(m =>
-                  m.id === assistantId ? { ...m, content: `错误: ${parsed.data}` } : m
+                  m.id === assistantId
+                    ? { ...m, content: `错误: ${parsed.data}`, toolEvents: closePendingToolEvents(m.toolEvents, '生成出错') }
+                    : m
                 ))
               }
             } catch (e) {
