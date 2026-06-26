@@ -897,6 +897,109 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual((res["id"], res["tool"], res["status"]), ("call-1", "append_report_draft", "success"))
 
     @mock.patch("backend.chat.OpenAI")
+    def test_malformed_args_after_early_pending_closes_with_error_tool_result(self, mock_openai):
+        # Orphan-pending regression #1: the stream assembles a valid name+id (early pending
+        # tool_call fires), then the args turn into malformed JSON → the diagnostic retry
+        # barrier fires and `continue`s WITHOUT executing. The early-fired pending id MUST be
+        # closed by a same-id error tool_result (otherwise the frontend pill spins forever).
+        def malformed_after_valid_stream():
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0, id="call-1", name="web_search", arguments='{"query":"x"'
+                    )
+                ]
+            )
+            yield self._make_chunk(
+                tool_calls=[self._make_stream_tool_call_chunk(0, arguments='}}}INVALID')]
+            )
+
+        mock_openai.return_value.chat.completions.create.return_value = malformed_after_valid_stream()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            events = list(handler.chat_stream(project["id"], "继续", max_iterations=2))
+
+        call_ids = [e["id"] for e in events if e.get("type") == "tool_call"]
+        result_ids = {e["id"] for e in events if e.get("type") == "tool_result"}
+        self.assertIn("call-1", call_ids)
+        # No orphan: every early-fired pending id is closed by a tool_result.
+        self.assertTrue(set(call_ids).issubset(result_ids))
+        closing = [e for e in events if e.get("type") == "tool_result" and e["id"] == "call-1"]
+        self.assertEqual(len(closing), 1)
+        self.assertEqual(closing[0]["status"], "error")
+        # The malformed diagnostic (type:"tool") is preserved, not replaced by the orphan-close.
+        self.assertTrue(
+            any(e.get("type") == "tool" and "畸形" in str(e.get("data", "")) for e in events)
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mid_stream_exception_after_early_pending_closes_with_error_tool_result(self, mock_openai):
+        # Orphan-pending regression #2: the stream early-fires a pending tool_call, then the
+        # provider stream raises mid-iteration → the except branch yields a global error and
+        # returns. The early-fired id MUST also be closed by a same-id error tool_result (in
+        # ADDITION to the global error banner), so no pending pill is left spinning.
+        def exploding_stream():
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0, id="call-1", name="web_search", arguments='{"query":"x"}'
+                    )
+                ]
+            )
+            raise RuntimeError("provider stream broke")
+
+        mock_openai.return_value.chat.completions.create.return_value = exploding_stream()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            events = list(handler.chat_stream(project["id"], "继续", max_iterations=2))
+
+        call_ids = [e["id"] for e in events if e.get("type") == "tool_call"]
+        result_events = [e for e in events if e.get("type") == "tool_result"]
+        self.assertIn("call-1", call_ids)
+        # The early-fired pending id is closed by an error tool_result.
+        self.assertTrue(any(e["id"] == "call-1" and e["status"] == "error" for e in result_events))
+        # The global error banner is still emitted (the orphan-close is additive, not a swap).
+        self.assertTrue(any(e.get("type") == "error" for e in events))
+
+    @mock.patch("backend.chat.OpenAI")
     def test_finalize_persists_tool_events_sibling_field(self, mock_openai):
         tool_stream = [
             self._make_chunk(

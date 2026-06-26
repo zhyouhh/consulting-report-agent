@@ -1528,6 +1528,25 @@ class ChatHandler:
             "summary": self._sse_tool_summary(p.name, p.result),
         } for p in self._pair_tool_calls_with_results(current_turn_messages)]
 
+    def _flush_pending_tool_calls(self, pending: "dict[str, str]", summary: str):
+        """对每个「已早发 pending tool_call 但未正常结束」的 id 补发一个同 id 的 error tool_result，
+        然后清空集合——杜绝前端永久转圈的孤儿 pending pill。
+
+        在「会放弃已早发调用」的退出路径（malformed-retry `continue` 前、mid-stream 异常 return 前）
+        显式调用；**故意不放在 finally**：chat_stream 会被 SSE 心跳包装器 `gen.close()`（GeneratorExit），
+        finally 里 yield 会触发 RuntimeError、破坏「GeneratorExit→response.close()→释放 request_lock」链路。
+        正常 execute 路径每个 id 在发 tool_result 后即 pop，到这里集合已空、不重复发。
+        """
+        for call_id, tool_name in list(pending.items()):
+            yield {
+                "type": "tool_result",
+                "id": call_id,
+                "tool": tool_name,
+                "status": "error",
+                "summary": summary,
+            }
+        pending.clear()
+
     def _format_tool_pair_line(self, pair: ToolPair) -> str:
         """Format: - TOOL_NAME(SHORT_ARGS) ✓ SUMMARY or ✗ ERROR_BRIEF. Max 120 chars.
 
@@ -2890,6 +2909,10 @@ class ChatHandler:
             collected_message = {"role": "assistant", "content": "", "tool_calls": []}
             known_tool_names = {tool["function"]["name"] for tool in self._get_tools()}
             announced_tool_call_indexes: set[int] = set()
+            # id → tool_name for early-fired pending tool_call events not yet closed by a
+            # tool_result this iteration. Flushed as error on abandon paths (malformed / mid-stream
+            # exception); popped on normal execute. Per-iteration → no cross-iteration leakage.
+            announced_pending: "dict[str, str]" = {}
             stream_usage = None
             accumulated = ""
             stream_buffer = ""
@@ -2968,6 +2991,7 @@ class ChatHandler:
                                 # arg 此刻 best-effort（多为空）；execute 前会再发带完整 arg 的同 id 事件，
                                 # 前端按 id 合并。汇报轮丢工具，故跳过早发以免孤儿 pending pill。
                                 announced_tool_call_indexes.add(tc_chunk.index)
+                                announced_pending[tc["id"]] = tc["function"]["name"]
                                 yield {
                                     "type": "tool_call",
                                     "id": tc["id"],
@@ -2987,6 +3011,9 @@ class ChatHandler:
                         request_kwargs=request_kwargs,
                     ),
                 }
+                # 流式中断会放弃本轮已早发的 pending tool_call——按 id 收尾，避免孤儿 pill 永久转圈。
+                # `except Exception` 不捕 GeneratorExit（BaseException），故 close() 路径不会走到这里。
+                yield from self._flush_pending_tool_calls(announced_pending, "流式中断")
                 return
             finally:
                 # 任何退出（提前 break / 异常 / return）都同步关闭 response，触发 wrapper 的
@@ -3069,6 +3096,9 @@ class ChatHandler:
                         "type": "tool",
                         "data": "⚠️ 上条 tool_calls 被上游合并成畸形条目，本轮作废并让模型重发。",
                     }
+                    # 本轮作废、不执行任何工具——收尾已早发的 pending tool_call（同 id error），
+                    # 否则前端 pill 永久转圈。重试会以新 id 产生新 pill（可接受）。诊断事件不替换。
+                    yield from self._flush_pending_tool_calls(announced_pending, "工具参数无效")
                     # 用一条纯文本 assistant + 一条 user 反馈做"合规隔板"，保持 user/model
                     # 严格交替——直接 append 一条 user 会导致连续两条 user（前面本轮原始
                     # 用户消息），触发 Gemini 的角色交替校验 400。
@@ -3136,6 +3166,9 @@ class ChatHandler:
                         "status": "success" if result.get("status") == "success" else "error",
                         "summary": self._sse_tool_summary(func_name, result),
                     }
+                    # This id is now closed → drop it from the pending set so the abandon-path
+                    # flush (if a later tool in this turn aborts) never re-emits it.
+                    announced_pending.pop(tool_call["id"], None)
                     current_turn_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
