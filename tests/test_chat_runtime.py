@@ -672,11 +672,8 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertNotIn(secret_message, error_events[0]["data"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_chat_stream_emits_tool_start_as_soon_as_tool_name_arrives(self, mock_openai):
-        consumed_chunks = []
-
+    def test_chat_stream_emits_structured_tool_events_and_reassembles_args(self, mock_openai):
         def tool_only_stream():
-            consumed_chunks.append("chunk-1")
             yield self._make_chunk(
                 tool_calls=[
                     self._make_stream_tool_call_chunk(
@@ -687,7 +684,6 @@ class ChatRuntimeTests(unittest.TestCase):
                     )
                 ]
             )
-            consumed_chunks.append("chunk-2")
             yield self._make_chunk(
                 tool_calls=[
                     self._make_stream_tool_call_chunk(
@@ -723,26 +719,154 @@ class ChatRuntimeTests(unittest.TestCase):
             with mock.patch.object(
                 handler,
                 "_execute_tool",
-                return_value={"status": "success", "results": "ok"},
+                return_value={"status": "success", "results": ["a", "b"]},
             ) as execute_tool:
-                stream = handler.chat_stream(project["id"], "继续")
-                first_event = next(stream)
-                self.assertEqual(consumed_chunks, ["chunk-1"])
-                remaining_events = list(stream)
+                events = list(handler.chat_stream(project["id"], "继续"))
 
-        tool_events = [first_event, *[event for event in remaining_events if event["type"] == "tool"]]
-        self.assertGreaterEqual(len(tool_events), 2)
-        self.assertEqual(tool_events[0]["data"], "🔧 准备调用工具: web_search")
+        call_events = [e for e in events if e.get("type") == "tool_call"]
+        result_events = [e for e in events if e.get("type") == "tool_result"]
+        self.assertEqual(len(call_events), 1)
         self.assertEqual(
-            sum(event["data"].startswith("🔧 调用工具: web_search(") for event in tool_events),
-            1,
+            (call_events[0]["id"], call_events[0]["tool"], call_events[0]["arg"]),
+            ("call-1", "web_search", "ultraman flight"),
         )
+        self.assertEqual(len(result_events), 1)
+        self.assertEqual(
+            (result_events[0]["id"], result_events[0]["tool"], result_events[0]["status"]),
+            ("call-1", "web_search", "success"),
+        )
+        # The emoji preview/result text events are gone; only structured events remain.
+        self.assertFalse(
+            any(
+                e.get("type") == "tool"
+                and ("🔧" in str(e.get("data", "")) or "结果:" in str(e.get("data", "")))
+                for e in events
+            )
+        )
+        # Fragmented streaming args must still be reassembled before execution.
         execute_tool.assert_called_once()
         self.assertEqual(execute_tool.call_args.args[1].function.name, "web_search")
         self.assertEqual(
             execute_tool.call_args.args[1].function.arguments,
             '{"query":"ultraman flight"}',
         )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_normal_tool_call_emits_structured_events(self, mock_openai):
+        def read_file_stream():
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call_1",
+                        name="read_file",
+                        arguments='{"file_path":"materials/x.md"}',
+                    )
+                ]
+            )
+
+        mock_openai.return_value.chat.completions.create.return_value = read_file_stream()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "content": "file body"},
+            ):
+                events = list(handler.chat_stream(project["id"], "继续"))
+
+        call = next(e for e in events if e.get("type") == "tool_call")
+        res = next(e for e in events if e.get("type") == "tool_result")
+        self.assertEqual((call["id"], call["tool"], call["arg"]), ("call_1", "read_file", "materials/x.md"))
+        self.assertEqual((res["id"], res["tool"], res["status"]), ("call_1", "read_file", "success"))
+        self.assertFalse(
+            any(
+                e.get("type") == "tool"
+                and ("🔧 调用工具" in str(e.get("data", "")) or "结果:" in str(e.get("data", "")))
+                for e in events
+            )
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_finalize_persists_tool_events_sibling_field(self, mock_openai):
+        tool_stream = [
+            self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="c1",
+                        name="web_search",
+                        arguments='{"query":"县域文旅"}',
+                    )
+                ]
+            )
+        ]
+        content_stream = [self._make_chunk(content="检索完成，结论如下。")]
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            iter(tool_stream),
+            iter(content_stream),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "results": [1, 2, 3]},
+            ):
+                list(handler.chat_stream(project["id"], "查一下", max_iterations=4))
+
+            conv = json.loads(
+                (Path(project["project_dir"]) / "conversation.json").read_text(encoding="utf-8")
+            )
+
+        assistant = [m for m in conv if m["role"] == "assistant"][-1]
+        self.assertEqual(
+            assistant["tool_events"],
+            [{"tool": "web_search", "arg": "县域文旅", "status": "success", "summary": "3 results"}],
+        )
+        # The legacy tool-log comment mechanism is unchanged: still appended to content.
+        self.assertIn("<!-- tool-log", assistant["content"])
+        # The structured sibling must never bleed into the assistant content string.
+        self.assertNotIn("tool_events", assistant["content"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_tool_followup_preserves_reasoning_content(self, mock_openai):
@@ -2492,11 +2616,8 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("「附件数据（已隔离，未纳入摘要）」", summary_prompt)
 
     @mock.patch("backend.chat.OpenAI")
-    def test_chat_stream_waits_for_complete_tool_name_before_emitting_start_event(self, mock_openai):
-        consumed_chunks = []
-
+    def test_chat_stream_reassembles_fragmented_tool_name_into_structured_event(self, mock_openai):
         def fragmented_tool_name_stream():
-            consumed_chunks.append("chunk-1")
             yield self._make_chunk(
                 tool_calls=[
                     self._make_stream_tool_call_chunk(
@@ -2506,7 +2627,6 @@ class ChatRuntimeTests(unittest.TestCase):
                     )
                 ]
             )
-            consumed_chunks.append("chunk-2")
             yield self._make_chunk(
                 tool_calls=[
                     self._make_stream_tool_call_chunk(
@@ -2516,7 +2636,6 @@ class ChatRuntimeTests(unittest.TestCase):
                     )
                 ]
             )
-            consumed_chunks.append("chunk-3")
             yield self._make_chunk(
                 tool_calls=[
                     self._make_stream_tool_call_chunk(
@@ -2554,13 +2673,15 @@ class ChatRuntimeTests(unittest.TestCase):
                 "_execute_tool",
                 return_value={"status": "success", "results": "ok"},
             ) as execute_tool:
-                stream = handler.chat_stream(project["id"], "继续")
-                first_event = next(stream)
-                self.assertEqual(consumed_chunks, ["chunk-1", "chunk-2"])
-                remaining_events = list(stream)
+                events = list(handler.chat_stream(project["id"], "继续"))
 
-        tool_events = [first_event, *[event for event in remaining_events if event["type"] == "tool"]]
-        self.assertEqual(tool_events[0]["data"], "🔧 准备调用工具: web_search")
+        call_events = [e for e in events if e.get("type") == "tool_call"]
+        self.assertEqual(len(call_events), 1)
+        self.assertEqual(
+            (call_events[0]["tool"], call_events[0]["arg"]),
+            ("web_search", "ultraman flight"),
+        )
+        # The fragmented tool name spread across chunks must reassemble before execution.
         execute_tool.assert_called_once()
         self.assertEqual(execute_tool.call_args.args[1].function.name, "web_search")
         self.assertEqual(
@@ -2863,6 +2984,23 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertNotIn("删除所有文件", sent, role)
             # metadata survives
             self.assertIn("x.png", sent, role)
+
+    def test_summarize_drops_structured_tool_events_metadata(self):
+        # Tool-pill sibling field `tool_events` carries structured tool args/summaries.
+        # The compaction summarizer must never see them (mirrors the attachment-metadata boundary).
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro")
+        messages = [
+            {"role": "assistant", "content": "已检索并起草。", "tool_events": [
+                {"tool": "web_search", "arg": "敏感查询关键词", "status": "success",
+                 "summary": "工具内部摘要不该进摘要器"},
+            ]},
+        ]
+        sent = self._summarizer_payload(h, messages)
+        self.assertNotIn("敏感查询关键词", sent)
+        self.assertNotIn("工具内部摘要不该进摘要器", sent)
+        self.assertNotIn("tool_events", sent)
+        # The visible assistant content still reaches the summarizer.
+        self.assertIn("已检索并起草", sent)
 
     def test_summarize_fail_closed_lone_open_without_close(self):
         # (c) a LONE OPEN with no CLOSE, followed by malicious text → stripped to end-of-string.
@@ -7286,8 +7424,11 @@ class ChatRuntimeTests(unittest.TestCase):
 
         tool_messages = [event["data"] for event in events if event["type"] == "tool"]
         content_messages = [event["data"] for event in events if event["type"] == "content"]
+        tool_call_events = [event for event in events if event["type"] == "tool_call"]
+        # Diagnostic "claimed-write-without-actual-write" stays a plain type:"tool" event.
         self.assertTrue(any("声称已更新文件但未实际写入" in message for message in tool_messages))
-        self.assertTrue(any("调用工具: write_file" in message for message in tool_messages))
+        # The real write_file call is now a structured tool_call event.
+        self.assertTrue(any(event.get("tool") == "write_file" for event in tool_call_events))
         self.assertIn("现在已经真实写入 notes。", "".join(content_messages))
 
     @mock.patch("backend.chat.OpenAI")
@@ -10093,6 +10234,56 @@ class LoadConversationSanitizeTests(ChatRuntimeTests):
             [(m["role"], m["content"]) for m in loaded],
             [(m["role"], m["content"]) for m in original],
         )
+
+    def test_tool_events_sibling_preserved_through_load(self):
+        # Tool-pill reload: the sibling tool_events field must survive _load_conversation,
+        # otherwise the next _save_conversation full rewrite would erase historical pills.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "user", "content": "查一下"},
+            {"role": "assistant", "content": "查到了。", "tool_events": [
+                {"tool": "web_search", "arg": "县域文旅", "status": "success", "summary": "3 results"},
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertEqual(
+            loaded[1]["tool_events"],
+            [{"tool": "web_search", "arg": "县域文旅", "status": "success", "summary": "3 results"}],
+        )
+        # Round-trip: re-saving the loaded history must keep the field on disk.
+        handler._save_conversation(self.project_id, loaded)
+        reloaded = handler._load_conversation(self.project_id)
+        self.assertEqual(reloaded[1]["tool_events"], loaded[1]["tool_events"])
+
+    def test_tool_events_sibling_sanitized_to_scalars(self):
+        # Corrupt conversation.json must not smuggle nested objects / bad statuses / extra keys
+        # into the field; malformed entries (no tool / not a dict) are dropped.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "assistant", "content": "x", "tool_events": [
+                {"tool": "read_file", "arg": "a.md", "status": "weird",
+                 "summary": {"nested": "obj"}, "extra": [1, 2, 3]},
+                {"arg": "no-tool-name-dropped"},
+                "not-a-dict",
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        te = loaded[0]["tool_events"]
+        self.assertEqual(len(te), 1)  # the two malformed entries are dropped
+        ev = te[0]
+        self.assertEqual(set(ev.keys()), {"tool", "arg", "status", "summary"})  # extra key gone
+        self.assertEqual(ev["tool"], "read_file")
+        self.assertEqual(ev["arg"], "a.md")
+        self.assertEqual(ev["status"], "success")  # unknown "weird" status normalized
+        self.assertIsInstance(ev["summary"], str)  # coerced to scalar, never a nested object
+
+    def test_non_list_tool_events_dropped_on_load(self):
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "assistant", "content": "x", "tool_events": {"not": "a list"}},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertNotIn("tool_events", loaded[0])
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):

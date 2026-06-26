@@ -894,6 +894,9 @@ class ChatHandler:
         # 客户端可控的非 content 字段绝不进摘要器：json.dumps 会序列化整条消息，
         # forged 的 attached_material_ids / client_message_id 可夹带指令。只留数量、丢 id。
         sanitized.pop("client_message_id", None)
+        # The structured tool_events sibling (tool args/summaries) must never reach the
+        # summarizer — same boundary as attachment metadata above.
+        sanitized.pop("tool_events", None)
         if "attached_material_ids" in sanitized:
             ids = sanitized.get("attached_material_ids") or []
             sanitized["attached_material_ids"] = len(ids)
@@ -1488,6 +1491,42 @@ class ChatHandler:
                 project_id,
                 exc_info=True,
             )
+
+    def _sse_tool_arg(self, name: str, args: "str | dict") -> str:
+        """单行 pill 的精简实参：取首个参数值、截断到 40 字符；无参 / append_report_draft 返回空。
+
+        live SSE 与持久化 sibling 共用同一派生，保证刷新前后 pill 一致。
+        """
+        try:
+            d = json.loads(args) if isinstance(args, str) else (args or {})
+        except json.JSONDecodeError:
+            d = {}
+        if not isinstance(d, dict) or not d or name == "append_report_draft":
+            return ""
+        val = str(next(iter(d.values())))
+        return val[:37] + "..." if len(val) > 40 else val
+
+    def _sse_tool_summary(self, name: str, result: dict) -> str:
+        """单行 pill 的结果摘要：失败给简短原因；web_search/fetch_url 给计数/体积，其余空。"""
+        if result.get("status") != "success":
+            return str(result.get("message") or result.get("error") or "失败")[:40]
+        if name == "web_search":
+            return f"{len(result.get('results') or [])} results"
+        if name == "fetch_url":
+            return f"{round(len(result.get('content') or '') / 1024, 1)} KB"
+        return ""
+
+    def _build_tool_events(self, current_turn_messages: List[Dict]) -> list:
+        """把本轮 tool call/result 收敛成结构化 sibling 列表（persist 到 conversation.json）。
+
+        sibling 元素无 id（端点 reload 时补合成 id）；与 live SSE 同一套 arg/summary 派生。
+        """
+        return [{
+            "tool": p.name,
+            "arg": self._sse_tool_arg(p.name, p.args),
+            "status": "success" if p.result.get("status") == "success" else "error",
+            "summary": self._sse_tool_summary(p.name, p.result),
+        } for p in self._pair_tool_calls_with_results(current_turn_messages)]
 
     def _format_tool_pair_line(self, pair: ToolPair) -> str:
         """Format: - TOOL_NAME(SHORT_ARGS) ✓ SUMMARY or ✗ ERROR_BRIEF. Max 120 chars.
@@ -2850,7 +2889,6 @@ class ChatHandler:
 
             collected_message = {"role": "assistant", "content": "", "tool_calls": []}
             known_tool_names = {tool["function"]["name"] for tool in self._get_tools()}
-            announced_tool_call_indexes: set[int] = set()
             stream_usage = None
             accumulated = ""
             stream_buffer = ""
@@ -2918,15 +2956,8 @@ class ChatHandler:
                                     tc["function"]["name"] += tc_chunk.function.name
                                 if tc_chunk.function.arguments:
                                     tc["function"]["arguments"] += tc_chunk.function.arguments
-                            if (
-                                tc_chunk.index not in announced_tool_call_indexes
-                                and tc["function"]["name"] in known_tool_names
-                                and not self._turn_context.get("system_trigger_no_tools")
-                            ):
-                                # 汇报轮禁工具：响应层 guard 会丢弃 tool_calls，这里就不要
-                                # 抢先 announce"准备调用工具"，否则用户会看到调用却无事发生。
-                                announced_tool_call_indexes.add(tc_chunk.index)
-                                yield {"type": "tool", "data": f"🔧 准备调用工具: {tc['function']['name']}"}
+                            # 工具调用的可见反馈改由执行点的结构化 tool_call/tool_result 事件承担，
+                            # 流式阶段不再抢先发"准备调用工具"文本预告（pill 在执行点一次到位）。
             except Exception as e:
                 yield from emit_parsed_stream_events(parser.flush())
                 self._debug_dump_request(request_kwargs, label="stream-iter", error=e, note=f"iteration={iterations}")
@@ -3043,10 +3074,12 @@ class ChatHandler:
                 for index, tool_call in enumerate(assistant_tool_message["tool_calls"]):
                     func_name = tool_call["function"]["name"]
                     func_args = tool_call["function"]["arguments"]
-                    tool_preview = f"🔧 调用工具: {func_name}"
-                    if func_args:
-                        tool_preview = f"{tool_preview}({func_args[:50]}...)"
-                    yield {"type": "tool", "data": tool_preview}
+                    yield {
+                        "type": "tool_call",
+                        "id": tool_call["id"],
+                        "tool": func_name,
+                        "arg": self._sse_tool_arg(func_name, func_args),
+                    }
 
                     class ToolCall:
                         def __init__(self, data):
@@ -3076,8 +3109,13 @@ class ChatHandler:
                             "user_action": notice["user_action"],
                         }
                     self._turn_context["pending_system_notices"] = []
-                    result_icon = "✅" if result.get("status") == "success" else "⚠️"
-                    yield {"type": "tool", "data": f"{result_icon} 结果: {str(result)[:160]}..."}
+                    yield {
+                        "type": "tool_result",
+                        "id": tool_call["id"],
+                        "tool": func_name,
+                        "status": result.get("status", "error"),
+                        "summary": self._sse_tool_summary(func_name, result),
+                    }
                     current_turn_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
@@ -6064,6 +6102,18 @@ class ChatHandler:
             attachment_transcripts = message.get("attachment_transcripts")
             if attachment_transcripts:
                 entry["attachment_transcripts"] = attachment_transcripts
+            # Tool-pill reload: preserve the structured tool_events sibling so a later full
+            # _save_conversation rewrite does not erase historical pills. Accept ONLY a list and
+            # rebuild scalar-by-scalar — a corrupt conversation.json must not smuggle big objects
+            # into the frontend or back into the next save.
+            raw_te = message.get("tool_events")
+            if isinstance(raw_te, list):
+                entry["tool_events"] = [{
+                    "tool": str(e.get("tool") or ""),
+                    "arg": str(e.get("arg") or ""),
+                    "status": e.get("status") if e.get("status") in ("success", "error", "pending") else "success",
+                    "summary": str(e.get("summary") or ""),
+                } for e in raw_te if isinstance(e, dict) and e.get("tool")]
             client_message_id = message.get("client_message_id")
             if client_message_id is not None:
                 entry["client_message_id"] = client_message_id
@@ -6785,24 +6835,25 @@ class ChatHandler:
             else:
                 self._unlock_s0_confirmation_first_turn(project_id)
 
-        # Step 5: append tool-log.
+        # Step 5: append tool-log comment (legacy mechanism, unchanged) + build the
+        # structured tool_events sibling field used by the frontend tool-call pills on reload.
         persisted_content = visible_content
         if current_turn_messages:
             persisted_content = self._append_tool_log_to_assistant(
                 persisted_content,
                 current_turn_messages,
             )
+        tool_events = self._build_tool_events(current_turn_messages) if current_turn_messages else []
 
-        # Step 6: persist this turn.
+        # Step 6: persist this turn. tool_events rides alongside content as a sibling field
+        # (never merged into content, never sent to the provider — see _to_provider_message).
+        assistant_msg = {"role": "assistant", "content": persisted_content}
+        if tool_events:
+            assistant_msg["tool_events"] = tool_events
         if self._turn_context.get("system_triggered"):
-            history.extend([
-                {"role": "assistant", "content": persisted_content},
-            ])
+            history.extend([assistant_msg])
         else:
-            history.extend([
-                current_user_message,
-                {"role": "assistant", "content": persisted_content},
-            ])
+            history.extend([current_user_message, assistant_msg])
         self._save_conversation(project_id, history)
         return persisted_content
 

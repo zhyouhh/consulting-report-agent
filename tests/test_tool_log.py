@@ -163,6 +163,54 @@ class AppendToolLogTests(unittest.TestCase):
             self.assertLessEqual(len(line), 120)
 
 
+class BuildToolEventsTests(unittest.TestCase):
+    def setUp(self):
+        self.handler = ChatHandler.__new__(ChatHandler)
+
+    def test_build_tool_events_structured(self):
+        turn = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "c1", "function": {"name": "web_search", "arguments": '{"query": "县域文旅"}'}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1",
+             "content": json.dumps({"status": "success", "results": [1, 2, 3]})},
+        ]
+        self.assertEqual(
+            self.handler._build_tool_events(turn),
+            [{"tool": "web_search", "arg": "县域文旅", "status": "success", "summary": "3 results"}],
+        )
+
+    def test_build_tool_events_error_status(self):
+        turn = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "c1", "function": {"name": "write_file", "arguments": '{"file_path": "plan/x.md"}'}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1",
+             "content": json.dumps({"status": "error", "message": "写入失败"})},
+        ]
+        self.assertEqual(
+            self.handler._build_tool_events(turn),
+            [{"tool": "write_file", "arg": "plan/x.md", "status": "error", "summary": "写入失败"}],
+        )
+
+    def test_build_tool_events_append_report_draft_omits_arg(self):
+        turn = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "c1", "function": {"name": "append_report_draft",
+                 "arguments": '{"content": "正文很长很长..."}'}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1",
+             "content": json.dumps({"status": "success", "path": "content/report_draft_v1.md"})},
+        ]
+        self.assertEqual(
+            self.handler._build_tool_events(turn),
+            [{"tool": "append_report_draft", "arg": "", "status": "success", "summary": ""}],
+        )
+
+    def test_build_tool_events_empty_turn(self):
+        self.assertEqual(self.handler._build_tool_events([]), [])
+
+
 class StripToolLogCommentsTests(unittest.TestCase):
     def test_strips_well_formed_single_line(self):
         from backend.chat import strip_tool_log_comments
