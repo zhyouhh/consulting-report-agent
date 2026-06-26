@@ -247,6 +247,22 @@ def _quota_notice(err) -> str:
     return "审查模型暂时不可用（多次未取得用量计数已保护性暂停），请稍后再试。"
 
 
+def _sse_tool_arg(name: str, args: "str | dict") -> str:
+    """单行 pill 的精简实参：取首个参数值、截断到 40 字符；无参 / append_report_draft 返回空。
+
+    与 chat.py 的 ChatHandler._sse_tool_arg 行为一致——审查窗口与主聊天共用 ToolCallPill，
+    arg 派生必须同源，刷新 / 跨窗口 pill 才一致。
+    """
+    try:
+        d = json.loads(args) if isinstance(args, str) else (args or {})
+    except json.JSONDecodeError:
+        d = {}
+    if not isinstance(d, dict) or not d or name == "append_report_draft":
+        return ""
+    val = str(next(iter(d.values())))
+    return val[:37] + "..." if len(val) > 40 else val
+
+
 class IndependentReviewAgent:
     """Independent S5 reviewer. A caller should hold the per-project lock while running."""
 
@@ -603,8 +619,12 @@ class IndependentReviewAgent:
                         except json.JSONDecodeError as exc:
                             malformed_reasons.append(f"{fn_name} 参数 JSON 异常: {exc.msg}")
                 if malformed_reasons:
+                    # 合成 id：malformed 批次本身没有 result（也可能整批缺 id），前端 id-pair
+                    # 聚合器对无 id 的 tool_result 会吞掉。给本轮一个稳定唯一的合成 id（每个
+                    # iteration 至多进一次此分支），让前端追加一张完成态错误卡、不丢失。
                     yield {
                         "type": "tool_result",
+                        "id": f"rev-malformed-{iteration}",
                         "tool": "",
                         "status": "error",
                         "summary": "工具调用格式异常，本轮作废并让模型重发",
@@ -640,15 +660,22 @@ class IndependentReviewAgent:
                     except Exception:
                         tool_args = {}
 
-                    yield {"type": "tool_call", "tool": tool_name, "args": tool_args}
+                    yield {
+                        "type": "tool_call",
+                        "id": tc.get("id") or "",
+                        "tool": tool_name,
+                        "arg": _sse_tool_arg(tool_name, tool_args),
+                    }
                     if is_cancelled():
                         yield from cancel_and_return(iteration)
                         return
                     result = self._execute_tool(project_id, tool_name, tool_args)
                     yield {
                         "type": "tool_result",
+                        "id": tc.get("id") or "",
                         "tool": tool_name,
-                        "status": result.get("status", "error"),
+                        # 归一 success/error，与主聊天 ToolEvent 形状一致（ToolCallPill 据此判定）。
+                        "status": "success" if result.get("status") == "success" else "error",
                         "summary": result.get("summary", ""),
                     }
                     messages.append(

@@ -33,24 +33,44 @@ test("aggregateContentDelta merges consecutive content_delta into one assistant 
 test("aggregateContentDelta closes the bubble on tool_call and starts a new one after", () => {
   let messages = [];
   messages = aggregateContentDelta(messages, { type: "content_delta", text: "分析中" });
-  messages = aggregateContentDelta(messages, { type: "tool_call", tool: "read_file", args: { p: 1 } });
+  messages = aggregateContentDelta(messages, { type: "tool_call", id: "r1", tool: "read_file", arg: "plan/outline.md" });
   messages = aggregateContentDelta(messages, { type: "content_delta", text: "继续" });
   assert.deepEqual(messages, [
     { kind: "assistant", text: "分析中" },
-    { kind: "tool_call", tool: "read_file", args: { p: 1 } },
+    { kind: "tool", id: "r1", tool: "read_file", arg: "plan/outline.md", status: "pending", summary: "" },
     { kind: "assistant", text: "继续" },
   ]);
 });
 
-test("aggregateContentDelta records tool_result cards", () => {
+test("aggregateContentDelta pairs tool_call + tool_result by id into ONE tool bubble", () => {
+  let messages = [];
+  messages = aggregateContentDelta(messages, { type: "tool_call", id: "r1", tool: "read_file", arg: "plan/outline.md" });
+  messages = aggregateContentDelta(messages, { type: "tool_result", id: "r1", tool: "read_file", status: "success", summary: "读取 120 字" });
+  assert.deepEqual(messages, [
+    { kind: "tool", id: "r1", tool: "read_file", arg: "plan/outline.md", status: "success", summary: "读取 120 字" },
+  ]);
+});
+
+test("aggregateContentDelta tool_result with no prior call (synthetic id) appends a completed bubble", () => {
   const messages = aggregateContentDelta([], {
     type: "tool_result",
-    tool: "read_file",
-    status: "success",
-    summary: "读取成功",
+    id: "rev-malformed-1",
+    tool: "",
+    status: "error",
+    summary: "工具调用格式异常",
   });
   assert.deepEqual(messages, [
-    { kind: "tool_result", tool: "read_file", status: "success", summary: "读取成功" },
+    { kind: "tool", id: "rev-malformed-1", tool: "", arg: "", status: "error", summary: "工具调用格式异常" },
+  ]);
+});
+
+test("aggregateContentDelta error event closes orphan pending tool pills (review broke mid-call)", () => {
+  let messages = [];
+  messages = aggregateContentDelta(messages, { type: "tool_call", id: "r1", tool: "read_file", arg: "plan/outline.md" });
+  // No tool_result arrives (disconnect between call frame and result frame); an error event lands.
+  messages = aggregateContentDelta(messages, { type: "error", message: "连接已中断" });
+  assert.deepEqual(messages, [
+    { kind: "tool", id: "r1", tool: "read_file", arg: "plan/outline.md", status: "error", summary: "已中断" },
   ]);
 });
 

@@ -9,7 +9,8 @@ import {
   reviewWindowReducer,
 } from '../utils/independentReviewDrawer'
 import { normalizeApiErrorDetail } from '../utils/authError'
-import { MarkdownMessage, ToolCard } from './MarkdownMessage'
+import { MarkdownMessage } from './MarkdownMessage'
+import ToolCallPill from './ToolCallPill'
 
 // S5 ReviewChatWindow: a draggable, closeable mini-chat that streams the independent-review
 // agent's reasoning. It generates a stable run_id on open (constant for the window's lifetime),
@@ -291,11 +292,9 @@ export default function ReviewChatWindow({
               </div>
             )
           }
-          if (bubble.kind === 'tool_call') {
-            return <ToolCard key={i}>调用工具：{bubble.tool}</ToolCard>
-          }
-          if (bubble.kind === 'tool_result') {
-            return <ToolCard key={i}>工具结果（{bubble.tool}）：{bubble.summary}</ToolCard>
+          if (bubble.kind === 'tool') {
+            // 统一用共享 ToolCallPill 渲染（与主聊天一致）；bubble 已含 {id,tool,arg,status,summary}。
+            return <ToolCallPill key={bubble.id ?? `tool-${i}`} event={bubble} />
           }
           return null
         })}
