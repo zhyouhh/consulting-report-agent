@@ -725,11 +725,12 @@ class ChatRuntimeTests(unittest.TestCase):
 
         call_events = [e for e in events if e.get("type") == "tool_call"]
         result_events = [e for e in events if e.get("type") == "tool_result"]
-        self.assertEqual(len(call_events), 1)
-        self.assertEqual(
-            (call_events[0]["id"], call_events[0]["tool"], call_events[0]["arg"]),
-            ("call-1", "web_search", "ultraman flight"),
-        )
+        # Pending (early) + full-arg (pre-execute) tool_call events, both bound to one id.
+        self.assertEqual(len(call_events), 2)
+        self.assertTrue(all((e["id"], e["tool"]) == ("call-1", "web_search") for e in call_events))
+        # The early pending event has no usable arg yet; the pre-execute one carries the full arg.
+        self.assertEqual(call_events[0]["arg"], "")
+        self.assertEqual(call_events[-1]["arg"], "ultraman flight")
         self.assertEqual(len(result_events), 1)
         self.assertEqual(
             (result_events[0]["id"], result_events[0]["tool"], result_events[0]["status"]),
@@ -806,6 +807,94 @@ class ChatRuntimeTests(unittest.TestCase):
                 for e in events
             )
         )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_pending_tool_call_emitted_before_args_complete_and_execution(self, mock_openai):
+        # Anti-死气 regression: for large-arg tools (append_report_draft streams the whole draft
+        # body in as the tool arg over many seconds), a pending tool_call pill MUST fire as soon
+        # as the tool name+id are known — BEFORE the rest of the args stream in and before execute.
+        consumed_chunks = []
+
+        def slow_arg_stream():
+            consumed_chunks.append("chunk-1")
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-1",
+                        name="append_report_draft",
+                        arguments='{"content":"第一段……',
+                    )
+                ]
+            )
+            consumed_chunks.append("chunk-2")
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        arguments='第二段……第三段……"}',
+                    )
+                ]
+            )
+
+        mock_openai.return_value.chat.completions.create.return_value = slow_arg_stream()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "path": "content/report_draft_v1.md"},
+            ) as execute_tool:
+                stream = handler.chat_stream(project["id"], "继续")
+                first_event = next(stream)
+                # The pending pill fires after the first chunk — before chunk-2 (rest of args)
+                # and before execution.
+                self.assertEqual(consumed_chunks, ["chunk-1"])
+                self.assertEqual(first_event["type"], "tool_call")
+                self.assertEqual(
+                    (first_event["id"], first_event["tool"]),
+                    ("call-1", "append_report_draft"),
+                )
+                # append_report_draft never exposes the draft body as arg → pending arg empty.
+                self.assertEqual(first_event["arg"], "")
+                self.assertFalse(execute_tool.called)
+                rest = list(stream)
+
+        events = [first_event, *rest]
+        call_events = [e for e in events if e.get("type") == "tool_call"]
+        # Early pending + pre-execute tool_call, both bound to the same id.
+        self.assertGreaterEqual(len(call_events), 2)
+        self.assertTrue(
+            all((e["id"], e["tool"]) == ("call-1", "append_report_draft") for e in call_events)
+        )
+        # Execution eventually ran with the fully-assembled args.
+        execute_tool.assert_called_once()
+        self.assertEqual(
+            execute_tool.call_args.args[1].function.arguments,
+            '{"content":"第一段……第二段……第三段……"}',
+        )
+        res = next(e for e in events if e.get("type") == "tool_result")
+        self.assertEqual((res["id"], res["tool"], res["status"]), ("call-1", "append_report_draft", "success"))
 
     @mock.patch("backend.chat.OpenAI")
     def test_finalize_persists_tool_events_sibling_field(self, mock_openai):
@@ -2676,11 +2765,10 @@ class ChatRuntimeTests(unittest.TestCase):
                 events = list(handler.chat_stream(project["id"], "继续"))
 
         call_events = [e for e in events if e.get("type") == "tool_call"]
-        self.assertEqual(len(call_events), 1)
-        self.assertEqual(
-            (call_events[0]["tool"], call_events[0]["arg"]),
-            ("web_search", "ultraman flight"),
-        )
+        # Early pending (fires once the name completes to web_search) + pre-execute full-arg event.
+        self.assertEqual(len(call_events), 2)
+        self.assertTrue(all(e["tool"] == "web_search" for e in call_events))
+        self.assertEqual(call_events[-1]["arg"], "ultraman flight")
         # The fragmented tool name spread across chunks must reassemble before execution.
         execute_tool.assert_called_once()
         self.assertEqual(execute_tool.call_args.args[1].function.name, "web_search")
@@ -11559,6 +11647,9 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         self.assertFalse(
             any("准备调用工具" in e.get("data", "") for e in events if e.get("type") == "tool")
         )
+        # Nor emit a structured pending tool_call pill — it would orphan (the tool is dropped,
+        # so no tool_result ever closes it).
+        self.assertFalse(any(e.get("type") == "tool_call" for e in events))
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_trigger_no_tools_drops_tool_call_only_then_corrects(self, mock_openai):
@@ -11611,6 +11702,9 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         self.assertFalse(
             any("准备调用工具" in e.get("data", "") for e in events if e.get("type") == "tool")
         )
+        # Nor emit a structured pending tool_call pill — it would orphan (the tool is dropped,
+        # so no tool_result ever closes it).
+        self.assertFalse(any(e.get("type") == "tool_call" for e in events))
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_trigger_no_tools_persistent_tool_calls_terminate_without_loop(self, mock_openai):
@@ -14680,9 +14774,14 @@ class B2BillingWiringTests(ChatRuntimeTests):
         import pathlib
         src = pathlib.Path(__file__).resolve().parents[1].joinpath("backend/chat.py").read_text(encoding="utf-8")
         i = src.index("for chunk in response:")          # 主流式消费锚点（chat.py 仅此处用此短语）
-        window = src[i:i + 4000]                          # 窗口覆盖循环体 + 紧随 try/except/finally（实测 finally 在 ~3125）
+        # 窗口覆盖循环体（含 tool-pill 早发 pending tool_call）+ 紧随 try/except/finally。
+        # 实测该区间内仅有这一处 finally（主流式 metered-stream finally，close 在 ~4068），
+        # 故 5000 窗口仍唯一锚定它、不会误捕别处无关 close（假绿防护不变）。
+        window = src[i:i + 5000]
         self.assertIn("finally:", window)
         self.assertIn("response.close()", window)
+        # 防御性：确认窗口内只有这一处 finally（早发块若再膨胀把无关 finally 推进窗口会被这里挡住）。
+        self.assertEqual(window.count("finally:"), 1)
 
     def test_chat_stream_consumption_closes_underlying_stream_and_settles_real_usage(self):
         # Codex NIT#1 行为版（非 source-guard）：patch 底层 _raw create 返回**可关闭流对象**（非裸 iter），

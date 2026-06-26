@@ -2889,6 +2889,7 @@ class ChatHandler:
 
             collected_message = {"role": "assistant", "content": "", "tool_calls": []}
             known_tool_names = {tool["function"]["name"] for tool in self._get_tools()}
+            announced_tool_call_indexes: set[int] = set()
             stream_usage = None
             accumulated = ""
             stream_buffer = ""
@@ -2956,8 +2957,25 @@ class ChatHandler:
                                     tc["function"]["name"] += tc_chunk.function.name
                                 if tc_chunk.function.arguments:
                                     tc["function"]["arguments"] += tc_chunk.function.arguments
-                            # 工具调用的可见反馈改由执行点的结构化 tool_call/tool_result 事件承担，
-                            # 流式阶段不再抢先发"准备调用工具"文本预告（pill 在执行点一次到位）。
+                            if (
+                                tc_chunk.index not in announced_tool_call_indexes
+                                and tc["id"]
+                                and tc["function"]["name"] in known_tool_names
+                                and not self._turn_context.get("system_trigger_no_tools")
+                            ):
+                                # 名+id 就位即早发 pending tool_call（同 id），前端立刻显示 pill，
+                                # 否则 append_report_draft 等大参数工具在参数流式累积期会长时间死气。
+                                # arg 此刻 best-effort（多为空）；execute 前会再发带完整 arg 的同 id 事件，
+                                # 前端按 id 合并。汇报轮丢工具，故跳过早发以免孤儿 pending pill。
+                                announced_tool_call_indexes.add(tc_chunk.index)
+                                yield {
+                                    "type": "tool_call",
+                                    "id": tc["id"],
+                                    "tool": tc["function"]["name"],
+                                    "arg": self._sse_tool_arg(
+                                        tc["function"]["name"], tc["function"]["arguments"]
+                                    ),
+                                }
             except Exception as e:
                 yield from emit_parsed_stream_events(parser.flush())
                 self._debug_dump_request(request_kwargs, label="stream-iter", error=e, note=f"iteration={iterations}")
@@ -3113,7 +3131,9 @@ class ChatHandler:
                         "type": "tool_result",
                         "id": tool_call["id"],
                         "tool": func_name,
-                        "status": result.get("status", "error"),
+                        # Normalize to success/error so the live ToolEvent shape matches the
+                        # persisted sibling built by _build_tool_events (single canonical shape).
+                        "status": "success" if result.get("status") == "success" else "error",
                         "summary": self._sse_tool_summary(func_name, result),
                     }
                     current_turn_messages.append({
