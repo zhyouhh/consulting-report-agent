@@ -56,3 +56,21 @@ export function reduceToolEvent(list = [], event = {}) {
 
   return list
 }
+
+/**
+ * 收尾仍在 pending 的工具事件（中止 / 网络失败时调用）。
+ *
+ * 后端在 GeneratorExit（用户中止 / 断连）上故意不发收尾 tool_result（Task 1 不变式），
+ * 所以早发 tool_call 后中止会留下永久 pending 转圈 pill——前端必须自己把它标为 error。
+ *
+ * pending → status:'error'（summary 优先用原 summary，否则用传入 summary）；
+ * 非 pending 不动；空 / undefined 安全返回原值；不可变（不改入参）。
+ *
+ * @param {Array} toolEvents
+ * @param {string} summary  pending 项无自带 summary 时的兜底文案
+ * @returns {Array}
+ */
+export function closePendingToolEvents(toolEvents, summary = '') {
+  if (!toolEvents || !toolEvents.length) return toolEvents
+  return toolEvents.map(e => e.status === 'pending' ? { ...e, status: 'error', summary: e.summary || summary } : e)
+}

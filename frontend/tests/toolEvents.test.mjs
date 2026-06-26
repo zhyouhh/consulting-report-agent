@@ -1,5 +1,5 @@
 import { test } from 'node:test'; import assert from 'node:assert/strict'
-import { reduceToolEvent, firstArgValue } from '../src/utils/toolEvents.js'
+import { reduceToolEvent, firstArgValue, closePendingToolEvents } from '../src/utils/toolEvents.js'
 test('reduceToolEvent：call 建 pending，result 按 id 更新且不丢 arg、保序', () => {
   let m = reduceToolEvent([], { type: 'tool_call', id: 'c1', tool: 'read_file', arg: 'a.md' })
   assert.deepEqual(m, [{ id: 'c1', tool: 'read_file', arg: 'a.md', status: 'pending', summary: '' }])
@@ -22,4 +22,37 @@ test('firstArgValue：取首值截断', () => {
 })
 test('firstArgValue：数组守卫返回空串', () => {
   assert.equal(firstArgValue(['a.md', 'b.md']), '')
+})
+test('closePendingToolEvents：pending → error，summary 用兜底文案', () => {
+  const out = closePendingToolEvents([{ id: 'c1', tool: 'read_file', arg: 'a.md', status: 'pending', summary: '' }], '已停止生成')
+  assert.deepEqual(out, [{ id: 'c1', tool: 'read_file', arg: 'a.md', status: 'error', summary: '已停止生成' }])
+})
+test('closePendingToolEvents：pending 自带 summary 时保留原 summary', () => {
+  const out = closePendingToolEvents([{ id: 'c1', tool: 'x', arg: '', status: 'pending', summary: '已有摘要' }], '连接中断')
+  assert.equal(out[0].status, 'error'); assert.equal(out[0].summary, '已有摘要')
+})
+test('closePendingToolEvents：已 success / error 不动', () => {
+  const input = [
+    { id: 'a', tool: 'x', arg: '', status: 'success', summary: 'ok' },
+    { id: 'b', tool: 'y', arg: '', status: 'error', summary: 'bad' },
+    { id: 'c', tool: 'z', arg: '', status: 'pending', summary: '' },
+  ]
+  const out = closePendingToolEvents(input, '已停止生成')
+  assert.deepEqual(out.map(e => [e.id, e.status, e.summary]), [
+    ['a', 'success', 'ok'], ['b', 'error', 'bad'], ['c', 'error', '已停止生成'],
+  ])
+})
+test('closePendingToolEvents：空数组 / undefined 安全返回原值', () => {
+  const empty = []
+  assert.equal(closePendingToolEvents(empty, 's'), empty)
+  assert.equal(closePendingToolEvents(undefined, 's'), undefined)
+  assert.equal(closePendingToolEvents(null, 's'), null)
+})
+test('closePendingToolEvents：不可变（不改入参）', () => {
+  const input = [{ id: 'c', tool: 'z', arg: '', status: 'pending', summary: '' }]
+  const snapshot = JSON.stringify(input)
+  const out = closePendingToolEvents(input, '已停止生成')
+  assert.equal(JSON.stringify(input), snapshot)   // 入参未被改
+  assert.notEqual(out, input)                       // 返回新数组
+  assert.notEqual(out[0], input[0])                 // pending 项是新对象
 })

@@ -86,7 +86,7 @@ test("ChatPanel routes structured tool_call/tool_result into msg.toolEvents via 
     new URL("../src/components/ChatPanel.jsx", import.meta.url),
     "utf-8",
   );
-  assert.match(source, /import \{ reduceToolEvent \} from '\.\.\/utils\/toolEvents'/);
+  assert.match(source, /import \{ closePendingToolEvents, reduceToolEvent \} from '\.\.\/utils\/toolEvents'/);
   assert.match(source, /parsed\.type === 'tool_call' \|\| parsed\.type === 'tool_result'/);
   assert.match(source, /toolEvents:\s*reduceToolEvent\(m\.toolEvents \|\| \[\], parsed\)/);
   // tool_call 到来时先冲刷已排队的流式文本，让 pill 落在正文之上的正确位置。
@@ -110,4 +110,16 @@ test("ChatPanel renders ToolCallList above assistant prose (no inline emoji tool
   assert.match(source, /<ToolCallList toolEvents=\{msg\.toolEvents\} \/>/);
   // 旧的「从 content 文本认 emoji 工具行 → 内联 pill」整段移除。
   assert.doesNotMatch(source, /block\.type === 'tool'/);
+});
+
+test("ChatPanel closes pending tool pills on abort and on network failure", () => {
+  const source = readFileSync(
+    new URL("../src/components/ChatPanel.jsx", import.meta.url),
+    "utf-8",
+  );
+  // 后端在 GeneratorExit（中止 / 断连）上不发收尾 tool_result，前端必须自己收尾仍 pending 的 pill，
+  // 否则留永久转圈。两条 catch 路径都调 closePendingToolEvents（中止→已停止生成、失败→连接中断）。
+  assert.match(source, /import \{ closePendingToolEvents, reduceToolEvent \} from '\.\.\/utils\/toolEvents'/);
+  assert.match(source, /toolEvents:\s*closePendingToolEvents\(m\.toolEvents,\s*'已停止生成'\)/);
+  assert.match(source, /toolEvents:\s*closePendingToolEvents\(m\.toolEvents,\s*'连接中断'\)/);
 });

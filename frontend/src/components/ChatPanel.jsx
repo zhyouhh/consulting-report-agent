@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm'
 import { showError, showInfo, showSuccess } from '../utils/toast'
 import { buildChatRequest, buildTransientAttachmentsPayload, conversionStatusChip, toggleMaterialSelection } from '../utils/chatMaterials'
 import { applyAttachmentTranscribed, historyTranscriptIndicators } from '../utils/sseEvents'
-import { reduceToolEvent } from '../utils/toolEvents'
+import { closePendingToolEvents, reduceToolEvent } from '../utils/toolEvents'
 import {
   createPendingTriggerItem,
   dequeuePendingTrigger,
@@ -617,8 +617,12 @@ const ChatPanel = forwardRef(function ChatPanel({
           flushStreamingQueueImmediately(assistantId, requestProjectId)
         }
         if (canApplyStreamResponse) {
+          // 中止：收尾任何仍 pending 的工具 pill（后端 GeneratorExit 上不发收尾 tool_result，
+          // 否则会留永久转圈 pill），其它字段不动。
           setMessages(prev => prev.map(m =>
-            m.id === assistantId ? { ...m, content: m.content || '已停止生成' } : m
+            m.id === assistantId
+              ? { ...m, content: m.content || '已停止生成', toolEvents: closePendingToolEvents(m.toolEvents, '已停止生成') }
+              : m
           ))
         }
       } else {
@@ -627,8 +631,11 @@ const ChatPanel = forwardRef(function ChatPanel({
           flushStreamingQueueImmediately(assistantId, requestProjectId)
         }
         if (canApplyStreamResponse) {
+          // 网络 / fetch 失败：同样收尾仍 pending 的工具 pill（断连后端不发收尾 tool_result）。
           setMessages(prev => prev.map(m =>
-            m.id === assistantId ? { ...m, content: `API调用失败: ${error.message}` } : m
+            m.id === assistantId
+              ? { ...m, content: `API调用失败: ${error.message}`, toolEvents: closePendingToolEvents(m.toolEvents, '连接中断') }
+              : m
           ))
         }
       }
