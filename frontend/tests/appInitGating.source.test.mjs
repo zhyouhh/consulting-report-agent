@@ -76,3 +76,21 @@ test('App: initializeApp effect 依赖稳定身份字段而非整个 authUser（
     'initializeApp effect 不应依赖整个 authUser 对象（额度刷新会触发重初始化黑屏）',
   )
 })
+
+// 侧栏副标题阶段名 race 修复（codex NIT）：传给 Sidebar 的实时 stage 必须按
+// 「workspace 归属项目 === 当前活动项目」守卫，否则切项目时旧项目 stage 会瞬时覆盖新项目。
+test('App: 侧栏 currentStageCode 受 workspaceProjectId 守卫（防切项目时旧 stage 覆盖新项目）', () => {
+  // setWorkspaceProjectId 须在 shouldApplyProjectResponse 通过 + setWorkspace 之后才置当前请求项目，
+  // 不能在 fetch 一开始就乐观置位（否则守卫失去意义）。
+  assert.match(
+    src,
+    /setWorkspace\(res\.data\)\s*\n\s*setWorkspaceProjectId\(requestProject\)/,
+    'workspace 成功加载后才绑定归属项目 id（紧跟 setWorkspace(res.data)）',
+  )
+  // 传给 Sidebar 的实时 stage 必须门控在归属匹配，否则回退 undefined（让 Sidebar 用 list 的 stage_code）。
+  assert.match(
+    src,
+    /currentStageCode=\{workspaceProjectId === currentProjectId \? workspace\?\.stage_code : undefined\}/,
+    'currentStageCode 应按 workspaceProjectId === currentProjectId 守卫',
+  )
+})

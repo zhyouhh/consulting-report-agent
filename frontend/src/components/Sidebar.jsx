@@ -4,6 +4,7 @@ import SettingsModal from './SettingsModal'
 import ProjectCreateModal from './ProjectCreateModal'
 import { describeConnectionMode } from '../utils/connectionMode'
 import { quotaLabel, quotaRatio } from '../utils/quotaFormat.js'
+import { getStageName } from '../utils/workspaceSummary'
 import { IconPlus, IconFile, IconTrash, IconShield, IconLogout, IconGear, IconSun, IconMoon } from './icons'
 
 const PROJECT_TYPE_LABELS = {
@@ -29,6 +30,7 @@ export default function Sidebar({
   onOpenAdmin,
   theme,
   onToggleTheme,
+  currentStageCode,
 }) {
   const [showModal, setShowModal] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -71,7 +73,13 @@ export default function Sidebar({
         </div>
         {projects.map((project) => {
           const isActive = currentProjectId === project.id
-          const meta = PROJECT_TYPE_LABELS[project.project_type] || ''
+          const typeLabel = PROJECT_TYPE_LABELS[project.project_type] || ''
+          // 副标题 = 「报告类型 · 阶段名」。活动项目用实时 workspace stage（每轮随
+          // workspaceRefreshToken 刷新），其余项目用 list_projects 返回的 stage_code。
+          // 两者都缺时只显示报告类型（向后兼容旧后端）。
+          const stageCode = (isActive && currentStageCode) || project.stage_code
+          const stageName = stageCode ? getStageName(stageCode) : ''
+          const meta = [typeLabel, stageName].filter(Boolean).join(' · ')
           return (
             <div
               key={project.id}

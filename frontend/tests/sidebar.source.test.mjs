@@ -10,3 +10,36 @@ test('Sidebar account block', () => {
   // 桌面/本地（uid==="local"）不显示账号块，避免点登出困在登录页
   assert.match(s, /authUser\.uid !== ['"]local['"]/)
 })
+
+test('Sidebar 项目副标题 = 报告类型 · 阶段名（getStageName + currentStageCode）', () => {
+  const s = readFileSync(new URL('../src/components/Sidebar.jsx', import.meta.url), 'utf8')
+  // 阶段名走单一真值源 STAGE_NAMES（getStageName），不在 Sidebar 重复硬编中文
+  assert.match(s, /import\s*\{[^}]*getStageName[^}]*\}\s*from\s*['"][^'"]*workspaceSummary/)
+  assert.match(s, /getStageName\(/)
+  // 活动项目取实时 workspace stage，其余取 list_projects 的 stage_code
+  assert.match(s, /currentStageCode/)
+  assert.match(s, /project\.stage_code/)
+  // 「报告类型 · 阶段名」拼接
+  assert.match(s, /' · '/)
+})
+
+test('ProjectCreateModal 标题/副标题/各字段 label 齐全', () => {
+  const s = readFileSync(new URL('../src/components/ProjectCreateModal.jsx', import.meta.url), 'utf8')
+  assert.match(s, /新建报告/)
+  assert.match(s, /填写基本信息，助手会据此开始准备阶段。/)
+  assert.match(s, /报告类型/)
+  assert.match(s, /报告主题/)
+  assert.match(s, /截止日期/)
+  assert.match(s, /预期篇幅/)
+})
+
+test('AdminPanel 用户表保留可编辑额度 + 状态色标 + grid 表头', () => {
+  const s = readFileSync(new URL('../src/components/AdminPanel.jsx', import.meta.url), 'utf8')
+  // 额度列仍是可编辑 input（用户明确要求保留）
+  assert.match(s, /onBlur=\{\(e\) => setCap\(/)
+  // 状态用 success/warn token 着色（正常绿 / 已禁用橙）
+  assert.match(s, /text-warn/)
+  assert.match(s, /text-success/)
+  // grid 表头（替换原裸 table）
+  assert.match(s, /grid-cols-\[1\.6fr_1fr_1fr_1fr_1\.3fr\]/)
+})

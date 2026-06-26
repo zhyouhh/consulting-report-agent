@@ -368,7 +368,17 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **复审挖出并修的真坑（改这些组件当心回归）**：材料 tab 原显示**绝对 workspace_dir 路径**——desktop 无害但 **web 部署会泄露 VPS 文件路径，已删**（产品/安全决策，覆盖早期「功能全保」复审结论）；上传忙态守卫的 `mountedRef` **必须 setup 置 true + cleanup 置 false**（只 cleanup 会被 StrictMode 重放永久 false → 上传静默失效）；`activeProjectRef` **渲染期赋值**（被动 useEffect 留切项目窗口）；StagePanel stepper 用**本地 stage 列表索引**算填充（用全局 STAGE_ORDER 会让 report-only S7 算出 116% 溢出）；S2/S3 进度条左标签是「有效来源/证据引用」**不是「正文字数」**；任何把后端 `detail` 显示给用户的地方走 `utils/authError.js:normalizeApiErrorDetail`（422 是数组、直接渲染会崩）。
 
-**未做（follow-up，已记 `docs/current-worklist.md`）**：工具调用卡片重设计 + 去 emoji（现渲染成多行原始日志 + ✏️/🛠️/✅ emoji，emoji 来自后端 SSE tool 事件文本故 paletteGuard 扫不到；目标对齐原型优雅单行 pill、保信息量；需结构化解析器 + call/result 配对 + 复制/strip 逻辑 + 测试，**先写 plan 再做**）。
+**未做（follow-up，已记 `docs/current-worklist.md`）**：工具调用卡片重设计 + 去 emoji —— **plan 已写** `docs/superpowers/plans/2026-06-26-tool-call-pill-redesign.md`（Codex round-1 对抗红队挖 6 BLOCKER 已修订、round-2 复审撞额度上限待补）。方案：后端把**正常** call/result 发结构化 `tool_call`/`tool_result`（带 `id` 配对）+ 前端 sentinel `<<tool-call:ID>>` 保行内顺序 + `message.toolEvents` map + 共享 `ToolCallPill` 组件，主聊天与独立审查统一；**只改 SSE 呈现层、不碰 provider 序列化/`_format_tool_pair_line` 持久化、保留诊断 `type:"tool"` 文本事件**。reload 后 pill 持久显示列为非目标（当前即不显示、无回归）。
+
+## redesign 三处原型差距 follow-up（2026-06-26 实施 + Codex 双轨+对抗红队全 APPROVED + 前后端部署 kr-web-01；分支 `feat/frontend-redesign-followups` commit `8e14eab`，待 merge main + push）
+
+翻新后用户对照原型 `design_handoff_frontend_redesign/` 发现 3 处没改完，本批补齐。改这三处前必读：
+
+- **侧栏副标题「报告类型 · 阶段名」**（`Sidebar.jsx`）：阶段名走单一真值源 `utils/workspaceSummary.js:getStageName`（别在 Sidebar 硬编中文）。`const stageCode = (isActive && currentStageCode) || project.stage_code`——活动项目用实时 workspace stage、其余用 list 的 stage_code、都缺只显示类型。**后端 `skill.py:list_projects` 加 `stage_code`**（与 `get_workspace_summary` 同源 `_infer_stage_state`[只读链路]；advisory：单项目目录损坏 `try/except` 降级 None、绝不让列表端点 500；前端仅 init/新建/删除拉 `/api/projects`、无逐轮轮询，per-project 推断成本可接受）。`App.jsx` 传 `currentStageCode={workspaceProjectId === currentProjectId ? workspace?.stage_code : undefined}`——**`workspaceProjectId` 守卫不可去**（切项目时 workspace 短暂仍持旧项目数据，无守卫旧阶段会瞬时覆盖新项目副标题，codex 红队真 bug）；所有 `setWorkspace(null)` 处同步 `setWorkspaceProjectId(null)` 保不变量。
+- **用户管理表格**（`AdminPanel.jsx`）：`<table>`→5 列 grid `grid-cols-[1.6fr_1fr_1fr_1fr_1.3fr]`，表头 `bg-card2`/`text-11`/`font-semibold`，状态色标（正常 `text-success`/已禁用 `text-warn`，对应原型 `--ok #34A853`/`--warn #B7791F`），操作列 `text-right`，今日/额度 `font-mono tabular-nums`。**额度列保留可编辑 `input`+`onBlur setCap`**（用户硬要求；原型那列是只读文本，不可改回只读）。grid 补 ARIA `role=table/row/columnheader/cell` + input `aria-label`。
+- **新建报告弹窗**（`ProjectCreateModal.jsx`）：补标题「新建报告」+ 副标题「填写基本信息，助手会据此开始准备阶段。」+ 四字段全 `<label htmlFor>`+控件 `id`（原缺标题/副标题/前两项 label）。
+
+回归：`tests/test_skill_engine.py`（list_projects stage_code + 损坏降级）、前端 `sidebar.source`（副标题 wiring + admin grid/色标/可编辑额度）+ `appInitGating.source`（`workspaceProjectId` 守卫）；前端 418 测试 + build 绿（后端 2 个 mac realpath 失败属环境差异）。**部署**：前端 dist（bundle `index-C7_xlMbU.js`）+ 后端 file-push `backend/skill.py` + 重启 systemd（kr-web-01 **首次后端 redeploy**——前几次都是 frontend-only dist swap）。详见 `docs/current-worklist.md` + memory [[frontend-redesign-status]] / [[w2c-deploy-status]]。
 
 ## 管理型搜索池
 

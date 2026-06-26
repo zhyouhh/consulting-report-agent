@@ -67,29 +67,52 @@ export default function AdminPanel({ onClose }) {
                     className="w-full bg-field border border-border rounded-btn px-2 py-1 text-text focus:outline-none focus:ring-2 focus:ring-accent" placeholder="my.llm.cn" />
           <button onClick={saveHosts} className="mt-1 text-abright hover:text-accent">保存允许域名</button>
         </div>
-        <table className="w-full text-sm text-text">
-          <thead><tr className="text-t3"><th>用户</th><th>今日</th><th>额度</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody>
-            {users.map((u) => (
-              <tr key={u.uid}>
-                <td>{u.username}{u.is_admin ? ' (admin)' : ''}</td>
-                <td>{formatYuan(u.today_cost_yuan)}</td>
-                <td>
-                  <input defaultValue={u.daily_cap_yuan} className="w-16 bg-field border border-border rounded-tag px-1 focus:outline-none focus:ring-2 focus:ring-accent"
-                         onBlur={(e) => setCap(u.uid, e.target.value)} />
-                </td>
-                <td>{u.disabled ? '已禁用' : '正常'}</td>
-                <td>
-                  <button onClick={() => toggleDisabled(u.uid, !u.disabled)} className="text-abright hover:text-accent mr-2">
-                    {u.disabled ? '启用' : '禁用'}
-                  </button>
-                  <button onClick={() => { const pw = prompt('新密码（≥8 位）'); if (pw) resetPassword(u.uid, pw) }}
-                          className="text-abright hover:text-accent">改密</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {/* 原型是 div grid 排版；补 ARIA table 语义让屏幕阅读器拿到列头/单元格关系（codex NIT） */}
+        <div role="table" aria-label="用户列表" className="rounded-card border border-border overflow-hidden">
+          <div role="row" className="grid grid-cols-[1.6fr_1fr_1fr_1fr_1.3fr] gap-2 bg-card2 border-b border-border px-[14px] py-[10px] text-11 font-semibold text-t2">
+            <span role="columnheader">用户</span>
+            <span role="columnheader">今日</span>
+            <span role="columnheader">额度</span>
+            <span role="columnheader">状态</span>
+            <span role="columnheader" className="text-right">操作</span>
+          </div>
+          {users.map((u) => (
+            <div
+              key={u.uid}
+              role="row"
+              className="grid grid-cols-[1.6fr_1fr_1fr_1fr_1.3fr] gap-2 items-center px-[14px] py-[11px] border-b border-hair last:border-b-0 hover:bg-card2"
+            >
+              <span role="cell" className="text-13 text-text truncate">
+                {u.username}
+                {u.is_admin && <span className="text-t3 ml-1">(admin)</span>}
+              </span>
+              <span role="cell" className="text-12 text-text font-mono tabular-nums">{formatYuan(u.today_cost_yuan)}</span>
+              <span role="cell">
+                {/* 原型这列是只读文本；保留可编辑 input（用户要求），样式收进等宽小框 */}
+                <input
+                  defaultValue={u.daily_cap_yuan}
+                  aria-label={`${u.username} 每日额度`}
+                  className="w-16 bg-field border border-border rounded-tag px-1 py-[2px] text-12 font-mono tabular-nums text-text focus:outline-none focus:ring-2 focus:ring-accent"
+                  onBlur={(e) => setCap(u.uid, e.target.value)}
+                />
+              </span>
+              <span role="cell" className={`text-xs ${u.disabled ? 'text-warn' : 'text-success'}`}>
+                {u.disabled ? '已禁用' : '正常'}
+              </span>
+              <span role="cell" className="text-right text-12">
+                <button onClick={() => toggleDisabled(u.uid, !u.disabled)} className="text-abright hover:text-accent mr-3">
+                  {u.disabled ? '启用' : '禁用'}
+                </button>
+                <button
+                  onClick={() => { const pw = prompt('新密码（≥8 位）'); if (pw) resetPassword(u.uid, pw) }}
+                  className="text-abright hover:text-accent"
+                >
+                  改密
+                </button>
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   )
