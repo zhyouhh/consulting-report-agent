@@ -10468,6 +10468,24 @@ class LoadConversationSanitizeTests(ChatRuntimeTests):
         self.assertEqual(ev["status"], "success")  # unknown "weird" status normalized
         self.assertIsInstance(ev["summary"], str)  # coerced to scalar, never a nested object
 
+    def test_tool_events_pending_status_coerced_to_terminal_on_load(self):
+        # Corrupt / externally-edited conversation.json may carry status:"pending" on a
+        # persisted tool_event.  Persisted events are always terminal (success/error);
+        # "pending" is only valid in live SSE.  _load_conversation must coerce it to
+        # "success" so the pill never renders as an orphan spinner on reload.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "assistant", "content": "x", "tool_events": [
+                {"tool": "web_search", "arg": "q", "status": "pending", "summary": ""},
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        te = loaded[0]["tool_events"]
+        self.assertEqual(len(te), 1)
+        self.assertNotEqual(te[0]["status"], "pending",
+                            "persisted 'pending' must be coerced to a terminal status on reload")
+        self.assertEqual(te[0]["status"], "success")
+
     def test_non_list_tool_events_dropped_on_load(self):
         handler = self._make_handler_with_project()
         self._write_conv([

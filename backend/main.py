@@ -1283,7 +1283,7 @@ async def get_conversation(scope: ProjectScope = Depends(require_project)):
                 {
                     "tool": str(e.get("tool") or ""),
                     "arg": str(e.get("arg") or ""),
-                    "status": e.get("status") if e.get("status") in ("success", "error", "pending") else "success",
+                    "status": e.get("status") if e.get("status") in ("success", "error") else "success",
                     "summary": str(e.get("summary") or ""),
                     "id": f"reload-{i}",
                 }
