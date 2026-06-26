@@ -1278,7 +1278,19 @@ async def get_conversation(scope: ProjectScope = Depends(require_project)):
             if raw.strip() in LEGACY_EMPTY_ASSISTANT_FALLBACKS:
                 continue
             cleaned = strip_tool_log_comments(_strip_legacy_stage_ack(raw))
-            sanitized.append({**m, "content": cleaned})
+            raw_events = m.get("tool_events") if isinstance(m.get("tool_events"), list) else []
+            tool_events = [
+                {
+                    "tool": str(e.get("tool") or ""),
+                    "arg": str(e.get("arg") or ""),
+                    "status": e.get("status") if e.get("status") in ("success", "error", "pending") else "success",
+                    "summary": str(e.get("summary") or ""),
+                    "id": f"reload-{i}",
+                }
+                for i, e in enumerate(raw_events)
+                if isinstance(e, dict) and e.get("tool")
+            ]
+            sanitized.append({**m, "content": cleaned, "tool_events": tool_events})
         else:
             sanitized.append(m)
     return {"messages": sanitized}

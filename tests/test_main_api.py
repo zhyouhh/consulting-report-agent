@@ -1939,6 +1939,48 @@ class GetConversationSanitizeTests(_LocalMockEngineMixin, unittest.TestCase):
         data = resp.json()
         self.assertIn("<!-- tool-log", data["messages"][0]["content"])
 
+    def test_get_conversation_returns_tool_events_with_reload_ids(self):
+        """assistant 消息有 tool_events 字段 → 返回时原样附带，每元素补 reload-<i> id"""
+        self._write_conversation([
+            {"role": "user", "content": "请帮我读文件"},
+            {
+                "role": "assistant",
+                "content": "好的，我来读。",
+                "tool_events": [
+                    {"tool": "read_file", "arg": "a.md", "status": "success", "summary": ""},
+                ],
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        self.assertIn("tool_events", assistant_msg)
+        events = assistant_msg["tool_events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["tool"], "read_file")
+        self.assertEqual(events[0]["arg"], "a.md")
+        self.assertEqual(events[0]["status"], "success")
+        self.assertEqual(events[0]["id"], "reload-0")
+
+    def test_get_conversation_old_message_without_tool_events_returns_empty_list(self):
+        """老消息（只有 <!-- tool-log --> 注释、无 tool_events 字段）→ tool_events==[], content strip 注释"""
+        self._write_conversation([
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "Real reply.\n<!-- tool-log\n- read_file ✓\n-->",
+                # 无 tool_events 字段
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        self.assertEqual(assistant_msg["tool_events"], [])
+        self.assertNotIn("<!-- tool-log", assistant_msg["content"])
+        self.assertIn("Real reply", assistant_msg["content"])
+
     def test_get_conversation_404_when_project_missing(self):
         self.mock_get_project_path.return_value = None
         resp = self.client.get("/api/projects/missing/conversation")
