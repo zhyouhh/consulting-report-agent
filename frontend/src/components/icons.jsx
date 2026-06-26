@@ -124,3 +124,17 @@ export const IconUpload = ({size=16, className=''}) => (
     <path d="M12 3v12"/>
   </svg>
 )
+
+export const IconTool = ({size=16, className=''}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M9 18l-6-6 6-6M15 6l6 6-6 6"/>
+  </svg>
+)
+
+export const IconChevronDown = ({size=16, className=''}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M6 9l6 6 6-6"/>
+  </svg>
+)
