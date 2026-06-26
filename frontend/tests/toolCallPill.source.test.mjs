@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const src = readFileSync(new URL('../src/components/ToolCallPill.jsx', import.meta.url), 'utf8')
+const iconsSrc = readFileSync(new URL('../src/components/icons.jsx', import.meta.url), 'utf8')
 
 test('ToolCallPill: single-line + status icon + summary click-to-expand, all tokens, no emoji', () => {
   assert.match(src, /inline-flex/)
@@ -31,4 +32,19 @@ test('ToolCallPill: single-line + status icon + summary click-to-expand, all tok
   assert.match(src, /sr-only/)
   assert.match(src, /type="button"|type:\s*['"]button['"]/)
   assert.match(src, /aria-expanded/)
+})
+
+test('icons used by ToolCallPill forward rest props so aria-hidden reaches the svg', () => {
+  // each icon component must collect rest props (...props) and spread them onto <svg> ({...props}),
+  // otherwise aria-hidden / aria-label passed by ToolCallPill is silently dropped.
+  assert.match(iconsSrc, /\.\.\.props/)
+  assert.match(iconsSrc, /\{\.\.\.props\}/)
+  for (const name of ['IconTool', 'IconChevronDown', 'IconCheck', 'IconClose']) {
+    // signature destructures rest props
+    const declRe = new RegExp(`export const ${name} = \\(\\{[^}]*\\.\\.\\.props\\}\\)`)
+    assert.match(iconsSrc, declRe, `${name} must destructure ...props`)
+  }
+  // the svg elements actually spread rest props
+  const svgSpreadCount = (iconsSrc.match(/className=\{className\} \{\.\.\.props\}/g) || []).length
+  assert.ok(svgSpreadCount >= 4, 'at least the 4 ToolCallPill icons spread {...props} onto <svg>')
 })
