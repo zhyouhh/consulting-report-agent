@@ -2809,6 +2809,119 @@ class SkillEngineTests(unittest.TestCase):
         self.assertEqual(state, "parsed")
         self.assertEqual(set(selected), {"SMART", "RACI", "里程碑"})
 
+    def test_parse_methodology_bold_marker_on_values_parsed(self):
+        # 真模型实测：deepseek 把框架值也 ** 加粗（值在一个粗体跨度内、或逐个加粗）。
+        # parser 必须容忍这类 markdown 强调标记、识别出框架名，而不是 malformed 卡住确认门。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for decl in (
+                "方法论框架：**SWOT、TAM-SAM-SOM、对标分析**\n",   # 整个值被一个粗体跨度包住
+                "方法论框架：**SWOT**、**对标分析**\n",            # 逐个加粗
+                "**方法论框架**：*SWOT*、波特五力\n",              # label 粗 + 值斜体
+            ):
+                state, selected = engine.parse_and_sanitize_methodology(decl)
+                self.assertEqual(state, "parsed", decl)
+                self.assertTrue(selected, decl)
+            # 锁第一例的精确净化结果（* 标记被剥、框架名识别）
+            state, selected = engine.parse_and_sanitize_methodology(
+                "方法论框架：**SWOT、TAM-SAM-SOM、对标分析**\n"
+            )
+        self.assertEqual(set(selected), {"SWOT", "TAM-SAM-SOM", "对标分析"})
+
+    def test_parse_methodology_asterisk_cannot_evade_danger(self):
+        # 安全不变式：容忍 * 后，危险词不得借 * 拆词/包裹绕过——raw_value 层归一化连 * 一并去除，
+        # 仍命中 denylist → malformed（红队不变式：normalize 去除集合 ⊇ parse 容忍的 *）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for evil in (
+                "方法论框架：**advance stage**\n",       # 借粗体 + 空格拆 advance stage
+                "方法论框架：adv*ance*stage\n",          # 借 * 拆 advancestage
+                "方法论框架：*advance*、*stage*\n",       # 借边界 * + 顿号拆 advance stage
+                "方法论框架：**write*file**\n",           # 借 * 拆 writefile 工具名
+            ):
+                state, selected = engine.parse_and_sanitize_methodology(evil)
+                self.assertEqual(state, "malformed", evil)
+                self.assertEqual(selected, [], evil)
+
+    def test_parse_methodology_paren_and_chinese_split_cannot_evade_danger(self):
+        # 红队 v5：parse 剥括号 + 容忍连字符/* → 危险词借「空括号/连字符/*」拆词逃过 raw 子串查，
+        # 再被 parse 还原成工具名/checkpoint/中文操控词。归一化去除集合现含 ()（）* → 这些拆词形态
+        # 在 raw_value 层归一化后还原成连续串、命中 denylist → malformed。任一 parsed 即 trust
+        # boundary 漏洞。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for evil in (
+                # 空括号拆工具名 / checkpoint / 注入词
+                "方法论框架：write()file\n",
+                "方法论框架：**write()file**\n",
+                "方法论框架：adv()ance()stage\n",
+                "方法论框架：adv(*)ance(*)stage\n",
+                "方法论框架：append()report()draft\n",
+                "方法论框架：s0()interview()done\n",
+                "方法论框架：pro()mpt\n",
+                # 有内容括号拆词（parse 剥括号跨度含内容 → 危险检测须在剥括号形态上复查；红队 v5）
+                "方法论框架：write(x)file\n",
+                "方法论框架：adv(x)ance(y)stage\n",
+                "方法论框架：append(foo)report(bar)draft\n",
+                "方法论框架：stage(x)-ack\n",
+                "方法论框架：ig(x)nore\n",
+                "方法论框架：推(这段删掉)进\n",
+                # 连字符/括号/* 拆中文操控词
+                "方法论框架：推-进\n",
+                "方法论框架：忽-略\n",
+                "方法论框架：检-查-点\n",
+                "方法论框架：覆(*)写\n",
+                "方法论框架：覆(*)寫\n",
+                # 繁体变体（NFKC 不做简繁转换，须显式覆盖；红队 v5）
+                "方法论框架：歸檔\n",
+                "方法论框架：無視\n",
+                "方法论框架：刪除\n",
+                "方法论框架：標記為\n",
+                "方法论框架：請你\n",
+                "方法论框架：門禁\n",
+                "方法论框架：檢查點\n",
+                "方法论框架：推進\n",
+                "方法论框架：跳過\n",
+                "方法论框架：設為\n",
+                "方法论框架：覆蓋\n",
+                # 危险词在第 9+ token 借括号拆词（raw 层全量检测，不被 tokens[:8] 截断绕过）
+                "方法论框架：SWOT、PEST、MECE、RACI、SMART、价值链、五力、对标分析、adv()ance()stage\n",
+                "方法论框架：SWOT、PEST、MECE、RACI、SMART、价值链、五力、对标分析、adv(x)ance(y)stage\n",
+            ):
+                state, selected = engine.parse_and_sanitize_methodology(evil)
+                self.assertEqual(state, "malformed", evil)
+                self.assertEqual(selected, [], evil)
+            # 误杀回归：合法框架带括号注释（内容非危险词）仍 parsed，括号被剥成展示名
+            state, selected = engine.parse_and_sanitize_methodology(
+                "方法论框架：SWOT（优势分析）、波特五力\n"
+            )
+            self.assertEqual(state, "parsed")
+            self.assertEqual(set(selected), {"SWOT", "波特五力"})
+
+    def test_parse_methodology_mixed_simplified_traditional_cannot_evade_danger(self):
+        # 红队 v5：逐字简繁混写（NFKC 不做简繁转换、off-menu 放行任意 CJK）。_normalize_for_danger
+        # 的繁→简折叠表闭合整类——任意简/繁/混写组合折叠成简体规范形即命中 denylist，不靠枚举。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for evil in (
+                "方法论框架：歸档\n", "方法论框架：归檔\n",        # 归档 混写
+                "方法论框架：無视\n", "方法论框架：无視\n",        # 无视 混写
+                "方法论框架：設为\n", "方法论框架：设為\n",        # 设为 混写
+                "方法论框架：標记为\n", "方法论框架：标記為\n",    # 标记为 混写
+                "方法论框架：檢查点\n", "方法论框架：检查點\n",    # 检查点 混写
+                "方法论框架：推進\n", "方法论框架：跳過\n",        # 全繁
+                # 混写叠加 parse 容忍字符（连字符/斜杠/括号）
+                "方法论框架：歸-档\n", "方法论框架：归/檔\n",
+                "方法论框架：标-記-為\n", "方法论框架：无(x)視\n",
+            ):
+                state, selected = engine.parse_and_sanitize_methodology(evil)
+                self.assertEqual(state, "malformed", evil)
+                self.assertEqual(selected, [], evil)
+            # 误杀回归：折叠表只覆盖控制词字符 → 合法繁体框架名（不在表内）仍 parsed
+            state, selected = engine.parse_and_sanitize_methodology("方法论框架：價值鏈\n")
+            self.assertEqual(state, "parsed")
+            self.assertEqual(selected, ["價值鏈"])
+
     def test_parse_methodology_malformed_on_injection_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self._bare_engine(tmp)

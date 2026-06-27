@@ -1939,10 +1939,187 @@ class GetConversationSanitizeTests(_LocalMockEngineMixin, unittest.TestCase):
         data = resp.json()
         self.assertIn("<!-- tool-log", data["messages"][0]["content"])
 
+    def test_get_conversation_returns_tool_events_with_reload_ids(self):
+        """assistant 消息有 tool_events 字段 → 返回时原样附带，每元素补 reload-<i> id"""
+        self._write_conversation([
+            {"role": "user", "content": "请帮我读文件"},
+            {
+                "role": "assistant",
+                "content": "好的，我来读。",
+                "tool_events": [
+                    {"tool": "read_file", "arg": "a.md", "status": "success", "summary": ""},
+                ],
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        self.assertIn("tool_events", assistant_msg)
+        events = assistant_msg["tool_events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["tool"], "read_file")
+        self.assertEqual(events[0]["arg"], "a.md")
+        self.assertEqual(events[0]["status"], "success")
+        self.assertEqual(events[0]["id"], "reload-0")
+
+    def test_get_conversation_old_message_without_tool_events_returns_empty_list(self):
+        """老消息（只有 <!-- tool-log --> 注释、无 tool_events 字段）→ tool_events==[], content strip 注释"""
+        self._write_conversation([
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "Real reply.\n<!-- tool-log\n- read_file ✓\n-->",
+                # 无 tool_events 字段
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        self.assertEqual(assistant_msg["tool_events"], [])
+        self.assertNotIn("<!-- tool-log", assistant_msg["content"])
+        self.assertIn("Real reply", assistant_msg["content"])
+
+    def test_get_conversation_coerces_pending_tool_events_to_terminal(self):
+        """conversation.json 里带 status:'pending' 的 tool_event → GET /conversation 返回时必须归一为终态，不得返回 pending（否则前端永久转圈）"""
+        self._write_conversation([
+            {"role": "user", "content": "搜一下"},
+            {
+                "role": "assistant",
+                "content": "好的。",
+                "tool_events": [
+                    {"tool": "web_search", "arg": "q", "status": "pending", "summary": ""},
+                ],
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        events = assistant_msg["tool_events"]
+        self.assertEqual(len(events), 1)
+        self.assertNotEqual(events[0]["status"], "pending",
+                            "persisted 'pending' must be coerced to terminal on GET /conversation")
+        self.assertEqual(events[0]["status"], "success")
+
     def test_get_conversation_404_when_project_missing(self):
         self.mock_get_project_path.return_value = None
         resp = self.client.get("/api/projects/missing/conversation")
         self.assertEqual(resp.status_code, 404)
+
+    # --- IP3: parts sanitization on GET /conversation ---
+
+    def test_get_conversation_sanitizes_parts_pending_tool_to_terminal(self):
+        """assistant 有 parts（含 pending tool）→ 返回时 pending 被终态化为 success，text part 保留"""
+        self._write_conversation([
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "好的。",
+                "parts": [
+                    {"type": "text", "text": "好的。"},
+                    {"type": "tool", "id": "t1", "tool": "web_search", "arg": "q",
+                     "status": "pending", "summary": ""},
+                ],
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        self.assertIn("parts", assistant_msg)
+        parts = assistant_msg["parts"]
+        self.assertEqual(len(parts), 2)
+        text_part = next(p for p in parts if p["type"] == "text")
+        tool_part = next(p for p in parts if p["type"] == "tool")
+        self.assertEqual(text_part["text"], "好的。")
+        self.assertNotEqual(tool_part["status"], "pending",
+                            "persisted 'pending' part must be coerced to terminal on GET /conversation")
+        self.assertEqual(tool_part["status"], "success")
+
+    def test_get_conversation_no_parts_field_for_old_message(self):
+        """老消息（无 parts 字段）→ 返回也无 parts 字段"""
+        self._write_conversation([
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "Real reply.",
+                # no parts field
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        self.assertNotIn("parts", assistant_msg)
+
+    def test_get_conversation_non_list_parts_dropped(self):
+        """parts 是非 list（如字符串）→ 返回时无 parts 字段"""
+        self._write_conversation([
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "Real reply.",
+                "parts": "not-a-list",
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        self.assertNotIn("parts", assistant_msg)
+
+    def test_get_conversation_tool_part_is_scalar_only_and_regularized(self):
+        """脏 tool part（额外键 + dict summary + pending）→ 端点返回只含规范标量键、status 终态、summary 恒为 str"""
+        self._write_conversation([
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "读一下。",
+                "parts": [
+                    {"type": "text", "text": "读一下。"},
+                    {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md",
+                     "status": "pending", "summary": {"nested": "x"}, "extra": "should_be_stripped"},
+                ],
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        parts = assistant_msg["parts"]
+        self.assertEqual(len(parts), 2)
+        text_part = next(p for p in parts if p["type"] == "text")
+        tool_part = next(p for p in parts if p["type"] == "tool")
+        # text part 正常返回
+        self.assertEqual(text_part["text"], "读一下。")
+        # pending → 终态
+        self.assertEqual(tool_part["status"], "success")
+        # 键集合恰为规范标量键，extra 被剥除、无多余键
+        self.assertEqual(set(tool_part.keys()), {"type", "id", "tool", "arg", "status", "summary"})
+        # summary 恒为标量 str（dict 经 str() 净化，非原 dict）
+        self.assertIsInstance(tool_part["summary"], str)
+        self.assertEqual(tool_part["summary"], str({"nested": "x"}))
+
+    def test_get_conversation_all_invalid_parts_results_in_no_parts_field(self):
+        """parts 全部非法（无 type 或 tool 为空）→ 净化后为空列表，不设 parts 字段"""
+        self._write_conversation([
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "Real reply.",
+                "parts": [
+                    {"type": "tool", "id": "x", "tool": "", "arg": "", "status": "success", "summary": ""},
+                    {"type": "unknown"},
+                ],
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        self.assertNotIn("parts", assistant_msg)
 
 
 class R3FileApiTests(unittest.TestCase):

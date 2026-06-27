@@ -2,6 +2,8 @@
 // These are framework-agnostic so they can be unit-tested with node:test (the project has no
 // jsdom / testing-library — DOM behaviour is covered by source-level guards instead).
 
+import { closePendingToolEvents } from "./toolEvents.js";
+
 export function parseDrawerEvent(data) {
   if (!data || data === "[DONE]") return null;
   try {
@@ -24,13 +26,17 @@ export function parseDrawerEvent(data) {
 }
 
 // Bubble model for the window stream:
-//   { kind: 'assistant', text }            — streamed model prose (markdown)
-//   { kind: 'tool_call', tool, args }      — a tool invocation card
-//   { kind: 'tool_result', tool, status, summary } — a tool result card
+//   { kind: 'assistant', text }                          — streamed model prose (markdown)
+//   { kind: 'tool', id, tool, arg, status, summary }     — one tool call+result pill (id-paired)
 //
 // Consecutive content_delta events append to the CURRENT assistant bubble (not one bubble per
-// delta — that would fragment the stream). A tool_call / tool_result event closes the current
-// assistant bubble so the next content_delta starts a fresh one.
+// delta — that would fragment the stream). A tool_call appends a pending tool bubble (which closes
+// the current assistant bubble so the next content_delta starts a fresh one). A tool_result is
+// paired BY id to its pending tool bubble and updates status/summary in place — mirroring the main
+// chat's reduceToolEvent so the shared ToolCallPill renders identically in both surfaces. An error
+// event flips any still-pending tool bubble to error (a review can break between a tool_call frame
+// and its result over the wire — mirrors the main chat's closePendingToolEvents so no pill spins
+// forever).
 export function aggregateContentDelta(messages, event) {
   const list = Array.isArray(messages) ? messages : [];
   if (!event || typeof event.type !== "string") return list;
@@ -48,19 +54,39 @@ export function aggregateContentDelta(messages, event) {
   }
 
   if (event.type === "tool_call") {
-    return [...list, { kind: "tool_call", tool: event.tool || "", args: event.args }];
+    const id = event.id;
+    const idx = id != null ? list.findIndex(b => b && b.kind === "tool" && b.id === id) : -1;
+    if (idx === -1) {
+      return [
+        ...list,
+        { kind: "tool", id, tool: event.tool || "", arg: event.arg || "", status: "pending", summary: "" },
+      ];
+    }
+    // Late chunk carrying the fully-formed tool/arg for an already-announced pending pill.
+    const next = list.slice();
+    next[idx] = { ...next[idx], tool: event.tool ?? next[idx].tool, arg: event.arg ?? next[idx].arg };
+    return next;
   }
 
   if (event.type === "tool_result") {
-    return [
-      ...list,
-      {
-        kind: "tool_result",
-        tool: event.tool || "",
-        status: event.status || "",
-        summary: event.summary || "",
-      },
-    ];
+    const id = event.id;
+    const idx = id != null ? list.findIndex(b => b && b.kind === "tool" && b.id === id) : -1;
+    if (idx === -1) {
+      // Result before its call, or a synthetic-id malformed-batch error: append a completed bubble
+      // (without an id we'd swallow the card; the backend always sends a real or synthetic id).
+      return [
+        ...list,
+        { kind: "tool", id, tool: event.tool || "", arg: "", status: event.status || "error", summary: event.summary || "" },
+      ];
+    }
+    const next = list.slice();
+    next[idx] = { ...next[idx], status: event.status || "error", summary: event.summary || "" };
+    return next;
+  }
+
+  if (event.type === "error") {
+    // The review broke before some tool_call got its result frame — close orphan pending pills.
+    return closePendingToolEvents(list, "已中断");
   }
 
   return list;

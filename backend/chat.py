@@ -9,6 +9,7 @@ import requests
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Dict, List
@@ -128,6 +129,14 @@ USER_VISIBLE_FALLBACK = (
 LEGACY_EMPTY_ASSISTANT_FALLBACKS = frozenset({
     "（本轮" "无回复）",
     USER_VISIBLE_FALLBACK,
+})
+# 合成隔板：本轮链路里为「保持 user/model 严格交替」而注入的占位 assistant content，
+# 非模型真实叙述。_build_message_parts 据此剥离，避免它们污染时间线展示片段。
+# 两条字符串必须与 chat_stream 真实注入处逐字一致（见 chat.py 内 "本轮为纯转述" /
+# "畸形条目" 注入分支），test_synthetic_barrier_notes_match_chat_source 守护防漂移。
+_SYNTHETIC_BARRIER_NOTES = frozenset({
+    "（上条工具调用被上游合并成畸形条目，已作废本轮调用。）",
+    "（本轮为纯转述，不调用任何工具。）",
 })
 SYSTEM_TRIGGER_PROMPTS = {
     "independent_review_done": (
@@ -894,6 +903,11 @@ class ChatHandler:
         # 客户端可控的非 content 字段绝不进摘要器：json.dumps 会序列化整条消息，
         # forged 的 attached_material_ids / client_message_id 可夹带指令。只留数量、丢 id。
         sanitized.pop("client_message_id", None)
+        # The structured tool_events sibling (tool args/summaries) must never reach the
+        # summarizer — same boundary as attachment metadata above.
+        sanitized.pop("tool_events", None)
+        # The ordered `parts` timeline sibling carries the same tool args/summaries — drop it too.
+        sanitized.pop("parts", None)
         if "attached_material_ids" in sanitized:
             ids = sanitized.get("attached_material_ids") or []
             sanitized["attached_material_ids"] = len(ids)
@@ -1488,6 +1502,114 @@ class ChatHandler:
                 project_id,
                 exc_info=True,
             )
+
+    def _sse_tool_arg(self, name: str, args: "str | dict") -> str:
+        """单行 pill 的精简实参：取首个参数值、截断到 40 字符；无参 / append_report_draft 返回空。
+
+        live SSE 与持久化 sibling 共用同一派生，保证刷新前后 pill 一致。
+        """
+        try:
+            d = json.loads(args) if isinstance(args, str) else (args or {})
+        except json.JSONDecodeError:
+            d = {}
+        if not isinstance(d, dict) or not d or name == "append_report_draft":
+            return ""
+        val = str(next(iter(d.values())))
+        return val[:37] + "..." if len(val) > 40 else val
+
+    def _sse_tool_summary(self, name: str, result: dict) -> str:
+        """单行 pill 的结果摘要：失败给简短原因；web_search/fetch_url 给计数/体积，其余空。"""
+        if result.get("status") != "success":
+            return str(result.get("message") or result.get("error") or "失败")[:40]
+        if name == "web_search":
+            return f"{len(result.get('results') or [])} results"
+        if name == "fetch_url":
+            return f"{round(len(result.get('content') or '') / 1024, 1)} KB"
+        return ""
+
+    def _build_tool_events(self, current_turn_messages: List[Dict]) -> list:
+        """把本轮 tool call/result 收敛成结构化 sibling 列表（persist 到 conversation.json）。
+
+        sibling 元素无 id（端点 reload 时补合成 id）；与 live SSE 同一套 arg/summary 派生。
+        """
+        return [{
+            "tool": p.name,
+            "arg": self._sse_tool_arg(p.name, p.args),
+            "status": "success" if p.result.get("status") == "success" else "error",
+            "summary": self._sse_tool_summary(p.name, p.result),
+        } for p in self._pair_tool_calls_with_results(current_turn_messages)]
+
+    def _build_message_parts(self, current_turn_messages, assistant_message):
+        """有序展示片段（文本/工具按时间穿插）+ 全轮可见文本（仅供前端复制）。
+
+        文本来源：每个 assistant 子消息 content（含 retry 候选叙述），跳已知合成隔板；末轮
+        visible_content 去重。工具配对对齐 `_pair_tool_calls_with_results` 的单遍 pending→pop
+        （锚定 call site、按 tool_call_id 配对、缺 id 的 tool_call 跳过、orphan tool 结果跳过）；
+        唯一差别在**重复 tool_call_id 这一病态输入**上本方法用 deque FIFO（同 id 多次出现按序消费
+        结果），既有 helper 是 dict 覆盖——provider 正常保证 id 唯一，此处取 FIFO 更稳。持久化
+        content/provider 不受影响。
+
+        **与 `_build_tool_events` 的有意差异**：未应答的 tool_call（call 有、result 无，rare：
+        mid-turn abort）在这里保留为 `status="error"` 的工具 part——穿插时间线要忠实展示
+        「调用过但没回」，且与前端 live abort 把 pending→error 一致；`_build_tool_events` 走
+        `_pair_tool_calls_with_results` 则不产 pair、会省略。parts 是渲染主源，这点不同无碍。
+        """
+        parts, text_segments = [], []
+        pending: "dict[str, deque[int]]" = {}  # tool_call_id → 工具 part 在 parts 里的下标队列（FIFO）
+        for msg in current_turn_messages or []:
+            role = msg.get("role")
+            if role == "assistant":
+                content = msg.get("content")
+                if (isinstance(content, str) and content.strip()
+                        and content not in _SYNTHETIC_BARRIER_NOTES):
+                    parts.append({"type": "text", "text": content}); text_segments.append(content)
+                for tc in (msg.get("tool_calls") or []):
+                    tc_id = tc.get("id")
+                    if not tc_id:  # 对齐 _pair_tool_calls_with_results 的 `if tc_id:` 守卫
+                        continue
+                    fn = tc.get("function") or {}
+                    name, args = fn.get("name") or "", fn.get("arguments") or ""
+                    parts.append({"type": "tool", "id": tc_id, "tool": name,
+                                  "arg": self._sse_tool_arg(name, args),
+                                  "status": "error", "summary": ""})  # 占位，待 result 回填
+                    pending.setdefault(tc_id, deque()).append(len(parts) - 1)
+            elif role == "tool":
+                tc_id = msg.get("tool_call_id")
+                idx_q = pending.get(tc_id) if tc_id else None
+                if not idx_q:  # orphan result（无对应 call）跳过，对齐 helper
+                    continue
+                idx = idx_q.popleft()
+                try:
+                    result = json.loads(msg.get("content") or "{}")
+                    if not isinstance(result, dict):
+                        result = {"status": "error", "raw": str(result)}
+                except json.JSONDecodeError:
+                    result = {"status": "error", "raw": msg.get("content")}
+                parts[idx]["status"] = "success" if result.get("status") == "success" else "error"
+                parts[idx]["summary"] = self._sse_tool_summary(parts[idx]["tool"], result)
+        if isinstance(assistant_message, str) and assistant_message.strip():
+            if not (text_segments and text_segments[-1] == assistant_message):
+                parts.append({"type": "text", "text": assistant_message}); text_segments.append(assistant_message)
+        return parts, "".join(text_segments)
+
+    def _flush_pending_tool_calls(self, pending: "dict[str, str]", summary: str):
+        """对每个「已早发 pending tool_call 但未正常结束」的 id 补发一个同 id 的 error tool_result，
+        然后清空集合——杜绝前端永久转圈的孤儿 pending pill。
+
+        在「会放弃已早发调用」的退出路径（malformed-retry `continue` 前、mid-stream 异常 return 前）
+        显式调用；**故意不放在 finally**：chat_stream 会被 SSE 心跳包装器 `gen.close()`（GeneratorExit），
+        finally 里 yield 会触发 RuntimeError、破坏「GeneratorExit→response.close()→释放 request_lock」链路。
+        正常 execute 路径每个 id 在发 tool_result 后即 pop，到这里集合已空、不重复发。
+        """
+        for call_id, tool_name in list(pending.items()):
+            yield {
+                "type": "tool_result",
+                "id": call_id,
+                "tool": tool_name,
+                "status": "error",
+                "summary": summary,
+            }
+        pending.clear()
 
     def _format_tool_pair_line(self, pair: ToolPair) -> str:
         """Format: - TOOL_NAME(SHORT_ARGS) ✓ SUMMARY or ✗ ERROR_BRIEF. Max 120 chars.
@@ -2851,6 +2973,10 @@ class ChatHandler:
             collected_message = {"role": "assistant", "content": "", "tool_calls": []}
             known_tool_names = {tool["function"]["name"] for tool in self._get_tools()}
             announced_tool_call_indexes: set[int] = set()
+            # id → tool_name for early-fired pending tool_call events not yet closed by a
+            # tool_result this iteration. Flushed as error on abandon paths (malformed / mid-stream
+            # exception); popped on normal execute. Per-iteration → no cross-iteration leakage.
+            announced_pending: "dict[str, str]" = {}
             stream_usage = None
             accumulated = ""
             stream_buffer = ""
@@ -2920,13 +3046,24 @@ class ChatHandler:
                                     tc["function"]["arguments"] += tc_chunk.function.arguments
                             if (
                                 tc_chunk.index not in announced_tool_call_indexes
+                                and tc["id"]
                                 and tc["function"]["name"] in known_tool_names
                                 and not self._turn_context.get("system_trigger_no_tools")
                             ):
-                                # 汇报轮禁工具：响应层 guard 会丢弃 tool_calls，这里就不要
-                                # 抢先 announce"准备调用工具"，否则用户会看到调用却无事发生。
+                                # 名+id 就位即早发 pending tool_call（同 id），前端立刻显示 pill，
+                                # 否则 append_report_draft 等大参数工具在参数流式累积期会长时间死气。
+                                # arg 此刻 best-effort（多为空）；execute 前会再发带完整 arg 的同 id 事件，
+                                # 前端按 id 合并。汇报轮丢工具，故跳过早发以免孤儿 pending pill。
                                 announced_tool_call_indexes.add(tc_chunk.index)
-                                yield {"type": "tool", "data": f"🔧 准备调用工具: {tc['function']['name']}"}
+                                announced_pending[tc["id"]] = tc["function"]["name"]
+                                yield {
+                                    "type": "tool_call",
+                                    "id": tc["id"],
+                                    "tool": tc["function"]["name"],
+                                    "arg": self._sse_tool_arg(
+                                        tc["function"]["name"], tc["function"]["arguments"]
+                                    ),
+                                }
             except Exception as e:
                 yield from emit_parsed_stream_events(parser.flush())
                 self._debug_dump_request(request_kwargs, label="stream-iter", error=e, note=f"iteration={iterations}")
@@ -2938,6 +3075,9 @@ class ChatHandler:
                         request_kwargs=request_kwargs,
                     ),
                 }
+                # 流式中断会放弃本轮已早发的 pending tool_call——按 id 收尾，避免孤儿 pill 永久转圈。
+                # `except Exception` 不捕 GeneratorExit（BaseException），故 close() 路径不会走到这里。
+                yield from self._flush_pending_tool_calls(announced_pending, "流式中断")
                 return
             finally:
                 # 任何退出（提前 break / 异常 / return）都同步关闭 response，触发 wrapper 的
@@ -3020,6 +3160,9 @@ class ChatHandler:
                         "type": "tool",
                         "data": "⚠️ 上条 tool_calls 被上游合并成畸形条目，本轮作废并让模型重发。",
                     }
+                    # 本轮作废、不执行任何工具——收尾已早发的 pending tool_call（同 id error），
+                    # 否则前端 pill 永久转圈。重试会以新 id 产生新 pill（可接受）。诊断事件不替换。
+                    yield from self._flush_pending_tool_calls(announced_pending, "工具参数无效")
                     # 用一条纯文本 assistant + 一条 user 反馈做"合规隔板"，保持 user/model
                     # 严格交替——直接 append 一条 user 会导致连续两条 user（前面本轮原始
                     # 用户消息），触发 Gemini 的角色交替校验 400。
@@ -3043,10 +3186,12 @@ class ChatHandler:
                 for index, tool_call in enumerate(assistant_tool_message["tool_calls"]):
                     func_name = tool_call["function"]["name"]
                     func_args = tool_call["function"]["arguments"]
-                    tool_preview = f"🔧 调用工具: {func_name}"
-                    if func_args:
-                        tool_preview = f"{tool_preview}({func_args[:50]}...)"
-                    yield {"type": "tool", "data": tool_preview}
+                    yield {
+                        "type": "tool_call",
+                        "id": tool_call["id"],
+                        "tool": func_name,
+                        "arg": self._sse_tool_arg(func_name, func_args),
+                    }
 
                     class ToolCall:
                         def __init__(self, data):
@@ -3076,8 +3221,18 @@ class ChatHandler:
                             "user_action": notice["user_action"],
                         }
                     self._turn_context["pending_system_notices"] = []
-                    result_icon = "✅" if result.get("status") == "success" else "⚠️"
-                    yield {"type": "tool", "data": f"{result_icon} 结果: {str(result)[:160]}..."}
+                    yield {
+                        "type": "tool_result",
+                        "id": tool_call["id"],
+                        "tool": func_name,
+                        # Normalize to success/error so the live ToolEvent shape matches the
+                        # persisted sibling built by _build_tool_events (single canonical shape).
+                        "status": "success" if result.get("status") == "success" else "error",
+                        "summary": self._sse_tool_summary(func_name, result),
+                    }
+                    # This id is now closed → drop it from the pending set so the abandon-path
+                    # flush (if a later tool in this turn aborts) never re-emits it.
+                    announced_pending.pop(tool_call["id"], None)
                     current_turn_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
@@ -6038,6 +6193,33 @@ class ChatHandler:
         text = unescape(text)
         return " ".join(text.split())
 
+    @staticmethod
+    def _sanitize_part_scalar(p):
+        """IP2 reload: coerce one persisted timeline part to a clean scalar dict (or None to drop).
+
+        Text part → {type,text} only when text is a non-empty (post-.strip()) str. Tool part →
+        {type,id,tool,arg,status,summary} with tool required; status coerced to a terminal value
+        (success/error) so a persisted/corrupt "pending" never renders as an orphan spinner.
+        Anything else → None.
+        """
+        if not isinstance(p, dict):
+            return None
+        if p.get("type") == "text":
+            t = p.get("text")
+            # Gate on .strip() (mirrors _build_message_parts) so a whitespace-only segment is
+            # dropped; the retained text is the original `t`, not the stripped form.
+            return {"type": "text", "text": t} if isinstance(t, str) and t.strip() else None
+        if p.get("type") == "tool":
+            tool = str(p.get("tool") or "")
+            if not tool:
+                return None
+            st = p.get("status")
+            return {"type": "tool", "id": str(p.get("id") or ""), "tool": tool,
+                    "arg": str(p.get("arg") or ""),
+                    "status": st if st in ("success", "error") else "success",
+                    "summary": str(p.get("summary") or "")}
+        return None
+
     def _load_conversation(self, project_id: str) -> List[Dict]:
         """加载对话历史。仅持久化 user/assistant 显示消息。"""
         project_path = self.skill_engine.get_project_path(project_id)
@@ -6064,6 +6246,32 @@ class ChatHandler:
             attachment_transcripts = message.get("attachment_transcripts")
             if attachment_transcripts:
                 entry["attachment_transcripts"] = attachment_transcripts
+            # Tool-pill reload: preserve the structured tool_events sibling so a later full
+            # _save_conversation rewrite does not erase historical pills. Accept ONLY a list and
+            # rebuild scalar-by-scalar — a corrupt conversation.json must not smuggle big objects
+            # into the frontend or back into the next save.
+            raw_te = message.get("tool_events")
+            if isinstance(raw_te, list):
+                entry["tool_events"] = [{
+                    "tool": str(e.get("tool") or ""),
+                    "arg": str(e.get("arg") or ""),
+                    "status": e.get("status") if e.get("status") in ("success", "error") else "success",
+                    "summary": str(e.get("summary") or ""),
+                } for e in raw_te if isinstance(e, dict) and e.get("tool")]
+            # IP2 reload: preserve the ordered `parts` sibling the same way as tool_events — the
+            # white-list rebuild must explicitly carry it, else a later full _save_conversation
+            # rewrite would erase it. Accept ONLY a list; rebuild scalar-by-scalar (a corrupt
+            # conversation.json must not smuggle nested objects into the frontend or the next save;
+            # any non-terminal/unknown tool status coerces to a terminal one — no orphan spinner).
+            # Only set the field when something survives sanitization — an empty list could let the
+            # frontend treat `parts` as authoritative and shadow valid content.
+            raw_parts = message.get("parts")
+            if isinstance(raw_parts, list):
+                cleaned_parts = [
+                    q for q in (self._sanitize_part_scalar(p) for p in raw_parts) if q
+                ]
+                if cleaned_parts:
+                    entry["parts"] = cleaned_parts
             client_message_id = message.get("client_message_id")
             if client_message_id is not None:
                 entry["client_message_id"] = client_message_id
@@ -6785,24 +6993,36 @@ class ChatHandler:
             else:
                 self._unlock_s0_confirmation_first_turn(project_id)
 
-        # Step 5: append tool-log.
+        # Step 5: append tool-log comment (legacy mechanism, unchanged) + build the
+        # structured tool_events sibling field used by the frontend tool-call pills on reload.
         persisted_content = visible_content
         if current_turn_messages:
             persisted_content = self._append_tool_log_to_assistant(
                 persisted_content,
                 current_turn_messages,
             )
+        tool_events = self._build_tool_events(current_turn_messages) if current_turn_messages else []
+        # IP2: ordered text/tool timeline parts ride alongside content/tool_events as a sibling
+        # field. Built from the SAME current_turn_messages with the CLEAN visible reply
+        # (visible_content, NOT the tool-log-appended persisted_content) as the末轮 text segment.
+        # Like tool_events: gated on current_turn_messages, never merged into content, never sent
+        # to the provider (_to_provider_message returns {role,content}).
+        parts, _full_text = (
+            self._build_message_parts(current_turn_messages, visible_content)
+            if current_turn_messages else ([], "")
+        )
 
-        # Step 6: persist this turn.
+        # Step 6: persist this turn. tool_events rides alongside content as a sibling field
+        # (never merged into content, never sent to the provider — see _to_provider_message).
+        assistant_msg = {"role": "assistant", "content": persisted_content}
+        if tool_events:
+            assistant_msg["tool_events"] = tool_events
+        if parts:
+            assistant_msg["parts"] = parts
         if self._turn_context.get("system_triggered"):
-            history.extend([
-                {"role": "assistant", "content": persisted_content},
-            ])
+            history.extend([assistant_msg])
         else:
-            history.extend([
-                current_user_message,
-                {"role": "assistant", "content": persisted_content},
-            ])
+            history.extend([current_user_message, assistant_msg])
         self._save_conversation(project_id, history)
         return persisted_content
 

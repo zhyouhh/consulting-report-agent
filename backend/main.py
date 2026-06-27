@@ -1278,7 +1278,27 @@ async def get_conversation(scope: ProjectScope = Depends(require_project)):
             if raw.strip() in LEGACY_EMPTY_ASSISTANT_FALLBACKS:
                 continue
             cleaned = strip_tool_log_comments(_strip_legacy_stage_ack(raw))
-            sanitized.append({**m, "content": cleaned})
+            raw_events = m.get("tool_events") if isinstance(m.get("tool_events"), list) else []
+            tool_events = [
+                {
+                    "tool": str(e.get("tool") or ""),
+                    "arg": str(e.get("arg") or ""),
+                    "status": e.get("status") if e.get("status") in ("success", "error") else "success",
+                    "summary": str(e.get("summary") or ""),
+                    "id": f"reload-{i}",
+                }
+                for i, e in enumerate(raw_events)
+                if isinstance(e, dict) and e.get("tool")
+            ]
+            raw_parts = m.get("parts") if isinstance(m.get("parts"), list) else None
+            cleaned_parts = None
+            if raw_parts is not None:
+                cleaned_parts = [q for q in (ChatHandler._sanitize_part_scalar(p) for p in raw_parts) if q]
+            entry = {**m, "content": cleaned, "tool_events": tool_events}
+            entry.pop("parts", None)
+            if cleaned_parts:
+                entry["parts"] = cleaned_parts
+            sanitized.append(entry)
         else:
             sanitized.append(m)
     return {"messages": sanitized}

@@ -232,6 +232,17 @@ class IndependentReviewAgentTests(unittest.TestCase):
         self.assertEqual(event_types[-1], "review-completed")
         self.assertEqual(events[-1]["path"], CANONICAL_REVIEW_PATH)
 
+        # 每个 tool_call/tool_result 带 id（前端 ToolCallPill 按 id 配对 call↔result）。
+        tool_calls = [e for e in events if e["type"] == "tool_call"]
+        tool_results = [e for e in events if e["type"] == "tool_result"]
+        self.assertTrue(all(e.get("id") for e in tool_calls))
+        self.assertTrue(all(e.get("id") for e in tool_results))
+        self.assertEqual({e["id"] for e in tool_calls}, {"call-1", "call-2", "call-3", "call-4"})
+        self.assertEqual({e["id"] for e in tool_results}, {"call-1", "call-2", "call-3", "call-4"})
+        # tool_call 带精简 arg（首参数值截断，与 chat._sse_tool_arg 同源）。
+        read_call = next(e for e in tool_calls if e["id"] == "call-1")
+        self.assertEqual(read_call["arg"], "plan/data-log.md")
+
     def test_run_streams_content_delta(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()
         del engine, project_dir
@@ -512,6 +523,16 @@ class IndependentReviewAgentTests(unittest.TestCase):
                 # _execute_tool call belongs to round 2's valid write_file.
                 self.assertEqual(executed, [("write_file", {"file_path": CANONICAL_REVIEW_PATH, "content": self._complete_review_text()})])
                 self.assertEqual(events[-1]["type"], "review-completed")
+
+                # malformed 批次的错误卡必带合成 id（整批可能缺 id，前端 id-pair 聚合器对无 id
+                # 的 tool_result 会吞掉错误卡——合成 id 保证错误可见）。
+                malformed_results = [
+                    e for e in events if e["type"] == "tool_result" and e.get("tool") == ""
+                ]
+                self.assertEqual(len(malformed_results), 1)
+                self.assertTrue(malformed_results[0].get("id"))
+                self.assertTrue(malformed_results[0]["id"].startswith("rev-malformed-"))
+                self.assertEqual(malformed_results[0]["status"], "error")
 
     def test_run_word_count_over_100k_emits_friendly_error(self):
         engine, project, project_dir, agent = self._make_engine_project_and_agent()

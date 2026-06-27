@@ -70,16 +70,16 @@ export const IconTrash = ({size=16, className=''}) => (
   </svg>
 )
 
-export const IconCheck = ({size=16, className=''}) => (
+export const IconCheck = ({size=16, className='', ...props}) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
-       strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className={className}>
+       strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
     <polyline points="20 6 9 17 4 12"/>
   </svg>
 )
 
-export const IconClose = ({size=16, className=''}) => (
+export const IconClose = ({size=16, className='', ...props}) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
-       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
     <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
   </svg>
 )
@@ -122,5 +122,19 @@ export const IconUpload = ({size=16, className=''}) => (
     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
     <path d="M17 8l-5-5-5 5"/>
     <path d="M12 3v12"/>
+  </svg>
+)
+
+export const IconTool = ({size=16, className='', ...props}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+    <path d="M9 18l-6-6 6-6M15 6l6 6-6 6"/>
+  </svg>
+)
+
+export const IconChevronDown = ({size=16, className='', ...props}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+    <path d="M6 9l6 6 6-6"/>
   </svg>
 )

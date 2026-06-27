@@ -79,13 +79,4 @@ export function MarkdownMessage({ children, className = 'max-w-none text-15 lead
   )
 }
 
-// A compact tool card matching the review window / chat tool-log aesthetic.
-export function ToolCard({ children }) {
-  return (
-    <div className="text-xs bg-card2 px-2 py-1 rounded border border-border text-t2 font-mono">
-      {children}
-    </div>
-  )
-}
-
 export default MarkdownMessage

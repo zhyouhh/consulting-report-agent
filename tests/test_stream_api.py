@@ -234,3 +234,68 @@ class ChatStreamApiTests(unittest.TestCase):
         done_event_index = next(index for index, item in enumerate(events) if item == "data: [DONE]")
         self.assertLess(content_event_index, usage_event_index)
         self.assertLess(usage_event_index, done_event_index)
+
+    def test_stream_endpoint_forwards_structured_tool_events(self):
+        """tool_call / tool_result 结构化事件必须原样透传到 SSE 流，不被过滤/丢弃。"""
+        handler = mock.Mock()
+
+        def fake_stream(project_id, message_text, attached_material_ids, transient_attachments, **kwargs):
+            yield {
+                "type": "tool_call",
+                "id": "tc-abc123",
+                "tool": "web_search",
+                "arg": '{"query": "市场规模"}',
+            }
+            yield {
+                "type": "tool_result",
+                "id": "tc-abc123",
+                "tool": "web_search",
+                "status": "ok",
+                "summary": "找到 3 条结果",
+            }
+            yield {"type": "content", "data": "分析完成"}
+
+        handler.chat_stream.side_effect = fake_stream
+        original_get_chat_handler = main_module.get_chat_handler
+        main_module.get_chat_handler = lambda uid, project_id: handler
+        port = _pick_free_port()
+        config = uvicorn.Config(main_module.app, host="127.0.0.1", port=port, log_level="error")
+        server = uvicorn.Server(config)
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+
+        try:
+            time.sleep(1.0)
+            response = requests.post(
+                f"http://127.0.0.1:{port}/api/chat/stream",
+                json={
+                    "project_id": "demo",
+                    "message_text": "分析市场",
+                    "attached_material_ids": [],
+                    "transient_attachments": [],
+                },
+                stream=True,
+                timeout=30,
+            )
+            payload = "".join(response.iter_content(chunk_size=1024, decode_unicode=True))
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+            main_module.get_chat_handler = original_get_chat_handler
+
+        # tool_call 事件字段全部出现
+        self.assertIn('"type": "tool_call"', payload)
+        self.assertIn('"id": "tc-abc123"', payload)
+        self.assertIn('"tool": "web_search"', payload)
+        self.assertIn('"arg":', payload)
+        self.assertIn("市场规模", payload)
+
+        # tool_result 事件字段全部出现
+        self.assertIn('"type": "tool_result"', payload)
+        self.assertIn('"status": "ok"', payload)
+        self.assertIn('"summary":', payload)
+        self.assertIn("找到 3 条结果", payload)
+
+        # content 事件也在（确认生成器没有提前终止）
+        self.assertIn('"type": "content"', payload)
+        self.assertIn("分析完成", payload)

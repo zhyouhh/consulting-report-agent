@@ -672,11 +672,8 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertNotIn(secret_message, error_events[0]["data"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_chat_stream_emits_tool_start_as_soon_as_tool_name_arrives(self, mock_openai):
-        consumed_chunks = []
-
+    def test_chat_stream_emits_structured_tool_events_and_reassembles_args(self, mock_openai):
         def tool_only_stream():
-            consumed_chunks.append("chunk-1")
             yield self._make_chunk(
                 tool_calls=[
                     self._make_stream_tool_call_chunk(
@@ -687,7 +684,6 @@ class ChatRuntimeTests(unittest.TestCase):
                     )
                 ]
             )
-            consumed_chunks.append("chunk-2")
             yield self._make_chunk(
                 tool_calls=[
                     self._make_stream_tool_call_chunk(
@@ -723,26 +719,510 @@ class ChatRuntimeTests(unittest.TestCase):
             with mock.patch.object(
                 handler,
                 "_execute_tool",
-                return_value={"status": "success", "results": "ok"},
+                return_value={"status": "success", "results": ["a", "b"]},
             ) as execute_tool:
-                stream = handler.chat_stream(project["id"], "继续")
-                first_event = next(stream)
-                self.assertEqual(consumed_chunks, ["chunk-1"])
-                remaining_events = list(stream)
+                events = list(handler.chat_stream(project["id"], "继续"))
 
-        tool_events = [first_event, *[event for event in remaining_events if event["type"] == "tool"]]
-        self.assertGreaterEqual(len(tool_events), 2)
-        self.assertEqual(tool_events[0]["data"], "🔧 准备调用工具: web_search")
+        call_events = [e for e in events if e.get("type") == "tool_call"]
+        result_events = [e for e in events if e.get("type") == "tool_result"]
+        # Pending (early) + full-arg (pre-execute) tool_call events, both bound to one id.
+        self.assertEqual(len(call_events), 2)
+        self.assertTrue(all((e["id"], e["tool"]) == ("call-1", "web_search") for e in call_events))
+        # The early pending event has no usable arg yet; the pre-execute one carries the full arg.
+        self.assertEqual(call_events[0]["arg"], "")
+        self.assertEqual(call_events[-1]["arg"], "ultraman flight")
+        self.assertEqual(len(result_events), 1)
         self.assertEqual(
-            sum(event["data"].startswith("🔧 调用工具: web_search(") for event in tool_events),
-            1,
+            (result_events[0]["id"], result_events[0]["tool"], result_events[0]["status"]),
+            ("call-1", "web_search", "success"),
         )
+        # The emoji preview/result text events are gone; only structured events remain.
+        self.assertFalse(
+            any(
+                e.get("type") == "tool"
+                and ("🔧" in str(e.get("data", "")) or "结果:" in str(e.get("data", "")))
+                for e in events
+            )
+        )
+        # Fragmented streaming args must still be reassembled before execution.
         execute_tool.assert_called_once()
         self.assertEqual(execute_tool.call_args.args[1].function.name, "web_search")
         self.assertEqual(
             execute_tool.call_args.args[1].function.arguments,
             '{"query":"ultraman flight"}',
         )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_normal_tool_call_emits_structured_events(self, mock_openai):
+        def read_file_stream():
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call_1",
+                        name="read_file",
+                        arguments='{"file_path":"materials/x.md"}',
+                    )
+                ]
+            )
+
+        mock_openai.return_value.chat.completions.create.return_value = read_file_stream()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "content": "file body"},
+            ):
+                events = list(handler.chat_stream(project["id"], "继续"))
+
+        call = next(e for e in events if e.get("type") == "tool_call")
+        res = next(e for e in events if e.get("type") == "tool_result")
+        self.assertEqual((call["id"], call["tool"], call["arg"]), ("call_1", "read_file", "materials/x.md"))
+        self.assertEqual((res["id"], res["tool"], res["status"]), ("call_1", "read_file", "success"))
+        self.assertFalse(
+            any(
+                e.get("type") == "tool"
+                and ("🔧 调用工具" in str(e.get("data", "")) or "结果:" in str(e.get("data", "")))
+                for e in events
+            )
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_pending_tool_call_emitted_before_args_complete_and_execution(self, mock_openai):
+        # Anti-死气 regression: for large-arg tools (append_report_draft streams the whole draft
+        # body in as the tool arg over many seconds), a pending tool_call pill MUST fire as soon
+        # as the tool name+id are known — BEFORE the rest of the args stream in and before execute.
+        consumed_chunks = []
+
+        def slow_arg_stream():
+            consumed_chunks.append("chunk-1")
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-1",
+                        name="append_report_draft",
+                        arguments='{"content":"第一段……',
+                    )
+                ]
+            )
+            consumed_chunks.append("chunk-2")
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        arguments='第二段……第三段……"}',
+                    )
+                ]
+            )
+
+        mock_openai.return_value.chat.completions.create.return_value = slow_arg_stream()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "path": "content/report_draft_v1.md"},
+            ) as execute_tool:
+                stream = handler.chat_stream(project["id"], "继续")
+                first_event = next(stream)
+                # The pending pill fires after the first chunk — before chunk-2 (rest of args)
+                # and before execution.
+                self.assertEqual(consumed_chunks, ["chunk-1"])
+                self.assertEqual(first_event["type"], "tool_call")
+                self.assertEqual(
+                    (first_event["id"], first_event["tool"]),
+                    ("call-1", "append_report_draft"),
+                )
+                # append_report_draft never exposes the draft body as arg → pending arg empty.
+                self.assertEqual(first_event["arg"], "")
+                self.assertFalse(execute_tool.called)
+                rest = list(stream)
+
+        events = [first_event, *rest]
+        call_events = [e for e in events if e.get("type") == "tool_call"]
+        # Early pending + pre-execute tool_call, both bound to the same id.
+        self.assertGreaterEqual(len(call_events), 2)
+        self.assertTrue(
+            all((e["id"], e["tool"]) == ("call-1", "append_report_draft") for e in call_events)
+        )
+        # Execution eventually ran with the fully-assembled args.
+        execute_tool.assert_called_once()
+        self.assertEqual(
+            execute_tool.call_args.args[1].function.arguments,
+            '{"content":"第一段……第二段……第三段……"}',
+        )
+        res = next(e for e in events if e.get("type") == "tool_result")
+        self.assertEqual((res["id"], res["tool"], res["status"]), ("call-1", "append_report_draft", "success"))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_malformed_args_after_early_pending_closes_with_error_tool_result(self, mock_openai):
+        # Orphan-pending regression #1: the stream assembles a valid name+id (early pending
+        # tool_call fires), then the args turn into malformed JSON → the diagnostic retry
+        # barrier fires and `continue`s WITHOUT executing. The early-fired pending id MUST be
+        # closed by a same-id error tool_result (otherwise the frontend pill spins forever).
+        def malformed_after_valid_stream():
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0, id="call-1", name="web_search", arguments='{"query":"x"'
+                    )
+                ]
+            )
+            yield self._make_chunk(
+                tool_calls=[self._make_stream_tool_call_chunk(0, arguments='}}}INVALID')]
+            )
+
+        mock_openai.return_value.chat.completions.create.return_value = malformed_after_valid_stream()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            events = list(handler.chat_stream(project["id"], "继续", max_iterations=2))
+
+        call_ids = [e["id"] for e in events if e.get("type") == "tool_call"]
+        result_ids = {e["id"] for e in events if e.get("type") == "tool_result"}
+        self.assertIn("call-1", call_ids)
+        # No orphan: every early-fired pending id is closed by a tool_result.
+        self.assertTrue(set(call_ids).issubset(result_ids))
+        closing = [e for e in events if e.get("type") == "tool_result" and e["id"] == "call-1"]
+        self.assertEqual(len(closing), 1)
+        self.assertEqual(closing[0]["status"], "error")
+        # The malformed diagnostic (type:"tool") is preserved, not replaced by the orphan-close.
+        self.assertTrue(
+            any(e.get("type") == "tool" and "畸形" in str(e.get("data", "")) for e in events)
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_mid_stream_exception_after_early_pending_closes_with_error_tool_result(self, mock_openai):
+        # Orphan-pending regression #2: the stream early-fires a pending tool_call, then the
+        # provider stream raises mid-iteration → the except branch yields a global error and
+        # returns. The early-fired id MUST also be closed by a same-id error tool_result (in
+        # ADDITION to the global error banner), so no pending pill is left spinning.
+        def exploding_stream():
+            yield self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0, id="call-1", name="web_search", arguments='{"query":"x"}'
+                    )
+                ]
+            )
+            raise RuntimeError("provider stream broke")
+
+        mock_openai.return_value.chat.completions.create.return_value = exploding_stream()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            events = list(handler.chat_stream(project["id"], "继续", max_iterations=2))
+
+        call_ids = [e["id"] for e in events if e.get("type") == "tool_call"]
+        result_events = [e for e in events if e.get("type") == "tool_result"]
+        self.assertIn("call-1", call_ids)
+        # The early-fired pending id is closed by an error tool_result.
+        self.assertTrue(any(e["id"] == "call-1" and e["status"] == "error" for e in result_events))
+        # The global error banner is still emitted (the orphan-close is additive, not a swap).
+        self.assertTrue(any(e.get("type") == "error" for e in events))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_finalize_persists_tool_events_sibling_field(self, mock_openai):
+        tool_stream = [
+            self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="c1",
+                        name="web_search",
+                        arguments='{"query":"县域文旅"}',
+                    )
+                ]
+            )
+        ]
+        content_stream = [self._make_chunk(content="检索完成，结论如下。")]
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            iter(tool_stream),
+            iter(content_stream),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            workspace_dir = Path(tmpdir) / "workspace"
+            engine = SkillEngine(projects_dir, self.repo_skill_dir)
+            project = engine.create_project(
+                name="demo",
+                workspace_dir=str(workspace_dir),
+                project_type="strategy-consulting",
+                theme="AI strategy review",
+                target_audience="executive audience",
+                deadline="2026-04-01",
+                expected_length="3000 words",
+            )
+            handler = ChatHandler(
+                self._make_settings(
+                    mode="managed",
+                    managed_model="gemini-3-flash",
+                    projects_dir=projects_dir,
+                ),
+                engine,
+            )
+            with mock.patch.object(
+                handler,
+                "_execute_tool",
+                return_value={"status": "success", "results": [1, 2, 3]},
+            ):
+                list(handler.chat_stream(project["id"], "查一下", max_iterations=4))
+
+            conv = json.loads(
+                (Path(project["project_dir"]) / "conversation.json").read_text(encoding="utf-8")
+            )
+
+        assistant = [m for m in conv if m["role"] == "assistant"][-1]
+        self.assertEqual(
+            assistant["tool_events"],
+            [{"tool": "web_search", "arg": "县域文旅", "status": "success", "summary": "3 results"}],
+        )
+        # The legacy tool-log comment mechanism is unchanged: still appended to content.
+        self.assertIn("<!-- tool-log", assistant["content"])
+        # The structured sibling must never bleed into the assistant content string.
+        self.assertNotIn("tool_events", assistant["content"])
+
+    def test_build_message_parts_interleaves_text_and_tools(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "先读文件再改。",
+             "tool_calls": [
+                 {"id": "c1", "function": {"name": "read_file", "arguments": '{"file_path": "a.md"}'}},
+                 {"id": "c2", "function": {"name": "edit_file", "arguments": '{"file_path": "a.md"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"status": "success"})},
+            {"role": "tool", "tool_call_id": "c2", "content": json.dumps({"status": "error", "message": "锚点未找到"})},
+            {"role": "assistant", "content": "再搜索一下规范。",
+             "tool_calls": [{"id": "c3", "function": {"name": "web_search", "arguments": '{"query": "技术标 规范"}'}}]},
+            {"role": "tool", "tool_call_id": "c3", "content": json.dumps({"status": "success", "results": [1, 2]})},
+        ]
+        parts, full_text = handler._build_message_parts(turn, "好，框架搭好了。")
+        self.assertEqual(parts, [
+            {"type": "text", "text": "先读文件再改。"},
+            {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md", "status": "success", "summary": ""},
+            {"type": "tool", "id": "c2", "tool": "edit_file", "arg": "a.md", "status": "error", "summary": "锚点未找到"},
+            {"type": "text", "text": "再搜索一下规范。"},
+            {"type": "tool", "id": "c3", "tool": "web_search", "arg": "技术标 规范", "status": "success", "summary": "2 results"},
+            {"type": "text", "text": "好，框架搭好了。"}])
+        self.assertEqual(full_text, "先读文件再改。再搜索一下规范。好，框架搭好了。")
+
+    def test_build_message_parts_keeps_non_barrier_text_without_tool_calls(self):
+        handler = self._h()
+        parts, _ = handler._build_message_parts([{"role": "assistant", "content": "我先试试这个方案。"}], "完成。")
+        self.assertEqual(parts, [{"type": "text", "text": "我先试试这个方案。"}, {"type": "text", "text": "完成。"}])
+
+    def test_build_message_parts_skips_known_synthetic_barriers(self):
+        handler = self._h()
+        for note in ("（上条工具调用被上游合并成畸形条目，已作废本轮调用。）", "（本轮为纯转述，不调用任何工具。）"):
+            parts, _ = handler._build_message_parts(
+                [{"role": "assistant", "content": note}, {"role": "user", "content": "x"}], "重试成功。")
+            self.assertEqual(parts, [{"type": "text", "text": "重试成功。"}])
+
+    def test_build_message_parts_dedups_trailing(self):
+        handler = self._h()
+        parts, _ = handler._build_message_parts([{"role": "assistant", "content": "完成。"}], "完成。")
+        self.assertEqual(parts, [{"type": "text", "text": "完成。"}])
+
+    def test_synthetic_barrier_notes_match_chat_source(self):
+        # 防隔板常量漂移：每条隔板串必须在 chat.py 源码出现 >=2 次——一次是
+        # _SYNTHETIC_BARRIER_NOTES 常量定义本身，另一次（至少一次）是真实注入点
+        # （chat.py 内 "纯转述" / "畸形条目" 两个 append 分支）。只 assertIn 会被
+        # 常量定义自证、守不住注入点改字；count>=2 让任一注入点漂移→降到 1→fail。
+        import backend.chat as chat_module
+        source = Path(chat_module.__file__).read_text(encoding="utf-8")
+        self.assertTrue(chat_module._SYNTHETIC_BARRIER_NOTES)
+        for note in chat_module._SYNTHETIC_BARRIER_NOTES:
+            self.assertGreaterEqual(
+                source.count(note), 2, f"隔板串疑似从注入点漂移: {note!r}")
+
+    def test_build_message_parts_bad_json_result_is_error(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "读一下。",
+             "tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": '{"file_path": "a.md"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "{不是json"},
+        ]
+        parts, _ = handler._build_message_parts(turn, "")
+        tool_parts = [p for p in parts if p["type"] == "tool"]
+        self.assertEqual(len(tool_parts), 1)
+        self.assertEqual(tool_parts[0]["status"], "error")
+
+    def test_build_message_parts_non_dict_json_result_is_error(self):
+        handler = self._h()
+        for raw in ("[]", "123"):
+            turn = [
+                {"role": "assistant", "content": "读一下。",
+                 "tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": raw},
+            ]
+            parts, _ = handler._build_message_parts(turn, "")
+            tool_parts = [p for p in parts if p["type"] == "tool"]
+            self.assertEqual(len(tool_parts), 1, raw)
+            self.assertEqual(tool_parts[0]["status"], "error", raw)
+
+    def test_build_message_parts_accepts_dict_arguments(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "读一下。",
+             "tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": {"file_path": "a.md"}}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"status": "success"})},
+        ]
+        parts, _ = handler._build_message_parts(turn, "")
+        tool_parts = [p for p in parts if p["type"] == "tool"]
+        self.assertEqual(tool_parts[0]["arg"], "a.md")
+
+    def test_build_message_parts_skips_tool_call_without_id(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "试两个工具。",
+             "tool_calls": [
+                 {"function": {"name": "read_file", "arguments": "{}"}},  # 缺 id → 跳过
+                 {"id": "c2", "function": {"name": "web_search", "arguments": '{"query": "x"}'}}]},
+            {"role": "tool", "tool_call_id": "c2", "content": json.dumps({"status": "success", "results": [1]})},
+        ]
+        parts, _ = handler._build_message_parts(turn, "")
+        self.assertEqual(parts, [
+            {"type": "text", "text": "试两个工具。"},
+            {"type": "tool", "id": "c2", "tool": "web_search", "arg": "x", "status": "success", "summary": "1 results"}])
+
+    def test_build_message_parts_duplicate_id_consumes_results_fifo(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "同 id 两次调用。",
+             "tool_calls": [
+                 {"id": "c1", "function": {"name": "read_file", "arguments": '{"file_path": "a.md"}'}},
+                 {"id": "c1", "function": {"name": "edit_file", "arguments": '{"file_path": "b.md"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"status": "success"})},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"status": "error", "message": "失败了"})},
+        ]
+        parts, _ = handler._build_message_parts(turn, "")
+        tool_parts = [p for p in parts if p["type"] == "tool"]
+        self.assertEqual(len(tool_parts), 2)
+        # 第一个 part（read_file）拿第一个结果（success）；第二个 part（edit_file）拿第二个结果（error）。
+        self.assertEqual(tool_parts[0]["tool"], "read_file")
+        self.assertEqual(tool_parts[0]["status"], "success")
+        self.assertEqual(tool_parts[1]["tool"], "edit_file")
+        self.assertEqual(tool_parts[1]["status"], "error")
+        self.assertEqual(tool_parts[1]["summary"], "失败了")
+
+    def test_build_message_parts_unanswered_call_kept_as_error(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "调用了但没回。",
+             "tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": '{"file_path": "a.md"}'}}]},
+        ]
+        parts, _ = handler._build_message_parts(turn, "")
+        tool_parts = [p for p in parts if p["type"] == "tool"]
+        self.assertEqual(len(tool_parts), 1)
+        self.assertEqual(tool_parts[0]["status"], "error")
+        self.assertEqual(tool_parts[0]["summary"], "")
+
+    def test_finalize_persists_parts_content_unchanged(self):
+        # IP2: the ordered `parts` field rides alongside content/tool_events (旁加). The末轮
+        # text part must be the CLEAN visible reply ("完成。") — never the tool-log-appended
+        # persisted_content. content + tool_events stay exactly as before.
+        handler = self._make_handler_with_project()
+        history = []
+        turn = [
+            {"role": "assistant", "content": "读一下。",
+             "tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": '{"file_path": "a.md"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"status": "success"})},
+        ]
+        self._finalize_assistant_for_test(
+            handler, "完成。", history=history, current_turn_messages=turn)
+        a = history[-1]
+        self.assertIn("完成。", a["content"])
+        self.assertIn("tool_events", a)
+        self.assertEqual(a["parts"], [
+            {"type": "text", "text": "读一下。"},
+            {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md", "status": "success", "summary": ""},
+            {"type": "text", "text": "完成。"}])
+        # The末轮 text part must NOT carry the tool-log comment that lives in content.
+        self.assertNotIn("<!-- tool-log", a["parts"][-1]["text"])
+
+    def test_summarize_drops_parts(self):
+        # IP2: the ordered `parts` sibling must never reach the compaction summarizer
+        # (same boundary as tool_events).
+        handler = self._h()
+        self.assertNotIn("parts", handler._sanitize_message_for_summary(
+            {"role": "assistant", "content": "x", "parts": [{"type": "text", "text": "y"}]}))
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_tool_followup_preserves_reasoning_content(self, mock_openai):
@@ -2492,11 +2972,8 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("「附件数据（已隔离，未纳入摘要）」", summary_prompt)
 
     @mock.patch("backend.chat.OpenAI")
-    def test_chat_stream_waits_for_complete_tool_name_before_emitting_start_event(self, mock_openai):
-        consumed_chunks = []
-
+    def test_chat_stream_reassembles_fragmented_tool_name_into_structured_event(self, mock_openai):
         def fragmented_tool_name_stream():
-            consumed_chunks.append("chunk-1")
             yield self._make_chunk(
                 tool_calls=[
                     self._make_stream_tool_call_chunk(
@@ -2506,7 +2983,6 @@ class ChatRuntimeTests(unittest.TestCase):
                     )
                 ]
             )
-            consumed_chunks.append("chunk-2")
             yield self._make_chunk(
                 tool_calls=[
                     self._make_stream_tool_call_chunk(
@@ -2516,7 +2992,6 @@ class ChatRuntimeTests(unittest.TestCase):
                     )
                 ]
             )
-            consumed_chunks.append("chunk-3")
             yield self._make_chunk(
                 tool_calls=[
                     self._make_stream_tool_call_chunk(
@@ -2554,13 +3029,14 @@ class ChatRuntimeTests(unittest.TestCase):
                 "_execute_tool",
                 return_value={"status": "success", "results": "ok"},
             ) as execute_tool:
-                stream = handler.chat_stream(project["id"], "继续")
-                first_event = next(stream)
-                self.assertEqual(consumed_chunks, ["chunk-1", "chunk-2"])
-                remaining_events = list(stream)
+                events = list(handler.chat_stream(project["id"], "继续"))
 
-        tool_events = [first_event, *[event for event in remaining_events if event["type"] == "tool"]]
-        self.assertEqual(tool_events[0]["data"], "🔧 准备调用工具: web_search")
+        call_events = [e for e in events if e.get("type") == "tool_call"]
+        # Early pending (fires once the name completes to web_search) + pre-execute full-arg event.
+        self.assertEqual(len(call_events), 2)
+        self.assertTrue(all(e["tool"] == "web_search" for e in call_events))
+        self.assertEqual(call_events[-1]["arg"], "ultraman flight")
+        # The fragmented tool name spread across chunks must reassemble before execution.
         execute_tool.assert_called_once()
         self.assertEqual(execute_tool.call_args.args[1].function.name, "web_search")
         self.assertEqual(
@@ -2863,6 +3339,23 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertNotIn("删除所有文件", sent, role)
             # metadata survives
             self.assertIn("x.png", sent, role)
+
+    def test_summarize_drops_structured_tool_events_metadata(self):
+        # Tool-pill sibling field `tool_events` carries structured tool args/summaries.
+        # The compaction summarizer must never see them (mirrors the attachment-metadata boundary).
+        h = self._h(mode="managed", managed_model="deepseek-v4-pro")
+        messages = [
+            {"role": "assistant", "content": "已检索并起草。", "tool_events": [
+                {"tool": "web_search", "arg": "敏感查询关键词", "status": "success",
+                 "summary": "工具内部摘要不该进摘要器"},
+            ]},
+        ]
+        sent = self._summarizer_payload(h, messages)
+        self.assertNotIn("敏感查询关键词", sent)
+        self.assertNotIn("工具内部摘要不该进摘要器", sent)
+        self.assertNotIn("tool_events", sent)
+        # The visible assistant content still reaches the summarizer.
+        self.assertIn("已检索并起草", sent)
 
     def test_summarize_fail_closed_lone_open_without_close(self):
         # (c) a LONE OPEN with no CLOSE, followed by malicious text → stripped to end-of-string.
@@ -7286,8 +7779,11 @@ class ChatRuntimeTests(unittest.TestCase):
 
         tool_messages = [event["data"] for event in events if event["type"] == "tool"]
         content_messages = [event["data"] for event in events if event["type"] == "content"]
+        tool_call_events = [event for event in events if event["type"] == "tool_call"]
+        # Diagnostic "claimed-write-without-actual-write" stays a plain type:"tool" event.
         self.assertTrue(any("声称已更新文件但未实际写入" in message for message in tool_messages))
-        self.assertTrue(any("调用工具: write_file" in message for message in tool_messages))
+        # The real write_file call is now a structured tool_call event.
+        self.assertTrue(any(event.get("tool") == "write_file" for event in tool_call_events))
         self.assertIn("现在已经真实写入 notes。", "".join(content_messages))
 
     @mock.patch("backend.chat.OpenAI")
@@ -10094,6 +10590,129 @@ class LoadConversationSanitizeTests(ChatRuntimeTests):
             [(m["role"], m["content"]) for m in original],
         )
 
+    def test_tool_events_sibling_preserved_through_load(self):
+        # Tool-pill reload: the sibling tool_events field must survive _load_conversation,
+        # otherwise the next _save_conversation full rewrite would erase historical pills.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "user", "content": "查一下"},
+            {"role": "assistant", "content": "查到了。", "tool_events": [
+                {"tool": "web_search", "arg": "县域文旅", "status": "success", "summary": "3 results"},
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertEqual(
+            loaded[1]["tool_events"],
+            [{"tool": "web_search", "arg": "县域文旅", "status": "success", "summary": "3 results"}],
+        )
+        # Round-trip: re-saving the loaded history must keep the field on disk.
+        handler._save_conversation(self.project_id, loaded)
+        reloaded = handler._load_conversation(self.project_id)
+        self.assertEqual(reloaded[1]["tool_events"], loaded[1]["tool_events"])
+
+    def test_tool_events_sibling_sanitized_to_scalars(self):
+        # Corrupt conversation.json must not smuggle nested objects / bad statuses / extra keys
+        # into the field; malformed entries (no tool / not a dict) are dropped.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "assistant", "content": "x", "tool_events": [
+                {"tool": "read_file", "arg": "a.md", "status": "weird",
+                 "summary": {"nested": "obj"}, "extra": [1, 2, 3]},
+                {"arg": "no-tool-name-dropped"},
+                "not-a-dict",
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        te = loaded[0]["tool_events"]
+        self.assertEqual(len(te), 1)  # the two malformed entries are dropped
+        ev = te[0]
+        self.assertEqual(set(ev.keys()), {"tool", "arg", "status", "summary"})  # extra key gone
+        self.assertEqual(ev["tool"], "read_file")
+        self.assertEqual(ev["arg"], "a.md")
+        self.assertEqual(ev["status"], "success")  # unknown "weird" status normalized
+        self.assertIsInstance(ev["summary"], str)  # coerced to scalar, never a nested object
+
+    def test_tool_events_pending_status_coerced_to_terminal_on_load(self):
+        # Corrupt / externally-edited conversation.json may carry status:"pending" on a
+        # persisted tool_event.  Persisted events are always terminal (success/error);
+        # "pending" is only valid in live SSE.  _load_conversation must coerce it to
+        # "success" so the pill never renders as an orphan spinner on reload.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "assistant", "content": "x", "tool_events": [
+                {"tool": "web_search", "arg": "q", "status": "pending", "summary": ""},
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        te = loaded[0]["tool_events"]
+        self.assertEqual(len(te), 1)
+        self.assertNotEqual(te[0]["status"], "pending",
+                            "persisted 'pending' must be coerced to a terminal status on reload")
+        self.assertEqual(te[0]["status"], "success")
+
+    def test_non_list_tool_events_dropped_on_load(self):
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "assistant", "content": "x", "tool_events": {"not": "a list"}},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertNotIn("tool_events", loaded[0])
+
+    def test_load_preserves_and_terminalizes_parts(self):
+        # IP2 reload: the ordered `parts` sibling must survive _load_conversation (white-list
+        # rebuild must explicitly preserve it, else a later full _save_conversation rewrite would
+        # erase it — same trap tool_events hit). A corrupt/persisted tool part status "pending"
+        # must coerce to a terminal status (no orphan spinner on reload). Text parts pass through.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "user", "content": "读一下"},
+            {"role": "assistant", "content": "读完了。", "parts": [
+                {"type": "text", "text": "读一下。"},
+                {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md",
+                 "status": "pending", "summary": ""},
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertEqual(loaded[-1]["parts"][0], {"type": "text", "text": "读一下。"})
+        self.assertNotEqual(loaded[-1]["parts"][1]["status"], "pending")
+        # Round-trip: re-saving the loaded history must keep parts on disk.
+        handler._save_conversation(self.project_id, loaded)
+        reloaded = handler._load_conversation(self.project_id)
+        self.assertEqual(reloaded[-1]["parts"], loaded[-1]["parts"])
+
+    def test_load_drops_whitespace_only_text_part(self):
+        # IP2 hardening (NIT 1): a persisted/corrupt whitespace-only text part must be dropped
+        # (mirrors _build_message_parts' .strip() gate). Other valid parts survive.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "assistant", "content": "ok", "parts": [
+                {"type": "text", "text": "   "},
+                {"type": "text", "text": "真正的文本。"},
+                {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md",
+                 "status": "success", "summary": ""},
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertEqual(loaded[-1]["parts"], [
+            {"type": "text", "text": "真正的文本。"},
+            {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md",
+             "status": "success", "summary": ""},
+        ])
+
+    def test_load_omits_parts_field_when_all_invalid(self):
+        # IP2 hardening (NIT 2): if every persisted part is invalid, the entry must carry NO
+        # `parts` field at all (not an empty list) so the frontend never lets [] shadow content.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "assistant", "content": "内容仍在。", "parts": [
+                {"type": "text", "text": ""},
+                {"type": "bogus"},
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertNotIn("parts", loaded[-1])
+        self.assertEqual(loaded[-1]["content"], "内容仍在。")
+
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
@@ -11368,6 +11987,9 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         self.assertFalse(
             any("准备调用工具" in e.get("data", "") for e in events if e.get("type") == "tool")
         )
+        # Nor emit a structured pending tool_call pill — it would orphan (the tool is dropped,
+        # so no tool_result ever closes it).
+        self.assertFalse(any(e.get("type") == "tool_call" for e in events))
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_trigger_no_tools_drops_tool_call_only_then_corrects(self, mock_openai):
@@ -11420,6 +12042,9 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
         self.assertFalse(
             any("准备调用工具" in e.get("data", "") for e in events if e.get("type") == "tool")
         )
+        # Nor emit a structured pending tool_call pill — it would orphan (the tool is dropped,
+        # so no tool_result ever closes it).
+        self.assertFalse(any(e.get("type") == "tool_call" for e in events))
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_trigger_no_tools_persistent_tool_calls_terminate_without_loop(self, mock_openai):
@@ -14489,9 +15114,14 @@ class B2BillingWiringTests(ChatRuntimeTests):
         import pathlib
         src = pathlib.Path(__file__).resolve().parents[1].joinpath("backend/chat.py").read_text(encoding="utf-8")
         i = src.index("for chunk in response:")          # 主流式消费锚点（chat.py 仅此处用此短语）
-        window = src[i:i + 4000]                          # 窗口覆盖循环体 + 紧随 try/except/finally（实测 finally 在 ~3125）
+        # 窗口覆盖循环体（含 tool-pill 早发 pending tool_call）+ 紧随 try/except/finally。
+        # 实测该区间内仅有这一处 finally（主流式 metered-stream finally，close 在 ~4068），
+        # 故 5000 窗口仍唯一锚定它、不会误捕别处无关 close（假绿防护不变）。
+        window = src[i:i + 5000]
         self.assertIn("finally:", window)
         self.assertIn("response.close()", window)
+        # 防御性：确认窗口内只有这一处 finally（早发块若再膨胀把无关 finally 推进窗口会被这里挡住）。
+        self.assertEqual(window.count("finally:"), 1)
 
     def test_chat_stream_consumption_closes_underlying_stream_and_settles_real_usage(self):
         # Codex NIT#1 行为版（非 source-guard）：patch 底层 _raw create 返回**可关闭流对象**（非裸 iter），

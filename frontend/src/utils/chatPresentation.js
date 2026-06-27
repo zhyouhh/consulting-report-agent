@@ -133,14 +133,9 @@ export function splitAssistantMessageBlocks(content = "") {
   };
 
   const appendNonThinkingSegment = (segment = "") => {
-    const lines = segment.split("\n");
-    for (const line of lines) {
-      const isToolLine = line.startsWith("🔧 调用工具:") || line.startsWith("✅ 结果:") || line.startsWith("⚠️ 结果:");
-      if (isToolLine) {
-        flushTextBuffer();
-        blocks.push({ type: "tool", content: line });
-        continue;
-      }
+    // 工具 pill 已迁到结构化 tool_call/tool_result 事件（msg.toolEvents），不再从 assistant
+    // content 文本里用 emoji 认工具行。诊断类 type:"tool" SSE 文本仍按普通文本渲染。
+    for (const line of segment.split("\n")) {
       textBuffer.push(line);
     }
   };
