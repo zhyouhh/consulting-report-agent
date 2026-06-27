@@ -9,6 +9,7 @@ import requests
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Dict, List
@@ -1538,42 +1539,50 @@ class ChatHandler:
 
     def _build_message_parts(self, current_turn_messages, assistant_message):
         """有序展示片段（文本/工具按时间穿插）+ 全轮可见文本（仅供前端复制）。
-        文本来源：每个 assistant 子消息 content（含 retry 候选叙述），跳已知合成隔板；末轮 visible_content 去重。
-        工具按 tool_call_id 配对。持久化 content/provider 不受影响。"""
-        results_by_id = {}
-        for msg in current_turn_messages or []:
-            if msg.get("role") != "tool":
-                continue
-            tc_id = msg.get("tool_call_id")
-            if not tc_id:
-                continue
-            try:
-                result = json.loads(msg.get("content") or "{}")
-                if not isinstance(result, dict):
-                    result = {"status": "error", "raw": str(result)}
-            except json.JSONDecodeError:
-                result = {"status": "error", "raw": msg.get("content")}
-            results_by_id[tc_id] = result
+
+        文本来源：每个 assistant 子消息 content（含 retry 候选叙述），跳已知合成隔板；末轮
+        visible_content 去重。工具配对**与 `_pair_tool_calls_with_results` 同语义**：单遍、
+        锚定 call site、按 tool_call_id FIFO pop（支持同 id 多次出现）；缺 id 的 tool_call 跳过、
+        orphan tool 结果跳过。持久化 content/provider 不受影响。
+
+        **与 `_build_tool_events` 的有意差异**：未应答的 tool_call（call 有、result 无，rare：
+        mid-turn abort）在这里保留为 `status="error"` 的工具 part——穿插时间线要忠实展示
+        「调用过但没回」，且与前端 live abort 把 pending→error 一致；`_build_tool_events` 走
+        `_pair_tool_calls_with_results` 则不产 pair、会省略。parts 是渲染主源，这点不同无碍。
+        """
         parts, text_segments = [], []
+        pending: "dict[str, deque[int]]" = {}  # tool_call_id → 工具 part 在 parts 里的下标队列（FIFO）
         for msg in current_turn_messages or []:
-            if msg.get("role") != "assistant":
-                continue
-            content = msg.get("content")
-            if (isinstance(content, str) and content.strip()
-                    and content not in _SYNTHETIC_BARRIER_NOTES):
-                parts.append({"type": "text", "text": content}); text_segments.append(content)
-            for tc in (msg.get("tool_calls") or []):
-                tc_id = tc.get("id") or ""
-                fn = tc.get("function") or {}
-                name, args = fn.get("name") or "", fn.get("arguments") or ""
-                result = results_by_id.get(tc_id)
-                if isinstance(result, dict):
-                    status = "success" if result.get("status") == "success" else "error"
-                    summary = self._sse_tool_summary(name, result)
-                else:
-                    status, summary = "error", ""
-                parts.append({"type": "tool", "id": tc_id, "tool": name,
-                              "arg": self._sse_tool_arg(name, args), "status": status, "summary": summary})
+            role = msg.get("role")
+            if role == "assistant":
+                content = msg.get("content")
+                if (isinstance(content, str) and content.strip()
+                        and content not in _SYNTHETIC_BARRIER_NOTES):
+                    parts.append({"type": "text", "text": content}); text_segments.append(content)
+                for tc in (msg.get("tool_calls") or []):
+                    tc_id = tc.get("id")
+                    if not tc_id:  # 对齐 _pair_tool_calls_with_results 的 `if tc_id:` 守卫
+                        continue
+                    fn = tc.get("function") or {}
+                    name, args = fn.get("name") or "", fn.get("arguments") or ""
+                    parts.append({"type": "tool", "id": tc_id, "tool": name,
+                                  "arg": self._sse_tool_arg(name, args),
+                                  "status": "error", "summary": ""})  # 占位，待 result 回填
+                    pending.setdefault(tc_id, deque()).append(len(parts) - 1)
+            elif role == "tool":
+                tc_id = msg.get("tool_call_id")
+                idx_q = pending.get(tc_id) if tc_id else None
+                if not idx_q:  # orphan result（无对应 call）跳过，对齐 helper
+                    continue
+                idx = idx_q.popleft()
+                try:
+                    result = json.loads(msg.get("content") or "{}")
+                    if not isinstance(result, dict):
+                        result = {"status": "error", "raw": str(result)}
+                except json.JSONDecodeError:
+                    result = {"status": "error", "raw": msg.get("content")}
+                parts[idx]["status"] = "success" if result.get("status") == "success" else "error"
+                parts[idx]["summary"] = self._sse_tool_summary(parts[idx]["tool"], result)
         if isinstance(assistant_message, str) and assistant_message.strip():
             if not (text_segments and text_segments[-1] == assistant_message):
                 parts.append({"type": "text", "text": assistant_message}); text_segments.append(assistant_message)

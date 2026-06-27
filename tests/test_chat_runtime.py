@@ -1101,13 +1101,98 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(parts, [{"type": "text", "text": "完成。"}])
 
     def test_synthetic_barrier_notes_match_chat_source(self):
-        # 防隔板常量漂移：_SYNTHETIC_BARRIER_NOTES 的每个字符串必须确实出现在 chat.py
-        # 真实注入分支里，否则 _build_message_parts 会漏剥某条合成隔板。
+        # 防隔板常量漂移：每条隔板串必须在 chat.py 源码出现 >=2 次——一次是
+        # _SYNTHETIC_BARRIER_NOTES 常量定义本身，另一次（至少一次）是真实注入点
+        # （chat.py 内 "纯转述" / "畸形条目" 两个 append 分支）。只 assertIn 会被
+        # 常量定义自证、守不住注入点改字；count>=2 让任一注入点漂移→降到 1→fail。
         import backend.chat as chat_module
         source = Path(chat_module.__file__).read_text(encoding="utf-8")
         self.assertTrue(chat_module._SYNTHETIC_BARRIER_NOTES)
         for note in chat_module._SYNTHETIC_BARRIER_NOTES:
-            self.assertIn(note, source)
+            self.assertGreaterEqual(
+                source.count(note), 2, f"隔板串疑似从注入点漂移: {note!r}")
+
+    def test_build_message_parts_bad_json_result_is_error(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "读一下。",
+             "tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": '{"file_path": "a.md"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "{不是json"},
+        ]
+        parts, _ = handler._build_message_parts(turn, "")
+        tool_parts = [p for p in parts if p["type"] == "tool"]
+        self.assertEqual(len(tool_parts), 1)
+        self.assertEqual(tool_parts[0]["status"], "error")
+
+    def test_build_message_parts_non_dict_json_result_is_error(self):
+        handler = self._h()
+        for raw in ("[]", "123"):
+            turn = [
+                {"role": "assistant", "content": "读一下。",
+                 "tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": raw},
+            ]
+            parts, _ = handler._build_message_parts(turn, "")
+            tool_parts = [p for p in parts if p["type"] == "tool"]
+            self.assertEqual(len(tool_parts), 1, raw)
+            self.assertEqual(tool_parts[0]["status"], "error", raw)
+
+    def test_build_message_parts_accepts_dict_arguments(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "读一下。",
+             "tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": {"file_path": "a.md"}}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"status": "success"})},
+        ]
+        parts, _ = handler._build_message_parts(turn, "")
+        tool_parts = [p for p in parts if p["type"] == "tool"]
+        self.assertEqual(tool_parts[0]["arg"], "a.md")
+
+    def test_build_message_parts_skips_tool_call_without_id(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "试两个工具。",
+             "tool_calls": [
+                 {"function": {"name": "read_file", "arguments": "{}"}},  # 缺 id → 跳过
+                 {"id": "c2", "function": {"name": "web_search", "arguments": '{"query": "x"}'}}]},
+            {"role": "tool", "tool_call_id": "c2", "content": json.dumps({"status": "success", "results": [1]})},
+        ]
+        parts, _ = handler._build_message_parts(turn, "")
+        self.assertEqual(parts, [
+            {"type": "text", "text": "试两个工具。"},
+            {"type": "tool", "id": "c2", "tool": "web_search", "arg": "x", "status": "success", "summary": "1 results"}])
+
+    def test_build_message_parts_duplicate_id_consumes_results_fifo(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "同 id 两次调用。",
+             "tool_calls": [
+                 {"id": "c1", "function": {"name": "read_file", "arguments": '{"file_path": "a.md"}'}},
+                 {"id": "c1", "function": {"name": "edit_file", "arguments": '{"file_path": "b.md"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"status": "success"})},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"status": "error", "message": "失败了"})},
+        ]
+        parts, _ = handler._build_message_parts(turn, "")
+        tool_parts = [p for p in parts if p["type"] == "tool"]
+        self.assertEqual(len(tool_parts), 2)
+        # 第一个 part（read_file）拿第一个结果（success）；第二个 part（edit_file）拿第二个结果（error）。
+        self.assertEqual(tool_parts[0]["tool"], "read_file")
+        self.assertEqual(tool_parts[0]["status"], "success")
+        self.assertEqual(tool_parts[1]["tool"], "edit_file")
+        self.assertEqual(tool_parts[1]["status"], "error")
+        self.assertEqual(tool_parts[1]["summary"], "失败了")
+
+    def test_build_message_parts_unanswered_call_kept_as_error(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "调用了但没回。",
+             "tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": '{"file_path": "a.md"}'}}]},
+        ]
+        parts, _ = handler._build_message_parts(turn, "")
+        tool_parts = [p for p in parts if p["type"] == "tool"]
+        self.assertEqual(len(tool_parts), 1)
+        self.assertEqual(tool_parts[0]["status"], "error")
+        self.assertEqual(tool_parts[0]["summary"], "")
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_tool_followup_preserves_reasoning_content(self, mock_openai):
