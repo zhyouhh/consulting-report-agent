@@ -616,6 +616,8 @@ const ChatPanel = forwardRef(function ChatPanel({
                 }
                 // 防御性：万一未来某后端路径在 tool_call 后发裸 error 不先 flush 收尾 tool_result，
                 // 前端自洽地收尾仍 pending 的工具 pill（当前后端先 flush，故多数情况是 no-op）。
+                // 有意差异：content 替换成纯错误（content=provider/compaction 历史、维持旧错误语义、装配零改动），
+                // 而 parts 追加错误段保留已流式叙述——parts 是 IP6 后的渲染/复制时间线、保留叙述+错误更忠实。
                 setMessages(prev => prev.map(m =>
                   m.id === assistantId
                     ? { ...m, content: `错误: ${parsed.data}`, toolEvents: closePendingToolEvents(m.toolEvents, '生成出错'), parts: closePendingToolParts(appendErrorPart(m.parts || [], `错误: ${parsed.data}`), '生成出错') }
@@ -652,6 +654,7 @@ const ChatPanel = forwardRef(function ChatPanel({
         }
         if (canApplyStreamResponse) {
           // 网络 / fetch 失败：同样收尾仍 pending 的工具 pill（断连后端不发收尾 tool_result）。
+          // 有意差异（同 in-stream error）：content 替换成纯错误维持旧语义，parts 追加错误段保留已流式叙述。
           setMessages(prev => prev.map(m =>
             m.id === assistantId
               ? { ...m, content: `API调用失败: ${error.message}`, toolEvents: closePendingToolEvents(m.toolEvents, '连接中断'), parts: closePendingToolParts(appendErrorPart(m.parts || [], `API调用失败: ${error.message}`), '连接中断') }
