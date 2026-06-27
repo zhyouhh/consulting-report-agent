@@ -304,10 +304,12 @@ class SkillEngine:
     # 中文操控词同时进 _METHODOLOGY_DANGER_NORMALIZED（红队 v5：「推-进」「覆(*)写」借连字符/括号拆词绕过）。
     _METHODOLOGY_DANGER_SUBSTRINGS = (
         "__", "<stage", "stage-ack", "ignore",
-        "系统提示", "系統提示", "忽略", "覆写", "覆寫", "覆盖",
+        "系统提示", "系統提示", "忽略", "覆写", "覆寫", "覆盖", "覆蓋",
         # 中文阶段操控 / 注入指令 / 控制语义词（不含框架·业务常用词：分析/模型/矩阵/交付/阶段）
         "推进", "回退", "归档", "无视", "跳过", "停止", "立即", "删除",
         "设为", "标记为", "指令", "请你", "门禁", "检查点",
+        # 繁体变体（NFKC 不做简繁转换，须显式覆盖；红队 v5）。回退/停止/立即/指令/忽略 简繁同形不重列。
+        "推進", "歸檔", "無視", "跳過", "刪除", "設為", "標記為", "請你", "門禁", "檢查點",
     )
     # 归一化（NFKC+casefold+删 Cf 格式字符+去空白/分隔符/强调标记/括号）后子串命中即 malformed：工具名 +
     # 全部 6 个 STAGE_CHECKPOINT_KEYS 的去分隔符形态 + 英文操作词 + 中文操控词。防 "advance stage" /
@@ -326,9 +328,11 @@ class SkillEngine:
         "override", "prompt", "ignore",
         # 中文操控/注入/控制语义词归一化形态（红队 v5：防括号/连字符/* 拆词绕过 raw 子串查；与
         # _METHODOLOGY_DANGER_SUBSTRINGS 的原样查并存）。不含 "__"（归一化成空串会全命中）。
-        "系统提示", "系統提示", "忽略", "覆写", "覆寫", "覆盖",
+        # 简繁都列（NFKC 不做简繁转换）。
+        "系统提示", "系統提示", "忽略", "覆写", "覆寫", "覆盖", "覆蓋",
         "推进", "回退", "归档", "无视", "跳过", "停止", "立即", "删除",
         "设为", "标记为", "指令", "请你", "门禁", "检查点",
+        "推進", "歸檔", "無視", "跳過", "刪除", "設為", "標記為", "請你", "門禁", "檢查點",
     )
 
     REPORT_DRAFT_PATH = "content/report_draft_v1.md"
@@ -2698,15 +2702,21 @@ class SkillEngine:
         if not match:
             return ("missing", [])
         raw_value = match.group(1).strip()
-        # 危险词先行（完整 raw_value，未剥括号、未截断）——spec §11「含危险词→malformed，不剥」。
-        # 原样 casefold 子串挡注入符号/中文操控词；归一化（去空白+分隔符）子串挡工具名/checkpoint
-        # 的「advance stage」「advance-stage」等分隔符变体（红队 v2）。
-        lowered_raw = raw_value.casefold()
-        normalized_raw = self._normalize_for_danger(raw_value)
-        if any(bad in lowered_raw for bad in self._METHODOLOGY_DANGER_SUBSTRINGS) or any(
-            bad in normalized_raw for bad in self._METHODOLOGY_DANGER_NORMALIZED
-        ):
-            return ("malformed", [])
+        # 危险词先行（未截断）——spec §11「含危险词→malformed，不剥绕过」。在**两种形态**双查，
+        # 闭合 parse 的剥括号/拆词能力（红队 v2/v5）：
+        #   ① 完整 raw_value：原样 casefold 子串挡注入符号/中文操控词；归一化（去空白/分隔符/*/括号字符）
+        #      子串挡「advance stage」「advance-stage」「覆(*)写」及**藏在括号内**的危险词（保留括号内容）。
+        #   ② 剥括号跨度后的 raw_value（镜像 parse 的 `re.sub([（(].*?[)）])`）：挡借**括号+填充内容**
+        #      拆词的工具名/checkpoint，如 `write(x)file`→剥成 `writefile`、`stage(x)-ack`→`stage-ack`。
+        # 两形态合起来覆盖「危险词在括号内」与「危险词被括号拆开」两类，缺一即漏（红队 v5）。
+        paren_stripped = re.sub(r"[（(].*?[)）]", "", raw_value)
+        for candidate in (raw_value, paren_stripped):
+            lowered = candidate.casefold()
+            normalized = self._normalize_for_danger(candidate)
+            if any(bad in lowered for bad in self._METHODOLOGY_DANGER_SUBSTRINGS) or any(
+                bad in normalized for bad in self._METHODOLOGY_DANGER_NORMALIZED
+            ):
+                return ("malformed", [])
         # 仅顿号/中英逗号分隔；不用 "/"（TAM-SAM-SOM、BCG/GE、金字塔原理/MECE 内部含 "/"）。
         tokens = [t.strip() for t in re.split(r"[、,，]+", raw_value) if t.strip()]
         if not tokens:

@@ -2859,18 +2859,44 @@ class SkillEngineTests(unittest.TestCase):
                 "方法论框架：append()report()draft\n",
                 "方法论框架：s0()interview()done\n",
                 "方法论框架：pro()mpt\n",
+                # 有内容括号拆词（parse 剥括号跨度含内容 → 危险检测须在剥括号形态上复查；红队 v5）
+                "方法论框架：write(x)file\n",
+                "方法论框架：adv(x)ance(y)stage\n",
+                "方法论框架：append(foo)report(bar)draft\n",
+                "方法论框架：stage(x)-ack\n",
+                "方法论框架：ig(x)nore\n",
+                "方法论框架：推(这段删掉)进\n",
                 # 连字符/括号/* 拆中文操控词
                 "方法论框架：推-进\n",
                 "方法论框架：忽-略\n",
                 "方法论框架：检-查-点\n",
                 "方法论框架：覆(*)写\n",
                 "方法论框架：覆(*)寫\n",
-                # 危险词在第 9+ token 借空括号拆词（raw 层全量检测，不被 tokens[:8] 截断绕过）
+                # 繁体变体（NFKC 不做简繁转换，须显式覆盖；红队 v5）
+                "方法论框架：歸檔\n",
+                "方法论框架：無視\n",
+                "方法论框架：刪除\n",
+                "方法论框架：標記為\n",
+                "方法论框架：請你\n",
+                "方法论框架：門禁\n",
+                "方法论框架：檢查點\n",
+                "方法论框架：推進\n",
+                "方法论框架：跳過\n",
+                "方法论框架：設為\n",
+                "方法论框架：覆蓋\n",
+                # 危险词在第 9+ token 借括号拆词（raw 层全量检测，不被 tokens[:8] 截断绕过）
                 "方法论框架：SWOT、PEST、MECE、RACI、SMART、价值链、五力、对标分析、adv()ance()stage\n",
+                "方法论框架：SWOT、PEST、MECE、RACI、SMART、价值链、五力、对标分析、adv(x)ance(y)stage\n",
             ):
                 state, selected = engine.parse_and_sanitize_methodology(evil)
                 self.assertEqual(state, "malformed", evil)
                 self.assertEqual(selected, [], evil)
+            # 误杀回归：合法框架带括号注释（内容非危险词）仍 parsed，括号被剥成展示名
+            state, selected = engine.parse_and_sanitize_methodology(
+                "方法论框架：SWOT（优势分析）、波特五力\n"
+            )
+            self.assertEqual(state, "parsed")
+            self.assertEqual(set(selected), {"SWOT", "波特五力"})
 
     def test_parse_methodology_malformed_on_injection_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
