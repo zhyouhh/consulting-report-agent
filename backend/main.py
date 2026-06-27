@@ -1290,7 +1290,15 @@ async def get_conversation(scope: ProjectScope = Depends(require_project)):
                 for i, e in enumerate(raw_events)
                 if isinstance(e, dict) and e.get("tool")
             ]
-            sanitized.append({**m, "content": cleaned, "tool_events": tool_events})
+            raw_parts = m.get("parts") if isinstance(m.get("parts"), list) else None
+            cleaned_parts = None
+            if raw_parts is not None:
+                cleaned_parts = [q for q in (ChatHandler._sanitize_part_scalar(p) for p in raw_parts) if q]
+            entry = {**m, "content": cleaned, "tool_events": tool_events}
+            entry.pop("parts", None)
+            if cleaned_parts:
+                entry["parts"] = cleaned_parts
+            sanitized.append(entry)
         else:
             sanitized.append(m)
     return {"messages": sanitized}
