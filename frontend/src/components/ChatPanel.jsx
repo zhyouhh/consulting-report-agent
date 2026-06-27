@@ -6,6 +6,14 @@ import { showError, showInfo, showSuccess } from '../utils/toast'
 import { buildChatRequest, buildTransientAttachmentsPayload, conversionStatusChip, toggleMaterialSelection } from '../utils/chatMaterials'
 import { applyAttachmentTranscribed, historyTranscriptIndicators } from '../utils/sseEvents'
 import { closePendingToolEvents, reduceToolEvent } from '../utils/toolEvents'
+// 时间线穿插：每个写 msg.content 的 SSE handler 旁建 msg.parts（文本/工具按到达顺序交错）。
+import {
+  appendErrorPart,
+  applyToolEventToParts,
+  closePendingToolParts,
+  mutateCurrentTextPart,
+  partsToText,
+} from '../utils/messageParts'
 import {
   createPendingTriggerItem,
   dequeuePendingTrigger,
@@ -157,6 +165,9 @@ const ChatPanel = forwardRef(function ChatPanel({
                 id: `${Date.now()}-${i}`,
                 role: m.role,
                 content: m.content,
+                // 时间线穿插 reload：后端 /conversation 给 assistant 返回有序 parts（文本/工具交错）；
+                // 老消息无字段→undefined（IP6 渲染回退到 content/toolEvents，不回归）。
+                parts: m.parts,
                 // Tool-pill reload: 后端 /conversation 给每条 assistant 返回结构化 tool_events
                 // 并列字段（老消息无字段→[]），直接进 msg.toolEvents 由 ToolCallList 渲染。
                 toolEvents: m.tool_events || [],
@@ -247,7 +258,8 @@ const ChatPanel = forwardRef(function ChatPanel({
     const pending = pendingContentRef.current.get(assistantId) || ''
     if (pending) {
       setMessages(prev => prev.map(message =>
-        message.id === assistantId ? { ...message, content: message.content + pending } : message
+        // 旁建 parts：本次冲刷出去的同一段 `pending` 并入当前 text 片段（content 写入不变）。
+        message.id === assistantId ? { ...message, content: message.content + pending, parts: mutateCurrentTextPart(message.parts || [], t => t + pending) } : message
       ))
     }
     clearStreamingQueue(assistantId)
@@ -281,7 +293,8 @@ const ChatPanel = forwardRef(function ChatPanel({
       const { emitted, remaining } = takeStreamingTextSlice(pending, 8)
       pendingContentRef.current.set(assistantId, remaining)
       setMessages(prev => prev.map(message =>
-        message.id === assistantId ? { ...message, content: message.content + emitted } : message
+        // 旁建 parts：本次切片冲出的同一段 `emitted` 并入当前 text 片段（content 写入不变）。
+        message.id === assistantId ? { ...message, content: message.content + emitted, parts: mutateCurrentTextPart(message.parts || [], t => t + emitted) } : message
       ))
 
       if (!remaining) {
@@ -316,8 +329,9 @@ const ChatPanel = forwardRef(function ChatPanel({
     }
   }
 
-  const copyMessage = (content) => {
-    const cleanText = getCopyableAssistantMessageText(content || '')
+  const copyMessage = (message) => {
+    // parts 非空时复制源用有序片段拼回的文本，否则回退 content；两者都仍过 strip（含 thinking/tool-log 标记）。
+    const cleanText = getCopyableAssistantMessageText(message?.parts?.length ? partsToText(message.parts) : (message?.content || ''))
     navigator.clipboard.writeText(cleanText).then(() => {
       // 简单提示，不打断用户
     }).catch(() => {
@@ -533,7 +547,7 @@ const ChatPanel = forwardRef(function ChatPanel({
                   break
                 }
                 setMessages(prev => prev.map(m =>
-                  m.id === assistantId ? { ...m, content: appendThinkingEventContent(m.content, parsed.data) } : m
+                  m.id === assistantId ? { ...m, content: appendThinkingEventContent(m.content, parsed.data), parts: mutateCurrentTextPart(m.parts || [], t => appendThinkingEventContent(t, parsed.data)) } : m
                 ))
               } else if (parsed.type === 'tool') {
                 if (shouldFlushStreamingQueueImmediately('tool')) {
@@ -544,7 +558,7 @@ const ChatPanel = forwardRef(function ChatPanel({
                   break
                 }
                 setMessages(prev => prev.map(m =>
-                  m.id === assistantId ? { ...m, content: appendToolEventContent(m.content, parsed.data) } : m
+                  m.id === assistantId ? { ...m, content: appendToolEventContent(m.content, parsed.data), parts: mutateCurrentTextPart(m.parts || [], t => appendToolEventContent(t, parsed.data)) } : m
                 ))
               } else if (parsed.type === 'tool_call' || parsed.type === 'tool_result') {
                 // 结构化工具事件（tool-pill）：tool_call 到来时先冲刷已排队的流式文本，
@@ -557,7 +571,8 @@ const ChatPanel = forwardRef(function ChatPanel({
                   break
                 }
                 setMessages(prev => prev.map(m =>
-                  m.id === assistantId ? { ...m, toolEvents: reduceToolEvent(m.toolEvents || [], parsed) } : m
+                  // 旁建 parts：同一事件经 applyToolEventToParts 插入/更新有序片段（与 toolEvents 并行、互不影响）。
+                  m.id === assistantId ? { ...m, toolEvents: reduceToolEvent(m.toolEvents || [], parsed), parts: applyToolEventToParts(m.parts || [], parsed) } : m
                 ))
               } else if (parsed.type === 'usage') {
                 if (!isActiveProjectRequest(requestProjectId)) {
@@ -603,7 +618,7 @@ const ChatPanel = forwardRef(function ChatPanel({
                 // 前端自洽地收尾仍 pending 的工具 pill（当前后端先 flush，故多数情况是 no-op）。
                 setMessages(prev => prev.map(m =>
                   m.id === assistantId
-                    ? { ...m, content: `错误: ${parsed.data}`, toolEvents: closePendingToolEvents(m.toolEvents, '生成出错') }
+                    ? { ...m, content: `错误: ${parsed.data}`, toolEvents: closePendingToolEvents(m.toolEvents, '生成出错'), parts: closePendingToolParts(appendErrorPart(m.parts || [], `错误: ${parsed.data}`), '生成出错') }
                     : m
                 ))
               }
@@ -625,7 +640,8 @@ const ChatPanel = forwardRef(function ChatPanel({
           // 否则会留永久转圈 pill），其它字段不动。
           setMessages(prev => prev.map(m =>
             m.id === assistantId
-              ? { ...m, content: m.content || '已停止生成', toolEvents: closePendingToolEvents(m.toolEvents, '已停止生成') }
+              // parts 同样仅当无可见文本时才追加「已停止生成」（有文本则 displayText='' → appendErrorPart no-op）。
+              ? { ...m, content: m.content || '已停止生成', toolEvents: closePendingToolEvents(m.toolEvents, '已停止生成'), parts: closePendingToolParts(appendErrorPart(m.parts || [], (partsToText(m.parts) || m.content) ? '' : '已停止生成'), '已停止生成') }
               : m
           ))
         }
@@ -638,7 +654,7 @@ const ChatPanel = forwardRef(function ChatPanel({
           // 网络 / fetch 失败：同样收尾仍 pending 的工具 pill（断连后端不发收尾 tool_result）。
           setMessages(prev => prev.map(m =>
             m.id === assistantId
-              ? { ...m, content: `API调用失败: ${error.message}`, toolEvents: closePendingToolEvents(m.toolEvents, '连接中断') }
+              ? { ...m, content: `API调用失败: ${error.message}`, toolEvents: closePendingToolEvents(m.toolEvents, '连接中断'), parts: closePendingToolParts(appendErrorPart(m.parts || [], `API调用失败: ${error.message}`), '连接中断') }
               : m
           ))
         }
@@ -1008,7 +1024,7 @@ const ChatPanel = forwardRef(function ChatPanel({
                   ))}
                 </div>
                 <button
-                  onClick={() => copyMessage(msg.content)}
+                  onClick={() => copyMessage(msg)}
                   className="absolute top-0 right-0 opacity-0 group-hover:opacity-100 text-11 px-2 py-1 bg-card2 border border-border rounded-tag text-t2 hover:text-text transition-opacity"
                   title="复制"
                 >
@@ -1025,7 +1041,7 @@ const ChatPanel = forwardRef(function ChatPanel({
                 {attachmentIndicators}
                 <div className="whitespace-pre-wrap">{msg.content}</div>
                 <button
-                  onClick={() => copyMessage(msg.content)}
+                  onClick={() => copyMessage(msg)}
                   className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 text-11 px-2 py-1 bg-white/15 rounded-tag text-white hover:bg-white/25 transition-opacity"
                   title="复制"
                 >
