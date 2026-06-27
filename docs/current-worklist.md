@@ -9,7 +9,9 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
-最后更新：2026-06-28（**工具调用卡片 pill + 时间线穿插 + R5 方法论 denylist 加固 ✅ 全部实施完成 + 每 task Codex 双轨审 + 整分支红队终审 SHIP + ✅ merge main `fff39ca`（--no-ff）——待 push origin + 部署 kr-web-01**，分支 `feat/tool-call-pill-redesign` 保留）：
+最后更新：2026-06-28（**工具调用卡片 pill + 时间线穿插 + R5 方法论 denylist 加固 ✅ 全部实施完成 + 每 task Codex 双轨审 + 整分支红队终审 SHIP + ✅ merge main `fff39ca`（--no-ff）+ ✅ push origin（`f56e765`）+ ✅ 部署上线 kr-web-01（公网 smoke 全过）**，分支 `feat/tool-call-pill-redesign` 保留）：
+
+**✅ 部署完成（2026-06-28）**：push origin `4b32368..f56e765` → 服务器 `git fetch + reset --hard origin/main`（后端 chat.py/main.py/skill.py 取齐到 `f56e765`、realign 工作树）+ 前端 dist tar 推送原子 swap（bundle `index-DYapXmNM.js`，`dist.old` 留回滚）+ 重启 systemd 单 worker（3s bind、startup journal 无 traceback）。公网 `https://consulting.z0y0h.work` 经 CF 验证：health 200 / SPA shell `no-cache` 引用新 bundle / 新 bundle 资产 200·1066921 bytes。同事可直接用。
 
 **① 工具 pill 特性（上批，15 commit `4111d39`..`501e9f7`）**：结构化 SSE `tool_call`/`tool_result`（带 id，独立审查也发 id）+ 持久化 `tool_events` 并列字段（`_build_tool_events` 写 / `_load_conversation` 显式保留+净化 / `GET /conversation` 净化返回 / `_to_provider_message` 只回 `{role,content}`）+ 前端共享 `ToolCallPill`/`ToolCallList`（无 emoji、单行+摘要 click-to-expand）。
 
@@ -19,7 +21,7 @@
 
 **验证**：后端 **1488 passed**（4 mac-realpath 环境差异）/ 前端 **459 / 0** / build 绿（bundle `index-DYapXmNM.js`）/ DeepSeek-compat 8 passed / 禁改区 chat.py 干净（仅注释提及）/ 整分支红队 **SHIP**（零 BLOCKER，验证 provider 边界/压缩 pop/租户门/parts 净化/不双渲染/无 dangerouslySetInnerHTML/方法论加固）。
 
-**下一步**：push origin main（含 2 个上会话未 push 的 local-main 提交：`7b94ea7` pill plan + `623ff0f` neat-freak sync）→ 部署 kr-web-01（前端 dist swap `index-DYapXmNM.js` + 后端 file-push `chat.py`/`main.py`/`skill.py` + 重启 systemd 单 worker；**push 后服务器 `git reset --hard origin/main` realign**——服务器工作树领先 HEAD，见 [[w2c-deploy-status]]）。见 memory [[tool-call-pill-status]]。
+**全线收口完成**（实施 → 双轨审 → 红队 SHIP → merge → neat-freak → push → 部署上线）。pre-existing follow-up（非阻塞、桌面单用户低优先级）：配额中断轮/空文本轮不持久化（reload 不还原该轮 parts）。见 memory [[tool-call-pill-status]] / [[w2c-deploy-status]]。
 
 最后更新：2026-06-26（**redesign 三处原型差距 follow-up ✅ 完成 + 前端+后端部署上线 kr-web-01**——分支 `feat/frontend-redesign-followups`，commit `8e14eab`，**待 merge main + push**）：用户本地对照原型 `design_handoff_frontend_redesign/` 发现翻新后 3 处没改完：① **用户管理表格**（`AdminPanel` `<table>`→5 列 grid `1.6/1/1/1/1.3fr` + `bg-card2` 表头 11px/600 + 状态色标[正常 `text-success`/已禁用 `text-warn`] + 操作右对齐 + 等宽数字；**保留可编辑额度 input**[用户硬要求]，补 ARIA `role=table/row/columnheader/cell` + input `aria-label`）；② **侧栏副标题**改「报告类型 · 阶段名」（`Sidebar` 用 `getStageName`，活动项目用实时 `workspace.stage_code`、其余用 `list_projects` 新返回的 `stage_code`、都缺只显示类型；**后端 `skill.py:list_projects` 加 `stage_code`＝本批唯一后端改动**，与 `get_workspace_summary` 同源 `_infer_stage_state`、advisory 降级 None；`App.jsx` `currentStageCode` 由 `workspaceProjectId === currentProjectId` 守卫，防切项目时旧阶段瞬时覆盖[codex 红队挖的真 bug]）；③ **新建报告弹窗**补标题「新建报告」+ 副标题 + 四字段 `<label htmlFor>`+id。Codex **spec+quality 双轨独立审 + 对抗式红队轮 全 APPROVED**（红队挖 3 a11y/正确性 NIT 全修）；前端 **418 测试 + build 绿**（后端 2 个 mac realpath 失败属环境差异、非本批）。**部署**：前端 dist（bundle `index-C7_xlMbU.js`）+ **kr-web-01 首次后端 redeploy**（file-push `backend/skill.py` + 重启 systemd 单 worker；服务器 git 原在 `8a4e042`、dist 早被换成 redesign bundle，本批 skill.py 唯一后端 delta 干净 file-push，**服务器工作树现领先 HEAD，待 push 后 `git reset --hard origin/main` realign**），公网 `https://consulting.z0y0h.work` 经 CF 验证 200 + served 新 bundle + no-cache shell + journal 无错。架构/不变式记项目 CLAUDE.md「## redesign 三处原型差距 follow-up」段。见 memory [[frontend-redesign-status]] + [[w2c-deploy-status]]。
 
