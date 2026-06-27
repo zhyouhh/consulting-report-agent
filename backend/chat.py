@@ -906,6 +906,8 @@ class ChatHandler:
         # The structured tool_events sibling (tool args/summaries) must never reach the
         # summarizer — same boundary as attachment metadata above.
         sanitized.pop("tool_events", None)
+        # The ordered `parts` timeline sibling carries the same tool args/summaries — drop it too.
+        sanitized.pop("parts", None)
         if "attached_material_ids" in sanitized:
             ids = sanitized.get("attached_material_ids") or []
             sanitized["attached_material_ids"] = len(ids)
@@ -6191,6 +6193,30 @@ class ChatHandler:
         text = unescape(text)
         return " ".join(text.split())
 
+    @staticmethod
+    def _sanitize_part_scalar(p):
+        """IP2 reload: coerce one persisted timeline part to a clean scalar dict (or None to drop).
+
+        Text part → {type,text} only when text is a non-empty str. Tool part → {type,id,tool,arg,
+        status,summary} with tool required; status coerced to a terminal value (success/error) so a
+        persisted/corrupt "pending" never renders as an orphan spinner. Anything else → None.
+        """
+        if not isinstance(p, dict):
+            return None
+        if p.get("type") == "text":
+            t = p.get("text")
+            return {"type": "text", "text": t} if isinstance(t, str) and t else None
+        if p.get("type") == "tool":
+            tool = str(p.get("tool") or "")
+            if not tool:
+                return None
+            st = p.get("status")
+            return {"type": "tool", "id": str(p.get("id") or ""), "tool": tool,
+                    "arg": str(p.get("arg") or ""),
+                    "status": st if st in ("success", "error") else "success",
+                    "summary": str(p.get("summary") or "")}
+        return None
+
     def _load_conversation(self, project_id: str) -> List[Dict]:
         """加载对话历史。仅持久化 user/assistant 显示消息。"""
         project_path = self.skill_engine.get_project_path(project_id)
@@ -6229,6 +6255,16 @@ class ChatHandler:
                     "status": e.get("status") if e.get("status") in ("success", "error") else "success",
                     "summary": str(e.get("summary") or ""),
                 } for e in raw_te if isinstance(e, dict) and e.get("tool")]
+            # IP2 reload: preserve the ordered `parts` sibling the same way as tool_events — the
+            # white-list rebuild must explicitly carry it, else a later full _save_conversation
+            # rewrite would erase it. Accept ONLY a list; rebuild scalar-by-scalar (a corrupt
+            # conversation.json must not smuggle nested objects into the frontend or the next save;
+            # any non-terminal/unknown tool status coerces to a terminal one — no orphan spinner).
+            raw_parts = message.get("parts")
+            if isinstance(raw_parts, list):
+                entry["parts"] = [
+                    q for q in (self._sanitize_part_scalar(p) for p in raw_parts) if q
+                ]
             client_message_id = message.get("client_message_id")
             if client_message_id is not None:
                 entry["client_message_id"] = client_message_id
@@ -6959,12 +6995,23 @@ class ChatHandler:
                 current_turn_messages,
             )
         tool_events = self._build_tool_events(current_turn_messages) if current_turn_messages else []
+        # IP2: ordered text/tool timeline parts ride alongside content/tool_events as a sibling
+        # field. Built from the SAME current_turn_messages with the CLEAN visible reply
+        # (visible_content, NOT the tool-log-appended persisted_content) as the末轮 text segment.
+        # Like tool_events: gated on current_turn_messages, never merged into content, never sent
+        # to the provider (_to_provider_message returns {role,content}).
+        parts, _full_text = (
+            self._build_message_parts(current_turn_messages, visible_content)
+            if current_turn_messages else ([], "")
+        )
 
         # Step 6: persist this turn. tool_events rides alongside content as a sibling field
         # (never merged into content, never sent to the provider — see _to_provider_message).
         assistant_msg = {"role": "assistant", "content": persisted_content}
         if tool_events:
             assistant_msg["tool_events"] = tool_events
+        if parts:
+            assistant_msg["parts"] = parts
         if self._turn_context.get("system_triggered"):
             history.extend([assistant_msg])
         else:

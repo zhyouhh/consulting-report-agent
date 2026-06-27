@@ -1194,6 +1194,36 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(tool_parts[0]["status"], "error")
         self.assertEqual(tool_parts[0]["summary"], "")
 
+    def test_finalize_persists_parts_content_unchanged(self):
+        # IP2: the ordered `parts` field rides alongside content/tool_events (旁加). The末轮
+        # text part must be the CLEAN visible reply ("完成。") — never the tool-log-appended
+        # persisted_content. content + tool_events stay exactly as before.
+        handler = self._make_handler_with_project()
+        history = []
+        turn = [
+            {"role": "assistant", "content": "读一下。",
+             "tool_calls": [{"id": "c1", "function": {"name": "read_file", "arguments": '{"file_path": "a.md"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"status": "success"})},
+        ]
+        self._finalize_assistant_for_test(
+            handler, "完成。", history=history, current_turn_messages=turn)
+        a = history[-1]
+        self.assertIn("完成。", a["content"])
+        self.assertIn("tool_events", a)
+        self.assertEqual(a["parts"], [
+            {"type": "text", "text": "读一下。"},
+            {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md", "status": "success", "summary": ""},
+            {"type": "text", "text": "完成。"}])
+        # The末轮 text part must NOT carry the tool-log comment that lives in content.
+        self.assertNotIn("<!-- tool-log", a["parts"][-1]["text"])
+
+    def test_summarize_drops_parts(self):
+        # IP2: the ordered `parts` sibling must never reach the compaction summarizer
+        # (same boundary as tool_events).
+        handler = self._h()
+        self.assertNotIn("parts", handler._sanitize_message_for_summary(
+            {"role": "assistant", "content": "x", "parts": [{"type": "text", "text": "y"}]}))
+
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_tool_followup_preserves_reasoning_content(self, mock_openai):
         def tool_stream():
@@ -10627,6 +10657,28 @@ class LoadConversationSanitizeTests(ChatRuntimeTests):
         ])
         loaded = handler._load_conversation(self.project_id)
         self.assertNotIn("tool_events", loaded[0])
+
+    def test_load_preserves_and_terminalizes_parts(self):
+        # IP2 reload: the ordered `parts` sibling must survive _load_conversation (white-list
+        # rebuild must explicitly preserve it, else a later full _save_conversation rewrite would
+        # erase it — same trap tool_events hit). A corrupt/persisted tool part status "pending"
+        # must coerce to a terminal status (no orphan spinner on reload). Text parts pass through.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "user", "content": "读一下"},
+            {"role": "assistant", "content": "读完了。", "parts": [
+                {"type": "text", "text": "读一下。"},
+                {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md",
+                 "status": "pending", "summary": ""},
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertEqual(loaded[-1]["parts"][0], {"type": "text", "text": "读一下。"})
+        self.assertNotEqual(loaded[-1]["parts"][1]["status"], "pending")
+        # Round-trip: re-saving the loaded history must keep parts on disk.
+        handler._save_conversation(self.project_id, loaded)
+        reloaded = handler._load_conversation(self.project_id)
+        self.assertEqual(reloaded[-1]["parts"], loaded[-1]["parts"])
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):
