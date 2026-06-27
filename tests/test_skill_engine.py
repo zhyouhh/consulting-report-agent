@@ -2843,6 +2843,35 @@ class SkillEngineTests(unittest.TestCase):
                 self.assertEqual(state, "malformed", evil)
                 self.assertEqual(selected, [], evil)
 
+    def test_parse_methodology_paren_and_chinese_split_cannot_evade_danger(self):
+        # 红队 v5：parse 剥括号 + 容忍连字符/* → 危险词借「空括号/连字符/*」拆词逃过 raw 子串查，
+        # 再被 parse 还原成工具名/checkpoint/中文操控词。归一化去除集合现含 ()（）* → 这些拆词形态
+        # 在 raw_value 层归一化后还原成连续串、命中 denylist → malformed。任一 parsed 即 trust
+        # boundary 漏洞。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for evil in (
+                # 空括号拆工具名 / checkpoint / 注入词
+                "方法论框架：write()file\n",
+                "方法论框架：**write()file**\n",
+                "方法论框架：adv()ance()stage\n",
+                "方法论框架：adv(*)ance(*)stage\n",
+                "方法论框架：append()report()draft\n",
+                "方法论框架：s0()interview()done\n",
+                "方法论框架：pro()mpt\n",
+                # 连字符/括号/* 拆中文操控词
+                "方法论框架：推-进\n",
+                "方法论框架：忽-略\n",
+                "方法论框架：检-查-点\n",
+                "方法论框架：覆(*)写\n",
+                "方法论框架：覆(*)寫\n",
+                # 危险词在第 9+ token 借空括号拆词（raw 层全量检测，不被 tokens[:8] 截断绕过）
+                "方法论框架：SWOT、PEST、MECE、RACI、SMART、价值链、五力、对标分析、adv()ance()stage\n",
+            ):
+                state, selected = engine.parse_and_sanitize_methodology(evil)
+                self.assertEqual(state, "malformed", evil)
+                self.assertEqual(selected, [], evil)
+
     def test_parse_methodology_malformed_on_injection_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self._bare_engine(tmp)

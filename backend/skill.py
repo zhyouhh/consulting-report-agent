@@ -300,7 +300,8 @@ class SkillEngine:
         "影响-可行矩阵", "dama-dmbok", "iso8000", "dama-dmbok/iso8000", "章-条-款-项",
     }
     # 原样 casefold 子串命中即整条 malformed：注入符号 / 中文操控·控制语义词。
-    # 工具名 + checkpoint + 英文操作词移到 _METHODOLOGY_DANGER_NORMALIZED（归一化匹配，防分隔符/拆词绕过）。
+    # 工具名 + checkpoint + 英文操作词在 _METHODOLOGY_DANGER_NORMALIZED（归一化匹配，防分隔符/拆词绕过）。
+    # 中文操控词同时进 _METHODOLOGY_DANGER_NORMALIZED（红队 v5：「推-进」「覆(*)写」借连字符/括号拆词绕过）。
     _METHODOLOGY_DANGER_SUBSTRINGS = (
         "__", "<stage", "stage-ack", "ignore",
         "系统提示", "系統提示", "忽略", "覆写", "覆寫", "覆盖",
@@ -308,11 +309,11 @@ class SkillEngine:
         "推进", "回退", "归档", "无视", "跳过", "停止", "立即", "删除",
         "设为", "标记为", "指令", "请你", "门禁", "检查点",
     )
-    # 归一化（NFKC+casefold+删 Cf 格式字符+去空白/分隔符）后子串命中即 malformed：工具名 +
-    # 全部 6 个 STAGE_CHECKPOINT_KEYS 的去分隔符形态 + 英文操作词。防 "advance stage" /
-    # "advance-stage" / "s0 interview done at" / "over ride" 等变体绕过（红队 v2/v3、quality NIT）。
-    # 零误杀（真框架名不会等于这些 API 标识符）。守护测试 test_*_all_checkpoint_key_variants 锁
-    # checkpoint 全覆盖，防未来加 key 漏项。
+    # 归一化（NFKC+casefold+删 Cf 格式字符+去空白/分隔符/强调标记/括号）后子串命中即 malformed：工具名 +
+    # 全部 6 个 STAGE_CHECKPOINT_KEYS 的去分隔符形态 + 英文操作词 + 中文操控词。防 "advance stage" /
+    # "advance-stage" / "s0 interview done at" / "over ride" / "write()file" / "推-进" / "覆(*)写" 等
+    # 变体绕过（红队 v2/v3/v5、quality NIT）。零误杀（真框架名不会等于这些 API 标识符或操控词）。守护测试
+    # test_*_all_checkpoint_key_variants 锁 checkpoint 全覆盖，防未来加 key 漏项。
     _METHODOLOGY_DANGER_NORMALIZED = (
         # 工具名
         "writefile", "editfile", "appendreportdraft", "readfile", "readmaterialfile",
@@ -322,7 +323,12 @@ class SkillEngine:
         "outlineconfirmed", "reviewstarted", "reviewpassed", "presentationready",
         "deliveryarchived",
         # 英文操作词（归一化防 "over ride" 拆词，quality NIT）
-        "override", "prompt",
+        "override", "prompt", "ignore",
+        # 中文操控/注入/控制语义词归一化形态（红队 v5：防括号/连字符/* 拆词绕过 raw 子串查；与
+        # _METHODOLOGY_DANGER_SUBSTRINGS 的原样查并存）。不含 "__"（归一化成空串会全命中）。
+        "系统提示", "系統提示", "忽略", "覆写", "覆寫", "覆盖",
+        "推进", "回退", "归档", "无视", "跳过", "停止", "立即", "删除",
+        "设为", "标记为", "指令", "请你", "门禁", "检查点",
     )
 
     REPORT_DRAFT_PATH = "content/report_draft_v1.md"
@@ -2651,14 +2657,15 @@ class SkillEngine:
     def _normalize_for_danger(text: str) -> str:
         """归一化用于危险词比对：NFKC + casefold + 删 Unicode 格式字符（Cf：零宽空格 U+200B/
         BOM U+FEFF/零宽连接符等）+ 去所有空白与常见分隔符。
-        不变式（防拆词绕过，红队 v2/v4）：去除集合必须 ⊇ parse 的 split 分隔符（、,，）∪ off-menu
-        白名单允许的非字母数字字符（- / 空格 全角空格）∪ parse 容忍剥除的 markdown 强调标记（*）
-        ——这样任何被允许字符拆开的 API 名（如「write、file」「advance stage」「s0-interview-done-at」
-        「adv*ance*stage」「**write*file**」）归一化后都还原成连续串、命中 denylist。改 off-menu
-        白名单 / split 分隔符 / token 剥除的强调标记时必须同步本集合。"""
+        不变式（防拆词绕过，红队 v2/v4/v5）：去除集合必须 ⊇ parse 的 split 分隔符（、,，）∪ off-menu
+        白名单允许的非字母数字字符（- / 空格 全角空格）∪ parse 容忍剥除的 markdown 强调标记（*）∪
+        parse 剥除的括号（()（））——这样任何被允许字符拆开的 API 名（如「write、file」「advance stage」
+        「s0-interview-done-at」「adv*ance*stage」「**write*file**」「write()file」「adv()ance()stage」）
+        归一化后都还原成连续串、命中 denylist。改 off-menu 白名单 / split 分隔符 / token 剥除的强调
+        标记或括号时必须同步本集合。"""
         folded = unicodedata.normalize("NFKC", text or "").casefold()
         folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Cf")
-        return re.sub(r"[\s\-_/.·、,，*]", "", folded)
+        return re.sub(r"[\s\-_/.·、,，*()（）]", "", folded)
 
     def _canonical_framework_name(self, token: str) -> Optional[str]:
         """token 去空格 casefold 后命中已知框架名 → 返回去空白原文；否则 None。
