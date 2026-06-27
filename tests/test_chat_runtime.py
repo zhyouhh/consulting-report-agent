@@ -1060,6 +1060,55 @@ class ChatRuntimeTests(unittest.TestCase):
         # The structured sibling must never bleed into the assistant content string.
         self.assertNotIn("tool_events", assistant["content"])
 
+    def test_build_message_parts_interleaves_text_and_tools(self):
+        handler = self._h()
+        turn = [
+            {"role": "assistant", "content": "先读文件再改。",
+             "tool_calls": [
+                 {"id": "c1", "function": {"name": "read_file", "arguments": '{"file_path": "a.md"}'}},
+                 {"id": "c2", "function": {"name": "edit_file", "arguments": '{"file_path": "a.md"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"status": "success"})},
+            {"role": "tool", "tool_call_id": "c2", "content": json.dumps({"status": "error", "message": "锚点未找到"})},
+            {"role": "assistant", "content": "再搜索一下规范。",
+             "tool_calls": [{"id": "c3", "function": {"name": "web_search", "arguments": '{"query": "技术标 规范"}'}}]},
+            {"role": "tool", "tool_call_id": "c3", "content": json.dumps({"status": "success", "results": [1, 2]})},
+        ]
+        parts, full_text = handler._build_message_parts(turn, "好，框架搭好了。")
+        self.assertEqual(parts, [
+            {"type": "text", "text": "先读文件再改。"},
+            {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md", "status": "success", "summary": ""},
+            {"type": "tool", "id": "c2", "tool": "edit_file", "arg": "a.md", "status": "error", "summary": "锚点未找到"},
+            {"type": "text", "text": "再搜索一下规范。"},
+            {"type": "tool", "id": "c3", "tool": "web_search", "arg": "技术标 规范", "status": "success", "summary": "2 results"},
+            {"type": "text", "text": "好，框架搭好了。"}])
+        self.assertEqual(full_text, "先读文件再改。再搜索一下规范。好，框架搭好了。")
+
+    def test_build_message_parts_keeps_non_barrier_text_without_tool_calls(self):
+        handler = self._h()
+        parts, _ = handler._build_message_parts([{"role": "assistant", "content": "我先试试这个方案。"}], "完成。")
+        self.assertEqual(parts, [{"type": "text", "text": "我先试试这个方案。"}, {"type": "text", "text": "完成。"}])
+
+    def test_build_message_parts_skips_known_synthetic_barriers(self):
+        handler = self._h()
+        for note in ("（上条工具调用被上游合并成畸形条目，已作废本轮调用。）", "（本轮为纯转述，不调用任何工具。）"):
+            parts, _ = handler._build_message_parts(
+                [{"role": "assistant", "content": note}, {"role": "user", "content": "x"}], "重试成功。")
+            self.assertEqual(parts, [{"type": "text", "text": "重试成功。"}])
+
+    def test_build_message_parts_dedups_trailing(self):
+        handler = self._h()
+        parts, _ = handler._build_message_parts([{"role": "assistant", "content": "完成。"}], "完成。")
+        self.assertEqual(parts, [{"type": "text", "text": "完成。"}])
+
+    def test_synthetic_barrier_notes_match_chat_source(self):
+        # 防隔板常量漂移：_SYNTHETIC_BARRIER_NOTES 的每个字符串必须确实出现在 chat.py
+        # 真实注入分支里，否则 _build_message_parts 会漏剥某条合成隔板。
+        import backend.chat as chat_module
+        source = Path(chat_module.__file__).read_text(encoding="utf-8")
+        self.assertTrue(chat_module._SYNTHETIC_BARRIER_NOTES)
+        for note in chat_module._SYNTHETIC_BARRIER_NOTES:
+            self.assertIn(note, source)
+
     @mock.patch("backend.chat.OpenAI")
     def test_chat_stream_tool_followup_preserves_reasoning_content(self, mock_openai):
         def tool_stream():

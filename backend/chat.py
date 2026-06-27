@@ -129,6 +129,14 @@ LEGACY_EMPTY_ASSISTANT_FALLBACKS = frozenset({
     "（本轮" "无回复）",
     USER_VISIBLE_FALLBACK,
 })
+# 合成隔板：本轮链路里为「保持 user/model 严格交替」而注入的占位 assistant content，
+# 非模型真实叙述。_build_message_parts 据此剥离，避免它们污染时间线展示片段。
+# 两条字符串必须与 chat_stream 真实注入处逐字一致（见 chat.py 内 "本轮为纯转述" /
+# "畸形条目" 注入分支），test_synthetic_barrier_notes_match_chat_source 守护防漂移。
+_SYNTHETIC_BARRIER_NOTES = frozenset({
+    "（上条工具调用被上游合并成畸形条目，已作废本轮调用。）",
+    "（本轮为纯转述，不调用任何工具。）",
+})
 SYSTEM_TRIGGER_PROMPTS = {
     "independent_review_done": (
         "[系统通知] 独立审查已完成。本轮临时消息中附带了审查报告的只读数据"
@@ -1527,6 +1535,49 @@ class ChatHandler:
             "status": "success" if p.result.get("status") == "success" else "error",
             "summary": self._sse_tool_summary(p.name, p.result),
         } for p in self._pair_tool_calls_with_results(current_turn_messages)]
+
+    def _build_message_parts(self, current_turn_messages, assistant_message):
+        """有序展示片段（文本/工具按时间穿插）+ 全轮可见文本（仅供前端复制）。
+        文本来源：每个 assistant 子消息 content（含 retry 候选叙述），跳已知合成隔板；末轮 visible_content 去重。
+        工具按 tool_call_id 配对。持久化 content/provider 不受影响。"""
+        results_by_id = {}
+        for msg in current_turn_messages or []:
+            if msg.get("role") != "tool":
+                continue
+            tc_id = msg.get("tool_call_id")
+            if not tc_id:
+                continue
+            try:
+                result = json.loads(msg.get("content") or "{}")
+                if not isinstance(result, dict):
+                    result = {"status": "error", "raw": str(result)}
+            except json.JSONDecodeError:
+                result = {"status": "error", "raw": msg.get("content")}
+            results_by_id[tc_id] = result
+        parts, text_segments = [], []
+        for msg in current_turn_messages or []:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if (isinstance(content, str) and content.strip()
+                    and content not in _SYNTHETIC_BARRIER_NOTES):
+                parts.append({"type": "text", "text": content}); text_segments.append(content)
+            for tc in (msg.get("tool_calls") or []):
+                tc_id = tc.get("id") or ""
+                fn = tc.get("function") or {}
+                name, args = fn.get("name") or "", fn.get("arguments") or ""
+                result = results_by_id.get(tc_id)
+                if isinstance(result, dict):
+                    status = "success" if result.get("status") == "success" else "error"
+                    summary = self._sse_tool_summary(name, result)
+                else:
+                    status, summary = "error", ""
+                parts.append({"type": "tool", "id": tc_id, "tool": name,
+                              "arg": self._sse_tool_arg(name, args), "status": status, "summary": summary})
+        if isinstance(assistant_message, str) and assistant_message.strip():
+            if not (text_segments and text_segments[-1] == assistant_message):
+                parts.append({"type": "text", "text": assistant_message}); text_segments.append(assistant_message)
+        return parts, "".join(text_segments)
 
     def _flush_pending_tool_calls(self, pending: "dict[str, str]", summary: str):
         """对每个「已早发 pending tool_call 但未正常结束」的 id 补发一个同 id 的 error tool_result，
