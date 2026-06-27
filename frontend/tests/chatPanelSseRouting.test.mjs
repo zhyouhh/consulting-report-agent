@@ -60,9 +60,11 @@ test("ChatPanel routes thinking SSE events through appendThinkingEventContent", 
   assert.match(source, /content:\s*appendThinkingEventContent\(m\.content,\s*parsed\.data\)/);
 });
 
-test("ChatPanel renders thinking blocks with ThinkingBlock", () => {
+test("assistant prose renders thinking blocks with ThinkingBlock (now in assistantTextRender)", () => {
+  // 正文渲染（含 thinking block）已抽到 renderAssistantText（assistantTextRender.jsx）；
+  // ChatPanel 渲染分支只调 renderAssistantText / MessageParts。防回归意图迁到这里。
   const source = readFileSync(
-    new URL("../src/components/ChatPanel.jsx", import.meta.url),
+    new URL("../src/components/assistantTextRender.jsx", import.meta.url),
     "utf-8",
   );
 
@@ -101,13 +103,20 @@ test("ChatPanel maps reload tool_events sibling onto msg.toolEvents", () => {
   assert.match(source, /toolEvents:\s*m\.tool_events \|\| \[\]/);
 });
 
-test("ChatPanel renders ToolCallList above assistant prose (no inline emoji tool pill)", () => {
+test("ChatPanel interleaves parts (MessageParts) with ToolCallList+renderAssistantText fallback", () => {
   const source = readFileSync(
     new URL("../src/components/ChatPanel.jsx", import.meta.url),
     "utf-8",
   );
+  // parts 有则按时间线穿插（MessageParts）；老消息/无 parts 回落到「ToolCallList 堆顶 + 正文」。
+  assert.match(source, /import MessageParts from '\.\/MessageParts'/);
+  assert.match(source, /import \{ renderAssistantText \} from '\.\/assistantTextRender'/);
   assert.match(source, /import ToolCallList from '\.\/ToolCallList'/);
+  assert.match(source, /msg\.parts && msg\.parts\.length/);
+  assert.match(source, /<MessageParts parts=\{msg\.parts\} \/>/);
+  // fallback：ToolCallList 在正文上方 + renderAssistantText(msg.content)
   assert.match(source, /<ToolCallList toolEvents=\{msg\.toolEvents\} \/>/);
+  assert.match(source, /renderAssistantText\(msg\.content\)/);
   // 旧的「从 content 文本认 emoji 工具行 → 内联 pill」整段移除。
   assert.doesNotMatch(source, /block\.type === 'tool'/);
 });

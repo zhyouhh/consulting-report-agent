@@ -1,7 +1,5 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import axios from 'axios'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { showError, showInfo, showSuccess } from '../utils/toast'
 import { buildChatRequest, buildTransientAttachmentsPayload, conversionStatusChip, toggleMaterialSelection } from '../utils/chatMaterials'
 import { applyAttachmentTranscribed, historyTranscriptIndicators } from '../utils/sseEvents'
@@ -32,7 +30,6 @@ import {
   shouldRenderSystemNoticeMessage,
   shouldContinueSseStream,
   shouldFlushStreamingQueueImmediately,
-  splitAssistantMessageBlocks,
   takeStreamingTextSlice,
 } from '../utils/chatPresentation'
 import { shouldSubmitComposerKeydown } from '../utils/composerInputBehavior'
@@ -46,12 +43,11 @@ import {
   splitPendingAttachments,
 } from '../utils/pendingAttachments'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
-import { stripToolLogComments } from '../utils/toolLogStrip.mjs'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
-import ThinkingBlock from './ThinkingBlock'
 import ToolCallList from './ToolCallList'
-// Shared markdown rendering fragment, reused by the S5 ReviewChatWindow (same look & feel).
-import { assistantMarkdownComponents } from './MarkdownMessage'
+// 时间线穿插：parts 有则按序穿插渲染（MessageParts），否则回落到「ToolCallList 堆顶 + renderAssistantText 正文」。
+import MessageParts from './MessageParts'
+import { renderAssistantText } from './assistantTextRender'
 import { IconTrash, IconSidebar, IconPanelRight, IconPaperclip, IconSend, IconStop, IconClose } from './icons'
 
 const ChatPanel = forwardRef(function ChatPanel({
@@ -937,13 +933,6 @@ const ChatPanel = forwardRef(function ChatPanel({
             )
           }
 
-          const cleanContent = msg.role === 'assistant'
-            ? stripToolLogComments(msg.content || '')
-            : msg.content
-          const assistantBlocks = msg.role === 'assistant'
-            ? splitAssistantMessageBlocks(cleanContent)
-            : [{ type: 'text', content: cleanContent }]
-
           // 附件 / 转写指示行（用户气泡内复用，token 配色）
           const attachmentIndicators = (
             <>
@@ -1011,20 +1000,11 @@ const ChatPanel = forwardRef(function ChatPanel({
                   <span className="text-13 font-semibold text-text">助手</span>
                 </div>
                 <div className="space-y-2 text-15 leading-[1.68] text-text">
-                  {/* 工具调用 pill 成组渲染在正文上方（live SSE reduceToolEvent / reload tool_events）。 */}
-                  <ToolCallList toolEvents={msg.toolEvents} />
-                  {assistantBlocks.map((block, index) => block.type === 'thinking' ? (
-                    <ThinkingBlock key={index} text={block.content} />
-                  ) : (
-                    <ReactMarkdown
-                      key={index}
-                      className="max-w-none"
-                      remarkPlugins={[remarkGfm]}
-                      components={assistantMarkdownComponents}
-                    >
-                      {block.content}
-                    </ReactMarkdown>
-                  ))}
+                  {/* parts 有则按时间线穿插（MessageParts）；老消息/无 parts 回落到旧分组渲染
+                      （ToolCallList 堆顶 + renderAssistantText 正文，行为与抽取前等价）。 */}
+                  {msg.parts && msg.parts.length
+                    ? <MessageParts parts={msg.parts} />
+                    : (<><ToolCallList toolEvents={msg.toolEvents} />{renderAssistantText(msg.content)}</>)}
                 </div>
                 <button
                   onClick={() => copyMessage(msg)}

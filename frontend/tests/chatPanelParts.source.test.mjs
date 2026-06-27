@@ -39,6 +39,16 @@ test('ChatPanel：tool_call/tool_result 旁建 parts 用 applyToolEventToParts(p
   assert.match(src, /toolEvents:\s*reduceToolEvent\(m\.toolEvents \|\| \[\], parsed\),\s*parts:\s*applyToolEventToParts\(m\.parts \|\| \[\], parsed\)/)
 })
 
+// ── IP6：渲染切到 parts 穿插（MessageParts），无 parts 回落到旧分组（ToolCallList + 正文）──
+test('ChatPanel：parts 有则 MessageParts、否则 ToolCallList + renderAssistantText fallback', () => {
+  assert.match(src, /import MessageParts from '\.\/MessageParts'/)
+  assert.match(src, /import \{ renderAssistantText \} from '\.\/assistantTextRender'/)
+  assert.match(src, /msg\.parts && msg\.parts\.length/)
+  assert.match(src, /<MessageParts parts=\{msg\.parts\} \/>/)
+  // fallback 老消息：ToolCallList 堆顶 + renderAssistantText(msg.content)（与抽取前等价）
+  assert.match(src, /renderAssistantText\(msg\.content\)/)
+})
+
 // ── 行为锁测：用真实纯函数模拟 ChatPanel 的 per-event parts 归约，断言时间线穿插正确 ──
 test('行为①：pending content flush 后再 tool_call → parts 为 text → tool', () => {
   let parts = []
