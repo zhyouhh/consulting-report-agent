@@ -1541,9 +1541,11 @@ class ChatHandler:
         """有序展示片段（文本/工具按时间穿插）+ 全轮可见文本（仅供前端复制）。
 
         文本来源：每个 assistant 子消息 content（含 retry 候选叙述），跳已知合成隔板；末轮
-        visible_content 去重。工具配对**与 `_pair_tool_calls_with_results` 同语义**：单遍、
-        锚定 call site、按 tool_call_id FIFO pop（支持同 id 多次出现）；缺 id 的 tool_call 跳过、
-        orphan tool 结果跳过。持久化 content/provider 不受影响。
+        visible_content 去重。工具配对对齐 `_pair_tool_calls_with_results` 的单遍 pending→pop
+        （锚定 call site、按 tool_call_id 配对、缺 id 的 tool_call 跳过、orphan tool 结果跳过）；
+        唯一差别在**重复 tool_call_id 这一病态输入**上本方法用 deque FIFO（同 id 多次出现按序消费
+        结果），既有 helper 是 dict 覆盖——provider 正常保证 id 唯一，此处取 FIFO 更稳。持久化
+        content/provider 不受影响。
 
         **与 `_build_tool_events` 的有意差异**：未应答的 tool_call（call 有、result 无，rare：
         mid-turn abort）在这里保留为 `status="error"` 的工具 part——穿插时间线要忠实展示
