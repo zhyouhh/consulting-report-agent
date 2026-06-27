@@ -70,6 +70,16 @@
 
 **Files:** Modify `backend/chat.py`；Test `tests/test_chat_runtime.py`
 
+> **实施修订（2026-06-27 Codex 双轨审后定稿，覆盖下方 Step 3 草案的「预收集 dict」写法）**：配对改为**单遍、锚定 call site、按 `tool_call_id` FIFO pop**，与既有 `_pair_tool_calls_with_results`（chat.py）**同语义**（消除两套配对分叉）：
+> - `pending: dict[str, collections.deque[int]]` 映射 id → 工具 part 在 `parts` 里的下标队列。
+> - assistant 子消息：`content.strip()` 非空且不在隔板集 → append text part（**门控用 `.strip()`，但存入 part 的是原文不 strip**——空白-only 段不该渲染成空 div、且无信息损失，刻意如此）；每个 tool_call **缺 id 跳过**（对齐 `_pair_tool_calls_with_results` 的 `if tc_id` 守卫，不落 `id:""`），有 id 的 append 占位工具 part（`status="error"`/`summary=""`/`arg=_sse_tool_arg`）并记下标入 `pending`。
+> - tool 结果：`popleft` 对应 id 的下标回填 `status`/`summary`；orphan result（id 不在 pending）跳过。
+> - 未应答 call（有 call 无 result，rare：mid-turn abort）保留为 `status="error"` pill（**刻意区别于 `_build_tool_events` 的省略**——parts 是穿插渲染主源，要忠实展示「调用过但没回」、与前端 live abort pending→error 一致）。docstring 注明。
+> - 守护测试用 `source.count(note) >= 2`（常量定义 + ≥1 注入点，注入点改字即 fail），不改 chat.py 注入点本身（守边界）。
+> - 边界测试补齐：坏 JSON / 非 dict JSON → error；dict `arguments` → arg 正确；缺 id → 不产 part；重复 id → FIFO 消费；未应答 call → error。
+>
+> 注：真实 `current_turn_messages` 里 tool 结果**永远在** assistant tool_call 之后（结构保证），故单遍 pending→pop 不丢任何真实场景；预收集方案唯一「优势」（结果先于 call 也能配）对应一个永不发生的序列。下方 Step 1/Step 3 草案保留作历史，实现以本修订为准。
+
 - [ ] **Step 1: 写失败测试**
 ```python
 def test_build_message_parts_interleaves_text_and_tools(self):
