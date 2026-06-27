@@ -14,7 +14,7 @@ export function applyToolEventToParts(parts = [], event = {}) {
   const idx = parts.findIndex(p => p.type === 'tool' && p.id === id)
   if (event.type === 'tool_call') {
     if (idx === -1) return [...parts, { type: 'tool', id, tool: event.tool || '', arg: event.arg || '', status: 'pending', summary: '' }]
-    const c = parts.slice(); c[idx] = { ...c[idx], tool: event.tool ?? c[idx].tool, arg: event.arg ?? c[idx].arg }; return c
+    const c = parts.slice(); c[idx] = { ...c[idx], tool: event.tool || c[idx].tool, arg: event.arg ?? c[idx].arg }; return c
   }
   if (event.type === 'tool_result') {
     if (idx === -1) return [...parts, { type: 'tool', id, tool: event.tool || '', arg: '', status: event.status || 'error', summary: event.summary ?? '' }]
