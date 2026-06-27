@@ -6197,15 +6197,18 @@ class ChatHandler:
     def _sanitize_part_scalar(p):
         """IP2 reload: coerce one persisted timeline part to a clean scalar dict (or None to drop).
 
-        Text part → {type,text} only when text is a non-empty str. Tool part → {type,id,tool,arg,
-        status,summary} with tool required; status coerced to a terminal value (success/error) so a
-        persisted/corrupt "pending" never renders as an orphan spinner. Anything else → None.
+        Text part → {type,text} only when text is a non-empty (post-.strip()) str. Tool part →
+        {type,id,tool,arg,status,summary} with tool required; status coerced to a terminal value
+        (success/error) so a persisted/corrupt "pending" never renders as an orphan spinner.
+        Anything else → None.
         """
         if not isinstance(p, dict):
             return None
         if p.get("type") == "text":
             t = p.get("text")
-            return {"type": "text", "text": t} if isinstance(t, str) and t else None
+            # Gate on .strip() (mirrors _build_message_parts) so a whitespace-only segment is
+            # dropped; the retained text is the original `t`, not the stripped form.
+            return {"type": "text", "text": t} if isinstance(t, str) and t.strip() else None
         if p.get("type") == "tool":
             tool = str(p.get("tool") or "")
             if not tool:
@@ -6260,11 +6263,15 @@ class ChatHandler:
             # rewrite would erase it. Accept ONLY a list; rebuild scalar-by-scalar (a corrupt
             # conversation.json must not smuggle nested objects into the frontend or the next save;
             # any non-terminal/unknown tool status coerces to a terminal one — no orphan spinner).
+            # Only set the field when something survives sanitization — an empty list could let the
+            # frontend treat `parts` as authoritative and shadow valid content.
             raw_parts = message.get("parts")
             if isinstance(raw_parts, list):
-                entry["parts"] = [
+                cleaned_parts = [
                     q for q in (self._sanitize_part_scalar(p) for p in raw_parts) if q
                 ]
+                if cleaned_parts:
+                    entry["parts"] = cleaned_parts
             client_message_id = message.get("client_message_id")
             if client_message_id is not None:
                 entry["client_message_id"] = client_message_id

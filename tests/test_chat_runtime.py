@@ -10680,6 +10680,39 @@ class LoadConversationSanitizeTests(ChatRuntimeTests):
         reloaded = handler._load_conversation(self.project_id)
         self.assertEqual(reloaded[-1]["parts"], loaded[-1]["parts"])
 
+    def test_load_drops_whitespace_only_text_part(self):
+        # IP2 hardening (NIT 1): a persisted/corrupt whitespace-only text part must be dropped
+        # (mirrors _build_message_parts' .strip() gate). Other valid parts survive.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "assistant", "content": "ok", "parts": [
+                {"type": "text", "text": "   "},
+                {"type": "text", "text": "真正的文本。"},
+                {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md",
+                 "status": "success", "summary": ""},
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertEqual(loaded[-1]["parts"], [
+            {"type": "text", "text": "真正的文本。"},
+            {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md",
+             "status": "success", "summary": ""},
+        ])
+
+    def test_load_omits_parts_field_when_all_invalid(self):
+        # IP2 hardening (NIT 2): if every persisted part is invalid, the entry must carry NO
+        # `parts` field at all (not an empty list) so the frontend never lets [] shadow content.
+        handler = self._make_handler_with_project()
+        self._write_conv([
+            {"role": "assistant", "content": "内容仍在。", "parts": [
+                {"type": "text", "text": ""},
+                {"type": "bogus"},
+            ]},
+        ])
+        loaded = handler._load_conversation(self.project_id)
+        self.assertNotIn("parts", loaded[-1])
+        self.assertEqual(loaded[-1]["content"], "内容仍在。")
+
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
