@@ -334,6 +334,15 @@ class SkillEngine:
         "设为", "标记为", "指令", "请你", "门禁", "检查点",
         "推進", "歸檔", "無視", "跳過", "刪除", "設為", "標記為", "請你", "門禁", "檢查點",
     )
+    # 繁→简折叠表：覆盖上述中文操控词里出现的全部繁体字。NFKC 不做简繁转换，off-menu `[一-鿿]`
+    # 放行任意 CJK，故**逐字混写**（如「歸档」「无視」「設为」）会绕过 raw/归一化子串查（红队 v5）。
+    # _normalize_for_danger 折叠后只需 denylist 留简体规范形即命中所有简/繁/混写组合——闭合整类、
+    # 不靠枚举、不加依赖。仅折叠控制词字符 → 不误折叠合法繁体框架名（如「價值鏈」不在表内、不受影响）。
+    _METHODOLOGY_ST_FOLD = str.maketrans({
+        "統": "统", "寫": "写", "蓋": "盖", "進": "进", "歸": "归", "檔": "档",
+        "無": "无", "視": "视", "過": "过", "刪": "删", "設": "设", "為": "为",
+        "標": "标", "記": "记", "請": "请", "門": "门", "檢": "检", "點": "点",
+    })
 
     REPORT_DRAFT_PATH = "content/report_draft_v1.md"
     REPORT_DRAFT_CANDIDATES = (REPORT_DRAFT_PATH,)
@@ -2657,10 +2666,10 @@ class SkillEngine:
             raise ValueError(f"模块 {filename}「## 二、标准结构」段为空")
         return body
 
-    @staticmethod
-    def _normalize_for_danger(text: str) -> str:
+    @classmethod
+    def _normalize_for_danger(cls, text: str) -> str:
         """归一化用于危险词比对：NFKC + casefold + 删 Unicode 格式字符（Cf：零宽空格 U+200B/
-        BOM U+FEFF/零宽连接符等）+ 去所有空白与常见分隔符。
+        BOM U+FEFF/零宽连接符等）+ 繁→简折叠（控制词字符）+ 去所有空白与常见分隔符。
         不变式（防拆词绕过，红队 v2/v4/v5）：去除集合必须 ⊇ parse 的 split 分隔符（、,，）∪ off-menu
         白名单允许的非字母数字字符（- / 空格 全角空格）∪ parse 容忍剥除的 markdown 强调标记（*）∪
         parse 剥除的括号（()（））——这样任何被允许字符拆开的 API 名（如「write、file」「advance stage」
@@ -2669,6 +2678,7 @@ class SkillEngine:
         标记或括号时必须同步本集合。"""
         folded = unicodedata.normalize("NFKC", text or "").casefold()
         folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Cf")
+        folded = folded.translate(cls._METHODOLOGY_ST_FOLD)  # 繁→简：闭合简繁混写绕过（红队 v5）
         return re.sub(r"[\s\-_/.·、,，*()（）]", "", folded)
 
     def _canonical_framework_name(self, token: str) -> Optional[str]:

@@ -2898,6 +2898,30 @@ class SkillEngineTests(unittest.TestCase):
             self.assertEqual(state, "parsed")
             self.assertEqual(set(selected), {"SWOT", "波特五力"})
 
+    def test_parse_methodology_mixed_simplified_traditional_cannot_evade_danger(self):
+        # 红队 v5：逐字简繁混写（NFKC 不做简繁转换、off-menu 放行任意 CJK）。_normalize_for_danger
+        # 的繁→简折叠表闭合整类——任意简/繁/混写组合折叠成简体规范形即命中 denylist，不靠枚举。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for evil in (
+                "方法论框架：歸档\n", "方法论框架：归檔\n",        # 归档 混写
+                "方法论框架：無视\n", "方法论框架：无視\n",        # 无视 混写
+                "方法论框架：設为\n", "方法论框架：设為\n",        # 设为 混写
+                "方法论框架：標记为\n", "方法论框架：标記為\n",    # 标记为 混写
+                "方法论框架：檢查点\n", "方法论框架：检查點\n",    # 检查点 混写
+                "方法论框架：推進\n", "方法论框架：跳過\n",        # 全繁
+                # 混写叠加 parse 容忍字符（连字符/斜杠/括号）
+                "方法论框架：歸-档\n", "方法论框架：归/檔\n",
+                "方法论框架：标-記-為\n", "方法论框架：无(x)視\n",
+            ):
+                state, selected = engine.parse_and_sanitize_methodology(evil)
+                self.assertEqual(state, "malformed", evil)
+                self.assertEqual(selected, [], evil)
+            # 误杀回归：折叠表只覆盖控制词字符 → 合法繁体框架名（不在表内）仍 parsed
+            state, selected = engine.parse_and_sanitize_methodology("方法论框架：價值鏈\n")
+            self.assertEqual(state, "parsed")
+            self.assertEqual(selected, ["價值鏈"])
+
     def test_parse_methodology_malformed_on_injection_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self._bare_engine(tmp)
