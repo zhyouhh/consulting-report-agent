@@ -2070,6 +2070,38 @@ class GetConversationSanitizeTests(_LocalMockEngineMixin, unittest.TestCase):
         assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
         self.assertNotIn("parts", assistant_msg)
 
+    def test_get_conversation_tool_part_is_scalar_only_and_regularized(self):
+        """脏 tool part（额外键 + dict summary + pending）→ 端点返回只含规范标量键、status 终态、summary 恒为 str"""
+        self._write_conversation([
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "读一下。",
+                "parts": [
+                    {"type": "text", "text": "读一下。"},
+                    {"type": "tool", "id": "c1", "tool": "read_file", "arg": "a.md",
+                     "status": "pending", "summary": {"nested": "x"}, "extra": "should_be_stripped"},
+                ],
+            },
+        ])
+        resp = self.client.get("/api/projects/demo/conversation")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        assistant_msg = next(m for m in data["messages"] if m["role"] == "assistant")
+        parts = assistant_msg["parts"]
+        self.assertEqual(len(parts), 2)
+        text_part = next(p for p in parts if p["type"] == "text")
+        tool_part = next(p for p in parts if p["type"] == "tool")
+        # text part 正常返回
+        self.assertEqual(text_part["text"], "读一下。")
+        # pending → 终态
+        self.assertEqual(tool_part["status"], "success")
+        # 键集合恰为规范标量键，extra 被剥除、无多余键
+        self.assertEqual(set(tool_part.keys()), {"type", "id", "tool", "arg", "status", "summary"})
+        # summary 恒为标量 str（dict 经 str() 净化，非原 dict）
+        self.assertIsInstance(tool_part["summary"], str)
+        self.assertEqual(tool_part["summary"], str({"nested": "x"}))
+
     def test_get_conversation_all_invalid_parts_results_in_no_parts_field(self):
         """parts 全部非法（无 type 或 tool 为空）→ 净化后为空列表，不设 parts 字段"""
         self._write_conversation([
