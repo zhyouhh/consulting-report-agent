@@ -2809,6 +2809,40 @@ class SkillEngineTests(unittest.TestCase):
         self.assertEqual(state, "parsed")
         self.assertEqual(set(selected), {"SMART", "RACI", "里程碑"})
 
+    def test_parse_methodology_bold_marker_on_values_parsed(self):
+        # 真模型实测：deepseek 把框架值也 ** 加粗（值在一个粗体跨度内、或逐个加粗）。
+        # parser 必须容忍这类 markdown 强调标记、识别出框架名，而不是 malformed 卡住确认门。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for decl in (
+                "方法论框架：**SWOT、TAM-SAM-SOM、对标分析**\n",   # 整个值被一个粗体跨度包住
+                "方法论框架：**SWOT**、**对标分析**\n",            # 逐个加粗
+                "**方法论框架**：*SWOT*、波特五力\n",              # label 粗 + 值斜体
+            ):
+                state, selected = engine.parse_and_sanitize_methodology(decl)
+                self.assertEqual(state, "parsed", decl)
+                self.assertTrue(selected, decl)
+            # 锁第一例的精确净化结果（* 标记被剥、框架名识别）
+            state, selected = engine.parse_and_sanitize_methodology(
+                "方法论框架：**SWOT、TAM-SAM-SOM、对标分析**\n"
+            )
+        self.assertEqual(set(selected), {"SWOT", "TAM-SAM-SOM", "对标分析"})
+
+    def test_parse_methodology_asterisk_cannot_evade_danger(self):
+        # 安全不变式：容忍 * 后，危险词不得借 * 拆词/包裹绕过——raw_value 层归一化连 * 一并去除，
+        # 仍命中 denylist → malformed（红队不变式：normalize 去除集合 ⊇ parse 容忍的 *）。
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._bare_engine(tmp)
+            for evil in (
+                "方法论框架：**advance stage**\n",       # 借粗体 + 空格拆 advance stage
+                "方法论框架：adv*ance*stage\n",          # 借 * 拆 advancestage
+                "方法论框架：*advance*、*stage*\n",       # 借边界 * + 顿号拆 advance stage
+                "方法论框架：**write*file**\n",           # 借 * 拆 writefile 工具名
+            ):
+                state, selected = engine.parse_and_sanitize_methodology(evil)
+                self.assertEqual(state, "malformed", evil)
+                self.assertEqual(selected, [], evil)
+
     def test_parse_methodology_malformed_on_injection_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self._bare_engine(tmp)

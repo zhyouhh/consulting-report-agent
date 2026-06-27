@@ -2652,12 +2652,13 @@ class SkillEngine:
         """归一化用于危险词比对：NFKC + casefold + 删 Unicode 格式字符（Cf：零宽空格 U+200B/
         BOM U+FEFF/零宽连接符等）+ 去所有空白与常见分隔符。
         不变式（防拆词绕过，红队 v2/v4）：去除集合必须 ⊇ parse 的 split 分隔符（、,，）∪ off-menu
-        白名单允许的非字母数字字符（- / 空格 全角空格）——这样任何被允许字符拆开的 API 名（如
-        「write、file」「advance stage」「s0-interview-done-at」）归一化后都还原成连续串、命中
-        denylist。改 off-menu 白名单或 split 分隔符时必须同步本集合。"""
+        白名单允许的非字母数字字符（- / 空格 全角空格）∪ parse 容忍剥除的 markdown 强调标记（*）
+        ——这样任何被允许字符拆开的 API 名（如「write、file」「advance stage」「s0-interview-done-at」
+        「adv*ance*stage」「**write*file**」）归一化后都还原成连续串、命中 denylist。改 off-menu
+        白名单 / split 分隔符 / token 剥除的强调标记时必须同步本集合。"""
         folded = unicodedata.normalize("NFKC", text or "").casefold()
         folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Cf")
-        return re.sub(r"[\s\-_/.·、,，]", "", folded)
+        return re.sub(r"[\s\-_/.·、,，*]", "", folded)
 
     def _canonical_framework_name(self, token: str) -> Optional[str]:
         """token 去空格 casefold 后命中已知框架名 → 返回去空白原文；否则 None。
@@ -2705,7 +2706,10 @@ class SkillEngine:
             return ("malformed", [])
         cleaned: list[str] = []
         for token in tokens[:8]:  # 条数上限（危险词已在 raw_value 层全量检测，截断不漏检）
-            bare = re.sub(r"[（(].*?[)）]", "", token).strip()  # 剥括号（仅展示清洗，危险词已先拦）
+            # 剥括号 + 边界 markdown 强调标记 *（真模型把值 **加粗** 后拆分会落在 token 首尾，如
+            # 「**SWOT」「对标分析**」）。仅展示清洗：危险词已在 raw_value 层先拦，且 _normalize_for_danger
+            # 连 * 一并归一化（不变式同步），故 * 拆词无法绕过 denylist。
+            bare = re.sub(r"[（(].*?[)）]", "", token).strip().strip("*").strip()
             if not bare:
                 continue
             canonical = self._canonical_framework_name(bare)
