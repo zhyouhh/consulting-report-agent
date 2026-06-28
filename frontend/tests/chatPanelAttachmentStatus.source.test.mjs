@@ -32,16 +32,25 @@ test("ChatPanel renders the transcribed indicator + transient failure note on th
   assert.match(src, /transcriptionStatus === 'failed'/);
 });
 
-test("ChatPanel renders a conversion-status chip on the materials list", () => {
+test("ChatPanel no longer renders the always-on project materials list above the composer", () => {
+  // Materials + their conversion status now live ONLY in the right-side 材料 tab (WorkspacePanel).
+  // The composer must not re-list every project material (the clutter the user reported) nor
+  // expose a manual material-attach toggle. Rationale for dropping "re-attach to this turn":
+  // every material id is already in the per-turn system manifest, and a read material's text is
+  // re-injected via the working-memory bypass (subject to compaction), so manual re-attach added
+  // little for the text-only managed model — an accepted product tradeoff, not a memory guarantee.
   const src = chatPanelSrc();
-  assert.match(src, /conversionStatusChip\(material\)/);
-  assert.match(src, /statusChip\.label/);
+  assert.doesNotMatch(src, /conversionStatusChip/);
+  assert.doesNotMatch(src, /toggleMaterialSelection/);
+  assert.doesNotMatch(src, /selectedMaterials\.map/);
 });
 
-test("ChatPanel renders a muted chip for the not_parsed tone", () => {
-  // N6 Fix1: not_parsed gets its own muted style branch (informative, not alarming).
+test("ChatPanel still auto-attaches freshly uploaded documents to the turn (invariant preserved)", () => {
+  // Removing the manual list must NOT break upload auto-attach: uploaded docs still merge into
+  // selectedMaterialIds and ride the turn via attachedMaterialIds.
   const src = chatPanelSrc();
-  assert.match(src, /statusChip\.tone === 'not_parsed'/);
+  assert.match(src, /mergeMaterialIds\(selectedMaterialIds, uploadedMaterials\)/);
+  assert.match(src, /attachedMaterialIds: requestAttachedMaterialIds/);
 });
 
 test("ChatPanel rebuilds history attachment_transcripts indicators on reload", () => {

@@ -400,6 +400,17 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **回归**：后端 `tests/test_chat_runtime.py`（`_build_message_parts`/persist/load/summary-pop/per-event）、`tests/test_main_api.py`（`GET /conversation` parts 净化/scalar-only/pending→终态）；前端 `messageParts.test.mjs` / `chatPanelParts.source` / `assistantTextRender.source` / `messageParts.render.source` / `chatPanelSseRouting` / `toolCallPill.source` / `toolEvents.test`。后端 1488 / 前端 459 / build / DeepSeek / 禁改区 全绿。详见 memory [[tool-call-pill-status]] + `docs/current-worklist.md`。
 
+## 聊天框材料区精简（2026-06-29，纯前端 + 已部署 kr-web-01 bundle `index-BpQ_ae3i.js`）
+
+用户反馈"上传后输入框上方常驻铺列全部材料"占地方、像冗余。本批把材料管理收敛到右侧「材料」标签，输入框上方平时只剩输入框本身。**纯前端、后端协议零改动、DeepSeek/信任边界/租户隔离零改动。** Codex 双轨复审（初审 + NIT 修复终核）APPROVED 无 BLOCKER。改聊天框附件/材料 UI 前必读：
+
+- **删掉 `ChatPanel.jsx` 输入框上方 block2（已勾选材料）+ block3（全部项目材料铺列 + 手动挂载 toggle）**。`待发送附件`（pendingAttachments，新拖入未发送）保留。
+- **解析状态（已解析/未解析/失败）迁到右侧「材料」标签**（`WorkspacePanel.jsx` 每行 + `conversionStatusChip` 三 tone），是材料解析状态**唯一**前端显示处。`conversionStatusChip` import 从 ChatPanel 移到 WorkspacePanel。
+- **为什么砍"手动把旧材料/旧图片重新挂这一轮"**（验证后的取舍，非纯删功能）：① `read_material_file` 读成功后正文按 `material:{id}` 存进 `conversation_state.json` 工作记忆、每轮注回（见「## 管理型搜索池」上方 N6 + worklist 顶「工作记忆旁路」实证）；② 默认 managed 模型 `deepseek-v4-pro` 是纯文本（不在 `MULTIMODAL_MODEL_MARKERS`），图片走转写、读过同样留；③ 模型每轮已从 `build_project_context` 的「## 可用项目材料」拿到全部材料 id。故"重新挂"对默认配置零增量。**后端 `_build_user_content` 的 image_url/transcript 能力与其测试（`test_chat_runtime.py:203/212`）保留不动**，只是前端不再给入口（custom + 真多模态模型想重看原图像素是边角，重新上传即可）。
+- **`selectedMaterialIds` 不变量**（删 UI 后唯一写者是上传自动挂载）：①写入只剩 `sendMessage` 上传文档后的 `mergeMaterialIds(selectedMaterialIds, uploadedMaterials)`（无手动 UI）；② **turn-end 成功/失败都清空** `setSelectedMaterialIds([])`（合并原成功/失败两分支），准备期 catch 也清——材料选择已无可见 UI，留着会变成"看不见的已挂材料"悄悄带到下一条无关消息（codex 两轮点名）；③ **待发送附件队列仍"失败保留/成功清空"**（`if (!streamFailed) clearPendingAttachmentQueue()`，图片靠 pending 经 transient 重发，语义同改前）。
+- `toggleMaterialSelection`（`utils/chatMaterials.js`）现为**无生产引用的死 util**，有意保留（带测试纯函数、零成本、后续若加"引用材料"选择器可复用）。`materials` prop 仍被 ChatPanel 历史气泡用于反查材料名，**不可删**。
+- 回归：`chatPanelAttachmentStatus.source`（改为守"ChatPanel 不再常驻材料列表 `doesNotMatch conversionStatusChip/toggleMaterialSelection/selectedMaterials.map`" + "上传自动挂载不变量 `mergeMaterialIds`/`attachedMaterialIds`"）、`workspacePanel.source`（解析状态 chip 迁入守护）、`chatPanelComposerClear.source`（turn-end 清理块锚点改 `if (isActiveProjectRequest(requestProjectId)) {` 之后的 `if (renderUserBubble)`，断言含 `setSelectedMaterialIds([])` 不含 `setInput`）。前端 460 测试 + build 全绿。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。

@@ -31,12 +31,17 @@ test("sendMessage 失败恢复走双重守卫：发送序号 + 输入框仍空�
   assert.doesNotMatch(sendMessageBody, /setInput\(trimmedInput\)/, "禁止无守卫的 setInput(trimmedInput)");
 });
 
-test("startStream 成功分支不再负责清空输入框（清空职责已上移 sendMessage）", () => {
-  const branchStart = src.indexOf("if (!streamFailed && renderUserBubble)");
-  const branchEnd = src.indexOf("} else if (streamFailed && renderUserBubble)");
-  assert.ok(branchStart > -1 && branchEnd > branchStart, "应保留成功分支结构");
-  const successBranch = src.slice(branchStart, branchEnd);
-  assert.doesNotMatch(successBranch, /setInput/, "成功分支不得再 setInput（避免双重清空职责）");
+test("startStream 的 turn-end 清理块不负责清空输入框（清空职责已上移 sendMessage）", () => {
+  // 材料选择无可见 UI 后，成功/失败两分支已合并为单一 if (renderUserBubble) 清理块。
+  // 意图不变：turn-end 清理只清材料选择 / 附件队列，绝不碰 setInput（乐观清空是 sendMessage 的职责）。
+  // turn-end 清理块在 isActiveProjectRequest 守卫之后（首个 if (renderUserBubble) 是推用户气泡）。
+  const cleanupAnchor = src.indexOf("if (isActiveProjectRequest(requestProjectId)) {");
+  assert.ok(cleanupAnchor > -1, "应保留 turn-end 的 isActiveProjectRequest 守卫");
+  const branchStart = src.indexOf("if (renderUserBubble)", cleanupAnchor);
+  assert.ok(branchStart > -1, "应保留 turn-end 清理块 if (renderUserBubble)");
+  const cleanupBlock = src.slice(branchStart, branchStart + 600);
+  assert.match(cleanupBlock, /setSelectedMaterialIds\(\[\]\)/, "turn-end 应清空材料选择（失败也清，不留隐形已挂材料）");
+  assert.doesNotMatch(cleanupBlock, /setInput/, "turn-end 清理块不得 setInput（避免双重清空职责）");
 });
 
 test("整个 ChatPanel 里 setInput('') 只此一处（乐观清空是唯一来源）", () => {

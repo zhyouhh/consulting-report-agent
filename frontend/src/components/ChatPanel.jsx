@@ -1,7 +1,7 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import axios from 'axios'
 import { showError, showInfo, showSuccess } from '../utils/toast'
-import { buildChatRequest, buildTransientAttachmentsPayload, conversionStatusChip, toggleMaterialSelection } from '../utils/chatMaterials'
+import { buildChatRequest, buildTransientAttachmentsPayload } from '../utils/chatMaterials'
 import { applyAttachmentTranscribed, historyTranscriptIndicators } from '../utils/sseEvents'
 import { closePendingToolEvents, reduceToolEvent } from '../utils/toolEvents'
 // 时间线穿插：每个写 msg.content 的 SSE handler 旁建 msg.parts（文本/工具按到达顺序交错）。
@@ -89,7 +89,6 @@ const ChatPanel = forwardRef(function ChatPanel({
   const sendSeqRef = useRef(0)
   const connection = describeConnectionMode(settings || {})
   const workspaceSummary = summarizeWorkspace(workspace || {})
-  const selectedMaterials = materials.filter(material => selectedMaterialIds.includes(material.id))
   const { transientImages: pendingImageAttachments, persistentDocuments: pendingDocumentAttachments } = splitPendingAttachments(pendingAttachments)
   const contextUsage = tokenUsage ? formatContextUsage(tokenUsage) : null
   const contextUsagePercent = tokenUsage ? getContextUsagePercent(tokenUsage) : null
@@ -665,12 +664,16 @@ const ChatPanel = forwardRef(function ChatPanel({
     if (isActiveProjectRequest(requestProjectId)) {
       setLoading(false)
       setAbortController(current => (current === controller ? null : current))
-      if (!streamFailed && renderUserBubble) {
-        // 输入框清空已由 sendMessage 乐观完成；此处只清材料选择 / 附件队列。
+      if (renderUserBubble) {
+        // 输入框清空已由 sendMessage 乐观完成；此处清材料选择。
+        // 材料选择无可见 UI（材料统一在右侧「材料」标签管），失败也一并清空——
+        // 否则会留下用户看不见的"已挂材料"，悄悄带到下一条无关消息上。上传文档已是
+        // 持久材料、每轮系统清单都在，重试照样能被模型读取，无需把选择恢复回来。
         setSelectedMaterialIds([])
-        clearPendingAttachmentQueue()
-      } else if (streamFailed && renderUserBubble) {
-        setSelectedMaterialIds(attachedMaterialIds)
+        // 失败/中止保留待发送附件队列（图片需经 transient 重发），成功才清空。
+        if (!streamFailed) {
+          clearPendingAttachmentQueue()
+        }
       }
       onProjectMutated?.()
       // C5: the chat is free again — flush the next queued system trigger (if any) for the
@@ -791,6 +794,10 @@ const ChatPanel = forwardRef(function ChatPanel({
         const prefix = preparationStage === 'images' ? '处理图片失败: ' : '上传材料失败: '
         showError(prefix + detail)
         setUploading(false)
+        // 准备期失败（文档已入库但图片转换失败等）也清材料选择——与 turn-end 一致，
+        // 不在无可见 UI 的情况下留下"隐形已挂材料"带到下一条消息。文档已是持久材料、
+        // 仍在每轮系统清单里，重试照样可被模型读取。
+        setSelectedMaterialIds([])
         restoreInputForRetry() // 上传失败：守卫式回填原文便于重试
         return
       }
@@ -1148,56 +1155,8 @@ const ChatPanel = forwardRef(function ChatPanel({
             </div>
           </div>
         )}
-        {selectedMaterials.length > 0 && (
-          <div className="mb-3 flex flex-wrap gap-2">
-            {selectedMaterials.map(material => (
-              <button
-                key={material.id}
-                type="button"
-                onClick={() => setSelectedMaterialIds(prev => toggleMaterialSelection(prev, material.id))}
-                className="text-12 px-2 py-1 rounded-tag bg-asoft border border-asoftb text-asoftt inline-flex items-center gap-1 hover:bg-asoft/70"
-              >
-                <span>{material.display_name}</span>
-                <IconClose size={11} />
-              </button>
-            ))}
-          </div>
-        )}
-        {materials.length > 0 && (
-          <div className="mb-3 flex flex-wrap gap-2">
-            {materials.map(material => {
-              const statusChip = conversionStatusChip(material)
-              return (
-                <button
-                  key={material.id}
-                  type="button"
-                  onClick={() => setSelectedMaterialIds(prev => toggleMaterialSelection(prev, material.id))}
-                  className={`text-12 px-2 py-1 rounded-tag border inline-flex items-center gap-1 ${
-                    selectedMaterialIds.includes(material.id)
-                      ? 'bg-accent border-accent text-white'
-                      : 'bg-card2 border-border text-t2 hover:text-text'
-                  }`}
-                >
-                  <span>{material.display_name}</span>
-                  {statusChip && (
-                    <span
-                      title={statusChip.title || undefined}
-                      className={`text-2xs px-1.5 py-0.5 rounded-chip ${
-                        statusChip.tone === 'failed'
-                          ? 'bg-error/20 text-error'
-                          : statusChip.tone === 'not_parsed'
-                          ? 'bg-track text-t3'
-                          : 'bg-success/15 text-success'
-                      }`}
-                    >
-                      {statusChip.label}
-                    </span>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-        )}
+        {/* 项目材料及其解析状态统一在右侧「材料」标签管理，不再在输入框上方常驻铺列。
+            新上传材料经 sendMessage 自动挂载本轮（selectedMaterialIds），无需手动勾选入口。 */}
         <div className="flex items-end gap-[9px] border border-track rounded-card bg-field px-[7px] py-[7px] pl-[10px]">
           <input
             ref={uploadInputRef}

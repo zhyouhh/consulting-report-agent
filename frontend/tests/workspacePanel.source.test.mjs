@@ -8,6 +8,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const wsSrc = () => readFileSync(path.join(__dirname, "../src/components/WorkspacePanel.jsx"), "utf-8");
 const appSrc = () => readFileSync(path.join(__dirname, "../src/App.jsx"), "utf-8");
 
+test("WorkspacePanel renders the material conversion-status chip (migrated from ChatPanel composer)", () => {
+  // Parse status (已解析/未解析/失败) now lives here, the single place materials are managed.
+  const s = wsSrc();
+  assert.match(s, /import \{ conversionStatusChip \} from '\.\.\/utils\/chatMaterials'/);
+  assert.match(s, /conversionStatusChip\(material\)/);
+  assert.match(s, /statusChip\.label/);
+  // not_parsed keeps its own muted style branch (informative, not alarming).
+  assert.match(s, /statusChip\.tone === 'not_parsed'/);
+  assert.match(s, /statusChip\.tone === 'failed'/);
+});
+
 test("WorkspacePanel passes structured files straight through (no name/path remap)", () => {
   const s = wsSrc();
   assert.match(s, /setFiles\(res\.data\.files\)/);

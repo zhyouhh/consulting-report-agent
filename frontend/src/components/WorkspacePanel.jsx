@@ -8,6 +8,7 @@ import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { getDefaultPreviewFile } from '../utils/workspaceFiles'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
 import { DEFAULT_WORKSPACE_WIDTH } from '../utils/workspaceResize'
+import { conversionStatusChip } from '../utils/chatMaterials'
 import { IconFile, IconTrash, IconUpload } from './icons'
 
 const WorkspacePanel = forwardRef(function WorkspacePanel({
@@ -405,7 +406,9 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
               暂无项目材料。点击右上角「上传」按钮，或在聊天输入框左侧的回形针添加材料。
             </div>
           ) : (
-            materials.map(material => (
+            materials.map(material => {
+              const statusChip = conversionStatusChip(material)
+              return (
               <div key={material.id} className="flex items-center gap-[11px] px-[13px] py-[11px] bg-card border border-border rounded-[10px] mb-2">
                 {/* 图标 */}
                 <div className="w-[30px] h-[30px] rounded-ibtn bg-asoft text-asoftt flex items-center justify-center flex-shrink-0">
@@ -418,6 +421,21 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
                     {material.source_type} · {material.file_type || '未知类型'}
                   </div>
                 </div>
+                {/* 解析状态 */}
+                {statusChip && (
+                  <span
+                    title={statusChip.title || undefined}
+                    className={`text-2xs px-1.5 py-0.5 rounded-chip flex-shrink-0 ${
+                      statusChip.tone === 'failed'
+                        ? 'bg-error/20 text-error'
+                        : statusChip.tone === 'not_parsed'
+                        ? 'bg-track text-t3'
+                        : 'bg-success/15 text-success'
+                    }`}
+                  >
+                    {statusChip.label}
+                  </span>
+                )}
                 {/* 删除按钮 */}
                 <button
                   type="button"
@@ -429,7 +447,8 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
                   <IconTrash size={14} />
                 </button>
               </div>
-            ))
+              )
+            })
           )}
         </div>
       )}
