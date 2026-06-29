@@ -54,3 +54,14 @@ test("MobileShell: 设置保存后关左抽屉（onSettingsSaved 包装 closeAll
   // 切主题保持裸透传（不 closeAll）
   assert.match(s, /onToggleTheme=\{onToggleTheme\}/);
 });
+
+test("MobileShell: Sidebar 回调由壳包装——选/登出/管理 closeAll，新建成功才关，删除不关", () => {
+  const s = src();
+  assert.match(s, /handleSelectProject = \(p\) => \{ onSelectProject\(p\); closeAll\(\) \}/);
+  assert.match(s, /handleCreateProject = async \(p\) => \{ const ok = await onCreateProject\(p\); if \(ok\) closeAll\(\); return ok \}/);
+  assert.match(s, /handleLoggedOut = \(\) => \{ closeAll\(\); onLoggedOut\(\) \}/);
+  assert.match(s, /handleOpenAdmin = \(\) => \{ closeAll\(\); onOpenAdmin\(\) \}/);
+  // 删除项目直接透传 onDeleteProject（刻意不 closeAll）
+  assert.match(s, /onDeleteProject=\{onDeleteProject\}/);
+});
+
