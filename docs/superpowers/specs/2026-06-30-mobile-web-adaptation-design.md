@@ -1,6 +1,6 @@
 # 移动端适配设计 Spec（2026-06-30）
 
-> 修订记录：v1 初稿（brainstorm 定稿）→ v2 吸收 Codex 单轨独立审首轮（NEEDS-WORK，6 BLOCKER + 2 NIT），全部核实属实并落入下文（标 `[R1]`）→ v3 吸收复审（NEEDS-WORK，2 BLOCKER[审查汇报 ref 链未写进合同、全屏审查层 vs 滑走仍跑语义冲突] + 2 NIT[Sidebar 自动关接线、isCoarsePointer try/catch]），标 `[R2]`。→ v4 吸收对抗式红队（NEEDS-WORK，2 BLOCKER[fixed 层在 transform 抽屉祖先下失效、移动键盘/100dvh/safe-area 被 v3 弄丢] + 2 NIT[AdminPanel 移动挂载位置、onCreateProject 成功才 closeAll]），标 `[R3]`。→ v5 吸收红队复审（NEEDS-WORK，1 BLOCKER[审查完成未关右抽屉、汇报轮在抽屉背后跑] + 3 NIT[§4.6 残留 transform 矛盾、visibility 对 fixed 子层限制、source-guard 规则具体化]），标 `[R4]`。
+> 修订记录：v1 初稿（brainstorm 定稿）→ v2 吸收 Codex 单轨独立审首轮（NEEDS-WORK，6 BLOCKER + 2 NIT），全部核实属实并落入下文（标 `[R1]`）→ v3 吸收复审（NEEDS-WORK，2 BLOCKER[审查汇报 ref 链未写进合同、全屏审查层 vs 滑走仍跑语义冲突] + 2 NIT[Sidebar 自动关接线、isCoarsePointer try/catch]），标 `[R2]`。→ v4 吸收对抗式红队（NEEDS-WORK，2 BLOCKER[fixed 层在 transform 抽屉祖先下失效、移动键盘/100dvh/safe-area 被 v3 弄丢] + 2 NIT[AdminPanel 移动挂载位置、onCreateProject 成功才 closeAll]），标 `[R3]`。→ v5 吸收红队复审（NEEDS-WORK，1 BLOCKER[审查完成未关右抽屉、汇报轮在抽屉背后跑] + 3 NIT[§4.6 残留 transform 矛盾、visibility 对 fixed 子层限制、source-guard 规则具体化]），标 `[R4]`。→ v6 吸收红队终审（**APPROVED**，2 NIT[safe-area 改造口径、删除项目后抽屉处置]），标 `[R5]`。**Codex 单轨独立审已 APPROVED，spec 定稿。**
 
 ## 1. 目标与定位
 
@@ -67,7 +67,7 @@ export function isCoarsePointer() {
 **移动端不再加任何顶栏**——直接复用这个头，把 `onToggleSidebar`/`onToggleWorkspacePanel` 两个回调**接到 MobileShell 的左/右抽屉开关**（而非桌面的列折叠）。这两个按钮在桌面/移动下是同一个 UI、只是 handler 指向不同，天然零双顶栏。
 
 ### 4.2 左抽屉 = `Sidebar` 组件（≈1:1）
-项目列表（点一下 = 切项目 + 自动关抽屉，回到聊天）、账号/今日额度/登出/切主题/新建项目、删除确认弹窗——全保留。竖向 264px 列塞进抽屉天然贴合，**`Sidebar` 内部零改动**。**[R2] 「自动关抽屉」不改 `Sidebar`**：由 MobileShell 包装 `Sidebar` 的回调（`onSelectProject`/`onLoggedOut`/`onOpenAdmin` 外面再包一层 `closeAll()`），`Sidebar.jsx:86` 现有 `onSelectProject(project)` 调用点不动。**[R3] `onCreateProject` 必须「成功才 closeAll」（原 NIT 2）**：`ProjectCreateModal.jsx:32` 依赖 `onCreate` 返回 success 才关弹窗，包装器若无条件先 `closeAll()` 会在新建失败时把用户踢出流程 → 写成 `async (p) => { const ok = await onCreateProject(p); if (ok) closeAll(); return ok }`，且**透传返回值**。`onSelectProject`（同步、无失败态）`closeAll()` 后置即可。
+项目列表（点一下 = 切项目 + 自动关抽屉，回到聊天）、账号/今日额度/登出/切主题/新建项目、删除确认弹窗——全保留。竖向 264px 列塞进抽屉天然贴合，**`Sidebar` 内部零改动**。**[R2] 「自动关抽屉」不改 `Sidebar`**：由 MobileShell 包装 `Sidebar` 的回调（`onSelectProject`/`onLoggedOut`/`onOpenAdmin` 外面再包一层 `closeAll()`），`Sidebar.jsx:86` 现有 `onSelectProject(project)` 调用点不动。**[R3] `onCreateProject` 必须「成功才 closeAll」（原 NIT 2）**：`ProjectCreateModal.jsx:32` 依赖 `onCreate` 返回 success 才关弹窗，包装器若无条件先 `closeAll()` 会在新建失败时把用户踢出流程 → 写成 `async (p) => { const ok = await onCreateProject(p); if (ok) closeAll(); return ok }`，且**透传返回值**。`onSelectProject`（同步、无失败态）`closeAll()` 后置即可。**[R5] 删除项目 `onDeleteProject`（`Sidebar.jsx:39`）刻意不自动关左抽屉**——删完用户多半要在列表里挑下一个项目，保持抽屉打开体验更顺（这是有意决策，非遗漏）。
 
 ### 4.3 右抽屉 = `WorkspacePanel` 组件（三 tab，部分降级）
 现有三 tab（`WorkspacePanel.jsx:332` `[['stage','阶段'],['files','文件'],['materials','材料']]`）：
@@ -107,7 +107,7 @@ export function isCoarsePointer() {
 
 **B. 移动视口高度 / 软键盘 / 安全区（核心场景「手机聊天推进」的命门）**
 - `MobileShell` 根高度用 **`100dvh`**（dynamic viewport height），**不用** `h-screen`/`100vh`——否则手机地址栏收放 + 软键盘弹出时高度算错。桌面分支仍 `h-screen`，不动（§2）。
-- 聊天 composer（`ChatPanel.jsx:1093` 底部输入区）底部 padding 加 **`env(safe-area-inset-bottom)`**，避免被 iPhone 底部横条压住。这是移动专属样式，经 `isMobile` 或媒体查询作用，不改桌面渲染。
+- 聊天 composer（`ChatPanel.jsx:1093` 底部输入区）底部留 **`env(safe-area-inset-bottom)`**，避免被 iPhone 底部横条压住。**[R5] 口径（消解 §5「ChatPanel 不动」的表面冲突）**：**优先由 MobileShell 外层 wrapper 承担这层 padding**（ChatPanel 完全不碰）；若确需改 ChatPanel，**仅限加一个稳定的 class/style hook**（媒体查询或 `isMobile` 驱动的纯样式），**不加 prop、不改桌面渲染**。
 - 聊天气泡流 / 文件预览 / 材料列表 / 抽屉内容滚动容器用 **`min-h-0 overflow-y-auto`**，保证软键盘弹出、内容超长时各自可独立纵向滚动；抽屉打开时背景聊天区锁滚动防穿透。
 - `index.css:39` 现无 safe-area 处理；移动样式新增，不动现有桌面规则。
 
