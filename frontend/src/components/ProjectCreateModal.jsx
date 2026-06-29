@@ -42,7 +42,7 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/45 dark:bg-scrim/60">
-      <div className="bg-card rounded-win p-6 w-[560px] border border-border shadow-popover">
+      <div className="bg-card rounded-win p-6 w-[min(560px,calc(100vw-32px))] max-h-[calc(100dvh-32px)] overflow-y-auto border border-border shadow-popover">
         <div className="text-lg font-bold text-text tracking-tight">新建报告</div>
         <div className="text-13 text-t3 mt-[3px] mb-[18px]">填写基本信息，助手会据此开始准备阶段。</div>
 
@@ -73,7 +73,7 @@ export default function ProjectCreateModal({ onClose, onCreate }) {
           className="w-full bg-field border border-border text-text rounded-btn px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-accent"
         />
 
-        <div className="grid grid-cols-2 gap-3 mb-3">
+        <div className="grid grid-cols-1 min-[480px]:grid-cols-2 gap-3 mb-3">
           <div>
             <label htmlFor="create-deadline" className="block text-12 text-t2 mb-[6px]">截止日期</label>
             <input
