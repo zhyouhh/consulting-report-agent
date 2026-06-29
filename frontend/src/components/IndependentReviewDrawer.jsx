@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   aggregateContentDelta,
   backoffExhausted,
@@ -21,6 +22,7 @@ export default function ReviewChatWindow({
   isOpen,
   onClose,
   onCompleted,
+  isMobile = false,
 }) {
   const [bubbles, setBubbles] = useState([])
   const [windowState, setWindowState] = useState(initialReviewWindowState())
@@ -250,15 +252,19 @@ export default function ReviewChatWindow({
   const positioned = position.x != null && position.y != null
   const style = positioned ? { left: position.x, top: position.y, right: 'auto', bottom: 'auto' } : undefined
 
-  return (
+  const windowEl = (
     <div
       ref={dragRef}
-      style={style}
-      className="fixed bottom-4 right-4 w-[480px] h-[600px] bg-card border border-border rounded-win shadow-float z-50 flex flex-col"
+      style={isMobile ? { height: '100dvh' } : style}
+      className={isMobile
+        ? "fixed inset-0 w-full bg-card z-50 flex flex-col"
+        : "fixed bottom-4 right-4 w-[480px] h-[600px] bg-card border border-border rounded-win shadow-float z-50 flex flex-col"}
     >
       <div
-        onMouseDown={handleDragStart}
-        className="px-4 py-3 border-b border-border flex items-center justify-between cursor-move select-none"
+        onMouseDown={isMobile ? undefined : handleDragStart}
+        className={isMobile
+          ? "px-4 py-3 border-b border-border flex items-center justify-between select-none"
+          : "px-4 py-3 border-b border-border flex items-center justify-between cursor-move select-none"}
       >
         <div className="flex flex-col">
           <span className="text-sm font-medium text-text">
@@ -276,10 +282,10 @@ export default function ReviewChatWindow({
           type="button"
           onClick={handleActiveClose}
           className="text-t2 hover:text-text text-lg leading-none px-2"
-          title="关闭"
-          aria-label="关闭"
+          title={isMobile ? "停止审查" : "关闭"}
+          aria-label={isMobile ? "停止审查" : "关闭"}
         >
-          ×
+          {isMobile ? '停止审查' : '×'}
         </button>
       </div>
 
@@ -329,4 +335,5 @@ export default function ReviewChatWindow({
       </div>
     </div>
   )
+  return isMobile ? createPortal(windowEl, document.body) : windowEl
 }

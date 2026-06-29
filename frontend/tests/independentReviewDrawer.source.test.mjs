@@ -32,13 +32,13 @@ test("ReviewChatWindow listens for ESC keydown", () => {
 test("ReviewChatWindow has a real close button (not ESC-only)", () => {
   const src = drawerSrc();
   // A clickable close control wired to the active-close handler.
-  assert.match(src, /aria-label="关闭"/);
+  assert.match(src, /aria-label=\{isMobile \? "停止审查" : "关闭"\}/);
   assert.match(src, /onClick=\{handleActiveClose\}/);
 });
 
 test("ReviewChatWindow header is draggable", () => {
   const src = drawerSrc();
-  assert.match(src, /onMouseDown=\{handleDragStart\}/);
+  assert.match(src, /onMouseDown=\{isMobile \? undefined : handleDragStart\}/);
   assert.match(src, /cursor-move/);
 });
 
@@ -180,4 +180,16 @@ test("ChatPanel exposes dropPendingReviewTriggers and prunes via dropPendingTrig
   assert.match(src, /dropPendingTriggersByType\(/);
   // exposed on the imperative handle so WorkspacePanel can prune at run-start.
   assert.match(src, /\{ triggerSystemTurn, dropPendingReviewTriggers \}/);
+});
+
+test("ReviewChatWindow isMobile (default false): portal fullscreen, no drag, stop-label", () => {
+  const s = readFileSync(path.join(__dirname, "../src/components/IndependentReviewDrawer.jsx"), "utf-8");
+  assert.match(s, /import \{ createPortal \} from ['"]react-dom['"]/);
+  assert.match(s, /isMobile\s*=\s*false/);
+  // 移动端经 createPortal 挂 document.body（脱离抽屉子树）
+  assert.match(s, /isMobile\s*\?\s*createPortal\([\s\S]*?document\.body\)/);
+  // 关闭按钮移动端语义/可见文字「停止审查」（不止 title——手机看不到 title）
+  assert.match(s, /\{isMobile \? ['"]停止审查['"]/);
+  // 移动端不绑拖动
+  assert.match(s, /isMobile\s*\?\s*undefined\s*:\s*handleDragStart/);
 });
