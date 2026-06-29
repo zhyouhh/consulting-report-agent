@@ -30,6 +30,7 @@ export default function MobileShell(props) {
   const handleOpenAdmin = () => { closeAll(); onOpenAdmin() }
   // 设置保存后关左抽屉（与 select/create/logout/admin 同模式；动作完成回到聊天）
   const handleSettingsSaved = (...args) => { const r = onSettingsSaved?.(...args); closeAll(); return r }
+  // onToggleTheme 刻意不包装/不 closeAll：切主题是就地开关，用户可能连续切/继续浏览，关抽屉反而打断。
   // 删除项目刻意不关左抽屉：删完顺手在列表挑下一个。
 
   // 审查完成：触发主聊天汇报轮后关右抽屉，落到聊天。
@@ -80,7 +81,6 @@ export default function MobileShell(props) {
           onLoggedOut={handleLoggedOut}
           onOpenAdmin={handleOpenAdmin}
           theme={theme}
-          {/* 切主题刻意不关抽屉的例外：就地开关，用户可能连续切/继续浏览，关抽屉反而打断。 */}
           onToggleTheme={onToggleTheme}
           currentStageCode={workspaceStageCode}
         />
