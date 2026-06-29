@@ -10,6 +10,8 @@
 
 **真值源 Spec：** `docs/superpowers/specs/2026-06-30-mobile-web-adaptation-design.md`（Codex 单轨审 APPROVED，v6）。
 
+> 修订：v1 初稿 → v2 吸收 Codex plan 审 R1（NEEDS-WORK，7 BLOCKER[右抽屉布局无高/宽基准、禁-transform guard 被注释自炸、MobileShell 注释 ☰/▣ 触 paletteGuard、Task4 未改既有审查测试、Task2 下传断言假阳性、漏 Sidebar 删除确认弹窗、onInsertPrompt 未关抽屉] + 4 NIT），全部落入下文。
+
 **通用约束（每个 task 都成立）：**
 - 不引入新颜色 / 裸 hex / emoji（`paletteGuard` 守）；除既有 `dark:bg-scrim/N` 外不加 `dark:`（`darkClassGuard` 守）。
 - 所有 `isMobile` prop **默认 false**，桌面取默认 = 今天行为。
@@ -158,11 +160,13 @@ test("WorkspacePanel accepts isMobile (default false) and threads it down", () =
   const s = wsSrc();
   // 签名含 isMobile 默认 false
   assert.match(s, /isMobile\s*=\s*false/);
-  // 下传给只读预览与审查窗
+  // [R1] 两条独立断言——防自闭合 <FilePreviewPanel/> 的 isMobile 假满足审查窗那条
   assert.match(s, /<FilePreviewPanel[\s\S]*?isMobile=\{isMobile\}/);
-  assert.match(s, /isMobile=\{isMobile\}[\s\S]*?\/>|<(IndependentReviewDrawer|ReviewChatWindow)[\s\S]*?isMobile=\{isMobile\}/);
+  assert.match(s, /<IndependentReviewDrawer[\s\S]*?isMobile=\{isMobile\}/);
 });
 ```
+
+> [R1] WorkspacePanel 渲染审查窗的 JSX tag 名是 `IndependentReviewDrawer`（import 别名，见 `WorkspacePanel.jsx:455`）；若实际别名不同，断言与实现同步对齐真实 tag 名。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -182,7 +186,7 @@ Expected: FAIL（`isMobile = false` 未出现）
 Run: `node --test tests/workspacePanel.source.test.mjs`
 Expected: PASS
 Run: `node --test tests/`
-Expected: 全绿（现有 460 + 新增不回归）
+Expected: 全绿（现有全套 + 新增不回归；测试总数以实际为准，勿写死）
 
 - [ ] **Step 5: 提交**
 
@@ -235,6 +239,7 @@ Expected: FAIL
    )}
    ```
 4. 拖动分隔条（约 `:304-305` 的 `<div onMouseDown={startTreeResize} className="h-[6px] cursor-row-resize ...">`）整体用 `{!isMobile && (...)}` 包裹——移动端文件树/预览保持默认 `treePct`（三七分）固定比例，不拖动。
+5. **[R1 NIT] `handleEnterEdit` 的 `useCallback` deps 加 `isMobile`**：当前是 `[currentFile, onReloadFile]`（`:206`）→ 改为 `[currentFile, onReloadFile, isMobile]`，别靠「首屏锁定」隐含成立（isMobile 在闭包里被读，须进 deps 才是正确 React 写法）。
 
 - [ ] **Step 4: 跑测试 + 回归**
 
@@ -271,9 +276,16 @@ test("ReviewChatWindow isMobile (default false): portal fullscreen, no drag, sto
   // 移动端关闭按钮语义为「停止审查」
   assert.match(s, /停止审查/);
   // 移动端不绑拖动
-  assert.match(s, /isMobile\s*\?\s*undefined\s*:\s*handleDragStart|!isMobile && [\s\S]*?handleDragStart/);
+  assert.match(s, /isMobile\s*\?\s*undefined\s*:\s*handleDragStart/);
+  // 移动端可见文字「停止审查」（不止 title——手机看不到 title，[R1 NIT]）
+  assert.match(s, /\{isMobile \? ['"]停止审查['"]/);
 });
 ```
+
+**[R1] 同时改既有两条测试**（改造让它们的硬断言失效，不改会回归红）：
+- `independentReviewDrawer.source.test.mjs:35` 的 `assert.match(src, /aria-label="关闭"/);` → `assert.match(src, /aria-label=\{isMobile \? "停止审查" : "关闭"\}/);`
+- `independentReviewDrawer.source.test.mjs:41` 的 `assert.match(src, /onMouseDown=\{handleDragStart\}/);` → `assert.match(src, /onMouseDown=\{isMobile \? undefined : handleDragStart\}/);`
+- `:36`（`onClick={handleActiveClose}`）、`:42`（`cursor-move` 仍在桌面分支三元里）保持，不改。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -303,11 +315,13 @@ Expected: FAIL
          {/* ...标题/进度（原样）... */}
          <button
            onClick={handleActiveClose}
-           className="text-t2 hover:text-text text-lg leading-none px-2"
+           className={isMobile
+             ? "text-12 text-error border border-error/40 rounded-btn px-3 py-1"
+             : "text-t2 hover:text-text text-lg leading-none px-2"}
            title={isMobile ? "停止审查" : "关闭"}
            aria-label={isMobile ? "停止审查" : "关闭"}
          >
-           {/* 原图标/×（原样） */}
+           {isMobile ? '停止审查' : (/* 桌面原子节点（× / 图标）原样保留 */ <原桌面子节点/>)}
          </button>
        </div>
        {/* ...正文流 + errored 分支（原样）... */}
@@ -379,13 +393,19 @@ test("MobileShell: scrim 关闭 + 100dvh + safe-area", () => {
   assert.match(s, /safe-area-inset-bottom/);         // composer 安全区
 });
 
-test("MobileShell: 抽屉容器禁 transform 类（spec §4.7-A）", () => {
+test("MobileShell: 抽屉/壳禁 CSS 变换类（保内部 fixed 弹窗，spec §4.7-A）", () => {
   const s = src();
-  // off-canvas 用 left/right，绝不用 transform/translate/scale 等（会破坏内部 fixed 弹窗 containing block）
-  assert.doesNotMatch(s, /\b(transform|transform-gpu|-?translate-[xy]|scale-|rotate-|skew-|perspective)\b/);
-  assert.doesNotMatch(s, /\b(blur-|backdrop-blur)\b/);
-  assert.doesNotMatch(s, /style=\{\{[^}]*transform:/);
-  assert.doesNotMatch(s, /style=\{\{[^}]*filter:/);
+  // [R1] 只扫 className 字符串字面量 + inline style，避免注释里的字样导致 guard 自炸/漏检
+  const classNames = [...s.matchAll(/className="([^"]*)"/g)].map((m) => m[1]).join(" ");
+  assert.doesNotMatch(classNames, /\b(transform|transform-gpu|translate-[xy]-|-translate-[xy]-|scale-|rotate-|skew-[xy]-|perspective-|blur-|backdrop-blur|filter)\b/);
+  assert.doesNotMatch(s, /style=\{\{[^}]*\b(transform|filter)\s*:/);
+});
+
+test("MobileShell: 抽屉 wrapper 有显式宽度基准 + 拉满高度（[R1] BLOCKER）", () => {
+  const s = src();
+  // 左抽屉显式 264px + h-full + flex；右抽屉显式宽 + h-full + flex（给 WorkspacePanel width:100% 视口基准 + 子面板拉满高）
+  assert.match(s, /left-0[^"]*h-full w-\[264px\] flex/);
+  assert.match(s, /right-0[^"]*h-full w-\[min\(100vw,28rem\)\] flex/);
 });
 ```
 
@@ -405,7 +425,7 @@ import WorkspacePanel from './WorkspacePanel'
 import { nextDrawerState, DRAWER_NONE, DRAWER_LEFT, DRAWER_RIGHT } from '../utils/deviceMode'
 
 // 移动端壳（spec §4）：聊天占满 + 左/右抽屉覆盖，复用桌面三面板，只换摆法。
-// 抽屉 off-canvas 用 left/right（禁 transform，避免破坏内部 fixed 弹窗 containing block，spec §4.7-A）。
+// 抽屉滑动用 left/right 定位，刻意不用会生成 containing block 的 CSS 变换（保内部 fixed 弹窗满屏，spec §4.7-A）。
 // 常驻挂载（关闭不卸载→上传/审查存活，spec §4.6）；根 100dvh + composer safe-area（spec §4.7-B）。
 export default function MobileShell(props) {
   const {
@@ -423,17 +443,22 @@ export default function MobileShell(props) {
   const toggleLeft = () => setDrawer((d) => nextDrawerState(d, 'toggleLeft'))
   const toggleRight = () => setDrawer((d) => nextDrawerState(d, 'toggleRight'))
 
-  // —— Sidebar / 审查回调包装在 Task 6/7 填入 ——
+  // Sidebar 回调包装：动作后自动关左抽屉，Sidebar 本体零改（spec §4.2）。
   const handleSelectProject = (p) => { onSelectProject(p); closeAll() }
   const handleCreateProject = async (p) => { const ok = await onCreateProject(p); if (ok) closeAll(); return ok }
   const handleLoggedOut = () => { closeAll(); onLoggedOut() }
   const handleOpenAdmin = () => { closeAll(); onOpenAdmin() }
+  // 删除项目刻意不关左抽屉：删完顺手在列表挑下一个（spec §4.2 [R5]）。
+
+  // 审查完成：触发主聊天汇报轮后关右抽屉，落到聊天（spec §5 [R4]）。
   const handleTriggerSystemTurn = (t, m) => { chatPanelRef.current?.triggerSystemTurn(t, m); closeAll() }
   const handleDropPendingReviewTriggers = (t) => chatPanelRef.current?.dropPendingReviewTriggers(t)
+  // [R1] 「继续扩写」/回退插入 prompt 后关右抽屉，否则输入框在抽屉背后像没反应。
+  const handleInsertPrompt = (text) => { onInsertPrompt(text); closeAll() }
 
   return (
     <div className="relative w-screen bg-bg overflow-hidden" style={{ height: '100dvh' }}>
-      {/* 聊天主区：复用 ChatPanel 自带 60px 顶栏（☰/▣ 接抽屉）。safe-area 由本壳承担、不碰 ChatPanel。 */}
+      {/* 聊天主区：复用 ChatPanel 自带 60px 顶栏（侧栏按钮/工作区按钮接抽屉）。safe-area 由本壳承担、不碰 ChatPanel。 */}
       <div className="absolute inset-0 flex flex-col" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
         <ChatPanel
           ref={chatPanelRef}
@@ -456,9 +481,9 @@ export default function MobileShell(props) {
         <div onClick={closeAll} aria-hidden="true" className="absolute inset-0 z-20 bg-scrim/40 dark:bg-scrim/60" />
       )}
 
-      {/* 左抽屉 = Sidebar（Task 6 填回调），off-canvas left、常驻挂载、禁 transform。 */}
+      {/* 左抽屉 = Sidebar。显式 w-[264px] h-full flex 给子面板高度基准（Sidebar 内部 w-[264px]），off-canvas left、常驻挂载。 */}
       <div
-        className="absolute top-0 left-0 z-30 h-full transition-[left] duration-200 ease-out"
+        className="absolute top-0 left-0 z-30 h-full w-[264px] flex transition-[left] duration-200 ease-out"
         style={{ left: drawer === DRAWER_LEFT ? '0' : '-110%', visibility: drawer === DRAWER_LEFT ? 'visible' : 'hidden' }}
       >
         <Sidebar
@@ -478,9 +503,9 @@ export default function MobileShell(props) {
         />
       </div>
 
-      {/* 右抽屉 = WorkspacePanel（Task 7 接 isMobile/审查），off-canvas right、常驻挂载、禁 transform。 */}
+      {/* 右抽屉 = WorkspacePanel。显式 w-[min(100vw,28rem)] h-full flex overflow-hidden 给 width:100% 基准 + 拉满高度，off-canvas right、常驻挂载。 */}
       <div
-        className="absolute top-0 right-0 z-30 h-full transition-[right] duration-200 ease-out"
+        className="absolute top-0 right-0 z-30 h-full w-[min(100vw,28rem)] flex overflow-hidden transition-[right] duration-200 ease-out"
         style={{ right: drawer === DRAWER_RIGHT ? '0' : '-110%', visibility: drawer === DRAWER_RIGHT ? 'visible' : 'hidden' }}
       >
         <WorkspacePanel
@@ -494,7 +519,7 @@ export default function MobileShell(props) {
           onMaterialDeleted={onMaterialDeleted}
           onProjectMutated={onProjectMutated}
           onCheckpointSet={onCheckpointSet}
-          onInsertPrompt={onInsertPrompt}
+          onInsertPrompt={handleInsertPrompt}
           onTriggerSystemTurn={handleTriggerSystemTurn}
           onDropPendingReviewTriggers={handleDropPendingReviewTriggers}
         />
@@ -584,6 +609,9 @@ test("MobileShell: 右抽屉 WorkspacePanel isMobile + width100% + 审查汇报 
   // 常驻挂载：WorkspacePanel 不被 {drawer===... && } 条件卸载，只用 visibility/off-canvas 隐藏
   assert.doesNotMatch(s, /drawer === DRAWER_RIGHT && <WorkspacePanel/);
   assert.match(s, /visibility: drawer === DRAWER_RIGHT \? 'visible' : 'hidden'/);
+  // [R1] 继续扩写/回退插入 prompt 后关右抽屉（否则输入框在抽屉背后像没反应）
+  assert.match(s, /handleInsertPrompt = \(text\) => \{ onInsertPrompt\(text\); closeAll\(\) \}/);
+  assert.match(s, /onInsertPrompt=\{handleInsertPrompt\}/);
 });
 ```
 
@@ -724,7 +752,7 @@ Expected: FAIL
 Run: `node --test tests/appInitGating.source.test.mjs`
 Expected: PASS
 Run: `node --test tests/`
-Expected: 全绿（460 + 新增）
+Expected: 全绿（全套 + 新增；测试总数以实际为准，勿写死）
 Run: `npm run build`
 Expected: 构建成功
 
@@ -800,7 +828,7 @@ git commit -m "feat(mobile): auth screens (login/force-password) shrink on narro
 ## Task 10: 模态框窄屏（ProjectCreateModal + SettingsModal + AdminPanel）
 
 **Files:**
-- Modify: `frontend/src/components/ProjectCreateModal.jsx:44`、`SettingsModal.jsx:100`、`AdminPanel.jsx:52`
+- Modify: `frontend/src/components/ProjectCreateModal.jsx:44`、`SettingsModal.jsx:100`、`AdminPanel.jsx:52`、`Sidebar.jsx:238`（[R1] 删除确认弹窗）
 - Test: `frontend/tests/mobileAuthModals.source.test.mjs`（追加）
 
 - [ ] **Step 1: 追加失败测试**
@@ -820,11 +848,24 @@ test("SettingsModal 窄屏：宽收缩 + 限高滚动", () => {
   assert.match(s, /overflow-y-auto/);
 });
 
-test("AdminPanel 窄屏：宽收缩 + 限高滚动 + 用户表横向滚动", () => {
+test("AdminPanel 窄屏：宽收缩 + 限高滚动 + 用户表横向滚动 + 内层 min-w", () => {
   const s = read("AdminPanel.jsx");
   assert.match(s, /w-\[min\(680px,calc\(100vw-32px\)\)\]/);
   assert.match(s, /max-h-\[calc\(100dvh-32px\)\]/);
-  assert.match(s, /overflow-x-auto/); // 5 列 grid 在窄屏可横向滚动
+  assert.match(s, /overflow-x-auto/); // 外层可横向滚动
+  assert.match(s, /min-w-\[/);        // [R1] 内层网格给 min-width 才会真的产生横向滚动
+});
+
+test("ProjectCreate/Settings 双列窄屏回退单列", () => {
+  // [R1] 双列在 <480px 改单列，避免挤压
+  assert.match(read("ProjectCreateModal.jsx"), /grid-cols-1 min-\[480px\]:grid-cols-2/);
+  assert.match(read("SettingsModal.jsx"), /grid-cols-1 min-\[480px\]:grid-cols-2/);
+});
+
+test("Sidebar 删除确认弹窗窄屏不溢出（[R1]）", () => {
+  const s = read("Sidebar.jsx");
+  assert.match(s, /w-\[min\(384px,calc\(100vw-32px\)\)\]/);
+  assert.doesNotMatch(s, /className="[^"]*\bw-96\b/); // 旧固定 384px 已去
 });
 ```
 
@@ -837,7 +878,8 @@ Expected: FAIL
 
 - `ProjectCreateModal.jsx:44`：容器 `w-[560px]` → `w-[min(560px,calc(100vw-32px))] max-h-[calc(100dvh-32px)] overflow-y-auto`；若内部为双列网格（`grid-cols-2` 类），加窄屏单列回退（如把固定 `grid-cols-2` 改 `grid-cols-1 min-[480px]:grid-cols-2`，仅在 ≥480px 才双列）。
 - `SettingsModal.jsx:100`：同上宽/高/滚动；双列同样加 `grid-cols-1 min-[480px]:grid-cols-2` 回退（若有）。
-- `AdminPanel.jsx:52`：`w-[680px]` → `w-[min(680px,calc(100vw-32px))] max-h-[calc(100dvh-32px)] overflow-y-auto`；用户表 5 列 grid 外层包 `overflow-x-auto`（窄屏横向滚动，不破版；额度列可编辑 input 保留——见 CLAUDE.md「redesign 三处差距 follow-up」AdminPanel 约束）。
+- `AdminPanel.jsx:52`：`w-[680px]` → `w-[min(680px,calc(100vw-32px))] max-h-[calc(100dvh-32px)] overflow-y-auto`；用户表 5 列 grid 外层包 `overflow-x-auto` + **内层网格容器加 `min-w-[640px]`**（[R1]：只给外层 `overflow-x-auto` 而内层会自适应收缩、不产生横向滚动；须给内层 min-width 才真能横滚）；额度列可编辑 input 保留（见 CLAUDE.md「redesign 三处差距 follow-up」AdminPanel 约束）。
+- **[R1] `Sidebar.jsx:238` 删除确认弹窗**：`w-96`（384px fixed overlay，360px 手机会溢出）→ `w-[min(384px,calc(100vw-32px))]`。
 
 > 桌面（≥592/712px 宽）`min()` 取固定值、`min-[480px]:` 命中双列，渲染与今天一致；仅窄屏收缩/单列/横滚。
 
@@ -846,15 +888,15 @@ Expected: FAIL
 Run: `node --test tests/mobileAuthModals.source.test.mjs`
 Expected: PASS
 Run: `node --test tests/`
-Expected: 全绿（`adminPanel.source`/`settingsModal.source`/`projectCreateModal` 既有测试不回归）
+Expected: 全绿（`adminPanel.source`/`settingsModal.source`/`projectCreateModal`/`sidebar.source` 既有测试不回归）
 Run: `npm run build`
 Expected: 成功
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add frontend/src/components/ProjectCreateModal.jsx frontend/src/components/SettingsModal.jsx frontend/src/components/AdminPanel.jsx frontend/tests/mobileAuthModals.source.test.mjs
-git commit -m "feat(mobile): modals (create/settings/admin) shrink + scroll on narrow viewport, desktop unchanged"
+git add frontend/src/components/ProjectCreateModal.jsx frontend/src/components/SettingsModal.jsx frontend/src/components/AdminPanel.jsx frontend/src/components/Sidebar.jsx frontend/tests/mobileAuthModals.source.test.mjs
+git commit -m "feat(mobile): modals (create/settings/admin) + delete-confirm shrink on narrow viewport, desktop unchanged"
 ```
 
 ---
