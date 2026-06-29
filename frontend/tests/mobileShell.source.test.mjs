@@ -65,3 +65,21 @@ test("MobileShell: Sidebar 回调由壳包装——选/登出/管理 closeAll，
   assert.match(s, /onDeleteProject=\{onDeleteProject\}/);
 });
 
+test("MobileShell: 右抽屉 WorkspacePanel isMobile + width100% + 审查汇报 closeAll + 常驻挂载", () => {
+  const s = src();
+  // WorkspacePanel opening tag 内含 isMobile={true}（用 tag-bounded，避免跨标签假阳性）
+  const wpTag = s.match(/<WorkspacePanel\b[^>]*>/)?.[0] || "";
+  assert.match(wpTag, /isMobile=\{true\}/);
+  assert.match(wpTag, /width="100%"/);
+  // 审查完成：触发主聊天汇报轮后关右抽屉
+  assert.match(s, /handleTriggerSystemTurn = \(t, m\) => \{ chatPanelRef\.current\?\.triggerSystemTurn\(t, m\); closeAll\(\) \}/);
+  assert.match(s, /onTriggerSystemTurn=\{handleTriggerSystemTurn\}/);
+  assert.match(s, /onDropPendingReviewTriggers=\{handleDropPendingReviewTriggers\}/);
+  // 常驻挂载：WorkspacePanel 不被 {drawer===... && } 条件卸载，只用 visibility/off-canvas 隐藏
+  assert.doesNotMatch(s, /drawer === DRAWER_RIGHT && <WorkspacePanel/);
+  assert.match(s, /visibility: drawer === DRAWER_RIGHT \? 'visible' : 'hidden'/);
+  // 继续扩写/回退插入 prompt 后关右抽屉
+  assert.match(s, /handleInsertPrompt = \(text\) => \{ onInsertPrompt\(text\); closeAll\(\) \}/);
+  assert.match(s, /onInsertPrompt=\{handleInsertPrompt\}/);
+});
+
