@@ -266,7 +266,7 @@ export default function ReviewChatWindow({
           ? "px-4 py-3 border-b border-border flex items-center justify-between select-none"
           : "px-4 py-3 border-b border-border flex items-center justify-between cursor-move select-none"}
       >
-        <div className="flex flex-col">
+        <div className={isMobile ? "flex flex-col min-w-0" : "flex flex-col"}>
           <span className="text-sm font-medium text-text">
             {windowState.status === 'completed'
               ? '审查完成'
@@ -281,7 +281,9 @@ export default function ReviewChatWindow({
         <button
           type="button"
           onClick={handleActiveClose}
-          className="text-t2 hover:text-text text-lg leading-none px-2"
+          className={isMobile
+            ? "text-t2 hover:text-text text-lg leading-none px-2 whitespace-nowrap flex-shrink-0"
+            : "text-t2 hover:text-text text-lg leading-none px-2"}
           title={isMobile ? "停止审查" : "关闭"}
           aria-label={isMobile ? "停止审查" : "关闭"}
         >

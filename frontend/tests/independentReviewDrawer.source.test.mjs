@@ -188,8 +188,11 @@ test("ReviewChatWindow isMobile (default false): portal fullscreen, no drag, sto
   assert.match(s, /isMobile\s*=\s*false/);
   // 移动端经 createPortal 挂 document.body（脱离抽屉子树）
   assert.match(s, /isMobile\s*\?\s*createPortal\([\s\S]*?document\.body\)/);
-  // 关闭按钮移动端语义/可见文字「停止审查」（不止 title——手机看不到 title）
-  assert.match(s, /\{isMobile \? ['"]停止审查['"]/);
+  // 移动端外层全屏 class + style（fullscreen 锁）
+  assert.match(s, /fixed inset-0 w-full/);
+  assert.match(s, /height: '100dvh'/);
+  // 锚定按钮子节点（而非 title/aria-label）：改回 × 必须 FAIL
+  assert.match(s, />\s*\{isMobile \? '停止审查' : '×'\}\s*<\/button>/);
   // 移动端不绑拖动
   assert.match(s, /isMobile\s*\?\s*undefined\s*:\s*handleDragStart/);
 });
