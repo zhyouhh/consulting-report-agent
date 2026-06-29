@@ -38,7 +38,9 @@ test("AdminPanel 窄屏：宽收缩 + 限高滚动 + 用户表横向滚动 + 内
   assert.match(s, /w-\[min\(680px,calc\(100vw-32px\)\)\]/);
   assert.match(s, /max-h-\[calc\(100dvh-32px\)\]/);
   assert.match(s, /overflow-x-auto/);
-  assert.match(s, /min-w-\[/);
+  // 内层 role=table 带 min-w-[600px]（桌面 ≤630px 内容区不横滚、窄屏才横滚）
+  const tableTag = s.match(/<div role="table"[^>]*>/)?.[0] || "";
+  assert.match(tableTag, /min-w-\[600px\]/);
 });
 
 test("ProjectCreate/Settings 双列窄屏回退单列", () => {

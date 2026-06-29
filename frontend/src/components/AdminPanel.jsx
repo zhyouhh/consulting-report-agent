@@ -69,7 +69,7 @@ export default function AdminPanel({ onClose }) {
         </div>
         {/* 原型是 div grid 排版；补 ARIA table 语义让屏幕阅读器拿到列头/单元格关系（codex NIT） */}
         <div className="rounded-card border border-border overflow-x-auto">
-        <div role="table" aria-label="用户列表" className="overflow-hidden min-w-[640px]">
+          <div role="table" aria-label="用户列表" className="overflow-hidden min-w-[600px]">
           <div role="row" className="grid grid-cols-[1.6fr_1fr_1fr_1fr_1.3fr] gap-2 bg-card2 border-b border-border px-[14px] py-[10px] text-11 font-semibold text-t2">
             <span role="columnheader">用户</span>
             <span role="columnheader">今日</span>
@@ -113,7 +113,7 @@ export default function AdminPanel({ onClose }) {
               </span>
             </div>
           ))}
-        </div>
+          </div>
         </div>
       </div>
     </div>
