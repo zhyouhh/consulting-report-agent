@@ -46,3 +46,11 @@ test("MobileShell: 抽屉 wrapper 有显式宽度基准 + 拉满高度", () => {
   assert.match(s, /left-0[^"]*h-full w-\[264px\] flex/);
   assert.match(s, /right-0[^"]*h-full w-\[min\(100vw,28rem\)\] flex/);
 });
+
+test("MobileShell: 设置保存后关左抽屉（onSettingsSaved 包装 closeAll），切主题刻意不关", () => {
+  const s = src();
+  assert.match(s, /handleSettingsSaved = \(\.\.\.args\) => \{ const r = onSettingsSaved\?\.\(\.\.\.args\); closeAll\(\); return r \}/);
+  assert.match(s, /onSettingsSaved=\{handleSettingsSaved\}/);
+  // 切主题保持裸透传（不 closeAll）
+  assert.match(s, /onToggleTheme=\{onToggleTheme\}/);
+});
