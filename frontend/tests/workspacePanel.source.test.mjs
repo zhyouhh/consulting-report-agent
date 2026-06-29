@@ -115,7 +115,9 @@ test("loadFile discards out-of-order content responses via latest-request ref (c
 test("WorkspacePanel accepts isMobile (default false) and threads it down", () => {
   const s = wsSrc();
   assert.match(s, /isMobile\s*=\s*false/);
-  // 两条独立断言——防自闭合 <FilePreviewPanel/> 的 isMobile 假满足审查窗那条
-  assert.match(s, /<FilePreviewPanel[\s\S]*?isMobile=\{isMobile\}/);
-  assert.match(s, /<IndependentReviewDrawer[\s\S]*?isMobile=\{isMobile\}/);
+  // 截取各自的 opening tag 再断言——杜绝 [\s\S]*? 跨标签边界的假阳性
+  const filePreviewTag = s.match(/<FilePreviewPanel\b[^>]*>/)?.[0] || "";
+  assert.match(filePreviewTag, /isMobile=\{isMobile\}/);
+  const reviewDrawerTag = s.match(/<IndependentReviewDrawer\b[^>]*>/)?.[0] || "";
+  assert.match(reviewDrawerTag, /isMobile=\{isMobile\}/);
 });
