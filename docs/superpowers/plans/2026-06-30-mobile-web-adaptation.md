@@ -10,7 +10,7 @@
 
 **真值源 Spec：** `docs/superpowers/specs/2026-06-30-mobile-web-adaptation-design.md`（Codex 单轨审 APPROVED，v6）。
 
-> 修订：v1 初稿 → v2 吸收 Codex plan 审 R1（NEEDS-WORK，7 BLOCKER[右抽屉布局无高/宽基准、禁-transform guard 被注释自炸、MobileShell 注释 ☰/▣ 触 paletteGuard、Task4 未改既有审查测试、Task2 下传断言假阳性、漏 Sidebar 删除确认弹窗、onInsertPrompt 未关抽屉] + 4 NIT），全部落入下文。
+> 修订：v1 初稿 → v2 吸收 Codex plan 审 R1（NEEDS-WORK，7 BLOCKER[右抽屉布局无高/宽基准、禁-transform guard 被注释自炸、MobileShell 注释 ☰/▣ 触 paletteGuard、Task4 未改既有审查测试、Task2 下传断言假阳性、漏 Sidebar 删除确认弹窗、onInsertPrompt 未关抽屉] + 4 NIT）→ v3 吸收 R2（NEEDS-WORK，1 BLOCKER[Task4 `<原桌面子节点/>` 占位无效 JSX、桌面子节点实为 `×`] + 4 NIT[appSrc 不存在、min-h-0 缺、Task5 数量过期、guard 仅扫字面量]），全部落入下文。
 
 **通用约束（每个 task 都成立）：**
 - 不引入新颜色 / 裸 hex / emoji（`paletteGuard` 守）；除既有 `dark:bg-scrim/N` 外不加 `dark:`（`darkClassGuard` 守）。
@@ -321,7 +321,7 @@ Expected: FAIL
            title={isMobile ? "停止审查" : "关闭"}
            aria-label={isMobile ? "停止审查" : "关闭"}
          >
-           {isMobile ? '停止审查' : (/* 桌面原子节点（× / 图标）原样保留 */ <原桌面子节点/>)}
+           {isMobile ? '停止审查' : '×'}{/* 桌面子节点就是 × — IndependentReviewDrawer.jsx:282 */}
          </button>
        </div>
        {/* ...正文流 + errored 分支（原样）... */}
@@ -391,6 +391,7 @@ test("MobileShell: scrim 关闭 + 100dvh + safe-area", () => {
   assert.match(s, /onClick=\{closeAll\}/);
   assert.match(s, /100dvh/);                         // 根高度（spec §4.7-B）
   assert.match(s, /safe-area-inset-bottom/);         // composer 安全区
+  assert.match(s, /min-h-0/);                        // [R2 NIT] 软键盘下聊天区可正确收缩/滚动
 });
 
 test("MobileShell: 抽屉/壳禁 CSS 变换类（保内部 fixed 弹窗，spec §4.7-A）", () => {
@@ -459,7 +460,7 @@ export default function MobileShell(props) {
   return (
     <div className="relative w-screen bg-bg overflow-hidden" style={{ height: '100dvh' }}>
       {/* 聊天主区：复用 ChatPanel 自带 60px 顶栏（侧栏按钮/工作区按钮接抽屉）。safe-area 由本壳承担、不碰 ChatPanel。 */}
-      <div className="absolute inset-0 flex flex-col" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+      <div className="absolute inset-0 flex flex-col min-h-0" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
         <ChatPanel
           ref={chatPanelRef}
           projectId={currentProjectId}
@@ -534,7 +535,7 @@ export default function MobileShell(props) {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node --test tests/mobileShell.source.test.mjs`
-Expected: PASS（4 测试）
+Expected: PASS（全过，数量以实际为准）
 
 - [ ] **Step 5: 提交**
 
@@ -651,7 +652,7 @@ git commit -m "test(mobile): lock right-drawer isMobile/review-report-closeAll +
 ```js
 // 追加到 frontend/tests/appInitGating.source.test.mjs 末尾（复用文件已有的 appSrc()/读取 helper）
 test("App: isMobile 首屏锁定 + MobileShell 分支 + 桌面分支结构原样 + AdminPanel 上提", () => {
-  const s = appSrc(); // 若无该 helper，按文件现有方式读 ../src/App.jsx
+  const s = src; // appInitGating.source.test.mjs 顶部已有 const src = readFileSync(../src/App.jsx)（字符串）
   // 首屏锁定，无运行时 matchMedia 监听
   assert.match(s, /import \{ isCoarsePointer \} from ['"]\.\/utils\/deviceMode['"]/);
   assert.match(s, /useState\(\(\) => isCoarsePointer\(\)\)/);
