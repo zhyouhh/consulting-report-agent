@@ -24,6 +24,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   onTriggerSystemTurn,
   onDropPendingReviewTriggers,
   width,
+  isMobile = false,
 }, ref) {
   const [activeTab, setActiveTab] = useState('stage')
   const [materialUploading, setMaterialUploading] = useState(null) // 正在上传的 projectId（按项目作用域），无则 null
@@ -376,6 +377,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
           onSelectFile={loadFile}
           onSaveFile={handleSaveFile}
           onReloadFile={reloadFile}
+          isMobile={isMobile}
         />
       ) : (
         <div className="flex-1 overflow-y-auto p-4">
@@ -457,6 +459,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
         isOpen={reviewDrawerOpen}
         onClose={handleCloseReviewDrawer}
         onCompleted={onIndependentReviewCompleted}
+        isMobile={isMobile}
       />
     </div>
   )

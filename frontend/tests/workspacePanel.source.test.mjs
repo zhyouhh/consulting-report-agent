@@ -111,3 +111,11 @@ test("loadFile discards out-of-order content responses via latest-request ref (c
   // 写 content 前比对最新请求 path
   assert.match(s, /latestFileRequestRef\.current !== path/);
 });
+
+test("WorkspacePanel accepts isMobile (default false) and threads it down", () => {
+  const s = wsSrc();
+  assert.match(s, /isMobile\s*=\s*false/);
+  // 两条独立断言——防自闭合 <FilePreviewPanel/> 的 isMobile 假满足审查窗那条
+  assert.match(s, /<FilePreviewPanel[\s\S]*?isMobile=\{isMobile\}/);
+  assert.match(s, /<IndependentReviewDrawer[\s\S]*?isMobile=\{isMobile\}/);
+});
