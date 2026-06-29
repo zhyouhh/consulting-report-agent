@@ -94,3 +94,22 @@ test('App: 侧栏 currentStageCode 受 workspaceProjectId 守卫（防切项目�
     'currentStageCode 应按 workspaceProjectId === currentProjectId 守卫',
   )
 })
+
+test("App: isMobile 首屏锁定 + MobileShell 分支 + 桌面分支结构原样 + AdminPanel 上提", () => {
+  const s = src;
+  // 首屏锁定，无运行时 matchMedia 监听
+  assert.match(s, /import \{ isCoarsePointer \} from ['"]\.\/utils\/deviceMode['"]/);
+  assert.match(s, /useState\(\(\) => isCoarsePointer\(\)\)/);
+  assert.doesNotMatch(s, /addEventListener\(['"]change['"][\s\S]*?pointer: coarse/);
+  // 分支
+  assert.match(s, /import MobileShell from ['"]\.\/components\/MobileShell['"]/);
+  assert.match(s, /isMobile \? \(\s*<MobileShell/);
+  // 桌面分支关键结构仍在（!isMobile 的 else 分支）
+  assert.match(s, /flex h-screen bg-bg/);
+  assert.match(s, /ref=\{setContainerRef\}/);
+  assert.match(s, /onMouseDown=\{startWorkspaceResize\}/);
+  assert.match(s, /cursor-col-resize/);
+  assert.match(s, /showWorkspacePanel &&/);
+  // AdminPanel 上提为分支兄弟（在 ErrorBoundary 内、两壳之外渲染一次）
+  assert.match(s, /\{showAdmin && authUser\?\.is_admin && <AdminPanel/);
+})
