@@ -1,6 +1,6 @@
 # 移动端适配设计 Spec（2026-06-30）
 
-> 修订记录：v1 初稿（brainstorm 定稿）→ v2 吸收 Codex 单轨独立审首轮（NEEDS-WORK，6 BLOCKER + 2 NIT），全部核实属实并落入下文（标 `[R1]`）→ v3 吸收复审（NEEDS-WORK，2 BLOCKER[审查汇报 ref 链未写进合同、全屏审查层 vs 滑走仍跑语义冲突] + 2 NIT[Sidebar 自动关接线、isCoarsePointer try/catch]），标 `[R2]`。→ v4 吸收对抗式红队（NEEDS-WORK，2 BLOCKER[fixed 层在 transform 抽屉祖先下失效、移动键盘/100dvh/safe-area 被 v3 弄丢] + 2 NIT[AdminPanel 移动挂载位置、onCreateProject 成功才 closeAll]），标 `[R3]`。
+> 修订记录：v1 初稿（brainstorm 定稿）→ v2 吸收 Codex 单轨独立审首轮（NEEDS-WORK，6 BLOCKER + 2 NIT），全部核实属实并落入下文（标 `[R1]`）→ v3 吸收复审（NEEDS-WORK，2 BLOCKER[审查汇报 ref 链未写进合同、全屏审查层 vs 滑走仍跑语义冲突] + 2 NIT[Sidebar 自动关接线、isCoarsePointer try/catch]），标 `[R2]`。→ v4 吸收对抗式红队（NEEDS-WORK，2 BLOCKER[fixed 层在 transform 抽屉祖先下失效、移动键盘/100dvh/safe-area 被 v3 弄丢] + 2 NIT[AdminPanel 移动挂载位置、onCreateProject 成功才 closeAll]），标 `[R3]`。→ v5 吸收红队复审（NEEDS-WORK，1 BLOCKER[审查完成未关右抽屉、汇报轮在抽屉背后跑] + 3 NIT[§4.6 残留 transform 矛盾、visibility 对 fixed 子层限制、source-guard 规则具体化]），标 `[R4]`。
 
 ## 1. 目标与定位
 
@@ -94,7 +94,7 @@ export function isCoarsePointer() {
 - **关闭**：点 scrim 遮罩、抽屉关闭区、或切项目/触发动作后自动关。
 - **互斥**：左右抽屉同时只开一个。
 - **遮罩**：抽屉开时聊天区盖 `bg-scrim/N`（设计系统唯一允许的 `dark:` 例外）。
-- **[R1] 挂载策略 = 常驻挂载、CSS 隐藏（`transform`/`visibility`/off-canvas），关闭抽屉绝不卸载 `WorkspacePanel`/`Sidebar`**。理由（[R2] 收敛到上传存活，审查改由 §4.5 fixed 层独立保证）：**材料上传 busy**（`WorkspacePanel.jsx:29`）在 `WorkspacePanel` 内、上传异步且用户会想同时干别的，卸载即中断；tab 选择 / 滚动位置也应保留。常驻挂载保证「**材料上传中关右抽屉 → 上传不中断**」。审查 stream 的存活**不依赖**抽屉挂载——它是 §4.5 的 `position: fixed` 全屏层，脱离抽屉容器。**这是移动壳特有行为，刻意区别于桌面 `{showWorkspacePanel && <WorkspacePanel/>}` 的卸载式折叠，不影响桌面。**
+- **[R1] 挂载策略 = 常驻挂载、CSS 隐藏（[R4] 用 `visibility:hidden` / off-canvas `left`-`right`/`inset` / `display:none`，**不用 `transform`**——见 §4.7-A），关闭抽屉绝不卸载 `WorkspacePanel`/`Sidebar`**。理由（[R2] 收敛到上传存活，审查改由 §4.5 fixed 层独立保证）：**材料上传 busy**（`WorkspacePanel.jsx:29`）在 `WorkspacePanel` 内、上传异步且用户会想同时干别的，卸载即中断；tab 选择 / 滚动位置也应保留。常驻挂载保证「**材料上传中关右抽屉 → 上传不中断**」。审查 stream 的存活**不依赖**抽屉挂载——它是 §4.5 的 `position: fixed` 全屏层，脱离抽屉容器。**这是移动壳特有行为，刻意区别于桌面 `{showWorkspacePanel && <WorkspacePanel/>}` 的卸载式折叠，不影响桌面。**
 
 ### 4.7 [R3] 移动端壳工程必做项（原红队 BLOCKER 1 + 2）
 
@@ -103,6 +103,7 @@ export function isCoarsePointer() {
 **A. fixed 层 vs transform 祖先（CSS containing block 坑）**
 - 任何 `position: fixed` 浮层（移动审查全屏层 §4.5、Sidebar 子树内的 `ProjectCreateModal`/`SettingsModal`/删除确认 `Sidebar.jsx:234/260`、App 级 `AdminPanel`）**一旦祖先带 `transform`/`filter`/`perspective`，其 containing block 会从 viewport 变成那个祖先**，导致「全屏」错位、跟随抽屉偏移。
 - **规则（二者都要）**：① 移动审查层用 `createPortal(document.body)` 脱离抽屉子树（§4.5）；② **移动抽屉的开合动画禁用 `transform`/`filter`/`perspective`**，改用 `left`/`right`/`inset` 过渡或 `visibility`/`display` 切换——这样 Sidebar 内既有的 fixed 弹窗**无需改造**（不必给每个 modal 加 portal）即不破版。隐藏态仍保持组件挂载（§4.6 上传存活），用 `visibility:hidden`/off-canvas `left`、**不卸载**。
+- **[R4] `visibility:hidden` 的限制（必须知道）**：`visibility:hidden` 的祖先会让整棵子树（含里面的 fixed 弹窗）**不可见**——所以 `Sidebar` 内的 `ProjectCreateModal`/`SettingsModal`/删除确认**只能在左抽屉 visible 时打开**（本设计正是如此：这些 modal 都从打开的抽屉里触发）。若将来需要「抽屉隐藏后 modal 仍显示」，那个 modal 必须改 portal。off-canvas `left` 位移则无此限制（普通定位祖先不改 fixed 的 containing block，fixed 弹窗不随抽屉位移）。
 
 **B. 移动视口高度 / 软键盘 / 安全区（核心场景「手机聊天推进」的命门）**
 - `MobileShell` 根高度用 **`100dvh`**（dynamic viewport height），**不用** `h-screen`/`100vh`——否则手机地址栏收放 + 软键盘弹出时高度算错。桌面分支仍 `h-screen`，不动（§2）。
@@ -123,14 +124,14 @@ App (isMobile=true)
        ├─ ChatPanel(ref=chatPanelRef, onToggleSidebar=openLeft, onToggleWorkspacePanel=openRight, ...现有 props 原样)
        ├─ Sidebar(onSelectProject/onCreateProject/onLoggedOut/onOpenAdmin = wrap(closeAll), ...其余现有 props 原样)  // Sidebar 本体零改，回调由 MobileShell 包装
        └─ WorkspacePanel(isMobile=true, width='100%',
-            onTriggerSystemTurn=(t,m)=>chatPanelRef.current?.triggerSystemTurn(t,m),
+            onTriggerSystemTurn=(t,m)=>{ chatPanelRef.current?.triggerSystemTurn(t,m); closeAll() },  // [R4] 审查完成关右抽屉→落到主聊天看汇报轮
             onDropPendingReviewTriggers=(t)=>chatPanelRef.current?.dropPendingReviewTriggers(t),
             ...其余现有 props 原样)
             ├─ FilePreviewPanel(isMobile=true)
             └─ IndependentReviewDrawer(isMobile=true)
 ```
 
-**[R2] 审查汇报 ref 链（原 BLOCKER 1，不可漏）**：桌面靠 imperative ref——`ChatPanel` 经 ref 暴露 `triggerSystemTurn`/`dropPendingReviewTriggers`（`ChatPanel.jsx:752`），`WorkspacePanel` 审查完成调 `onTriggerSystemTurn`（`WorkspacePanel.jsx:191`），`App.jsx:448` 用 `chatPanelRef.current` 接上。MobileShell 必须持**同一个 `chatPanelRef`** 并把 `WorkspacePanel` 这两个回调接到**移动端这个 `ChatPanel` 实例**，否则审查完成后主聊天汇报轮不触发（审查白跑）。source-guard 锁这条链（§8.4）。
+**[R2] 审查汇报 ref 链（原 BLOCKER 1，不可漏）**：桌面靠 imperative ref——`ChatPanel` 经 ref 暴露 `triggerSystemTurn`/`dropPendingReviewTriggers`（`ChatPanel.jsx:752`），`WorkspacePanel` 审查完成调 `onTriggerSystemTurn`（`WorkspacePanel.jsx:191`），`App.jsx:448` 用 `chatPanelRef.current` 接上。MobileShell 必须持**同一个 `chatPanelRef`** 并把 `WorkspacePanel` 这两个回调接到**移动端这个 `ChatPanel` 实例**，否则审查完成后主聊天汇报轮不触发（审查白跑）。**[R4] 移动端 `onTriggerSystemTurn` 包装里在 `triggerSystemTurn` 之后调 `closeAll()`** 关右抽屉，否则汇报轮在抽屉背后跑、用户看不到（`WorkspacePanel.onIndependentReviewCompleted` 只触发系统轮 + `setReviewRunning(false)`，不会关 MobileShell 抽屉）。source-guard 锁这条链 + closeAll（§8.4）。
 
 **最小改动（桌面取默认值 = 今天行为）：**
 - `App.jsx`：根渲染加分支 `isMobile ? <MobileShell .../> : (现有三栏 JSX 原样保留)`。现有桌面 JSX 不重写不挪动。**[R3] 顶层挂载位置（原 NIT 1）**：`ErrorBoundary`（`App.jsx:390`）+ `Toaster`（`:391`）继续包在分支**外层**两分支共用；`{showAdmin && authUser?.is_admin && <AdminPanel/>}`（现位于桌面 JSX 内 `:454`）**上提为 `isMobile` 分支的兄弟**（在 ErrorBoundary 内、两壳之外渲染），否则移动端点「管理」只 set state 看不到面板。`AdminPanel` 自身的窄屏适配见 §7。
@@ -169,7 +170,7 @@ App (isMobile=true)
 1. **现有 460 前端测试全绿**（[R1] NIT 2：`cd frontend && node --test tests/` 实测 `tests 460`，spec 属实）——测桌面结构与行为，桌面被动即红。
 2. **新增 source-guard**：断言 `App.jsx` 桌面分支结构原样（三栏 flex 壳 + 中右拖动条 `onMouseDown`/`cursor-col-resize` 仍在 `!isMobile` 分支）；`MobileShell` 只在 `isMobile` 分支渲染；面板新 prop 默认 false。
 3. **`deviceMode.js` 纯函数单测**：`isCoarsePointer` 的 matchMedia-absent fallback、抽屉互斥状态机。
-4. **`mobileShell.source` 接线测**：MobileShell 装配 `ChatPanel`(带 `chatPanelRef`)/`Sidebar`/`WorkspacePanel` + scrim + 两 toggle 接抽屉；**[R2] 审查汇报 ref 链**（`WorkspacePanel.onTriggerSystemTurn` 接 `chatPanelRef.current?.triggerSystemTurn`）；**[R2] `Sidebar` 回调被 `closeAll` 包装**（`onCreateProject` 成功才关）；右抽屉常驻挂载（关闭不卸载）；**[R3] 抽屉容器类名不含 `transform`/`filter`/`perspective` 工具类**（`translate-x`/`scale`/`rotate`/`blur` 等，守 §4.7-A）、移动审查层经 `createPortal`；**[R3] MobileShell 根高度用 `100dvh` 非 `h-screen`**、composer 含 `safe-area-inset-bottom`；prop 链 §5 正确。
+4. **`mobileShell.source` 接线测**：MobileShell 装配 `ChatPanel`(带 `chatPanelRef`)/`Sidebar`/`WorkspacePanel` + scrim + 两 toggle 接抽屉；**[R2] 审查汇报 ref 链**（`WorkspacePanel.onTriggerSystemTurn` 接 `chatPanelRef.current?.triggerSystemTurn`）+ **[R4] 该包装含 `closeAll()`**（审查完成关右抽屉）；**[R2] `Sidebar` 回调被 `closeAll` 包装**（`onCreateProject` 成功才关）；右抽屉常驻挂载（关闭不卸载）；**[R3/R4] source-guard 只扫 `MobileShell.jsx` 的 drawer 容器片段（非全仓）**，断言其 class 不含 `transform`/`transform-gpu`/`translate-`/`-translate-`/`scale-`/`rotate-`/`skew-`/`blur-`/`filter`/`backdrop-blur`/`perspective`，且 inline `style` 不含 `transform:`/`filter:`；移动审查层经 `createPortal`；**[R3] MobileShell 根高度用 `100dvh` 非 `h-screen`**、composer 含 `safe-area-inset-bottom`；prop 链 §5 正确。
 5. **[R1] 桌面行为 smoke**：补一条桌面侧验证证明「字节级」之外的行为不变——`isMobile=false` 下渲染路径不变 + 关键交互（拖动分栏、切 tab、dirty guard）source-guard 仍指向 `!isMobile` 分支；条件允许时加 Playwright 桌面截图/DOM 快照（择一，记录所选手段）。
 6. **paletteGuard / darkClassGuard 继续绿**：移动端无新 hex/emoji、除既有 `dark:bg-scrim/N` 外无新 `dark:`。
 7. **build 绿。**
