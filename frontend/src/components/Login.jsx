@@ -30,7 +30,7 @@ export default function Login({ onAuthed }) {
   }
   return (
     <div className="flex items-center justify-center h-screen bg-bg">
-      <div className="w-[344px]">
+      <div className="w-[min(344px,calc(100vw-32px))]">
         {/* wordmark 行 */}
         <div className="flex items-center justify-center gap-[11px] mb-[22px]">
           <div className="w-[34px] h-[34px] rounded-[9px] bg-accent text-white flex items-center justify-center text-base font-bold">R</div>
