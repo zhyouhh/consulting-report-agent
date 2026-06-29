@@ -95,4 +95,3 @@ test("MobileShell: 右抽屉 WorkspacePanel isMobile + width100% + 审查汇报 
   assert.match(s, /handleInsertPrompt = \(text\) => \{ onInsertPrompt\(text\); closeAll\(\) \}/);
   assert.match(s, /onInsertPrompt=\{handleInsertPrompt\}/);
 });
-
