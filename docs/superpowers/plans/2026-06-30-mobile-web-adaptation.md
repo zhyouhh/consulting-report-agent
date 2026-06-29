@@ -650,7 +650,7 @@ git commit -m "test(mobile): lock right-drawer isMobile/review-report-closeAll +
 - [ ] **Step 1: 追加失败测试**
 
 ```js
-// 追加到 frontend/tests/appInitGating.source.test.mjs 末尾（复用文件已有的 appSrc()/读取 helper）
+// 追加到 frontend/tests/appInitGating.source.test.mjs 末尾（复用文件顶部已有的 `src` 常量 = App.jsx 内容）
 test("App: isMobile 首屏锁定 + MobileShell 分支 + 桌面分支结构原样 + AdminPanel 上提", () => {
   const s = src; // appInitGating.source.test.mjs 顶部已有 const src = readFileSync(../src/App.jsx)（字符串）
   // 首屏锁定，无运行时 matchMedia 监听
