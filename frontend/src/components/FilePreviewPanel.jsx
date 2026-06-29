@@ -69,6 +69,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
   onSelectFile,
   onSaveFile,
   onReloadFile,
+  isMobile = false,
 }, ref) {
   const [edit, setEdit] = useState(initialEditState)
   const [collapsed, setCollapsed] = useState({})
@@ -190,6 +191,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
   }, [doSave, confirmReloadCurrent])
 
   const handleEnterEdit = useCallback(async () => {
+    if (isMobile) return // 移动端只读：完全不进入编辑态（spec §4.3/§5）
     const targetPath = currentFile
     const seq = selectionSeqRef.current
     try {
@@ -203,7 +205,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
       if (selectionSeqRef.current !== seq) return // 已切走，别为过期文件弹错误
       showError('无法进入编辑：' + (error?.message || '读取失败'))
     }
-  }, [currentFile, onReloadFile])
+  }, [currentFile, onReloadFile, isMobile])
 
   // 切换预览文件本身是一条离开路径：经统一守卫（dirty 弹三按钮）。
   const handleSelectFile = useCallback((path) => {
@@ -299,14 +301,16 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
         })}
       </div>
 
-      {/* 可拖动上下分隔条：调整文件树 / 预览框高度 */}
-      <div
-        onMouseDown={startTreeResize}
-        className="h-[6px] cursor-row-resize bg-col hover:bg-abright flex-shrink-0"
-        role="separator"
-        aria-orientation="horizontal"
-        title="拖动调整上下高度"
-      />
+      {/* 可拖动上下分隔条：调整文件树 / 预览框高度（桌面专属，移动端固定比例不可拖） */}
+      {!isMobile && (
+        <div
+          onMouseDown={startTreeResize}
+          className="h-[6px] cursor-row-resize bg-col hover:bg-abright flex-shrink-0"
+          role="separator"
+          aria-orientation="horizontal"
+          title="拖动调整上下高度"
+        />
+      )}
 
       {/* review_stale advisory（仅正文页显示） */}
       {isDraft && reviewStale && (
@@ -317,7 +321,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
 
       {/* 工具栏 */}
       <div className="px-[14px] py-2 border-b border-border flex items-center gap-2 min-h-[42px]">
-        {!inEdit && currentEditable && (
+        {!isMobile && !inEdit && currentEditable && (
           <button onClick={handleEnterEdit} className="px-3 py-[5px] rounded-ibtn text-12 bg-accent text-white">编辑</button>
         )}
         {inEdit && (
