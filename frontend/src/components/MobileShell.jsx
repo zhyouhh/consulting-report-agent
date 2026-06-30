@@ -42,7 +42,7 @@ export default function MobileShell(props) {
         target.closest('input, textarea, select, button, a, [contenteditable], .overflow-x-auto')) {
       touchStartRef.current = null; return // 交互/横滚元素上不接管手势（避免选字/横滚/点按误触发）
     }
-    const t = e.touches && e.touches[0]
+    const t = e.changedTouches && e.changedTouches[0] // 本次新增的 touch；touches[0] 多指下可能是旧手指
     touchStartRef.current = t ? { id: t.identifier, x: t.clientX, y: t.clientY } : null
   }
   const onShellTouchEnd = (e) => {
@@ -50,8 +50,8 @@ export default function MobileShell(props) {
     touchStartRef.current = null
     if (!start) return
     const list = e.changedTouches ? Array.from(e.changedTouches) : []
-    const t = list.find((x) => x.identifier === start.id) || list[0]
-    if (!t) return
+    const t = list.find((x) => x.identifier === start.id)
+    if (!t) return // 没找到同一根手指抬起 → 不接管（不 fallback，避免错配起止点）
     const action = resolveSwipeAction(t.clientX - start.x, t.clientY - start.y, drawer !== DRAWER_NONE)
     if (action === 'close') closeAll()
     else if (action === 'openLeft') setDrawer((d) => nextDrawerState(d, 'openLeft'))

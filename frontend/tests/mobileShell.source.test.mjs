@@ -86,6 +86,10 @@ test("MobileShell: 抽屉滑动手势接线 + 右抽屉留 scrim 缝隙", () => 
   // 手势忽略交互/横滚元素 + touchcancel 清理
   assert.match(s, /closest\(['"]input, textarea, select, button, a, \[contenteditable\], \.overflow-x-auto['"]\)/);
   assert.match(s, /onTouchCancel=\{onShellTouchCancel\}/);
+  // touchstart 取本次新增 touch（changedTouches，非 touches[0]）+ touchend 无 list[0] 错配兜底
+  // 窗口 400 跨越 closest 交互/横滚过滤块（onShellTouchStart 起到首个 changedTouches 实测 313 字符）
+  assert.match(s, /onShellTouchStart[\s\S]{0,400}?changedTouches/);
+  assert.doesNotMatch(s, /identifier === start\.id\)\s*\|\|\s*list\[0\]/);
 });
 
 test("MobileShell: 右抽屉 WorkspacePanel isMobile + width100% + 审查汇报 closeAll + 常驻挂载", () => {
