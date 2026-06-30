@@ -74,7 +74,9 @@
 
 **状态**：✅ **11 TDD task 全实施 + 每 task Codex spec+quality 双轨独立审 APPROVED（挖出并修 6 真 BLOCKER：source-guard 跨标签假阳性 ×2、onSettingsSaved 不关抽屉、非法 in-attribute JSX 注释、锁测只锁定义不锁接线 + keep-mounted 反向断言过窄、AdminPanel min-w-[640px] 桌面横滚回归）+ 整分支红队终审 SHIP-READY + 真实浏览器设备模拟 smoke 全过**（壳渲染/抽屉互斥/scrim/无 transform 不变式/桌面零变化逐项 DOM 核实）。merge main `011ce2b`（--no-ff，分支 `feat/mobile-web-adaptation` 保留）+ push origin + 部署 kr-web-01 bundle `index-DcRdGv8t.js`（frontend-only dist swap，公网 CF smoke 200）。前端 488/488 + build 绿。架构/实施铁律记 CLAUDE.md「## 移动端适配（drawer 壳）」段 + memory [[mobile-web-adaptation-status]]。
 
-**已知未自动覆盖**（smoke 时人工 DOM/CSS 核、非阻塞）：窄视口 modal 收缩（CSS 已 Codex 核）、审查窗 portal 真触发（无 transform 前提已现场坐实 + createPortal 在源码）、真触屏 pointer 判定（deviceMode 单测兜底）。后续真机/真触屏验收可补。
+**滑动手势 follow-up（2026-06-30，真机暴露后修）**：✅ 完成。用户真机测发现①滑动从没做（我汇报措辞误导）②右抽屉 `w-[min(100vw,28rem)]` 手机满屏盖住 scrim/按钮 → 工作区关不掉只能刷新。修：`utils/drawerSwipe.js` 纯函数 + `MobileShell` 根 div touch 接线（changedTouches+identifier 配对、交互/横滚 target 过滤、touchcancel、fail-closed、零 transform）+ 右抽屉留 48px scrim 缝隙。**开关三方式：顶栏按钮 / 点 scrim / 滑动**（开着任一向滑关、没开右滑出左·左滑出右）。Codex 双轨 3 轮（fail-closed / target-filter / 多指错配）APPROVED + 用户真机确认手感 OK。merge main `a0f88e9`（--no-ff，分支 `fix/mobile-drawer-swipe-close` 保留）+ 部署 kr-web-01 bundle `index-HsuR1V2M.js`（CF smoke 200，桌面 mobile-only diff + 实测不受影响）。前端 496/496。
+
+**已知未自动覆盖**（非阻塞）：窄视口 modal 收缩（CSS 已 Codex 核）、审查窗 portal 真触发（无 transform 前提已现场坐实 + createPortal 在源码）。真触屏 pointer 判定 + 滑动手感**已用户真机验过**。
 
 ### 🟢 服务器化 + 多用户 Web 部署 + 标书模板（2026-06-15 起 · = 原产品化方向 b 解 park · 新最高优先）
 
