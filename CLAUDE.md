@@ -411,6 +411,21 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - `toggleMaterialSelection`（`utils/chatMaterials.js`）现为**无生产引用的死 util**，有意保留（带测试纯函数、零成本、后续若加"引用材料"选择器可复用）。`materials` prop 仍被 ChatPanel 历史气泡用于反查材料名，**不可删**。
 - 回归：`chatPanelAttachmentStatus.source`（改为守"ChatPanel 不再常驻材料列表 `doesNotMatch conversionStatusChip/toggleMaterialSelection/selectedMaterials.map`" + "上传自动挂载不变量 `mergeMaterialIds`/`attachedMaterialIds`"）、`workspacePanel.source`（解析状态 chip 迁入守护）、`chatPanelComposerClear.source`（turn-end 清理块锚点改 `if (isActiveProjectRequest(requestProjectId)) {` 之后的 `if (renderUserBubble)`，断言含 `setSelectedMaterialIds([])` 不含 `setInput`）。前端 460 测试 + build 全绿。
 
+## 移动端适配（drawer 壳，2026-06-30 实施完成 + merge main `011ce2b`（--no-ff）+ 部署 kr-web-01 bundle `index-DcRdGv8t.js`；分支 `feat/mobile-web-adaptation` 保留）
+
+给 web 前端加移动端抽屉壳：**触摸设备（`pointer: coarse`）启用、鼠标设备永远走原桌面三栏、桌面零变化**。纯前端、零后端/DeepSeek/信任边界/租户隔离改动。11 TDD task，每 task Codex spec+quality 双轨独立审到 APPROVED + 整分支红队终审 SHIP-READY + 真实浏览器设备模拟 smoke 过。改移动端布局 / 设备判定 / 抽屉前必读。spec `docs/superpowers/specs/2026-06-30-mobile-web-adaptation-design.md`、plan `docs/superpowers/plans/2026-06-30-mobile-web-adaptation.md`。
+
+- **触发按设备非按宽度**：`utils/deviceMode.js:isCoarsePointer()`（`matchMedia('(pointer: coarse)')`，缺失/抛错 fallback 桌面）；App `const [isMobile] = useState(() => isCoarsePointer())` **首屏锁定、无 matchMedia 监听**——桌面缩窗/分屏永不变成移动壳，也避免运行时切壳卸载子树丢状态。**别加 resize/宽度逻辑、别退回带 listener 的写法。**
+- **方案 = 抽屉壳**：`components/MobileShell.jsx` 复用 `ChatPanel`/`Sidebar`/`WorkspacePanel` 只换外壳：聊天占满 + 复用 ChatPanel 自带 60px 顶栏（`onToggleSidebar`/`onToggleWorkspacePanel` 接抽屉、**不新增顶栏**）+ 左抽屉 Sidebar / 右抽屉 WorkspacePanel。App `isMobile ? <MobileShell/> : (原桌面三栏 JSX 逐字不动)`；AdminPanel 上提为两壳兄弟（fixed overlay，移出移动抽屉子树）。**`App.jsx` init effect 依赖仍是 `[authUser?.uid, authUser?.must_change_password]`，本特性没碰 effect——别退回 `[authUser]`（黑屏重挂雷区）。**
+- **硬约束①：抽屉滑动禁 CSS 变换**（`transform`/`translate`/`scale`/`filter`/`blur`/`perspective`）——它们生成 containing block 会破坏内部 `fixed` 弹窗（审查窗）。用 off-canvas `left/right`（`-110%`）+ `visibility` 滑动；审查窗（`IndependentReviewDrawer` isMobile 时）`createPortal(windowEl, document.body)` 脱离抽屉子树满屏。`mobileShell.source.test.mjs` 有 className-only 扫描 guard 钉死「无变换类」；smoke 现场坐实壳子树 `anyTransformInShell: []`。
+- **硬约束②：抽屉常驻挂载**（关闭不卸载，只 off-canvas + `visibility:hidden`）——保进行中的材料上传 / 审查 stream 存活。锁测用「wrapper `>` 后必须直接跟 `<Sidebar>`/`<WorkspacePanel>`」的**正向邻接断言**（防 `{cond && <Panel/>}` 条件卸载，含多行 `&& (` 与三元）。右抽屉 wrapper 须显式 `w-[min(100vw,28rem)] h-full flex` 给 `width="100%"` 基准。
+- **硬约束③：动作后关右抽屉**——审查汇报（`handleTriggerSystemTurn` 调 `chatPanelRef.current?.triggerSystemTurn` 后 closeAll）、`onInsertPrompt`（继续扩写/回退）、设置保存（`onSettingsSaved` 包装 closeAll）都 closeAll，否则动作在抽屉背后像没反应。**`onToggleTheme` 刻意裸透传不 closeAll**（就地切主题、不打断）；**删除项目刻意不 closeAll**（删完顺手挑下一个）；create **成功才** closeAll。审查汇报 ref 链在 MobileShell 复刻（`chatPanelRef`）。
+- **硬约束④：移动端文件预览只读**——`FilePreviewPanel` isMobile 时 `handleEnterEdit` 首行早返回 + 编辑按钮/拖动分隔条 `!isMobile` 门控（`useCallback` deps 含 isMobile）。AdminPanel 额度列**仍可编辑**（与上不同，别误改成只读）。
+- **硬约束⑤：移动 viewport**——根 `100dvh` + composer `safe-area-inset-bottom` + `min-h-0`（软键盘）。`MobileShell.jsx` 注释**禁 emoji/符号**（`paletteGuard` 扫 `.jsx` emoji 区，曾因 ☰/▣ 自炸）；scrim 是唯一 `dark:bg-scrim/N` 例外。
+- **Auth/Modal 窄屏**：Login/ForcePasswordChange/ProjectCreateModal/SettingsModal/AdminPanel/Sidebar 删除确认都从写死宽度改 `w-[min(Npx,calc(100vw-32px))]`（桌面 ≥N+32px 取固定值＝零变化）；ProjectCreate/Settings 双列 `grid-cols-1 min-[480px]:grid-cols-2`；AdminPanel 用户表外层 `overflow-x-auto` + 内层 **`min-w-[600px]`**（600 < 680 卡片 ~630px 内容区 → 桌面不冒横滚，**别回 640**——会引入桌面横滚回归）。
+- 测试全是 source-guard + 纯函数（**无 jsdom**）：`tests/deviceMode.test.mjs`、`mobileShell.source.test.mjs`、`mobileAuthModals.source.test.mjs` + `appInitGating`/`workspacePanel`/`filePreviewPanel`/`independentReviewDrawer` 追加。前端 488/488。强 guard 铁律：source-guard 须自验「改坏门控→FAIL」（本批多次挖出 `[\s\S]*?` 跨标签/跨结构假阳性，已全改成 tag-bounded / 结构锚定）。**已知未自动覆盖**（smoke 时人工 DOM/CSS 核）：窄视口 modal 收缩、审查窗 portal 真触发、真触屏 pointer 判定。
+- 部署：frontend-only dist swap → kr-web-01（见 [[w2c-deploy-status]]）。详见 memory [[mobile-web-adaptation-status]]。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。

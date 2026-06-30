@@ -68,17 +68,13 @@
 
 ## 当前未解决 / 待验证
 
-### 🟢 移动端适配（2026-06-30 · spec+plan 双双 Codex APPROVED · 待实施）
+### ✅ 移动端适配（2026-06-30 · 实施完成 + merge main `011ce2b` + 部署 kr-web-01）
 
-来源：用户 2026-06-30 问「web 端是不是没做移动端」→ 确认**完全没做**（`frontend/src` 零 `sm:/md:/lg:` + 零 `@media`，桌面三栏 `flex h-screen` 写死、拖动条鼠标专属）。**纯前端、零后端改动**，让同事手机也能用（W2 web 化已上线但手机不可用）。
+来源：用户 2026-06-30 问「web 端是不是没做移动端」→ 确认**完全没做**。**纯前端、零后端改动**，让同事手机也能用。**已全部落地**：触摸设备（`pointer: coarse`）启用抽屉壳、鼠标设备永远走原桌面三栏、桌面零变化。
 
-**状态**：spec + plan **都已 Codex 单轨独立审 APPROVED**，分支 `feat/mobile-web-adaptation`（10 commit），**代码未实施**。spec `docs/superpowers/specs/2026-06-30-mobile-web-adaptation-design.md`（v6，5 轮 / 11 BLOCKER）；plan `docs/superpowers/plans/2026-06-30-mobile-web-adaptation.md`（v3，3 轮 / 8 BLOCKER，11 TDD task）。详见 memory [[mobile-web-adaptation-status]]。
+**状态**：✅ **11 TDD task 全实施 + 每 task Codex spec+quality 双轨独立审 APPROVED（挖出并修 6 真 BLOCKER：source-guard 跨标签假阳性 ×2、onSettingsSaved 不关抽屉、非法 in-attribute JSX 注释、锁测只锁定义不锁接线 + keep-mounted 反向断言过窄、AdminPanel min-w-[640px] 桌面横滚回归）+ 整分支红队终审 SHIP-READY + 真实浏览器设备模拟 smoke 全过**（壳渲染/抽屉互斥/scrim/无 transform 不变式/桌面零变化逐项 DOM 核实）。merge main `011ce2b`（--no-ff，分支 `feat/mobile-web-adaptation` 保留）+ push origin + 部署 kr-web-01 bundle `index-DcRdGv8t.js`（frontend-only dist swap，公网 CF smoke 200）。前端 488/488 + build 绿。架构/实施铁律记 CLAUDE.md「## 移动端适配（drawer 壳）」段 + memory [[mobile-web-adaptation-status]]。
 
-**核心决策（用户拍板）**：场景＝聊天推进 + 查看为主（手机唯一不能干＝逐字编辑正文，只读）；**触发按设备非按宽度**（`isCoarsePointer()` = `(pointer: coarse)` 首屏锁定，鼠标设备永远三栏、缩窗/分屏都不变）；方案 B 抽屉壳（复用 `ChatPanel`/`Sidebar`/`WorkspacePanel` 换外壳，复用 ChatPanel 自带 60px 顶栏的 ☰/▣ 接抽屉、不新增顶栏）；**桌面零变化**＝`isMobile=false` 走原代码路径。
-
-**实施铁律（Codex spec 5 轮 + plan 3 轮挖出）**：① 抽屉开合禁 `transform`/`filter`/`perspective`（会改写内部 fixed 弹窗 containing block）→ off-canvas `left/right` + `visibility`；审查全屏层 `createPortal(document.body)` 脱离抽屉子树；② 抽屉**常驻挂载**（关闭不卸载，保材料上传/审查 stream 存活），右抽屉 wrapper 须显式宽高基准（`w-[min(100vw,28rem)] h-full flex`）；③ 审查完成、`onInsertPrompt`（继续扩写/回退）都要 `closeAll()` 关右抽屉（否则动作在抽屉背后像没反应）+ MobileShell 复刻审查汇报 ref 链；④ `MobileShell.jsx` 注释禁 ☰/▣ 等符号（`paletteGuard` 扫 `.jsx` emoji 区）；`100dvh`+`safe-area-inset-bottom`+`min-h-0`（软键盘）；⑤ **Auth/Modal 窄屏 pass**（Login/ForcePasswordChange/ProjectCreateModal/SettingsModal/AdminPanel/Sidebar 删除确认都写死宽度、手机溢出）→ `w-[min(Npx,calc(100vw-32px))]` + 双列 `grid-cols-1 min-[480px]:grid-cols-2`。
-
-**下一步**：subagent-driven 实施（11 task，每 task Codex 双轨审，[[per-batch-codex-review]]）。部署 frontend-only dist swap → kr-web-01（[[w2c-deploy-status]]）。
+**已知未自动覆盖**（smoke 时人工 DOM/CSS 核、非阻塞）：窄视口 modal 收缩（CSS 已 Codex 核）、审查窗 portal 真触发（无 transform 前提已现场坐实 + createPortal 在源码）、真触屏 pointer 判定（deviceMode 单测兜底）。后续真机/真触屏验收可补。
 
 ### 🟢 服务器化 + 多用户 Web 部署 + 标书模板（2026-06-15 起 · = 原产品化方向 b 解 park · 新最高优先）
 
