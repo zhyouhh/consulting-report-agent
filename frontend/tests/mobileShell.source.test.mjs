@@ -44,7 +44,7 @@ test("MobileShell: 抽屉/壳禁 CSS 变换类（保内部 fixed 弹窗）", () 
 test("MobileShell: 抽屉 wrapper 有显式宽度基准 + 拉满高度", () => {
   const s = src();
   assert.match(s, /left-0[^"]*h-full w-\[264px\] flex/);
-  assert.match(s, /right-0[^"]*h-full w-\[min\(100vw,28rem\)\] flex/);
+  assert.match(s, /right-0[^"]*h-full w-\[min\(28rem,calc\(100vw-48px\)\)\] flex/);
 });
 
 test("MobileShell: 设置保存后关左抽屉（onSettingsSaved 包装 closeAll），切主题刻意不关", () => {
@@ -68,6 +68,28 @@ test("MobileShell: Sidebar 回调由壳包装——选/登出/管理 closeAll，
   assert.match(s, /onOpenAdmin=\{handleOpenAdmin\}/);
   // 删除项目直接透传 onDeleteProject（刻意不 closeAll）
   assert.match(s, /onDeleteProject=\{onDeleteProject\}/);
+});
+
+test("MobileShell: 抽屉滑动手势接线 + 右抽屉留 scrim 缝隙", () => {
+  const s = src();
+  assert.match(s, /from ['"]\.\.\/utils\/drawerSwipe['"]/);
+  assert.match(s, /resolveSwipeAction\(/);
+  // 根 div 绑 touchstart/touchend
+  assert.match(s, /onTouchStart=\{onShellTouchStart\}/);
+  assert.match(s, /onTouchEnd=\{onShellTouchEnd\}/);
+  // 三个动作都接上
+  assert.match(s, /action === 'close'[\s\S]{0,40}?closeAll\(\)/);
+  assert.match(s, /action === 'openLeft'[\s\S]{0,80}?nextDrawerState\(d, 'openLeft'\)/);
+  assert.match(s, /action === 'openRight'[\s\S]{0,80}?nextDrawerState\(d, 'openRight'\)/);
+  // 右抽屉不再满屏：48px 缝隙
+  assert.match(s, /w-\[min\(28rem,calc\(100vw-48px\)\)\]/);
+  // 手势忽略交互/横滚元素 + touchcancel 清理
+  assert.match(s, /closest\(['"]input, textarea, select, button, a, \[contenteditable\], \.overflow-x-auto['"]\)/);
+  assert.match(s, /onTouchCancel=\{onShellTouchCancel\}/);
+  // touchstart 取本次新增 touch（changedTouches，非 touches[0]）+ touchend 无 list[0] 错配兜底
+  // 窗口 400 跨越 closest 交互/横滚过滤块（onShellTouchStart 起到首个 changedTouches 实测 313 字符）
+  assert.match(s, /onShellTouchStart[\s\S]{0,400}?changedTouches/);
+  assert.doesNotMatch(s, /identifier === start\.id\)\s*\|\|\s*list\[0\]/);
 });
 
 test("MobileShell: 右抽屉 WorkspacePanel isMobile + width100% + 审查汇报 closeAll + 常驻挂载", () => {
