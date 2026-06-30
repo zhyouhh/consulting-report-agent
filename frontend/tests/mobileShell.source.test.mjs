@@ -83,6 +83,9 @@ test("MobileShell: 抽屉滑动手势接线 + 右抽屉留 scrim 缝隙", () => 
   assert.match(s, /action === 'openRight'[\s\S]{0,80}?nextDrawerState\(d, 'openRight'\)/);
   // 右抽屉不再满屏：48px 缝隙
   assert.match(s, /w-\[min\(28rem,calc\(100vw-48px\)\)\]/);
+  // 手势忽略交互/横滚元素 + touchcancel 清理
+  assert.match(s, /closest\(['"]input, textarea, select, button, a, \[contenteditable\], \.overflow-x-auto['"]\)/);
+  assert.match(s, /onTouchCancel=\{onShellTouchCancel\}/);
 });
 
 test("MobileShell: 右抽屉 WorkspacePanel isMobile + width100% + 审查汇报 closeAll + 常驻挂载", () => {

@@ -26,3 +26,10 @@ test("非数字入参 → 安全 null", () => {
   assert.equal(resolveSwipeAction(undefined, undefined, true), null);
   assert.equal(resolveSwipeAction(NaN, NaN, false), null);
 });
+test("fail-closed：混入非有限值 / 数字字符串 / Infinity / 坏 threshold → null", () => {
+  assert.equal(resolveSwipeAction(80, undefined, false), null);
+  assert.equal(resolveSwipeAction(80, 'x', false), null);
+  assert.equal(resolveSwipeAction('80', 0, false), null);       // 数字字符串不接受
+  assert.equal(resolveSwipeAction(Infinity, 0, true), null);
+  assert.equal(resolveSwipeAction(80, 10, false, NaN), null);   // 坏 threshold
+});

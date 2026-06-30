@@ -5,8 +5,9 @@
 export const SWIPE_THRESHOLD_PX = 60;
 
 export function resolveSwipeAction(dx, dy, anyDrawerOpen, threshold = SWIPE_THRESHOLD_PX) {
-  const ax = Math.abs(Number(dx) || 0);
-  const ay = Math.abs(Number(dy) || 0);
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(threshold)) return null; // fail-closed：非有限值/数字字符串/Infinity/坏阈值一律不接管
+  const ax = Math.abs(dx);
+  const ay = Math.abs(dy);
   if (ax < threshold || ax <= ay) return null; // 非明确水平滑动
   if (anyDrawerOpen) return "close";            // 开着 → 任一水平向关闭
   return dx > 0 ? "openLeft" : "openRight";     // 没开 → 右滑出左、左滑出右

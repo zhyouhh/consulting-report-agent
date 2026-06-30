@@ -37,20 +37,27 @@ export default function MobileShell(props) {
   // 滑动手势：检测水平滑动方向 → 改 drawer state。不 preventDefault（保纵向滚动），不做 follow-finger。
   const touchStartRef = useRef(null)
   const onShellTouchStart = (e) => {
+    const target = e.target
+    if (target && typeof target.closest === 'function' &&
+        target.closest('input, textarea, select, button, a, [contenteditable], .overflow-x-auto')) {
+      touchStartRef.current = null; return // 交互/横滚元素上不接管手势（避免选字/横滚/点按误触发）
+    }
     const t = e.touches && e.touches[0]
-    touchStartRef.current = t ? { x: t.clientX, y: t.clientY } : null
+    touchStartRef.current = t ? { id: t.identifier, x: t.clientX, y: t.clientY } : null
   }
   const onShellTouchEnd = (e) => {
     const start = touchStartRef.current
     touchStartRef.current = null
     if (!start) return
-    const t = e.changedTouches && e.changedTouches[0]
+    const list = e.changedTouches ? Array.from(e.changedTouches) : []
+    const t = list.find((x) => x.identifier === start.id) || list[0]
     if (!t) return
     const action = resolveSwipeAction(t.clientX - start.x, t.clientY - start.y, drawer !== DRAWER_NONE)
     if (action === 'close') closeAll()
     else if (action === 'openLeft') setDrawer((d) => nextDrawerState(d, 'openLeft'))
     else if (action === 'openRight') setDrawer((d) => nextDrawerState(d, 'openRight'))
   }
+  const onShellTouchCancel = () => { touchStartRef.current = null }
 
   // 审查完成：触发主聊天汇报轮后关右抽屉，落到聊天。
   const handleTriggerSystemTurn = (t, m) => { chatPanelRef.current?.triggerSystemTurn(t, m); closeAll() }
@@ -59,7 +66,7 @@ export default function MobileShell(props) {
   const handleInsertPrompt = (text) => { onInsertPrompt(text); closeAll() }
 
   return (
-    <div className="relative w-screen bg-bg overflow-hidden" style={{ height: '100dvh' }} onTouchStart={onShellTouchStart} onTouchEnd={onShellTouchEnd}>
+    <div className="relative w-screen bg-bg overflow-hidden" style={{ height: '100dvh' }} onTouchStart={onShellTouchStart} onTouchEnd={onShellTouchEnd} onTouchCancel={onShellTouchCancel}>
       {/* 聊天主区：复用 ChatPanel 自带顶栏（侧栏按钮/工作区按钮接抽屉）。safe-area 由本壳承担。 */}
       <div className="absolute inset-0 flex flex-col min-h-0" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
         <ChatPanel
