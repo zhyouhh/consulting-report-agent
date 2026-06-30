@@ -111,3 +111,13 @@ test("loadFile discards out-of-order content responses via latest-request ref (c
   // 写 content 前比对最新请求 path
   assert.match(s, /latestFileRequestRef\.current !== path/);
 });
+
+test("WorkspacePanel accepts isMobile (default false) and threads it down", () => {
+  const s = wsSrc();
+  assert.match(s, /isMobile\s*=\s*false/);
+  // 截取各自的 opening tag 再断言——杜绝 [\s\S]*? 跨标签边界的假阳性
+  const filePreviewTag = s.match(/<FilePreviewPanel\b[^>]*>/)?.[0] || "";
+  assert.match(filePreviewTag, /isMobile=\{isMobile\}/);
+  const reviewDrawerTag = s.match(/<IndependentReviewDrawer\b[^>]*>/)?.[0] || "";
+  assert.match(reviewDrawerTag, /isMobile=\{isMobile\}/);
+});

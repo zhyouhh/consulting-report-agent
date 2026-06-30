@@ -98,11 +98,11 @@ export default function SettingsModal({ onClose, onSaved }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/45 dark:bg-scrim/60">
-      <div className="bg-card rounded-win p-6 w-[560px] border border-border shadow-popover">
+      <div className="bg-card rounded-win p-6 w-[min(560px,calc(100vw-32px))] max-h-[calc(100dvh-32px)] overflow-y-auto border border-border shadow-popover">
         <h2 className="text-lg font-semibold mb-1 text-text">连接设置</h2>
         <p className="text-sm text-t2 mb-5">试用通道仅供快速试用，无服务质量承诺，推荐有条件使用自定义 API。</p>
 
-        <div className="grid grid-cols-2 gap-3 mb-5">
+        <div className="grid grid-cols-1 min-[480px]:grid-cols-2 gap-3 mb-5">
           <button
             onClick={() => setForm(prev => ({ ...prev, mode: 'managed' }))}
             className={`text-left rounded-card p-4 border transition ${

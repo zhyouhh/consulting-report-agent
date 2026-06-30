@@ -132,3 +132,42 @@ test("three-button dialog closes on Escape = 取消 (codex NIT 1)", () => {
   assert.match(s, /['"]Escape['"]/);
   assert.match(s, /closeLeaveDialog\(\)/);
 });
+
+// ── Task 3: isMobile guard ────────────────────────────────────────────────────
+
+test("isMobile prop defaults to false in component signature", () => {
+  const s = src();
+  // Must appear inside the props destructuring block, not just anywhere in the file
+  const propsMatch = s.match(/FilePreviewPanel\(\{([\s\S]*?)\},\s*ref\s*\)/);
+  assert.ok(propsMatch, 'component signature not found');
+  const propsBlock = propsMatch[1];
+  assert.match(propsBlock, /isMobile\s*=\s*false/);
+});
+
+test("handleEnterEdit has isMobile early-return as its very first statement (mobile read-only)", () => {
+  const s = src();
+  // Extract the async callback body of handleEnterEdit
+  const fnMatch = s.match(/const handleEnterEdit = useCallback\(async \(\) => \{([\s\S]*?)\},\s*\[/);
+  assert.ok(fnMatch, 'handleEnterEdit body not found');
+  // Trim leading whitespace; the first non-blank statement must be the isMobile guard
+  const bodyStart = fnMatch[1].trimStart().slice(0, 60);
+  assert.match(bodyStart, /^if\s*\(\s*isMobile\s*\)\s*return/);
+});
+
+test("edit button (编辑) is gated by !isMobile — removal of gate causes FAIL", () => {
+  const s = src();
+  const idx = s.indexOf('>编辑</button>');
+  assert.ok(idx !== -1, 'edit button not found');
+  // Look back at most 200 chars before the button text; {!isMobile && must appear there
+  const slice = s.slice(Math.max(0, idx - 200), idx);
+  assert.match(slice, /\{!isMobile\s*&&/);
+});
+
+test("drag-resize divider (cursor-row-resize) is gated by !isMobile — removal of gate causes FAIL", () => {
+  const s = src();
+  const idx = s.indexOf('cursor-row-resize');
+  assert.ok(idx !== -1, 'drag divider not found');
+  // Look back at most 200 chars before the class name; {!isMobile && must appear there
+  const slice = s.slice(Math.max(0, idx - 200), idx);
+  assert.match(slice, /\{!isMobile\s*&&/);
+});

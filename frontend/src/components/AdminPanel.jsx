@@ -50,7 +50,7 @@ export default function AdminPanel({ onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/45 dark:bg-scrim/60" onClick={onClose}>
-      <div className="bg-card border border-border rounded-win p-6 w-[680px] max-h-[80vh] overflow-auto shadow-popover" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-card border border-border rounded-win p-6 w-[min(680px,calc(100vw-32px))] max-h-[calc(100dvh-32px)] overflow-y-auto shadow-popover" onClick={(e) => e.stopPropagation()}>
         <div className="flex justify-between mb-4">
           <h2 className="text-text font-semibold">用户管理</h2>
           <button onClick={onClose} className="text-t2 hover:text-text">关闭</button>
@@ -68,7 +68,8 @@ export default function AdminPanel({ onClose }) {
           <button onClick={saveHosts} className="mt-1 text-abright hover:text-accent">保存允许域名</button>
         </div>
         {/* 原型是 div grid 排版；补 ARIA table 语义让屏幕阅读器拿到列头/单元格关系（codex NIT） */}
-        <div role="table" aria-label="用户列表" className="rounded-card border border-border overflow-hidden">
+        <div className="rounded-card border border-border overflow-x-auto">
+          <div role="table" aria-label="用户列表" className="overflow-hidden min-w-[600px]">
           <div role="row" className="grid grid-cols-[1.6fr_1fr_1fr_1fr_1.3fr] gap-2 bg-card2 border-b border-border px-[14px] py-[10px] text-11 font-semibold text-t2">
             <span role="columnheader">用户</span>
             <span role="columnheader">今日</span>
@@ -112,6 +113,7 @@ export default function AdminPanel({ onClose }) {
               </span>
             </div>
           ))}
+          </div>
         </div>
       </div>
     </div>

@@ -14,6 +14,8 @@ import { mergeMaterials, removeMaterialById } from './utils/chatMaterials'
 import { getCurrentProject, isSameProjectSelection, reconcileCurrentProjectId } from './utils/projectSelection'
 import { clampWorkspaceWidth, computeWorkspaceWidth, parseStoredWorkspaceWidth } from './utils/workspaceResize'
 import { getInitialTheme, applyTheme, toggleTheme } from './utils/theme'
+import { isCoarsePointer } from './utils/deviceMode'
+import MobileShell from './components/MobileShell'
 
 const WORKSPACE_WIDTH_STORAGE_KEY = 'cra:workspaceWidth'
 
@@ -38,6 +40,9 @@ function App() {
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
   const [showAdmin, setShowAdmin] = useState(false)
+  // 设备形态首屏锁定：触屏（pointer: coarse）走移动壳，桌面走原三栏。刻意只读一次、无 matchMedia 监听——
+  // 桌面缩窗永不变形（移动适配按设备而非按宽度），且避免运行时切壳卸载子树丢状态。
+  const [isMobile] = useState(() => isCoarsePointer())
   const [theme, setTheme] = useState(getInitialTheme)
   useEffect(() => { applyTheme(theme) }, [theme])
   const onToggleTheme = () => setTheme(t => toggleTheme(t))
@@ -389,6 +394,34 @@ function App() {
   return (
     <ErrorBoundary>
       <Toaster position="top-right" />
+      {isMobile ? (
+        <MobileShell
+          projects={projects}
+          currentProjectId={currentProjectId}
+          settings={settings}
+          authUser={authUser}
+          theme={theme}
+          project={currentProject}
+          workspace={workspace}
+          materials={materials}
+          workspaceRefreshToken={workspaceRefreshToken}
+          injectedPrompt={injectedPrompt}
+          workspaceStageCode={workspaceProjectId === currentProjectId ? workspace?.stage_code : undefined}
+          onSelectProject={handleSelectProject}
+          onCreateProject={createProject}
+          onDeleteProject={deleteProject}
+          onSettingsSaved={loadSettings}
+          onLoggedOut={() => setAuthUser(null)}
+          onOpenAdmin={() => setShowAdmin(true)}
+          onToggleTheme={onToggleTheme}
+          onMaterialsMerged={handleMaterialsMerged}
+          onMaterialDeleted={handleMaterialDeleted}
+          onProjectMutated={handleProjectMutated}
+          onCheckpointSet={loadWorkspace}
+          onInsertPrompt={(text) => setInjectedPrompt(text)}
+          onInjectedPromptConsumed={() => setInjectedPrompt(null)}
+        />
+      ) : (
       <div className="flex h-screen bg-bg">
         {showSidebar && (
           <Sidebar
@@ -451,8 +484,9 @@ function App() {
             </>
           )}
         </div>
-        {showAdmin && authUser?.is_admin && <AdminPanel onClose={() => setShowAdmin(false)} />}
       </div>
+      )}
+      {showAdmin && authUser?.is_admin && <AdminPanel onClose={() => setShowAdmin(false)} />}
     </ErrorBoundary>
   )
 }

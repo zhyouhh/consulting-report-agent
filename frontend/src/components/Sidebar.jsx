@@ -236,7 +236,7 @@ export default function Sidebar({
       {/* 5) 删除确认弹窗 */}
       {deleteConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/45 dark:bg-scrim/60">
-          <div className="bg-card border border-border rounded-win p-6 w-96 shadow-popover">
+          <div className="bg-card border border-border rounded-win p-6 w-[min(384px,calc(100vw-32px))] shadow-popover">
             <h2 className="text-base font-semibold text-text mb-4">确认删除</h2>
             <p className="text-13 text-t2 mb-6">确定要删除这个项目吗？此操作无法撤销。</p>
             <div className="flex gap-2">

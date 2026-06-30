@@ -15,7 +15,7 @@ export default function ForcePasswordChange({ onChanged }) {
   }
   return (
     <div className="h-screen flex items-center justify-center bg-bg">
-      <div className="w-[360px] bg-card border border-border rounded-win p-6 shadow-popover">
+      <div className="w-[min(360px,calc(100vw-32px))] bg-card border border-border rounded-win p-6 shadow-popover">
         <h2 className="text-base font-semibold text-text mb-[5px]">首次登录请修改密码</h2>
         <p className="text-12 text-t3 mb-4">为了账户安全，请设置一个新的登录密码。</p>
         {err && <div className="text-error text-12 mb-[11px]">{err}</div>}
