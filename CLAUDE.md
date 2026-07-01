@@ -56,7 +56,7 @@ Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI
 仍需接续：
 
 1. managed 真实模型长链路偶发 timeout / 无首包，阶段机本身已用确定性打包态 S0-S7 验收。
-2. 打包与前端小债：`favicon.ico` 404、输入框 id/name 可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning。
+2. 打包与前端小债：~~`favicon.ico` 404~~（✅ web 端 2026-07-01 已结清，复用桌面 `app_icon.ico`，见下方「## 中右分栏拖动」部署流程段）、输入框 id/name 可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning。
 3. 图片附件按 `managed_model` 分流已推后到 UI 重构；stage-advance-gates Bug G/H 低优先级复核。
 
 ## Skill 工作流（S0-S7）

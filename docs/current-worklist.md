@@ -246,7 +246,8 @@ R5. **方法论路由接回 + 显性化 + S1 软确认/可换**（原"可见不�
 
 2. **P2：打包 / 前端小债**
 - 状态：`待清理`
-- 当前明确项：`favicon.ico` 404、输入框缺少 `id` 或 `name` 的可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning
+- 当前明确项：输入框缺少 `id` 或 `name` 的可访问性提示、`npm audit` high、Vite chunk warning、PyInstaller conda warning
+- ✅ 已结清：`favicon.ico` 404（2026-07-01 web 端复用桌面 `app_icon.ico` 上线 kr-web-01，git `a375383`；桌面打包态无 favicon 概念、窗口图标走 exe `app_icon.ico`）
 
 3. **P3：v1 chunk fallback（超 100k 字 map-reduce 重审）**
 - 状态：`低优先级`
