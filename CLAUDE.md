@@ -351,7 +351,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - 中间列 `ChatPanel`(flex-1) + 其输入框/上下文用量框靠 flexbox 自动重排，**无需手动同步宽度**。
 - 回归：`frontend/tests/workspaceResize.test.mjs`（纯函数）+ `workspaceResize.source.test.mjs`（接线/容器排除 Sidebar/callback-ref 重夹）。
 
-**部署（前端 only 的通用流程）**：`dist` gitignore、服务器不 build → 本地 `npm run build` → tar → `VPS-fix-private/.push-file.py kr-web-01` 推 → 服务器解到 `dist.new` + `chmod -R a+rX` + 原子 `mv dist dist.old && mv dist.new dist`，**无须重启 systemd**（`_SPAStaticFiles` 按请求读盘、SPA shell no-cache 用户免硬刷），`dist.old` 留回滚。本次 bundle `index-D9CspGtr.js`。
+**部署（前端 only 的通用流程）**：`dist` gitignore、服务器不 build → 本地 `npm run build` → tar → `VPS-fix-private/.push-file.py kr-web-01` 推 → 服务器**在真实运行目录 `/opt/consulting-report-agent/frontend/`**（⚠️ 认 `systemctl show consulting-report -p WorkingDirectory`，**别用 `find /opt -name dist` 撞到的残留目录 `/opt/consulting-report/`——曾把 favicon 部署整轮打偏、假性 200 真 404**）解到 `dist.new` + `chmod -R a+rX` + 原子 `mv dist dist.old && mv dist.new dist`，**无须重启 systemd**（`_SPAStaticFiles` 按请求读盘、SPA shell no-cache 用户免硬刷），`dist.old` 留回滚。本次 bundle `index-D9CspGtr.js`。
 
 ## 前端 UX 翻新：海军蓝双主题设计系统（2026-06-26 实施完成 + 每批及整分支 Codex 双轨审全 APPROVED + merge main `d794ae0`（--no-ff）+ 部署 kr-web-01；分支 `feat/frontend-redesign` 保留）
 
