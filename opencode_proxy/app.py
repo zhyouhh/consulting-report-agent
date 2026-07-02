@@ -84,6 +84,7 @@ def create_app(settings: Optional[NormalizerSettings] = None,
     async def lifespan(app: FastAPI):
         async with httpx.AsyncClient(
             timeout=timeout, follow_redirects=False, transport=transport,
+            trust_env=False,   # 忽略服务器 HTTP(S)_PROXY 等环境代理，opencode key 不走意外外连
         ) as client:
             app.state.client = client
             yield
@@ -123,6 +124,9 @@ def create_app(settings: Optional[NormalizerSettings] = None,
                    methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     async def proxy(full_path: str, request: Request):
         client: httpx.AsyncClient = app.state.client
+        # 拒绝 `..` 段（含 %2e%2e 解码后），防止跳出 opencode 的 /zen/go 前缀
+        if ".." in full_path.split("/"):
+            return Response(content="not found", status_code=404)
         url = f"{base}/{full_path}"
         body = await request.body()
         upstream_req = client.build_request(

@@ -33,17 +33,27 @@ from typing import Iterable, Iterator, List, Optional
 
 _PRIVATE_CHUNK_ALLOWED_KEYS = frozenset({"choices", "cost", "normalizedUsage", "x-opencode-type"})
 
+# 单个 SSE 事件的字符上限：防止上游只发字节、永不发空行导致 `_acc` 无界增长（内存 DoS）。
+# 一个 chat chunk 远小于此；超限即判 corrupt、fail-closed。
+_MAX_EVENT_CHARS = 8 * 1024 * 1024
+
 
 # ----------------------------- 字节级 SSE 组帧 -----------------------------
 
 class _SseEventFramer:
     """把原始字节流按 SSE 规范组帧，产出每个事件**完整的 data 值**（多行 data 以 `\\n` 连接）。
-    只按 `\\r`/`\\n`/`\\r\\n` 切行、按空行分事件——绝不在 `\\u2028` 等 Unicode 行边界字符处切。"""
+    只按 `\\r`/`\\n`/`\\r\\n` 切行、按空行分事件——绝不在 `\\u2028` 等 Unicode 行边界字符处切。
+    非法 UTF-8 或单事件超上限 → `corrupt=True` 并停止产出（上游据此走截断 fail-closed）。"""
 
     def __init__(self) -> None:
-        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._decoder = codecs.getincrementaldecoder("utf-8")()   # strict：非法字节抛错
         self._acc = ""            # 已规范换行、尚未成完整事件的文本
         self._pending_cr = False  # 上一 chunk 末尾悬挂的 '\r'（可能是跨 chunk 的 '\r\n'）
+        self._corrupt = False
+
+    @property
+    def corrupt(self) -> bool:
+        return self._corrupt
 
     def _absorb(self, text: str) -> None:
         if self._pending_cr:
@@ -72,7 +82,19 @@ class _SseEventFramer:
         return joined if joined.strip() != "" else None
 
     def feed_bytes(self, chunk: bytes) -> List[str]:
-        self._absorb(self._decoder.decode(chunk))
+        if self._corrupt:
+            return []
+        try:
+            text = self._decoder.decode(chunk)
+        except UnicodeDecodeError:
+            self._corrupt = True
+            self._acc = ""
+            return []
+        self._absorb(text)
+        if len(self._acc) > _MAX_EVENT_CHARS:
+            self._corrupt = True
+            self._acc = ""
+            return []
         out: List[str] = []
         while "\n\n" in self._acc:
             event_text, self._acc = self._acc.split("\n\n", 1)
@@ -82,7 +104,13 @@ class _SseEventFramer:
         return out
 
     def close(self) -> List[str]:
-        self._absorb(self._decoder.decode(b"", final=True))
+        if self._corrupt:
+            return []
+        try:
+            self._absorb(self._decoder.decode(b"", final=True))
+        except UnicodeDecodeError:
+            self._corrupt = True
+            return []
         self._pending_cr = False
         out: List[str] = []
         # 剩余可能是没有结尾空行的最后一个事件
@@ -100,11 +128,6 @@ class _SseEventFramer:
 def _choices_nonempty(obj: dict) -> bool:
     ch = obj.get("choices")
     return isinstance(ch, list) and len(ch) > 0
-
-
-def _has_usage(obj: dict) -> bool:
-    u = obj.get("usage")
-    return isinstance(u, dict) and len(u) > 0
 
 
 def _is_terminal_block(obj: dict) -> bool:
@@ -129,29 +152,49 @@ def _is_token_count(v) -> bool:
     return False
 
 
+def _nested_cached_tokens(usage: dict):
+    d = usage.get("prompt_tokens_details")
+    return d.get("cached_tokens") if isinstance(d, dict) else None
+
+
 def _usage_is_billable(usage) -> bool:
-    """可计费 usage：prompt_tokens 与 completion_tokens 均为合法计数；cache hit/miss 若存在须
-    合法且不超过 prompt_tokens（防 hit>prompt 之类怪值被下游按低价结算）。否则 fail-closed 不转正。"""
+    """可计费 usage——须严格贴合 CRA `metering.extract_billing_usage` 的语义，否则会**少计费**：
+    CRA 读 top-level `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens`；miss 缺省时派生
+    `miss = prompt - hit`，miss 存在时**直接采用**、hit 缺省按 0。故：
+    - prompt/completion 必为合法计数；
+    - hit/miss 若在须合法且 ≤ prompt；
+    - **miss 存在时 hit 也必须存在且 `hit + miss == prompt`**（否则 CRA 会漏计 `prompt-hit-miss`）；
+    - 嵌套 OpenAI 风格 `prompt_tokens_details.cached_tokens`（new-api 可能读）须合法 ≤ prompt 且与 hit 一致。
+    任一不满足 → fail-closed 不转正（下游按缺 usage / 全 miss 保守多计费）。"""
     if not isinstance(usage, dict):
         return False
     pt = usage.get("prompt_tokens")
     ct = usage.get("completion_tokens")
     if not (_is_token_count(pt) and _is_token_count(ct)):
         return False
-    for key in ("prompt_cache_hit_tokens", "prompt_cache_miss_tokens"):
-        v = usage.get(key)
-        if v is not None and (not _is_token_count(v) or v > pt):
+    hit = usage.get("prompt_cache_hit_tokens")
+    miss = usage.get("prompt_cache_miss_tokens")
+    if hit is not None and (not _is_token_count(hit) or hit > pt):
+        return False
+    if miss is not None and (not _is_token_count(miss) or miss > pt):
+        return False
+    if miss is not None and (hit is None or hit + miss != pt):
+        return False
+    nested = _nested_cached_tokens(usage)
+    if nested is not None:
+        if not _is_token_count(nested) or nested > pt:
+            return False
+        if hit is not None and nested != hit:
             return False
     return True
 
 
 def _is_opencode_private_chunk(obj: dict) -> bool:
-    """opencode 私有成本块：inference-cost（x-opencode-type）或仅含 cost 的空块。
-    仅在 choices 为空且无 usage 时调用。带 `error` 等集外键 → 不判私有（透传，绝不吞错误）。"""
+    """opencode 私有成本块：**含 `cost` 且键全部 ⊆ 已知私有键集**（inference-cost / `[DONE]` 后
+    `{"choices":[],"cost":"0"}`）。仅在 choices 为空且无 usage 时调用。带 `error` 或任何集外键 →
+    不判私有（透传，绝不吞错误/未来诊断事件）。"""
     if "error" in obj:
         return False
-    if "x-opencode-type" in obj:
-        return True
     return "cost" in obj and set(obj.keys()) <= _PRIVATE_CHUNK_ALLOWED_KEYS
 
 
@@ -181,9 +224,13 @@ class _SseNormalizer:
         if not isinstance(obj, dict):
             self._malformed = True             # 非对象 JSON（数组/数字等）→ 可疑
             return []
+        if "error" in obj:
+            return [_frame(obj)]               # 错误/诊断对象优先透传，绝不被 usage/私有分支吞掉
         if "usage" in obj:
-            if _has_usage(obj) and _is_terminal_block(obj):
-                self._last_usage = obj["usage"]      # 最后一个终态块 usage 胜出（可计费判定推迟到 finalize）
+            if _is_terminal_block(obj):
+                # 终态块含 usage key 即更新候选（含 null/{}）——后来的空/null 终态会清掉更早候选，
+                # fail-closed；可计费判定推迟到 finalize 由 `_usage_is_billable` 决定是否真发。
+                self._last_usage = obj.get("usage")
                 self._last_usage_template = {k: obj[k] for k in ("id", "object", "created", "model")
                                              if k in obj}
             if _choices_nonempty(obj):
@@ -193,7 +240,7 @@ class _SseNormalizer:
             return [_frame(obj)]               # 普通正文增量 → 透传
         if _is_opencode_private_chunk(obj):
             return []                          # opencode 私有块 → 丢弃
-        return [_frame(obj)]                   # 未知/error 对象 → 透传（不静默吞）
+        return [_frame(obj)]                   # 未知对象 → 透传（不静默吞）
 
     def _finalize(self) -> List[str]:
         if self._finalized:

@@ -148,6 +148,60 @@ class NormalizerCoreTests(unittest.TestCase):
         objs, _ = _parse_frames(_norm(events))
         self.assertFalse(any(o.get("usage") for o in objs))
 
+    def test_miss_present_without_hit_not_billable(self):
+        """miss 存在但无 hit：CRA 直接用 miss、hit 按 0 → 漏计 prompt-miss。必须不转正。"""
+        events = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_cache_miss_tokens":10}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_hit_plus_miss_not_equal_prompt_not_billable(self):
+        events = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_cache_hit_tokens":100,"prompt_cache_miss_tokens":100}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_consistent_hit_miss_is_billable(self):
+        events = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_cache_hit_tokens":700,"prompt_cache_miss_tokens":300}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
+        usage = [o for o in objs if o.get("usage")]
+        self.assertEqual(len(usage), 1)
+        self.assertEqual(usage[0]["usage"]["prompt_cache_hit_tokens"], 700)
+
+    def test_nested_cached_tokens_inconsistent_not_billable(self):
+        events = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":999}}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_error_object_with_usage_key_is_passed_through(self):
+        """带 error 且含 usage:null 的对象绝不能被 usage 分支吞掉。"""
+        objs, done = _parse_frames(_norm([
+            'data: {"choices":[],"usage":null,"error":{"message":"boom"}}',
+            'data: [DONE]',
+        ]))
+        self.assertTrue(done)
+        self.assertTrue(any("error" in o for o in objs))
+
+    def test_empty_terminal_usage_clears_earlier_billable_candidate(self):
+        """终态 usage:{} 出现在可计费 usage 之后 → 清掉候选，最终不发 usage（fail-closed）。"""
+        events = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20}}',
+            'data: {"choices":[],"usage":{}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
+        self.assertFalse(any(o.get("usage") for o in objs))
+
     def test_empty_usage_object_is_not_emitted(self):
         objs, done = _parse_frames(_norm(['data: {"choices":[],"usage":{}}', 'data: [DONE]']))
         self.assertTrue(done)
@@ -303,6 +357,17 @@ class NormalizerAppTests(unittest.TestCase):
             r = c.post("/v1/chat/completions", headers={"Authorization": "Bearer k"},
                        json={"stream": True})
             self.assertEqual(r.status_code, 502)
+
+    def test_dotdot_path_segments_rejected(self):
+        called = {"n": 0}
+
+        def handler(req):
+            called["n"] += 1
+            return httpx.Response(200)
+        with self._client(handler) as c:
+            r = c.get("/%2e%2e/%2e%2e/admin", headers={"Authorization": "Bearer k"})
+            self.assertEqual(r.status_code, 404)
+            self.assertEqual(called["n"], 0)  # 未打到上游
 
 
 if __name__ == "__main__":
