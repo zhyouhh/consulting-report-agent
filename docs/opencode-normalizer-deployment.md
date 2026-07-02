@@ -3,6 +3,12 @@
 `opencode_proxy/` 是 new-api ↔ opencode 之间的薄 SSE 规范化反向代理，部署在 jp-app-01
 （与 `managed_proxy`、new-api 同机）。
 
+> **状态：✅ 2026-07-03 已上线 jp-app-01。** 容器 `opencode-sse-normalizer`（`/opt/opencode-sse-normalizer`，
+> compose，`newapi_default` 网络，`restart: unless-stopped`）；new-api 渠道 61 base_url→
+> `http://opencode-sse-normalizer:18732`、group→`default,ds`；DB 备份 `one-api.db.bak-ocnorm-20260703`。
+> 端到端门禁全过：ds专用 token 经**薄网关**全链实测 8/8 响应带 `prompt_cache_hit_tokens>0`，
+> new-api 渠道 61 `local_count=0`、cache>0（修复前 90/90 local_count、cache=0）。下面步骤为部署记录/复现用。
+
 ## 为什么需要它
 
 opencode.ai/zen 在 **2026-07-01→07-02** 间把流式响应改成了非标准形态：把 `usage`

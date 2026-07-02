@@ -427,6 +427,19 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - 测试全是 source-guard + 纯函数（**无 jsdom**）：`tests/deviceMode.test.mjs`、`mobileShell.source.test.mjs`、`mobileAuthModals.source.test.mjs` + `appInitGating`/`workspacePanel`/`filePreviewPanel`/`independentReviewDrawer` 追加。前端 488/488。强 guard 铁律：source-guard 须自验「改坏门控→FAIL」（本批多次挖出 `[\s\S]*?` 跨标签/跨结构假阳性，已全改成 tag-bounded / 结构锚定）。**已知未自动覆盖**（smoke 时人工 DOM/CSS 核）：窄视口 modal 收缩、审查窗 portal 真触发、真触屏 pointer 判定。
 - 部署：frontend-only dist swap → kr-web-01（见 [[w2c-deploy-status]]）。详见 memory [[mobile-web-adaptation-status]]。
 
+## opencode SSE 规范化 sidecar（2026-07-03 上线 jp-app-01）
+
+`opencode_proxy/`（镜像 `managed_proxy/` 约定：`create_app(settings)` 工厂 + `NormalizerSettings` dataclass + 非 root Dockerfile）是 new-api ↔ opencode.ai/zen 之间的薄反向代理。修 opencode 2026-07-01→02 起的**非标准流式格式**（把 `usage` 挂在 finish 正文块上，而非 OpenAI 规范的末尾 `choices:[]` 空块 + `[DONE]` 后多发私有块）——该格式让 new-api 抓不到流式 usage → 回退本地估 token（`local_count_tokens`）→ cache=0 → 下游 CRA 按最贵未命中档计费（deepseek-v4-pro miss 3.0 vs hit 0.025 元/百万，差 120×）。opencode 本身物理确有缓存且 usage 字段完整，纯流式格式回归；new-api/薄网关无 bug。改 sidecar / 计费链前必读。部署/回滚见 `docs/opencode-normalizer-deployment.md`。
+
+**拓扑**：CRA → 薄网关 `managed_proxy`（纯字节透传、不碰 usage）→ new-api（渠道路由 + 计费/日志）→ **本 sidecar** → opencode。缓存字段全程透传到 CRA（2026-07-03 门禁 + 薄网关全链实测：8/8 响应带 `prompt_cache_hit_tokens>0`，含走渠道 61 的）。
+
+**硬约束**（`opencode_proxy/normalizer.py` + `app.py`）：
+- **必须自建字节级 SSE 组帧**（`_SseEventFramer`，app 走 `upstream.aiter_bytes()`）：只按 `\r`/`\n`/`\r\n` 切行、空行分事件——**绝不用 httpx/requests 的 `iter_lines`**（它按 `str.splitlines()` 会在 ` `/``/`\v`/`\f` 等 Unicode 行边界字符处切断正文 JSON → 正常回复被误判截断、丢 usage；实测 httpx 也如此）。输出帧 `ensure_ascii=True`——不把行边界字符传给下游 new-api。
+- **计费 fail-closed**（严格贴合 `backend/metering.py:extract_billing_usage` 语义，防少计费）：usage 候选只认**终态块**（`choices==[]`，或非空 list 且每个 choice 带 finish_reason；`choices` 缺失/非 list 的裸 `{"usage":…}` 与非终态快照不认）；最后一个终态 usage 胜出，且**候选之后出现任何非私有业务事件即清候选**；发出前过 `_usage_is_billable`（prompt/completion 为整数非负 ≤1e9；**miss 存在则 hit 必在且 `hit+miss==prompt`**；嵌套 `prompt_tokens_details.cached_tokens` 须一致）→ `_canonical_usage` **规范化重建**（只留校验过的字段，杜绝未校验 cache 别名穿透）；截断（未见 `[DONE]`）/ 畸形事件 / 非法 UTF-8 / 单事件超 8MiB → **不发 usage、不发 `[DONE]`**。收到 `[DONE]` 当场发 usage+DONE 并停读关上游（不等 EOF）。
+- 只丢**明确识别**的 opencode 私有块（含 `cost` 且键 ⊆ `{choices,cost,normalizedUsage,x-opencode-type}`）；`{"error":…}` / 未知对象**透传**（不吞错误）。app **不鉴权**（仅内部、绝不公网暴露，opencode key 由 new-api 每请求经 Authorization 透传、不落盘）、`trust_env=False`、不跟随重定向、拒 `..` 路径段、非流式与 4xx/5xx（含 SSE 错误体）逐字透传。
+- **部署态接线**：new-api 渠道 61【商业】Opencode GO base_url→`http://opencode-sse-normalizer:18732`（`newapi_default` 网络容器名）、group→`default,ds`（加回 CRA 的 ds 组，克隆 20 行 ds abilities）。**回滚**=base_url 改回 `https://opencode.ai/zen/go` + group 去 ds + 删 `ds|61` abilities + 重启 new-api（或还原 `one-api.db.bak-ocnorm-*`）。改 new-api 渠道配置需重启（无 admin API 会话，走 DB 直改 + 重启，重启前停容器避 WAL 竞争）。
+- Codex 双轨（spec+quality，gpt-5.5 xhigh）审 **5 轮 APPROVED**（红队挖出并修一串真 bug：` ` 切断、候选非最终、cache 组合漏计、别名穿透、事件缓冲误判）；回归 `tests/test_opencode_normalizer.py`（42 用例，事件上限可注入以秒级跑）。DeepSeek 官渠兼容不涉及（sidecar 不 import backend、不碰 provider 序列化）。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。

@@ -86,7 +86,8 @@ build.bat
 ├── backend/         # FastAPI 后端
 ├── frontend/        # React 前端
 ├── skill/           # 打包内置的咨询报告 skill 运行时资产
-├── managed_proxy/   # 试用通道薄中转
+├── managed_proxy/   # 试用通道薄中转（CRA → new-api 上游）
+├── opencode_proxy/  # opencode 渠道 SSE 规范化 sidecar（new-api → opencode，修缓存计费）
 ├── tests/           # Python 回归测试
 └── app.py           # 桌面应用入口
 ```
