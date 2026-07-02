@@ -123,7 +123,7 @@ def create_app(settings: Optional[NormalizerSettings] = None,
             return Response(content=f"upstream request failed: {exc}", status_code=502)
 
         content_type = upstream.headers.get("content-type", "")
-        is_sse = content_type.startswith("text/event-stream")
+        is_sse = content_type.lower().startswith("text/event-stream")
         # 仅对**成功的 SSE** 规范化；4xx/5xx（含 SSE 错误体）与非流式一律逐字透传。
         if is_sse and upstream.status_code < 400:
             return StreamingResponse(

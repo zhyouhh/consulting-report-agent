@@ -94,6 +94,32 @@ class NormalizerCoreTests(unittest.TestCase):
         _, done = _parse_frames("".join(normalize_sse(truncated)))
         self.assertFalse(done)
 
+    def test_truncated_stream_with_billable_usage_drops_usage(self):
+        """截断流即使已含可计费 usage，也不得发出 usage 块或 [DONE]（fail-closed 最后一刀）。"""
+        truncated = [
+            'data: {"choices":[{"index":0,"delta":{"content":"a"}}]}',
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{"content":""}}],"usage":{"prompt_tokens":50,"completion_tokens":9,"prompt_cache_hit_tokens":40,"prompt_cache_miss_tokens":10}}',
+        ]  # 注意：没有 data: [DONE]
+        objs, done = _parse_frames("".join(normalize_sse(truncated)))
+        self.assertFalse(done)
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_nonfinite_or_negative_usage_not_promoted(self):
+        """负/怪值 token 计数不视为可计费（拒 partial/malformed 转正）。"""
+        lines = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":100,"completion_tokens":-1,"prompt_cache_hit_tokens":80}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames("".join(normalize_sse(lines)))
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_private_chunk_with_error_key_is_not_dropped(self):
+        """带 error 的成本块不算私有块，必须透传（不吞错误）。"""
+        lines = ['data: {"choices":[],"cost":"0","error":{"message":"boom"}}']
+        objs, done = _parse_frames("".join(normalize_sse(lines)))
+        self.assertFalse(done)
+        self.assertTrue(any("error" in o for o in objs))
+
     def test_error_object_is_passed_through_not_dropped(self):
         """{"error":...} 无 choices 无 usage，但绝不能当私有块吞掉。"""
         lines = ['data: {"error":{"message":"boom","type":"server_error"}}']
@@ -206,6 +232,17 @@ class NormalizerAppTests(unittest.TestCase):
                        json={"stream": True})
             self.assertEqual(r.status_code, 429)
             self.assertEqual(r.content, err)
+
+    def test_content_type_case_insensitive_is_normalized(self):
+        def handler(req):
+            return httpx.Response(200, headers={"content-type": "Text/Event-Stream; charset=utf-8"},
+                                  content=_sse_body(BROKEN_LINES))
+        with self._client(handler) as c:
+            r = c.post("/v1/chat/completions", headers={"Authorization": "Bearer k"},
+                       json={"stream": True})
+            objs, done = _parse_frames(r.text)
+            self.assertTrue(done)
+            self.assertEqual([o for o in objs if o.get("usage")][0]["choices"], [])
 
     def test_upstream_error_returns_502(self):
         def handler(req):

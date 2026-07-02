@@ -25,7 +25,11 @@
 """
 from __future__ import annotations
 import json
+import math
 from typing import Iterable, Iterator, Optional
+
+# opencode 私有成本块允许出现的键集合；出现集外键（如 error/diagnostic）就不当私有块，透传。
+_PRIVATE_CHUNK_ALLOWED_KEYS = frozenset({"choices", "cost", "normalizedUsage", "x-opencode-type"})
 
 
 def _choices_nonempty(obj: dict) -> bool:
@@ -38,22 +42,33 @@ def _has_usage(obj: dict) -> bool:
     return isinstance(u, dict) and len(u) > 0
 
 
-def _is_int_like(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+def _is_nonneg_finite(v) -> bool:
+    """token 计数须为有限、非负的数（拒 bool / nan / inf / 负数）。"""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return v >= 0
+    if isinstance(v, float):
+        return math.isfinite(v) and v >= 0
+    return False
 
 
 def _usage_is_billable(usage: dict) -> bool:
-    """只有同时带数值型 prompt_tokens 与 completion_tokens 的 usage 才转正。
+    """只有同时带有限非负 prompt_tokens 与 completion_tokens 的 usage 才转正。
     否则不转正 → 下游（new-api 本地估算 / CRA 缺 usage 保守路径）fail-closed。"""
     return (isinstance(usage, dict)
-            and _is_int_like(usage.get("prompt_tokens"))
-            and _is_int_like(usage.get("completion_tokens")))
+            and _is_nonneg_finite(usage.get("prompt_tokens"))
+            and _is_nonneg_finite(usage.get("completion_tokens")))
 
 
 def _is_opencode_private_chunk(obj: dict) -> bool:
-    """opencode 私有块：inference-cost（x-opencode-type）或仅含 cost 的空块。
-    只对 choices 为空且无 usage 的块判定为可安全丢弃。"""
-    return ("x-opencode-type" in obj) or ("cost" in obj)
+    """opencode 私有成本块：inference-cost（x-opencode-type）或仅含 cost 的空块。
+    仅在 choices 为空且无 usage 时调用。带 `error` 等集外键 → 不判私有（透传，绝不吞错误）。"""
+    if "error" in obj:
+        return False
+    if "x-opencode-type" in obj:
+        return True
+    return "cost" in obj and set(obj.keys()) <= _PRIVATE_CHUNK_ALLOWED_KEYS
 
 
 def _frame(obj: dict) -> str:
@@ -126,13 +141,16 @@ class _SseNormalizer:
 
     def close(self) -> list[str]:
         frames = self._flush_buf()
-        if self._pending_usage is not None:
-            chunk = dict(self._usage_template)
-            chunk["choices"] = []
-            chunk["usage"] = self._pending_usage
-            frames.append(_frame(chunk))
+        # fail-closed：**只有确实收到上游 [DONE] 才发 usage 与 [DONE]**。上游截断（连接在
+        # 最终 usage/[DONE] 前断开）时不发 usage，让下游走无 usage / 本地估算保守路径，
+        # 绝不把可能是 partial 的中间 usage 当完整结算。
         if self._saw_done:
-            frames.append("data: [DONE]\n\n")          # 仅在确实收到上游 [DONE] 时才补发
+            if self._pending_usage is not None:
+                chunk = dict(self._usage_template)
+                chunk["choices"] = []
+                chunk["usage"] = self._pending_usage
+                frames.append(_frame(chunk))
+            frames.append("data: [DONE]\n\n")
         return frames
 
 

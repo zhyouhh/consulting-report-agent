@@ -25,10 +25,15 @@ new-api 侧无 bug（同一实例对官渠 57、以及 **07-01 的 opencode 流�
 
 ## 规范化逻辑（`normalizer.py`）
 
-- `usage` + `choices` 非空（opencode 畸形）→ 拆成"去 usage 的正文块" + "标准 `choices:[]` usage 空块"。
-- `usage` + `choices` 空（已标准 / opencode 若修回）→ 原样透传（**幂等**，不重复注入）。
-- 无 usage 的空块（opencode 私有块）→ 丢弃；`[DONE]` 后内容自然丢弃。
-- 请求体 / Authorization 不改动，逐字转发；非流式 / 错误响应逐字透传。
+- `usage` + `choices` 非空（opencode 畸形）→ 发出"去 usage 的正文块"，并把该 usage 记为"待发"。
+- `usage` + `choices` 空（标准末块 / opencode 若修回）→ 该 usage 记为"待发"，不当场发（**幂等**，统一到末尾）。
+- **待发 usage 取"最后一个含有限非负 prompt_tokens+completion_tokens 的可计费 usage"**；仅在收到上游
+  `[DONE]` 后，作为**唯一**的 `choices:[]` 空块发出，随后补 `[DONE]`。
+- **fail-closed**：上游截断（未见 `[DONE]`）→ **不发 usage、不补 `[DONE]`**（让下游走无 usage / 本地估算的
+  保守路径，绝不把可能是 partial 的中间 usage 当完整结算）；缺 prompt/completion 的 partial usage 同样不转正。
+- 明确识别的 opencode 私有块（`x-opencode-type`，或键 ⊆ `{choices,cost,normalizedUsage}` 的空块）→ 丢弃；
+  `[DONE]` 后内容忽略；**未知 / `{"error":...}` 对象 → 透传**（绝不静默吞成功）。
+- 请求体 / Authorization 不改动，逐字转发；非流式与 4xx/5xx（含 SSE 错误体）响应逐字透传。
 
 ## 部署（会动生产；已由 Codex 双轨审 APPROVED 后执行）
 
