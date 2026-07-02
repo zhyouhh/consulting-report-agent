@@ -22,9 +22,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 
 try:  # package 上下文（仓库内 / 测试）
-    from opencode_proxy.normalizer import _SseNormalizer
+    from opencode_proxy.normalizer import _SseEventFramer, _SseNormalizer
 except ImportError:  # 扁平容器上下文（/app 下 `uvicorn app:app`）
-    from normalizer import _SseNormalizer
+    from normalizer import _SseEventFramer, _SseNormalizer
 
 
 DEFAULT_UPSTREAM_BASE_URL = "https://opencode.ai/zen/go"
@@ -95,11 +95,25 @@ def create_app(settings: Optional[NormalizerSettings] = None,
         return {"status": "ok", "upstream": base}
 
     async def _stream_normalized(upstream: httpx.Response) -> AsyncIterator[bytes]:
+        # 用**原始字节** + 自建 SSE 组帧：不走 httpx.aiter_lines（它按 str.splitlines() 语义会在
+        #   等 Unicode 行边界字符处误切正文 JSON）。framer 只按 \r/\n/\r\n 切行、空行分事件。
+        framer = _SseEventFramer()
         normalizer = _SseNormalizer()
         try:
-            async for line in upstream.aiter_lines():
-                for frame in normalizer.feed(line):
-                    yield frame.encode("utf-8")
+            async for chunk in upstream.aiter_bytes():
+                for data in framer.feed_bytes(chunk):
+                    for frame in normalizer.feed_event(data):
+                        yield frame.encode("utf-8")
+                    if normalizer.done:
+                        break
+                if normalizer.done:
+                    break                        # 收到 [DONE] 即停读并关上游，不等 EOF
+            if not normalizer.done:
+                for data in framer.close():
+                    for frame in normalizer.feed_event(data):
+                        yield frame.encode("utf-8")
+                    if normalizer.done:
+                        break
             for frame in normalizer.close():
                 yield frame.encode("utf-8")
         finally:

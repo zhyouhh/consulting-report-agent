@@ -5,11 +5,11 @@ import httpx
 from fastapi.testclient import TestClient
 
 from opencode_proxy.app import NormalizerSettings, create_app
-from opencode_proxy.normalizer import normalize_sse
+from opencode_proxy.normalizer import _SseNormalizer, normalize_sse_text
 
 
-# 实测 opencode 当前畸形流（usage 挂在 finish_reason 块 + 私有块 + [DONE] 后多发块）
-BROKEN_LINES = [
+# 实测 opencode 当前畸形流（usage 挂在 finish_reason 块 + 私有块 + [DONE] 后多发块），每条 = 一个 SSE 事件
+BROKEN_EVENTS = [
     'data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant","content":"你"}}]}',
     'data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"好"}}]}',
     'data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"finish_reason":"stop","delta":{"content":""}}],"usage":{"prompt_tokens":45196,"completion_tokens":100,"total_tokens":45296,"prompt_cache_hit_tokens":43648,"prompt_cache_miss_tokens":1548,"prompt_tokens_details":{"cached_tokens":43648}}}',
@@ -19,8 +19,16 @@ BROKEN_LINES = [
 ]
 
 
+def _sse(events):
+    """把每个事件字符串组成合法 SSE 文本（事件间空行分隔）。"""
+    return "".join(e + "\n\n" for e in events)
+
+
+def _norm(events):
+    return "".join(normalize_sse_text(_sse(events)))
+
+
 def _parse_frames(text):
-    """把规范化后的 SSE 文本拆成 (data_objects, saw_done)。"""
     objs, saw_done = [], False
     for chunk in text.split("\n\n"):
         line = chunk.strip()
@@ -37,41 +45,36 @@ def _parse_frames(text):
 
 class NormalizerCoreTests(unittest.TestCase):
     def test_broken_stream_usage_moved_to_empty_choices_chunk(self):
-        objs, done = _parse_frames("".join(normalize_sse(BROKEN_LINES)))
+        objs, done = _parse_frames(_norm(BROKEN_EVENTS))
         self.assertTrue(done)
         usage_chunks = [o for o in objs if o.get("usage")]
         self.assertEqual(len(usage_chunks), 1)
         self.assertEqual(usage_chunks[0]["choices"], [])
         self.assertEqual(usage_chunks[0]["usage"]["prompt_cache_hit_tokens"], 43648)
-        self.assertEqual(usage_chunks[0]["usage"]["prompt_cache_miss_tokens"], 1548)
-        # usage 块须是最后一个 data 对象（在 [DONE] 前）
-        self.assertIs(objs[-1], usage_chunks[0])
+        self.assertIs(objs[-1], usage_chunks[0])  # usage 是最后一个 data 对象（在 [DONE] 前）
 
     def test_content_deltas_preserved_and_finish_usage_stripped(self):
-        objs, _ = _parse_frames("".join(normalize_sse(BROKEN_LINES)))
-        content = "".join(
-            c.get("delta", {}).get("content") or ""
-            for o in objs for c in (o.get("choices") or [])
-        )
+        objs, _ = _parse_frames(_norm(BROKEN_EVENTS))
+        content = "".join(c.get("delta", {}).get("content") or ""
+                          for o in objs for c in (o.get("choices") or []))
         self.assertEqual(content, "你好")
-        finish = [o for o in objs if o.get("choices")
-                  and o["choices"][0].get("finish_reason")]
+        finish = [o for o in objs if o.get("choices") and o["choices"][0].get("finish_reason")]
         self.assertTrue(finish)
         self.assertNotIn("usage", finish[0])
 
     def test_private_and_post_done_chunks_dropped(self):
-        objs, _ = _parse_frames("".join(normalize_sse(BROKEN_LINES)))
+        objs, _ = _parse_frames(_norm(BROKEN_EVENTS))
         self.assertFalse(any("x-opencode-type" in o for o in objs))
         self.assertFalse(any(o.get("cost") == "0" for o in objs))
 
     def test_already_standard_stream_is_idempotent(self):
-        standard = [
+        events = [
             'data: {"id":"y","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"}}]}',
             'data: {"id":"y","object":"chat.completion.chunk","choices":[{"index":0,"finish_reason":"stop","delta":{}}]}',
             'data: {"id":"y","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_cache_hit_tokens":8,"prompt_cache_miss_tokens":2}}',
             'data: [DONE]',
         ]
-        objs, done = _parse_frames("".join(normalize_sse(standard)))
+        objs, done = _parse_frames(_norm(events))
         self.assertTrue(done)
         usage_chunks = [o for o in objs if o.get("usage")]
         self.assertEqual(len(usage_chunks), 1)
@@ -79,93 +82,143 @@ class NormalizerCoreTests(unittest.TestCase):
         self.assertEqual(usage_chunks[0]["choices"], [])
 
     def test_no_upstream_usage_is_not_fabricated(self):
-        only_content = [
+        events = [
             'data: {"choices":[{"index":0,"delta":{"content":"a"}}]}',
             'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}]}',
             'data: [DONE]',
         ]
-        objs, done = _parse_frames("".join(normalize_sse(only_content)))
+        objs, done = _parse_frames(_norm(events))
         self.assertTrue(done)
         self.assertFalse(any(o.get("usage") for o in objs))
 
     def test_truncated_stream_without_done_does_not_synthesize_done(self):
-        """上游截断（没等到 [DONE]）→ 不得合成 [DONE]（fail-closed，让下游感知异常）。"""
-        truncated = ['data: {"choices":[{"index":0,"delta":{"content":"a"}}]}']
-        _, done = _parse_frames("".join(normalize_sse(truncated)))
+        objs, done = _parse_frames(_norm(['data: {"choices":[{"index":0,"delta":{"content":"a"}}]}']))
         self.assertFalse(done)
 
     def test_truncated_stream_with_billable_usage_drops_usage(self):
-        """截断流即使已含可计费 usage，也不得发出 usage 块或 [DONE]（fail-closed 最后一刀）。"""
-        truncated = [
+        events = [
             'data: {"choices":[{"index":0,"delta":{"content":"a"}}]}',
             'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{"content":""}}],"usage":{"prompt_tokens":50,"completion_tokens":9,"prompt_cache_hit_tokens":40,"prompt_cache_miss_tokens":10}}',
-        ]  # 注意：没有 data: [DONE]
-        objs, done = _parse_frames("".join(normalize_sse(truncated)))
+        ]  # 无 [DONE]
+        objs, done = _parse_frames(_norm(events))
         self.assertFalse(done)
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_partial_usage_without_completion_not_promoted(self):
+        events = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":100,"prompt_cache_hit_tokens":80}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
         self.assertFalse(any(o.get("usage") for o in objs))
 
     def test_nonfinite_or_negative_usage_not_promoted(self):
-        """负/怪值 token 计数不视为可计费（拒 partial/malformed 转正）。"""
-        lines = [
+        events = [
             'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":100,"completion_tokens":-1,"prompt_cache_hit_tokens":80}}',
             'data: [DONE]',
         ]
-        objs, _ = _parse_frames("".join(normalize_sse(lines)))
+        objs, _ = _parse_frames(_norm(events))
         self.assertFalse(any(o.get("usage") for o in objs))
 
-    def test_private_chunk_with_error_key_is_not_dropped(self):
-        """带 error 的成本块不算私有块，必须透传（不吞错误）。"""
-        lines = ['data: {"choices":[],"cost":"0","error":{"message":"boom"}}']
-        objs, done = _parse_frames("".join(normalize_sse(lines)))
+    def test_usage_on_nonterminal_delta_not_promoted(self):
+        events = [
+            'data: {"choices":[{"index":0,"delta":{"content":"a"}}],"usage":{"prompt_tokens":100,"completion_tokens":1}}',
+            'data: {"choices":[{"index":0,"delta":{"content":"bbbb"}}]}',
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}]}',
+            'data: [DONE]',
+        ]
+        objs, done = _parse_frames(_norm(events))
+        self.assertTrue(done)
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_last_terminal_usage_must_be_billable(self):
+        events = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20}}',
+            'data: {"choices":[],"usage":{"prompt_tokens":100}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_cache_hit_exceeding_prompt_not_billable(self):
+        events = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":999}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_empty_usage_object_is_not_emitted(self):
+        objs, done = _parse_frames(_norm(['data: {"choices":[],"usage":{}}', 'data: [DONE]']))
+        self.assertTrue(done)
+        self.assertFalse(any("usage" in o for o in objs))
+
+    def test_malformed_data_event_fails_closed(self):
+        objs, done = _parse_frames(_norm(['data: not-json', 'data: [DONE]']))
+        self.assertFalse(done)
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_error_object_is_passed_through_not_dropped(self):
+        objs, done = _parse_frames(_norm(['data: {"error":{"message":"boom","type":"server_error"}}']))
         self.assertFalse(done)
         self.assertTrue(any("error" in o for o in objs))
 
-    def test_error_object_is_passed_through_not_dropped(self):
-        """{"error":...} 无 choices 无 usage，但绝不能当私有块吞掉。"""
-        lines = ['data: {"error":{"message":"boom","type":"server_error"}}']
-        objs, done = _parse_frames("".join(normalize_sse(lines)))
-        self.assertFalse(done)  # 上游没发 [DONE]
+    def test_private_chunk_with_error_key_is_not_dropped(self):
+        objs, done = _parse_frames(_norm(['data: {"choices":[],"cost":"0","error":{"message":"boom"}}']))
+        self.assertFalse(done)
         self.assertTrue(any("error" in o for o in objs))
 
-    def test_partial_usage_without_completion_not_promoted(self):
-        """缺 completion_tokens 的 usage 不转正（否则 CRA 把输出计 0，非 fail-closed）。"""
-        lines = [
-            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{"content":""}}],"usage":{"prompt_tokens":100,"prompt_cache_hit_tokens":80}}',
-            'data: [DONE]',
-        ]
-        objs, _ = _parse_frames("".join(normalize_sse(lines)))
-        self.assertFalse(any(o.get("usage") for o in objs))
-
-    def test_last_billable_usage_wins(self):
-        """出现"中间 partial usage + 最终完整 usage"时，采信最后一个可计费 usage。"""
-        lines = [
-            'data: {"choices":[{"index":0,"delta":{"content":"a"}}],"usage":{"prompt_tokens":50,"completion_tokens":1,"prompt_cache_hit_tokens":0}}',
-            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{"content":""}}],"usage":{"prompt_tokens":50,"completion_tokens":9,"prompt_cache_hit_tokens":40,"prompt_cache_miss_tokens":10}}',
-            'data: [DONE]',
-        ]
-        objs, _ = _parse_frames("".join(normalize_sse(lines)))
-        usage_chunks = [o for o in objs if o.get("usage")]
-        self.assertEqual(len(usage_chunks), 1)
-        self.assertEqual(usage_chunks[0]["usage"]["completion_tokens"], 9)
-        self.assertEqual(usage_chunks[0]["usage"]["prompt_cache_hit_tokens"], 40)
-
     def test_multiline_data_event_is_assembled(self):
-        """SSE 允许一个 event 跨多行 data；跨行 JSON 应累积到可解析。"""
-        lines = [
-            'data: {"choices":[{"index":0,',
-            'data: "delta":{"content":"hi"}}]}',
-            '',
-            'data: [DONE]',
-        ]
-        objs, done = _parse_frames("".join(normalize_sse(lines)))
+        # 一个事件跨两行 data:（SSE 规范），framer 应以 \n 连接成完整 JSON
+        multiline_event = 'data: {"choices":[{"index":0,\ndata: "delta":{"content":"hi"}}]}'
+        objs, done = _parse_frames(_norm([multiline_event, 'data: [DONE]']))
         self.assertTrue(done)
         content = "".join(c.get("delta", {}).get("content") or ""
                           for o in objs for c in (o.get("choices") or []))
         self.assertEqual(content, "hi")
 
+    def test_unicode_line_separator_in_content_does_not_break_stream(self):
+        """核心回归：正文含 U+2028（合法 JSON 字符、但 str.splitlines/httpx 会误切）时，
+        自建 framer 不切断 → usage + [DONE] 正常，且正文原样保留、输出对下游安全（已转义）。"""
+        u = " "
+        events = [
+            'data: {"choices":[{"index":0,"delta":{"content":"a' + u + 'b"}}],"usage":null}',
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":8,"prompt_cache_miss_tokens":2}}',
+            'data: [DONE]',
+        ]
+        out_text = _norm(events)
+        # 输出的任何一行都不得含裸 U+2028（否则把问题传给下游）
+        self.assertNotIn(u, out_text)
+        objs, done = _parse_frames(out_text)
+        self.assertTrue(done)
+        usage = [o for o in objs if o.get("usage")]
+        self.assertEqual(len(usage), 1)
+        self.assertEqual(usage[0]["usage"]["prompt_cache_hit_tokens"], 8)
+        content = "".join(c.get("delta", {}).get("content") or ""
+                          for o in objs for c in (o.get("choices") or []))
+        self.assertIn(u, content)  # 内容里的 U+2028 经 json 往返无损保留
 
-def _sse_body(lines):
-    return "".join(l + "\n\n" for l in lines).encode("utf-8")
+    def test_crlf_line_endings_are_handled(self):
+        text = ('data: {"choices":[{"index":0,"finish_reason":"stop","delta":{"content":"x"}}],'
+                '"usage":{"prompt_tokens":5,"completion_tokens":1}}\r\n\r\ndata: [DONE]\r\n\r\n')
+        objs, done = _parse_frames("".join(normalize_sse_text(text)))
+        self.assertTrue(done)
+        self.assertTrue(any(o.get("usage") for o in objs))
+
+    def test_usage_and_done_emitted_on_done_not_on_close(self):
+        n = _SseNormalizer()
+        emitted = []
+        emitted += n.feed_event('{"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":8,"prompt_cache_miss_tokens":2}}')
+        emitted += n.feed_event("[DONE]")
+        self.assertTrue(n.done)
+        text = "".join(emitted)
+        self.assertIn('"usage"', text)
+        self.assertTrue(text.rstrip().endswith("[DONE]"))
+        self.assertEqual(n.close(), [])
+
+
+def _sse_body(events):
+    return _sse(events).encode("utf-8")
 
 
 class NormalizerAppTests(unittest.TestCase):
@@ -183,7 +236,7 @@ class NormalizerAppTests(unittest.TestCase):
     def test_streaming_response_is_normalized(self):
         def handler(req):
             return httpx.Response(200, headers={"content-type": "text/event-stream"},
-                                  content=_sse_body(BROKEN_LINES))
+                                  content=_sse_body(BROKEN_EVENTS))
         with self._client(handler) as c:
             r = c.post("/v1/chat/completions",
                        headers={"Authorization": "Bearer opencode-key"},
@@ -222,7 +275,6 @@ class NormalizerAppTests(unittest.TestCase):
             self.assertEqual(r.content, body)
 
     def test_error_status_sse_passed_through_verbatim(self):
-        """4xx/5xx 的 SSE 错误体不走 normalizer，逐字透传保留 opencode 错误详情。"""
         err = _sse_body(['data: {"error":{"message":"rate limited"}}'])
 
         def handler(req):
@@ -236,7 +288,7 @@ class NormalizerAppTests(unittest.TestCase):
     def test_content_type_case_insensitive_is_normalized(self):
         def handler(req):
             return httpx.Response(200, headers={"content-type": "Text/Event-Stream; charset=utf-8"},
-                                  content=_sse_body(BROKEN_LINES))
+                                  content=_sse_body(BROKEN_EVENTS))
         with self._client(handler) as c:
             r = c.post("/v1/chat/completions", headers={"Authorization": "Bearer k"},
                        json={"stream": True})
