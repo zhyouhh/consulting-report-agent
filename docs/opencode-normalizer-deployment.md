@@ -55,11 +55,17 @@ new-api 侧无 bug（同一实例对官渠 57、以及 **07-01 的 opencode 流�
    ```
    `docker compose up -d --build`。
 
-4. **接入渠道 61**（改前先备份）：
-   `cp /opt/newapi/data/one-api.db /opt/newapi/data/one-api.db.bak-ocnorm-<date>`。
-   把渠道 61 的 base_url 由 `https://opencode.ai/zen/go` 改为
+4. **接入渠道 61**（改前先做 WAL 安全备份）：new-api 的 SQLite 开着 WAL，`cp` 单文件
+   拿不到完整状态。用在线一致快照：
+   `sqlite3 /opt/newapi/data/one-api.db ".backup '/opt/newapi/data/one-api.db.bak-ocnorm-<date>'"`
+   （或停 new-api 容器后连 `one-api.db`/`-wal`/`-shm` 一起复制）。
+   然后把渠道 61 的 base_url 由 `https://opencode.ai/zen/go` 改为
    `http://opencode-sse-normalizer:18732`（同网络容器名），并把 ds 分组加回渠道 61。
-5. 打一条流式请求走渠道 61，查 new-api 日志确认 `cache_tokens > 0` 且无 `local_count_tokens`。
+5. **上线门禁（不是普通验证，不过则回滚）**：打一条走渠道 61 的**流式** managed 请求，端到端确认：
+   - new-api 日志该条 `local_count_tokens` 不为真、`cache_tokens > 0`；
+   - 二次相同前缀请求缓存命中上升；
+   - CRA 侧 `usage_daily.cache_hit_tokens` 按预期增长（而非全进 miss）。
+   任一不满足即视为"new-api 未把还原后的空块解析为真实 cache"，立即按下方回滚，勿放量。
 
 ## 回滚
 

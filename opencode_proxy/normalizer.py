@@ -1,4 +1,4 @@
-"""OpenCode Zen SSE 规范化核心（纯函数，只依赖 stdlib）。
+"""OpenCode Zen SSE 规范化核心（纯函数 / push 式解析，只依赖 stdlib）。
 
 背景：opencode.ai/zen 在 2026-07-01→07-02 间把流式响应改成了非标准形态——
 把 `usage` 挂在带 `finish_reason` 的正文块（choices 非空）上，而不是 OpenAI 规范
@@ -7,16 +7,25 @@
 一块。new-api 的流式取 usage 逻辑只从"空 choices 的末块"里找 usage，于是抓不到 →
 回退本地估 token → cache 归 0。
 
-本模块把 opencode 当前的畸形流**还原成 OpenAI 标准流**：usage 落在 choices:[] 空块，
+本模块把 opencode 当前的畸形流**还原成 OpenAI 标准流**：usage 落在末尾 choices:[] 空块，
 丢弃 opencode 私有块与 [DONE] 之后的内容。new-api 在 2026-07-01 已被生产证明能正确
 解析这种标准形态（同一 opencode base_url、同一渠道），故还原后计费自动恢复正确。
 
-设计原则：**最小介入 + 对两种格式都安全**。若 opencode 日后修回标准格式（usage 已在
-空块），本模块原样透传、绝不重复注入——是个幂等的防御性 shim。
+设计要点：
+- **push 式**：`_SseNormalizer.feed(line)` + `close()`，可被同步或异步调用方逐行驱动。
+- **fail-closed**：宁可当"未命中/无 usage"让下游保守多计费，绝不凭空造缓存少计费。
+  · usage 缺 `prompt_tokens`/`completion_tokens` → 不转正（下游走缺 usage 保守路径）。
+  · 上游截断（没等到 `[DONE]`）→ 不合成 `[DONE]`，让下游感知异常。
+  · 只丢弃**明确识别**的 opencode 私有块（x-opencode-type / 仅 cost）；未知对象（如
+    `{"error":...}`）原样透传，绝不静默吞成功。
+- **last-usage-wins**：剥掉所有正文块上的 usage，只缓存最后一个"可计费" usage，在 `[DONE]`
+  前作为唯一的 choices:[] 空块发出（防 opencode 发"中间 usage + 最终 usage"时误用 partial）。
+- **幂等**：opencode 若修回标准（usage 已在空块）→ 归一到同一末块形态，无重复注入。
+- **多行 event**：按 SSE 规范累积多行 `data:`；单行 JSON 立即解析，跨行 JSON 累积到可解析为止。
 """
 from __future__ import annotations
 import json
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Optional
 
 
 def _choices_nonempty(obj: dict) -> bool:
@@ -29,77 +38,110 @@ def _has_usage(obj: dict) -> bool:
     return isinstance(u, dict) and len(u) > 0
 
 
-def _split_usage_chunk(obj: dict) -> tuple[dict, dict]:
-    """把"usage 挂在正文块"拆成 (去掉 usage 的正文块, 标准 choices:[] usage 空块)。
-    空块复用源块的 id/object/created/model，最大程度贴合上游真实末块形态。"""
-    usage = obj["usage"]
-    content_chunk = {k: v for k, v in obj.items() if k != "usage"}
-    std_usage_chunk = {k: obj[k] for k in ("id", "object", "created", "model") if k in obj}
-    std_usage_chunk["choices"] = []
-    std_usage_chunk["usage"] = usage
-    return content_chunk, std_usage_chunk
+def _is_int_like(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def normalize_objects(objs: Iterable[dict]) -> Iterator[dict]:
-    """把已解析的 data JSON 对象序列（不含 [DONE]）规范化为标准顺序。
+def _usage_is_billable(usage: dict) -> bool:
+    """只有同时带数值型 prompt_tokens 与 completion_tokens 的 usage 才转正。
+    否则不转正 → 下游（new-api 本地估算 / CRA 缺 usage 保守路径）fail-closed。"""
+    return (isinstance(usage, dict)
+            and _is_int_like(usage.get("prompt_tokens"))
+            and _is_int_like(usage.get("completion_tokens")))
 
-    规则（按块判定，幂等）：
-    - usage + choices 非空（opencode 畸形）→ 拆成 正文块 + 标准 usage 空块。
-    - usage + choices 空（已是标准末块 / opencode 若修回）→ 原样透传。
-    - 无 usage + choices 空（opencode 私有块 inference-cost / cost-only）→ 丢弃。
-    - 无 usage + choices 非空（普通正文增量）→ 原样透传。
-    重复 usage（防御）：仅采信首个 usage；其后再出现的 usage 只当正文/丢弃，不重复注入。
-    """
-    usage_emitted = False
-    for obj in objs:
+
+def _is_opencode_private_chunk(obj: dict) -> bool:
+    """opencode 私有块：inference-cost（x-opencode-type）或仅含 cost 的空块。
+    只对 choices 为空且无 usage 的块判定为可安全丢弃。"""
+    return ("x-opencode-type" in obj) or ("cost" in obj)
+
+
+def _frame(obj: dict) -> str:
+    return "data: " + json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+
+
+class _SseNormalizer:
+    """push 式 SSE 规范化器。`feed(line)`/`close()` 都返回待发出的帧字符串列表。"""
+
+    def __init__(self) -> None:
+        self._buf: list[str] = []          # 跨行 data event 累积
+        self._saw_done = False
+        self._pending_usage: Optional[dict] = None
+        self._usage_template: dict = {}
+
+    def _dispatch(self, obj) -> list[str]:
         if not isinstance(obj, dict):
-            continue
+            return []
         has_usage = _has_usage(obj)
         nonempty = _choices_nonempty(obj)
-        if has_usage and nonempty:
-            content_chunk, std_usage_chunk = _split_usage_chunk(obj)
-            yield content_chunk
-            if not usage_emitted:
-                yield std_usage_chunk
-                usage_emitted = True
-        elif has_usage and not nonempty:
-            if not usage_emitted:
-                yield obj
-                usage_emitted = True
-            # 已发过 usage → 丢弃这个多余的空 usage 块
-        elif (not has_usage) and (not nonempty):
-            # opencode 私有空块（inference-cost / {"choices":[],"cost":..}）→ 丢弃
-            continue
-        else:
-            # 普通正文增量块 → 透传
-            yield obj
+        if has_usage:
+            usage = obj["usage"]
+            if _usage_is_billable(usage):
+                # last-usage-wins：缓存最后一个可计费 usage + 其块模板（id/model 等）
+                self._pending_usage = usage
+                self._usage_template = {k: obj[k] for k in ("id", "object", "created", "model")
+                                        if k in obj}
+            if nonempty:
+                # 正文块：剥掉 usage 后透传（usage 统一到末尾空块发）
+                return [_frame({k: v for k, v in obj.items() if k != "usage"})]
+            # 纯 usage 空块：被 pending_usage 吸收，此处不发
+            return []
+        if nonempty:
+            return [_frame(obj)]                       # 普通正文增量 → 透传
+        if _is_opencode_private_chunk(obj):
+            return []                                  # opencode 私有块 → 丢弃
+        return [_frame(obj)]                           # 未知/error 对象 → 透传（不静默吞）
+
+    def _flush_buf(self) -> list[str]:
+        if not self._buf:
+            return []
+        joined = "\n".join(self._buf)
+        self._buf = []
+        try:
+            obj = json.loads(joined)
+        except Exception:
+            return []                                  # 不可解析的残片 → 安全丢弃
+        return self._dispatch(obj)
+
+    def feed(self, line) -> list[str]:
+        if line is None or self._saw_done:
+            return []                                  # [DONE] 之后一律忽略（含 opencode 后置私有块）
+        s = line.strip()
+        if s == "":
+            return self._flush_buf()                   # 空行 = SSE event 边界 → 结算累积
+        if not s.startswith("data:"):
+            return []                                  # 注释/其它 SSE 字段（event:/id:）忽略
+        payload = s[len("data:"):].lstrip()
+        if payload == "[DONE]":
+            self._saw_done = True
+            return []
+        self._buf.append(payload)
+        joined = "\n".join(self._buf)
+        try:
+            obj = json.loads(joined)
+        except Exception:
+            return []                                  # 可能是跨行 JSON 续行，继续累积
+        self._buf = []
+        return self._dispatch(obj)
+
+    def close(self) -> list[str]:
+        frames = self._flush_buf()
+        if self._pending_usage is not None:
+            chunk = dict(self._usage_template)
+            chunk["choices"] = []
+            chunk["usage"] = self._pending_usage
+            frames.append(_frame(chunk))
+        if self._saw_done:
+            frames.append("data: [DONE]\n\n")          # 仅在确实收到上游 [DONE] 时才补发
+        return frames
 
 
 def normalize_sse(lines: Iterable[str]) -> Iterator[str]:
-    r"""输入 = 上游 SSE 的逐行文本（不含尾随换行）；输出 = 规范化后的 SSE 帧文本
-    （每帧自带 `\n\n`）。流式逐块处理、不整段缓冲；遇 `data: [DONE]` 发出后即终止，
-    自然丢弃 opencode 在 [DONE] 之后多发的私有块。非 data 行（SSE 注释/keepalive）忽略。
-    """
-    def _obj_stream() -> Iterator[dict]:
-        # 内嵌生成器：把行流转成 data 对象流，遇 [DONE] 结束。
-        for raw in lines:
-            if raw is None:
-                continue
-            line = raw.strip()
-            if not line:
-                continue
-            if not line.startswith("data:"):
-                continue  # SSE 注释/keepalive：本层忽略（new-api 不需要）
-            payload = line[len("data:"):].strip()
-            if payload == "[DONE]":
-                return
-            try:
-                obj = json.loads(payload)
-            except Exception:
-                continue  # 无法解析的 data 行：安全丢弃（不应出现）
-            if isinstance(obj, dict):
-                yield obj
-
-    for out in normalize_objects(_obj_stream()):
-        yield "data: " + json.dumps(out, ensure_ascii=False, separators=(",", ":")) + "\n\n"
-    yield "data: [DONE]\n\n"
+    r"""同步便捷封装：吃逐行文本、吐规范化后的 SSE 帧（每帧自带 `\n\n`）。
+    异步调用方请直接用 `_SseNormalizer.feed()/close()` 驱动。"""
+    n = _SseNormalizer()
+    for line in lines:
+        for f in n.feed(line):
+            yield f
+    for f in n.close():
+        yield f

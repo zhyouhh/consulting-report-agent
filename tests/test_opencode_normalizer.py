@@ -1,7 +1,7 @@
 import json
 import unittest
-from unittest import mock
 
+import httpx
 from fastapi.testclient import TestClient
 
 from opencode_proxy.app import NormalizerSettings, create_app
@@ -37,18 +37,18 @@ def _parse_frames(text):
 
 class NormalizerCoreTests(unittest.TestCase):
     def test_broken_stream_usage_moved_to_empty_choices_chunk(self):
-        text = "".join(normalize_sse(BROKEN_LINES))
-        objs, done = _parse_frames(text)
+        objs, done = _parse_frames("".join(normalize_sse(BROKEN_LINES)))
         self.assertTrue(done)
         usage_chunks = [o for o in objs if o.get("usage")]
         self.assertEqual(len(usage_chunks), 1)
         self.assertEqual(usage_chunks[0]["choices"], [])
         self.assertEqual(usage_chunks[0]["usage"]["prompt_cache_hit_tokens"], 43648)
         self.assertEqual(usage_chunks[0]["usage"]["prompt_cache_miss_tokens"], 1548)
+        # usage 块须是最后一个 data 对象（在 [DONE] 前）
+        self.assertIs(objs[-1], usage_chunks[0])
 
     def test_content_deltas_preserved_and_finish_usage_stripped(self):
-        text = "".join(normalize_sse(BROKEN_LINES))
-        objs, _ = _parse_frames(text)
+        objs, _ = _parse_frames("".join(normalize_sse(BROKEN_LINES)))
         content = "".join(
             c.get("delta", {}).get("content") or ""
             for o in objs for c in (o.get("choices") or [])
@@ -60,17 +60,15 @@ class NormalizerCoreTests(unittest.TestCase):
         self.assertNotIn("usage", finish[0])
 
     def test_private_and_post_done_chunks_dropped(self):
-        text = "".join(normalize_sse(BROKEN_LINES))
-        objs, _ = _parse_frames(text)
+        objs, _ = _parse_frames("".join(normalize_sse(BROKEN_LINES)))
         self.assertFalse(any("x-opencode-type" in o for o in objs))
-        # [DONE] 之后的 {"choices":[],"cost":"0"} 必须被丢弃
         self.assertFalse(any(o.get("cost") == "0" for o in objs))
 
     def test_already_standard_stream_is_idempotent(self):
         standard = [
             'data: {"id":"y","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"}}]}',
             'data: {"id":"y","object":"chat.completion.chunk","choices":[{"index":0,"finish_reason":"stop","delta":{}}]}',
-            'data: {"id":"y","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"prompt_cache_hit_tokens":8,"prompt_cache_miss_tokens":2,"completion_tokens":3}}',
+            'data: {"id":"y","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_cache_hit_tokens":8,"prompt_cache_miss_tokens":2}}',
             'data: [DONE]',
         ]
         objs, done = _parse_frames("".join(normalize_sse(standard)))
@@ -90,91 +88,132 @@ class NormalizerCoreTests(unittest.TestCase):
         self.assertTrue(done)
         self.assertFalse(any(o.get("usage") for o in objs))
 
-    def test_terminates_and_appends_done_even_without_upstream_done(self):
-        no_done = [
-            'data: {"choices":[{"index":0,"delta":{"content":"a"}}]}',
+    def test_truncated_stream_without_done_does_not_synthesize_done(self):
+        """上游截断（没等到 [DONE]）→ 不得合成 [DONE]（fail-closed，让下游感知异常）。"""
+        truncated = ['data: {"choices":[{"index":0,"delta":{"content":"a"}}]}']
+        _, done = _parse_frames("".join(normalize_sse(truncated)))
+        self.assertFalse(done)
+
+    def test_error_object_is_passed_through_not_dropped(self):
+        """{"error":...} 无 choices 无 usage，但绝不能当私有块吞掉。"""
+        lines = ['data: {"error":{"message":"boom","type":"server_error"}}']
+        objs, done = _parse_frames("".join(normalize_sse(lines)))
+        self.assertFalse(done)  # 上游没发 [DONE]
+        self.assertTrue(any("error" in o for o in objs))
+
+    def test_partial_usage_without_completion_not_promoted(self):
+        """缺 completion_tokens 的 usage 不转正（否则 CRA 把输出计 0，非 fail-closed）。"""
+        lines = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{"content":""}}],"usage":{"prompt_tokens":100,"prompt_cache_hit_tokens":80}}',
+            'data: [DONE]',
         ]
-        text = "".join(normalize_sse(no_done))
-        _, done = _parse_frames(text)
+        objs, _ = _parse_frames("".join(normalize_sse(lines)))
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_last_billable_usage_wins(self):
+        """出现"中间 partial usage + 最终完整 usage"时，采信最后一个可计费 usage。"""
+        lines = [
+            'data: {"choices":[{"index":0,"delta":{"content":"a"}}],"usage":{"prompt_tokens":50,"completion_tokens":1,"prompt_cache_hit_tokens":0}}',
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{"content":""}}],"usage":{"prompt_tokens":50,"completion_tokens":9,"prompt_cache_hit_tokens":40,"prompt_cache_miss_tokens":10}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames("".join(normalize_sse(lines)))
+        usage_chunks = [o for o in objs if o.get("usage")]
+        self.assertEqual(len(usage_chunks), 1)
+        self.assertEqual(usage_chunks[0]["usage"]["completion_tokens"], 9)
+        self.assertEqual(usage_chunks[0]["usage"]["prompt_cache_hit_tokens"], 40)
+
+    def test_multiline_data_event_is_assembled(self):
+        """SSE 允许一个 event 跨多行 data；跨行 JSON 应累积到可解析。"""
+        lines = [
+            'data: {"choices":[{"index":0,',
+            'data: "delta":{"content":"hi"}}]}',
+            '',
+            'data: [DONE]',
+        ]
+        objs, done = _parse_frames("".join(normalize_sse(lines)))
         self.assertTrue(done)
+        content = "".join(c.get("delta", {}).get("content") or ""
+                          for o in objs for c in (o.get("choices") or []))
+        self.assertEqual(content, "hi")
 
 
-class _FakeUpstream:
-    def __init__(self, *, status_code=200, content_type="text/event-stream",
-                 lines=None, content=b""):
-        self.status_code = status_code
-        self.headers = {"content-type": content_type}
-        self._lines = lines or []
-        self.content = content
-        self.closed = False
-
-    def iter_lines(self, decode_unicode=False):
-        for line in self._lines:
-            yield line
-
-    def close(self):
-        self.closed = True
+def _sse_body(lines):
+    return "".join(l + "\n\n" for l in lines).encode("utf-8")
 
 
 class NormalizerAppTests(unittest.TestCase):
-    def setUp(self):
-        self.settings = NormalizerSettings(upstream_base_url="https://opencode.example/zen/go")
-        self.client = TestClient(create_app(self.settings))
+    def _client(self, handler):
+        transport = httpx.MockTransport(handler)
+        settings = NormalizerSettings(upstream_base_url="https://opencode.example/zen/go")
+        return TestClient(create_app(settings, transport=transport))
 
     def test_health(self):
-        r = self.client.get("/health")
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["upstream"], "https://opencode.example/zen/go")
+        with self._client(lambda req: httpx.Response(200)) as c:
+            r = c.get("/health")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["upstream"], "https://opencode.example/zen/go")
 
-    @mock.patch("opencode_proxy.app.requests.request")
-    def test_streaming_response_is_normalized(self, mock_request):
-        mock_request.return_value = _FakeUpstream(lines=BROKEN_LINES)
-        r = self.client.post(
-            "/v1/chat/completions",
-            headers={"Authorization": "Bearer opencode-key"},
-            json={"model": "deepseek-v4-pro", "stream": True},
-        )
-        self.assertEqual(r.status_code, 200)
-        objs, done = _parse_frames(r.text)
-        self.assertTrue(done)
-        usage_chunks = [o for o in objs if o.get("usage")]
-        self.assertEqual(len(usage_chunks), 1)
-        self.assertEqual(usage_chunks[0]["choices"], [])
-        self.assertEqual(usage_chunks[0]["usage"]["prompt_cache_hit_tokens"], 43648)
+    def test_streaming_response_is_normalized(self):
+        def handler(req):
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  content=_sse_body(BROKEN_LINES))
+        with self._client(handler) as c:
+            r = c.post("/v1/chat/completions",
+                       headers={"Authorization": "Bearer opencode-key"},
+                       json={"model": "deepseek-v4-pro", "stream": True})
+            self.assertEqual(r.status_code, 200)
+            objs, done = _parse_frames(r.text)
+            self.assertTrue(done)
+            usage_chunks = [o for o in objs if o.get("usage")]
+            self.assertEqual(len(usage_chunks), 1)
+            self.assertEqual(usage_chunks[0]["choices"], [])
+            self.assertEqual(usage_chunks[0]["usage"]["prompt_cache_hit_tokens"], 43648)
 
-    @mock.patch("opencode_proxy.app.requests.request")
-    def test_forwards_upstream_url_and_authorization(self, mock_request):
-        mock_request.return_value = _FakeUpstream(lines=["data: [DONE]"])
-        self.client.post(
-            "/v1/chat/completions",
-            headers={"Authorization": "Bearer opencode-key"},
-            json={"model": "deepseek-v4-pro", "stream": True},
-        )
-        args, kwargs = mock_request.call_args
-        self.assertEqual(args[0], "POST")
-        self.assertEqual(args[1], "https://opencode.example/zen/go/v1/chat/completions")
-        self.assertEqual(kwargs["headers"].get("authorization"), "Bearer opencode-key")
-        self.assertTrue(kwargs["stream"])
+    def test_forwards_upstream_url_and_authorization(self):
+        seen = {}
 
-    @mock.patch("opencode_proxy.app.requests.request")
-    def test_non_stream_response_passed_through_verbatim(self, mock_request):
+        def handler(req):
+            seen["url"] = str(req.url)
+            seen["auth"] = req.headers.get("authorization")
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  content=_sse_body(["data: [DONE]"]))
+        with self._client(handler) as c:
+            c.post("/v1/chat/completions?a=1&a=2",
+                   headers={"Authorization": "Bearer opencode-key"},
+                   json={"model": "deepseek-v4-pro", "stream": True})
+        self.assertEqual(seen["url"], "https://opencode.example/zen/go/v1/chat/completions?a=1&a=2")
+        self.assertEqual(seen["auth"], "Bearer opencode-key")
+
+    def test_non_stream_response_passed_through_verbatim(self):
         body = json.dumps({"object": "list", "data": []}).encode()
-        mock_request.return_value = _FakeUpstream(
-            content_type="application/json", content=body, lines=[])
-        r = self.client.get("/v1/models", headers={"Authorization": "Bearer k"})
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.content, body)
 
-    @mock.patch("opencode_proxy.app.requests.request")
-    def test_upstream_error_returns_502(self, mock_request):
-        import requests as _rq
-        mock_request.side_effect = _rq.RequestException("boom")
-        r = self.client.post(
-            "/v1/chat/completions",
-            headers={"Authorization": "Bearer k"},
-            json={"stream": True},
-        )
-        self.assertEqual(r.status_code, 502)
+        def handler(req):
+            return httpx.Response(200, headers={"content-type": "application/json"}, content=body)
+        with self._client(handler) as c:
+            r = c.get("/v1/models", headers={"Authorization": "Bearer k"})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.content, body)
+
+    def test_error_status_sse_passed_through_verbatim(self):
+        """4xx/5xx 的 SSE 错误体不走 normalizer，逐字透传保留 opencode 错误详情。"""
+        err = _sse_body(['data: {"error":{"message":"rate limited"}}'])
+
+        def handler(req):
+            return httpx.Response(429, headers={"content-type": "text/event-stream"}, content=err)
+        with self._client(handler) as c:
+            r = c.post("/v1/chat/completions", headers={"Authorization": "Bearer k"},
+                       json={"stream": True})
+            self.assertEqual(r.status_code, 429)
+            self.assertEqual(r.content, err)
+
+    def test_upstream_error_returns_502(self):
+        def handler(req):
+            raise httpx.ConnectError("boom", request=req)
+        with self._client(handler) as c:
+            r = c.post("/v1/chat/completions", headers={"Authorization": "Bearer k"},
+                       json={"stream": True})
+            self.assertEqual(r.status_code, 502)
 
 
 if __name__ == "__main__":
