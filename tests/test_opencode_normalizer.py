@@ -192,6 +192,70 @@ class NormalizerCoreTests(unittest.TestCase):
         self.assertTrue(done)
         self.assertTrue(any("error" in o for o in objs))
 
+    def test_bare_usage_without_choices_not_promoted(self):
+        """裸 {"usage":{...}}（无 choices）不认终态 → 不作候选（后续正文/finish 无 usage）。"""
+        events = [
+            'data: {"usage":{"prompt_tokens":100,"completion_tokens":1,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":100}}',
+            'data: {"choices":[{"index":0,"delta":{"content":"大量输出"}}]}',
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}]}',
+            'data: [DONE]',
+        ]
+        objs, done = _parse_frames(_norm(events))
+        self.assertTrue(done)
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_candidate_cleared_by_content_after_usage(self):
+        """候选之后又出现正文/finish 无 usage → 说明候选非最终 → 清候选，不发 usage。"""
+        events = [
+            'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":1,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":100}}',
+            'data: {"choices":[{"index":0,"delta":{"content":"后续大量输出"}}]}',
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}]}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_emitted_usage_is_canonical_without_unvalidated_aliases(self):
+        """发出的 usage 规范化重建：剔除未校验 cache 别名（top-level cached_tokens/cache_read_tokens）。"""
+        events = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_cache_hit_tokens":700,"prompt_cache_miss_tokens":300,"cached_tokens":999,"cache_read_tokens":999,"prompt_tokens_details":{"cached_tokens":700}}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
+        u = [o for o in objs if o.get("usage")][0]["usage"]
+        self.assertNotIn("cached_tokens", u)
+        self.assertNotIn("cache_read_tokens", u)
+        self.assertEqual(u["prompt_cache_hit_tokens"], 700)
+        self.assertEqual(u["prompt_cache_miss_tokens"], 300)
+        self.assertEqual(u["prompt_tokens_details"]["cached_tokens"], 700)
+        self.assertEqual(u["total_tokens"], 1010)
+
+    def test_error_passthrough_strips_usage(self):
+        """error 对象透传但剥掉 usage，避免被下游当 usage 块。"""
+        objs, _ = _parse_frames(_norm([
+            'data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":1},"error":{"message":"x"}}',
+            'data: [DONE]',
+        ]))
+        err = [o for o in objs if "error" in o]
+        self.assertTrue(err)
+        self.assertNotIn("usage", err[0])
+
+    def test_oversized_token_count_not_billable(self):
+        events = [
+            'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":2000000000,"completion_tokens":1}}',
+            'data: [DONE]',
+        ]
+        objs, _ = _parse_frames(_norm(events))
+        self.assertFalse(any(o.get("usage") for o in objs))
+
+    def test_invalid_utf8_bytes_fail_closed(self):
+        from opencode_proxy.normalizer import normalize_sse_bytes
+        good = ('data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],'
+                '"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n').encode("utf-8")
+        out = "".join(normalize_sse_bytes([good, b"\xff\xfe bad bytes ", b"data: [DONE]\n\n"]))
+        self.assertNotIn("[DONE]", out)     # 损坏后 fail-closed：不发 [DONE]
+        self.assertNotIn('"usage"', out)    # 也不发 usage
+
     def test_empty_terminal_usage_clears_earlier_billable_candidate(self):
         """终态 usage:{} 出现在可计费 usage 之后 → 清掉候选，最终不发 usage（fail-closed）。"""
         events = [

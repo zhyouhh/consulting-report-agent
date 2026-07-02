@@ -107,8 +107,8 @@ def create_app(settings: Optional[NormalizerSettings] = None,
                         yield frame.encode("utf-8")
                     if normalizer.done:
                         break
-                if normalizer.done:
-                    break                        # 收到 [DONE] 即停读并关上游，不等 EOF
+                if normalizer.done or framer.corrupt:
+                    break                        # [DONE] 或 framer 损坏即停读关上游，不挂到超时
             if not normalizer.done:
                 for data in framer.close():
                     for frame in normalizer.feed_event(data):

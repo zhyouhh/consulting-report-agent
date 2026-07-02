@@ -130,25 +130,29 @@ def _choices_nonempty(obj: dict) -> bool:
     return isinstance(ch, list) and len(ch) > 0
 
 
+# 单次调用 token 量级上界（与 CRA metering 的 _MAX_PLAUSIBLE_TOKENS 一致）；超出视为怪值不转正。
+_MAX_TOKENS = 10 ** 9
+
+
 def _is_terminal_block(obj: dict) -> bool:
-    """终态块：choices 缺失/非 list（裸 usage 块）、choices 为空、或非空但每个 choice 都带 finish_reason。
-    正文增量块（无 finish_reason）非终态——其 usage 快照不作候选。"""
+    """终态块：choices 为**空 list**，或非空 list 且每个 choice 都带 finish_reason。
+    `choices` 缺失/非 list（裸 usage 块）→ **不认终态**（fail-closed：不信任来路不明的 usage）。"""
     ch = obj.get("choices")
     if not isinstance(ch, list):
-        return True
+        return False
     if len(ch) == 0:
         return True
     return all(isinstance(c, dict) and c.get("finish_reason") is not None for c in ch)
 
 
 def _is_token_count(v) -> bool:
-    """合法 token 计数：非 bool、有限、非负、整数值（拒 nan/inf/负/小数）。"""
+    """合法 token 计数：非 bool、有限、非负、整数值、≤1e9（拒 nan/inf/负/小数/超量级）。"""
     if isinstance(v, bool):
         return False
     if isinstance(v, int):
-        return v >= 0
+        return 0 <= v <= _MAX_TOKENS
     if isinstance(v, float):
-        return math.isfinite(v) and v >= 0 and v.is_integer()
+        return math.isfinite(v) and v.is_integer() and 0 <= v <= _MAX_TOKENS
     return False
 
 
@@ -189,6 +193,32 @@ def _usage_is_billable(usage) -> bool:
     return True
 
 
+def _canonical_usage(usage: dict) -> dict:
+    """从**已校验可计费**的 usage 重建规范 usage：只含校验过的字段、内部自洽，杜绝未校验的
+    cache 别名（top-level `cached_tokens` / `cache_read_tokens` / `input_tokens_details...`）
+    穿透到下游被误读。前置：调用方已确保 `_usage_is_billable(usage)`。"""
+    pt = int(usage["prompt_tokens"])
+    ct = int(usage["completion_tokens"])
+    hit = usage.get("prompt_cache_hit_tokens")
+    miss = usage.get("prompt_cache_miss_tokens")
+    if hit is not None:
+        h = int(hit)
+        m = int(miss) if miss is not None else pt - h
+    elif miss is not None:            # 理论上不可达（此组合非 billable），保守派生
+        m = int(miss)
+        h = pt - m
+    else:
+        h, m = 0, pt
+    return {
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "total_tokens": pt + ct,
+        "prompt_cache_hit_tokens": h,
+        "prompt_cache_miss_tokens": m,
+        "prompt_tokens_details": {"cached_tokens": h},
+    }
+
+
 def _is_opencode_private_chunk(obj: dict) -> bool:
     """opencode 私有成本块：**含 `cost` 且键全部 ⊆ 已知私有键集**（inference-cost / `[DONE]` 后
     `{"choices":[],"cost":"0"}`）。仅在 choices 为空且无 usage 时调用。带 `error` 或任何集外键 →
@@ -220,27 +250,37 @@ class _SseNormalizer:
     def done(self) -> bool:
         return self._done
 
+    def _clear_candidate(self) -> None:
+        self._last_usage = None
+        self._last_usage_template = {}
+
     def _dispatch(self, obj) -> List[str]:
         if not isinstance(obj, dict):
             self._malformed = True             # 非对象 JSON（数组/数字等）→ 可疑
             return []
-        if "error" in obj:
-            return [_frame(obj)]               # 错误/诊断对象优先透传，绝不被 usage/私有分支吞掉
-        if "usage" in obj:
-            if _is_terminal_block(obj):
-                # 终态块含 usage key 即更新候选（含 null/{}）——后来的空/null 终态会清掉更早候选，
-                # fail-closed；可计费判定推迟到 finalize 由 `_usage_is_billable` 决定是否真发。
-                self._last_usage = obj.get("usage")
-                self._last_usage_template = {k: obj[k] for k in ("id", "object", "created", "model")
-                                             if k in obj}
-            if _choices_nonempty(obj):
+        nonempty = _choices_nonempty(obj)
+        # ① 终态块 + 含 usage key → 成为**新候选**（含 null/{}）；正文剥 usage 后透传。
+        #    候选严格：只认 choices==[] 或全 finish_reason 的终态；裸/非终态 usage 不作候选。
+        if "usage" in obj and "error" not in obj and _is_terminal_block(obj):
+            self._last_usage = obj.get("usage")
+            self._last_usage_template = {k: obj[k] for k in ("id", "object", "created", "model")
+                                         if k in obj}
+            if nonempty:
                 return [_frame({k: v for k, v in obj.items() if k != "usage"})]
             return []
-        if _choices_nonempty(obj):
-            return [_frame(obj)]               # 普通正文增量 → 透传
-        if _is_opencode_private_chunk(obj):
-            return []                          # opencode 私有块 → 丢弃
-        return [_frame(obj)]                   # 未知对象 → 透传（不静默吞）
+        # ② opencode 私有成本块 → 丢弃，且**不清候选**（它合法地出现在 finish+usage 与 [DONE] 之间）。
+        if (not nonempty) and "usage" not in obj and _is_opencode_private_chunk(obj):
+            return []
+        # ③ 其它一切业务事件（正文 delta、finish-无-usage、error、未知、裸/非终态带 usage）：
+        #    说明之前的候选不是"最后的业务事实" → 清候选（fail-closed），再按内容处理。
+        self._clear_candidate()
+        if "error" in obj:
+            return [_frame({k: v for k, v in obj.items() if k != "usage"})]   # 透传但剥 usage，防被当 usage 块
+        if "usage" in obj:                     # 裸/非终态带 usage 快照 → 剥 usage
+            if nonempty:
+                return [_frame({k: v for k, v in obj.items() if k != "usage"})]
+            return []
+        return [_frame(obj)]                   # 正文增量 / 未知对象 → 透传
 
     def _finalize(self) -> List[str]:
         if self._finalized:
@@ -252,7 +292,7 @@ class _SseNormalizer:
         if _usage_is_billable(self._last_usage):
             chunk = dict(self._last_usage_template)
             chunk["choices"] = []
-            chunk["usage"] = self._last_usage
+            chunk["usage"] = _canonical_usage(self._last_usage)   # 规范化重建，不带未校验别名
             frames.append(_frame(chunk))
         frames.append("data: [DONE]\n\n")
         return frames
