@@ -249,24 +249,23 @@ class NormalizerCoreTests(unittest.TestCase):
         self.assertFalse(any(o.get("usage") for o in objs))
 
     def test_large_stream_of_small_events_not_falsely_corrupt(self):
-        """一个大 transport chunk 里含许多小完整事件（总量 > 8 MiB）不得被误判 corrupt。"""
+        """一个大 transport chunk 里含许多小完整事件（总量 > cap）不得被误判 corrupt。
+        用小 cap 注入（cap 只该拦"单事件未终止"的无界增长，不该拦"很多小完整事件")。"""
         from opencode_proxy.normalizer import normalize_sse_bytes
         filler = 'data: {"choices":[{"index":0,"delta":{"content":"x"}}]}\n\n'
-        n = (8 * 1024 * 1024) // len(filler) + 200
-        body = (filler * n
+        body = (filler * 500      # 远超下面注入的 cap，但都是完整小事件
                 + 'data: {"choices":[{"index":0,"finish_reason":"stop","delta":{}}],'
                   '"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n'
                 + 'data: [DONE]\n\n').encode("utf-8")
-        out = "".join(normalize_sse_bytes([body]))   # 单 chunk 一次喂入
+        out = "".join(normalize_sse_bytes([body], max_event_chars=200))
         self.assertIn("[DONE]", out)
         self.assertIn('"usage"', out)
 
     def test_single_unterminated_oversized_event_is_corrupt_fail_closed(self):
         """单个**永不终止**（无 \\n\\n）的事件累积超上限 → corrupt fail-closed（不发 usage/[DONE]）。"""
         from opencode_proxy.normalizer import normalize_sse_bytes
-        huge = ('data: {"choices":[{"index":0,"delta":{"content":"'
-                + "y" * (9 * 1024 * 1024)).encode("utf-8")   # 无闭合、无 \n\n
-        out = "".join(normalize_sse_bytes([huge, b'data: [DONE]\n\n']))
+        huge = ('data: {"choices":[{"index":0,"delta":{"content":"' + "y" * 5000).encode("utf-8")  # 无闭合
+        out = "".join(normalize_sse_bytes([huge, b'data: [DONE]\n\n'], max_event_chars=1000))
         self.assertNotIn("[DONE]", out)
         self.assertEqual(out, "")
 

@@ -45,11 +45,12 @@ class _SseEventFramer:
     只按 `\\r`/`\\n`/`\\r\\n` 切行、按空行分事件——绝不在 `\\u2028` 等 Unicode 行边界字符处切。
     非法 UTF-8 或单事件超上限 → `corrupt=True` 并停止产出（上游据此走截断 fail-closed）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, max_event_chars: int = _MAX_EVENT_CHARS) -> None:
         self._decoder = codecs.getincrementaldecoder("utf-8")()   # strict：非法字节抛错
         self._acc = ""            # 已规范换行、尚未成完整事件的文本
         self._pending_cr = False  # 上一 chunk 末尾悬挂的 '\r'（可能是跨 chunk 的 '\r\n'）
         self._corrupt = False
+        self._max_event_chars = max_event_chars
 
     @property
     def corrupt(self) -> bool:
@@ -99,7 +100,7 @@ class _SseEventFramer:
                 out.append(data)
         # 上限只作用于**当前未完成事件**（切出完整事件后的剩余 _acc），不是整段累积——
         # 否则一个大 chunk 里的许多小完整事件会被误判 corrupt。仅拦"单事件永不终止"的无界增长。
-        if len(self._acc) > _MAX_EVENT_CHARS:
+        if len(self._acc) > self._max_event_chars:
             self._corrupt = True
             self._acc = ""
         return out
@@ -318,10 +319,12 @@ class _SseNormalizer:
 
 # ------------------------------- 便捷封装（测试用） -------------------------------
 
-def normalize_sse_bytes(chunks: Iterable[bytes]) -> Iterator[str]:
+def normalize_sse_bytes(chunks: Iterable[bytes],
+                        max_event_chars: int = _MAX_EVENT_CHARS) -> Iterator[str]:
     """吃原始字节 chunk 流，吐规范化后的 SSE 帧文本。异步调用方请直接用
-    `_SseEventFramer` + `_SseNormalizer` 驱动，并在 `.done` 后停读关上游。"""
-    framer = _SseEventFramer()
+    `_SseEventFramer` + `_SseNormalizer` 驱动，并在 `.done` 后停读关上游。
+    `max_event_chars` 仅供测试注入小阈值；生产用默认 8 MiB。"""
+    framer = _SseEventFramer(max_event_chars=max_event_chars)
     n = _SseNormalizer()
     for chunk in chunks:
         for data in framer.feed_bytes(chunk):
