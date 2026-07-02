@@ -91,16 +91,17 @@ class _SseEventFramer:
             self._acc = ""
             return []
         self._absorb(text)
-        if len(self._acc) > _MAX_EVENT_CHARS:
-            self._corrupt = True
-            self._acc = ""
-            return []
         out: List[str] = []
         while "\n\n" in self._acc:
             event_text, self._acc = self._acc.split("\n\n", 1)
             data = self._extract_data(event_text)
             if data is not None:
                 out.append(data)
+        # 上限只作用于**当前未完成事件**（切出完整事件后的剩余 _acc），不是整段累积——
+        # 否则一个大 chunk 里的许多小完整事件会被误判 corrupt。仅拦"单事件永不终止"的无界增长。
+        if len(self._acc) > _MAX_EVENT_CHARS:
+            self._corrupt = True
+            self._acc = ""
         return out
 
     def close(self) -> List[str]:
