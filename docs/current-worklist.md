@@ -9,6 +9,29 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
+最后更新：2026-07-07 晚（**admin 搜索池额度监控 ✅ 已实施 + Codex 3 轮审至 APPROVED + 部署 kr-web-01 + 端到端验证**）：
+
+**背景**：用户提出「管理面板看不清搜索池各渠道额度/用量」。联网调研四家 provider 官方能力（结论：只有 tavily 有干净用量 API；brave 只有响应头；serper/exa 只能本地记账）+ 本地摸底（此前**零持久记账**：限流窗口 1h 即扔、无 provider/key 维度；`daily_soft_limit`/`minute_limit` 是从未执行的摆设配置）。用户拍板：只管 web 端（桌面版没人用）、serper 2500/key、exa $10/key 全赠送、brave 已设限额按 $5/月（约 1000 次）算、新 exa key 入池、**权重烧反了要重排**（月度重置的 tavily/brave 该当主力、一次性库存 serper/exa 该做兜底）。
+
+**交付（commits `1c463aa`→`a3dc251`→`47ff389`→`34e6352` 本地 main，未 push）**：
+- **持久记账**：`accounts.search_usage_daily`（provider × key_id × 天；calls/units/errors 原子累加）。**key 身份 = sha256 指纹**（`search_quota.key_fingerprint`，非机密、跨配置重排/换 key 稳定），绝不用列表下标（Codex BLOCKER：重排会把旧账记到新 key 头上）；含 `key_index`→`key_id` 幂等迁移（短命中间 schema 的库自动重建，旧行按 `legacy-index:{n}` 保留）。
+- **记账零阻塞**：搜索路径只 `enqueue_search_usage`（有界队列 512 + daemon worker 落库，满即丢+日志）——同步写 SQLite busy 最长 5s 会卡 provider 调用（Codex BLOCKER）。
+- **数据源三档**（`backend/search_quota.py` 新叶子模块，报告逐 provider 标 source）：tavily=`live`（GET /usage 逐 key 实时、5min TTL 缓存、**账号级字段按 (plan,usage,limit) 元组去重且仅 used>0 触发**——部署实测月初三个零用量账号被误折成 1000/1000，修后 3000/3000）；brave=`observed`（响应头月度段快照，**观测在状态码判断之前**——429 恰带 remaining=0，快照挂 `SearchProviderError.quota_snapshot` 走错误记账路径透传）；serper/exa=`estimated`（serper 按响应体 `credits` 真值累计、exa 按 calls×`est_cost_per_call`；monthly 按本月至今、one_time 按全时段+`baseline_used`；**只按当前配置 key 指纹归集**，退役 key 不拖累估算）。
+- **配置**：`managed_search_pool.json` 加可选 `quota` 块（model/unit/per_key_quota/baseline_used/est_cost_per_call，缺省=未声明、向后兼容桌面存量配置）；routing 重排 primary=[tavily,brave] secondary=[serper,exa]、权重 3/1/3/2；新 exa key 入池（现 4 把）。**改配置需重启**（路由单例不热重载）。
+- **端点+前端**：`GET /api/admin/search-quota`（admin 门禁；缺配置 configured=false / 坏配置 configured=false+error 区分；`?refresh=true` 强刷 tavily 缓存）；`/admin` 页新「搜索池额度」板块（`SearchPoolQuota.jsx`：四卡带来源标签+剩余进度条+逐 key 明细，估算类标注口径；31 日各渠道调用趋势折线复用 usageChart 数学；**独立取数不进 reload 的 Promise.all**——tavily 慢/挂不拖累核心管理数据）。key 标签只用指纹前 6 位（**连 key 尾 4 位都不许出现**，Codex BLOCKER）。
+- **明确不做**：不动限流门禁（这次解决「看不清」不是「超了没拦」；`daily_soft_limit` 摆设字段保持原样仅存于配置）。
+- **Codex（gpt-5.5 xhigh）3 轮**：初审 5 BLOCKER（key 身份/同步写/label 泄露/tavily 重复计数/brave 429 丢头）+ 复审 1 BLOCKER（缺 schema 迁移）全修，终 **APPROVED**；部署后实测又暴露 tavily 零用量去重误合并 → 修 + Codex 快速复核 APPROVED。
+- **部署（第六笔）**：7 后端文件 + `managed_search_pool.json` + dist swap（bundle `index-D2bYJHJ7.js`）+ 重启；公网 smoke（api/health 200 / admin 200 / search-quota 未登录 401）+ 服务器端真跑报告验证（tavily live 3×1000、其余 estimated 满额起算）+ journal 干净。回滚点 `/opt/cra-rollback-20260707/`（7 文件 + app.db.bak）。
+- **⏳ 后续可选**：serper/exa 在记账启用（2026-07-07）前的历史消耗未计——若想更准，去 dashboard 看一眼累计已用填进 `quota.baseline_used`（不填=剩余偏乐观）；brave 快照要等下一次真实 brave 搜索才首次出现（此前显示 estimated 满额）。
+
+最后更新：2026-07-07（**缓存命中率掉到 ~59% 排查 → 根因=new-api ds 组渠道分流 → 修复：ch61 opencode 设主渠道、ch57 官渠 failover ✅ 已上线 jp-app-01 + 验证**）：
+
+**排查起点**：用户报 admin 07-07 面板缓存命中率常态 ~59%（历史 70-83%）。**三方对账（CRA usage_daily × new-api logs × 逐请求 `cache_tokens`，精确到 token；`failclosed_tokens` 全 0、面板已诚实——非 07-06 fail-closed 污染复发、非 sidecar/格式回归）定位到第三个正交根因**：new-api `ds` 组自 07-01 起同挂两个**同优先级**渠道——57【ds】Deepseek官渠 + 61【商业】Opencode GO（priority 都=1、weight 1:2）→ 每请求加权随机分流两家。DeepSeek 上下文缓存**按上游账号独立**，同一 CRA 会话连续轮次被打散到不同 provider → 对话前缀（~44k）在没服务过上一轮的那家未命中、只剩共享系统前缀(~5.9k)命中 → 命中率腰斩、bimodal(99%/12%)。**铁证**：ch57 自身命中率也在 ch61 进场那天(07-01)从 74-83% 掉到 62%（单 provider 缓存不会自己变差，除非会话被分流走）。**成本**：miss=120×hit，命中掉 20pp≈单篇成本翻倍（admin 07-07 ¥4.19、本可 ¥2.2）。
+
+**修复（jp-app-01，无 CRA 代码改动，纯 new-api 渠道配置）**：ds 组 ch61→priority 2（主）、ch57→priority 1（自动 failover），改 `channels`+`abilities` 两表；停机 `PRAGMA wal_checkpoint(TRUNCATE)` + 备份 `one-api.db.bak-dspriority-20260707-013612` + 重启（v0.11.2-alpha.2）。new-api 选路=先取最高 priority 层加权随机、失败重试才降级 ⇒ 高 priority=主、低=自动 failover（`RetryTimes` 默认开）。**验证**：ds token 直发 3 轮同前缀请求全落 ch61、缓存 0%(冷)→95%(复用)→94%(续)。**回滚**=`UPDATE channels/abilities SET priority=1 WHERE id/channel_id=61`+重启（或还原 `.bak-dspriority-*`）。硬约束/细节记 `VPS-fix-private/notes/jp-app-01.md` 2026-07-07 条 + memory [[opencode-sse-normalizer-status]] 后记 2。
+
+**⏳ 待验证/监控（下次会话跟进）**：① 2026-07-08 看 admin 面板真实报告命中率是否稳定回到 70-80%（本次是合成请求验机制，真实报告有停顿/缓存 TTL 冷掉，最终以面板为准）；② 盯 new-api ch57 官渠流量——opencode 包月、健康时 ch57 应≈0；若 ch57 流量上涨=opencode 限流/抽风、failover 顶上按量烧钱，需关注。
+
 最后更新：2026-07-06 晚（**fail-closed 计费污染修复 + admin 用量趋势折线图 ✅ 已实施 + Codex 单轮审 APPROVED + 部署 kr-web-01**）：
 
 **排查起点**：用户报 07-06 面板缓存命中率特别低（37-60%）。**结论：面板没算错、真实缓存健康（new-api 侧 64.6%、重度用户 ~72%），是 fail-closed 计费污染数据**——流中断（停止按钮/手机切后台断 SSE）按 256k 上限全额记 miss（¥0.768/次），07-06 单日 7 次 = ¥5.6 幽灵账（当日 42%）+ 命中率虚低 16pp；07-01 起累计 ~¥10。三方对账实证（usage_daily vs new-api logs vs managed-proxy 计数，233 请求全对上），排除了 opencode sidecar / 渠道路由 / provider_retry 嫌疑（当日流量跑的还是旧代码，22:05 才部署新版）。

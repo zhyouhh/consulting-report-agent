@@ -460,6 +460,21 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 **部署（2026-07-06 晚，第五笔）**：dist swap bundle `index-Rwor1vmc.js` + file-push 3 后端文件（metering/accounts/main）+ 重启 → 启动时 `init_db` 自动迁移 DB（已验列存在）；smoke：公网 health/新 bundle/`/admin` 200/usage 端点 401 门禁/journal 干净。**回滚点 `/opt/cra-rollback-20260706b/`（3 旧文件 + app.db.bak）**——注意回滚代码须同时回滚 DB 或容忍多余列（老 add_usage 6 参 INSERT 对多列表安全）。
 
+## admin 搜索池额度监控（2026-07-07 实施 + Codex 3 轮审 APPROVED + 部署 kr-web-01）
+
+搜索池（serper/brave/tavily/exa）的额度/用量监控进 `/admin` 页。改搜索记账 / provider 适配器 / 额度报告 / 搜索池配置前必读。commits `1c463aa`→`34e6352`（本地 main）。
+
+- **新叶子模块 `backend/search_quota.py`**（只依赖 accounts/metering/config + requests，**绝不 import chat/skill/main**）：记账 + tavily 实时拉取 + 报告装配。
+- **key 身份 = sha256 指纹**（`key_fingerprint`，前 12 hex，非机密、跨配置重排/换 key 稳定）：`accounts.search_usage_daily(provider, key_id, day)` + 快照 app_config 键 + 报告 join 全按指纹；**绝不用列表下标当持久身份**（重排 key 会把旧账记到新 key 头上，Codex BLOCKER）。`init_db` 含 `key_index`→`key_id` 幂等迁移（旧行 `legacy-index:{n}` 保留进历史、指纹不匹配天然不入估算）。
+- **记账绝不阻塞搜索**：`SearchRouter` 注入的 `usage_recorder` 在生产接 `enqueue_search_usage`（有界队列 512 + daemon worker 落库、满即丢+日志）——**别改回同步写**（SQLite busy 最长等 5s 会卡 provider 调用）。`record_search_usage` 同步版留给 worker/测试；`wait_for_usage_idle` 测试用。成功/失败都记（errors 列），冷却跳过/缓存命中不记。
+- **数据源三档（报告 `source` 字段，前端标签）**：tavily=`live`（`GET /usage` 逐 key、5min TTL 缓存、失败不缓存；**plan_usage/plan_limit 是账号级字段**，按 (plan,usage,limit) 元组去重防同账号多 key 翻倍，**仅 used>0 触发**——月初全零元组无区分度，部署实测 3 账号被误折成 1000/1000）；brave=`observed`（`X-RateLimit-*` 响应头月度段快照；**观测在状态码判断之前**，429 恰带 remaining=0，快照挂 `SearchProviderError.quota_snapshot` 走错误记账透传；月度段 0=unlimited 视为无信号）；serper/exa=`estimated`（serper 按响应体 `credits` 真值、exa 按 calls×`est_cost_per_call`；monthly 按本月至今、one_time 按全时段+`baseline_used`；**只按当前配置 key 指纹归集**，退役 key 不拖累）。
+- **key 原文零回显**：报告 key 标签 = `#N · 指纹前6位`——**连 key 尾 4 位都不许出现在 API 响应**（`test_report_never_echoes_api_keys_or_their_tails` 锁死）。
+- **配置 `quota` 块整体可选**（`config.py:ManagedSearchQuotaConfig`：model=monthly/one_time、unit=credits/usd/requests、per_key_quota、baseline_used、est_cost_per_call）——缺省=未声明（source=none 只显调用统计），**向后兼容随桌面包分发的存量配置**。纯展示/估算用，**不参与限流门禁**（`daily_soft_limit`/`minute_limit` 仍是未执行的摆设字段，本批刻意不接——解决「看不清」非「超了没拦」）。改 `managed_search_pool.json` 需重启（路由单例不热重载）。**2026-07-07 配置重排**：primary=[tavily,brave]（月度重置不用白不用）、secondary=[serper,exa]（一次性库存做兜底）、权重 3/1/3/2、exa 第 4 把 key 入池。
+- **端点** `GET /api/admin/search-quota`（`get_current_admin` 门禁、同步 def 走线程池、`?refresh=true` 强刷 tavily 缓存）：缺配置 `configured=false` / 坏配置 `configured=false + error`（两者必须区分）。
+- **前端** `SearchPoolQuota.jsx` + `utils/searchQuota.js`（纯函数 node:test 直测）：**独立 effect 取数、不进 reload 的 `Promise.all`**（tavily 慢/挂不拖累核心管理数据，source-guard 锁）；序列颜色类三份写死字面量（JIT 铁律）；估算卡必须带口径提示（「不含其它部署消耗」）。
+- **回归**：`tests/test_search_quota.py`（指纹/队列/tavily 缓存与去重/报告装配/估算窗口/key 零回显）、`test_search_providers.py`（key 归属/serper credits/brave 快照含 429）、`test_search_pool.py`（recorder 注入语义）、`test_accounts.py`（表+迁移）、`test_admin_api.py`、前端 `searchQuota.test.mjs`/`searchPoolQuota.source.test.mjs`。
+- **部署（第六笔，2026-07-07）**：7 后端文件 + 配置 + dist swap（bundle `index-D2bYJHJ7.js`）+ 重启；回滚点 `/opt/cra-rollback-20260707/`（含 app.db.bak）。**已知余项**：serper/exa 记账启用前的历史消耗未计（可填 `baseline_used` 校准，不填=剩余偏乐观）；brave 快照等首次真实 brave 搜索才出现。
+
 ## opencode SSE 规范化 sidecar（2026-07-03 上线 jp-app-01）
 
 `opencode_proxy/`（镜像 `managed_proxy/` 约定：`create_app(settings)` 工厂 + `NormalizerSettings` dataclass + 非 root Dockerfile）是 new-api ↔ opencode.ai/zen 之间的薄反向代理。修 opencode 2026-07-01→02 起的**非标准流式格式**（把 `usage` 挂在 finish 正文块上，而非 OpenAI 规范的末尾 `choices:[]` 空块 + `[DONE]` 后多发私有块）——该格式让 new-api 抓不到流式 usage → 回退本地估 token（`local_count_tokens`）→ cache=0 → 下游 CRA 按最贵未命中档计费（deepseek-v4-pro miss 3.0 vs hit 0.025 元/百万，差 120×）。opencode 本身物理确有缓存且 usage 字段完整，纯流式格式回归；new-api/薄网关无 bug。改 sidecar / 计费链前必读。部署/回滚见 `docs/opencode-normalizer-deployment.md`。
