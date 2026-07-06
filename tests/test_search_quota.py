@@ -300,6 +300,19 @@ class BuildReportTests(SearchQuotaTestBase):
         self.assertEqual(tavily["total_used"], 200.0)       # 不是 400
         self.assertIn("去重", tavily["note"])
 
+    def test_tavily_zero_usage_identical_accounts_not_deduped(self):
+        # 月初重置后多个免费账号全是 (Free, 0, 1000)：元组无区分度，不得误合并
+        #（部署实测踩过：3 账号被折成 1000/1000，真实 3000/3000）
+        fresh = {"ok": True, "plan": "Free", "plan_usage": 0.0, "plan_limit": 1000.0,
+                 "key_usage": 0.0, "key_limit": None}
+        live = [dict(fresh), dict(fresh)]
+        with mock.patch("backend.search_quota.fetch_tavily_usage", return_value=live):
+            report = self._build()
+        tavily = next(p for p in report["providers"] if p["name"] == "tavily")
+        self.assertEqual(tavily["total_quota"], 2000.0)
+        self.assertEqual(tavily["total_remaining"], 2000.0)
+        self.assertIsNone(tavily["note"])
+
     def test_report_never_echoes_api_keys_or_their_tails(self):
         live = [
             {"ok": True, "plan": "Free", "plan_usage": 1.0, "plan_limit": 1000.0,

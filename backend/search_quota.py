@@ -354,9 +354,11 @@ def build_search_quota_report(
             live = fetch_tavily_usage(pcfg.api_keys, force_refresh=force_refresh)
             any_ok = False
             # plan_usage/plan_limit 是**账号级**字段：多 key 属同一账号时逐 key 求和会翻倍。
-            # 以 (plan, plan_usage, plan_limit) 元组近似账号身份去重。已知模糊性：**任何**
-            # 两个恰好同 plan 同用量同上限的不同账号都会被误合并（不限于零用量新账号）——
-            # 方向恒为少报不虚报；触发时 note 提示管理员人工核对。
+            # 以 (plan, plan_usage, plan_limit) 元组近似账号身份去重，但**零用量元组不触发**——
+            # 月初重置后所有免费账号都是 (Free, 0, 1000)，元组毫无区分度，按它去重会把
+            # 多账号错合成一个（部署实测：3 账号被折成 1000/1000）；plan_usage > 0 时元组
+            # 相等才是强同账号信号。残余模糊性：两个不同账号恰好同 plan 同非零用量同上限
+            # 仍会误合并——方向恒为少报不虚报；触发时 note 提示管理员人工核对。
             seen_accounts: set[tuple] = set()
             used_sum = 0.0
             limit_sum = 0.0
@@ -375,7 +377,7 @@ def build_search_quota_report(
                     continue
                 row["remaining"] = max(0.0, limit - used)
                 account_identity = (result.get("plan"), used, limit)
-                if account_identity in seen_accounts:
+                if used > 0 and account_identity in seen_accounts:
                     deduped = True
                     continue
                 seen_accounts.add(account_identity)
