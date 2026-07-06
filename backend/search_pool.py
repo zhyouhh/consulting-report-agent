@@ -8,6 +8,7 @@ from typing import Callable
 
 from backend.config import ManagedSearchPoolConfig
 from backend.search_providers import ProviderSearchResult, SearchItem, SearchProviderError
+from backend.search_quota import UNKNOWN_KEY_ID, key_fingerprint
 from backend.search_state import SearchStateStore
 
 logger = logging.getLogger(__name__)
@@ -29,9 +30,15 @@ class SearchRouter:
         self.config = config
         self.state_store = state_store
         self.providers = providers
-        # 用量记账回调（搜索池额度监控）：签名 (provider=, key_index=, calls=, units=, errors=, quota_snapshot=)。
-        # None = 不记账（向后兼容既有构造方）；回调必须 best-effort，这里再兜一层防御。
+        # 用量记账回调（搜索池额度监控）：签名 (provider=, key_id=, calls=, units=, errors=, quota_snapshot=)。
+        # None = 不记账（向后兼容既有构造方）；回调必须 best-effort（生产接 enqueue），这里再兜一层防御。
         self.usage_recorder = usage_recorder
+        # key 下标 → 持久指纹身份（记账绝不落下标：配置重排/换 key 会把旧账记到新 key 头上）
+        self._key_ids = {
+            (name, index): key_fingerprint(api_key)
+            for name, provider_config in config.providers.items()
+            for index, api_key in enumerate(provider_config.api_keys)
+        }
         self._layer_cursors = {"primary": 0, "secondary": 0}
         self._cursor_lock = threading.Lock()
 
@@ -48,9 +55,12 @@ class SearchRouter:
         if self.usage_recorder is None:
             return
         try:
+            key_id = UNKNOWN_KEY_ID
+            if isinstance(key_index, int):
+                key_id = self._key_ids.get((provider_name, key_index), UNKNOWN_KEY_ID)
             self.usage_recorder(
                 provider=provider_name,
-                key_index=key_index,
+                key_id=key_id,
                 calls=calls,
                 units=units,
                 errors=errors,
@@ -102,13 +112,15 @@ class SearchRouter:
                     provider_result = provider.search(query)
                 except SearchProviderError as exc:
                     # 失败也记账（errors 列）：额度面板需要看到失败率；units 不计
-                    #（429/鉴权失败通常不扣 provider 额度）。冷却跳过的不经此处、不记账。
+                    #（429/鉴权失败通常不扣 provider 额度）。错误响应顺带观测到的额度快照
+                    #（如 brave 429 头里的 remaining=0）照常透传。冷却跳过的不经此处、不记账。
                     self._record_usage(
                         provider_name,
                         getattr(exc, "key_index", None),
                         calls=0,
                         units=0.0,
                         errors=1,
+                        quota_snapshot=getattr(exc, "quota_snapshot", None),
                     )
                     provider_errors.append(exc)
                     self._mark_provider_failure(provider_name, exc)

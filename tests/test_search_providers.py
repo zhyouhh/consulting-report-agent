@@ -309,6 +309,25 @@ class SearchUsageAttributionTests(unittest.TestCase):
             adapter = BraveProvider(api_key="k", session=session)
             self.assertIsNone(adapter.search("q").quota_snapshot)
 
+    def test_brave_quota_snapshot_captured_on_429_error(self):
+        # 429 的响应头恰恰带着 remaining=0 的关键信号：必须先观测再抛错，快照挂错误对象
+        session = mock.Mock()
+        response = _mock_response(status_code=429, text="too many requests")
+        response.headers = {
+            "X-RateLimit-Limit": "1, 1000",
+            "X-RateLimit-Remaining": "0, 0",
+        }
+        session.get.return_value = response
+        adapter = BraveProvider(api_key="k", session=session)
+
+        with self.assertRaises(SearchProviderError) as exc:
+            adapter.search("q")
+
+        self.assertEqual(exc.exception.error_type, "rate_limited")
+        self.assertIsNotNone(exc.exception.quota_snapshot)
+        self.assertEqual(exc.exception.quota_snapshot["month_remaining"], 0)
+        self.assertEqual(exc.exception.quota_snapshot["month_limit"], 1000)
+
     def test_snapshot_does_not_leak_across_calls(self):
         # 第一次带头、第二次不带：thread-local 快照必须逐调用清空，不残留上次的值
         session = mock.Mock()

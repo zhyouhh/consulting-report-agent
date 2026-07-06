@@ -49,8 +49,10 @@ class SearchProviderError(RuntimeError):
         self.provider = provider
         self.error_type = error_type
         self.status_code = status_code
-        # 失败调用的 key 归属（BaseSearchProvider.search 捕获后回填；路由层冷却错误无此值）
+        # 失败调用的 key 归属 + 顺带观测到的额度快照（BaseSearchProvider.search 捕获后回填；
+        # 路由层冷却错误无此值）。429 响应的限流头恰恰带着 remaining=0 的关键信号，不能丢。
         self.key_index: int | None = None
+        self.quota_snapshot: dict[str, Any] | None = None
 
 
 class BaseSearchProvider:
@@ -97,6 +99,7 @@ class BaseSearchProvider:
             payload = self._request_payload(query, api_key)
         except SearchProviderError as exc:
             exc.key_index = key_index
+            exc.quota_snapshot = getattr(self._tls, "quota_snapshot", None)
             raise
         items = self._parse_items(payload)
         return ProviderSearchResult(
@@ -141,14 +144,16 @@ class BaseSearchProvider:
                 str(exc) or "request failed",
             ) from exc
 
-        if response.status_code >= 400:
-            self._raise_response_error(response)
-
+        # 观测钩子必须在状态码判断**之前**：4xx/5xx（尤其 429）的响应头
+        # 同样携带额度信息，丢掉就错过 remaining=0 的关键快照。
         try:
             self._observe_response(response)
         except Exception:
             # 观测钩子纯附加值（额度快照），任何解析问题都不能影响搜索本身。
             pass
+
+        if response.status_code >= 400:
+            self._raise_response_error(response)
 
         try:
             payload = response.json()

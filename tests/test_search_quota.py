@@ -1,6 +1,7 @@
 """搜索池用量记账 + 额度报告（backend/search_quota.py）。
 
 夹具沿用 test_accounts.py 范式：隔离 CRA_DATA_ROOT + init_db；tavily /usage 一律 mock requests。
+key 身份 = sha256 指纹（key_fingerprint），测试里用配置 key 现算，绝不硬编码下标。
 """
 import json
 import os
@@ -19,6 +20,13 @@ from backend.config import (
     ManagedSearchRoutingConfig,
 )
 
+TAVILY_KEYS = ("tvly-aaaa1111", "tvly-bbbb2222")
+BRAVE_KEYS = ("brave-key-0001",)
+SERPER_KEYS = ("serper-key-0001", "serper-key-0002")
+EXA_KEYS = ("exa-key-00000001",)
+
+fp = search_quota.key_fingerprint
+
 
 def _provider_cfg(*, api_keys=("k",), weight=1, enabled=True, quota=None):
     return ManagedSearchProviderConfig(
@@ -33,30 +41,33 @@ def _provider_cfg(*, api_keys=("k",), weight=1, enabled=True, quota=None):
     )
 
 
-def _make_pool_config():
+def _make_pool_config(providers_override=None):
+    providers = {
+        "tavily": _provider_cfg(
+            api_keys=TAVILY_KEYS,
+            weight=3,
+            quota=ManagedSearchQuotaConfig(model="monthly", unit="credits", per_key_quota=1000),
+        ),
+        "brave": _provider_cfg(
+            api_keys=BRAVE_KEYS,
+            quota=ManagedSearchQuotaConfig(model="monthly", unit="requests", per_key_quota=1000),
+        ),
+        "serper": _provider_cfg(
+            api_keys=SERPER_KEYS,
+            quota=ManagedSearchQuotaConfig(model="one_time", unit="credits", per_key_quota=2500),
+        ),
+        "exa": _provider_cfg(
+            api_keys=EXA_KEYS,
+            quota=ManagedSearchQuotaConfig(
+                model="one_time", unit="usd", per_key_quota=10, est_cost_per_call=0.004
+            ),
+        ),
+    }
+    if providers_override:
+        providers.update(providers_override)
     return ManagedSearchPoolConfig(
         version=1,
-        providers={
-            "tavily": _provider_cfg(
-                api_keys=("tvly-aaaa1111", "tvly-bbbb2222"),
-                weight=3,
-                quota=ManagedSearchQuotaConfig(model="monthly", unit="credits", per_key_quota=1000),
-            ),
-            "brave": _provider_cfg(
-                api_keys=("brave-key-0001",),
-                quota=ManagedSearchQuotaConfig(model="monthly", unit="requests", per_key_quota=1000),
-            ),
-            "serper": _provider_cfg(
-                api_keys=("serper-key-0001", "serper-key-0002"),
-                quota=ManagedSearchQuotaConfig(model="one_time", unit="credits", per_key_quota=2500),
-            ),
-            "exa": _provider_cfg(
-                api_keys=("exa-key-00000001",),
-                quota=ManagedSearchQuotaConfig(
-                    model="one_time", unit="usd", per_key_quota=10, est_cost_per_call=0.004
-                ),
-            ),
-        },
+        providers=providers,
         routing=ManagedSearchRoutingConfig(
             primary=["tavily", "brave"],
             secondary=["serper", "exa"],
@@ -86,41 +97,54 @@ class SearchQuotaTestBase(unittest.TestCase):
         shutil.rmtree(self._tmp, ignore_errors=True)
 
 
+class KeyFingerprintTests(unittest.TestCase):
+    def test_fingerprint_is_stable_nonsecret_and_short(self):
+        a = search_quota.key_fingerprint("serper-key-0001")
+        self.assertEqual(a, search_quota.key_fingerprint("serper-key-0001"))
+        self.assertEqual(len(a), 12)
+        self.assertNotIn("serper", a)
+
+    def test_empty_key_folds_to_unknown(self):
+        self.assertEqual(search_quota.key_fingerprint(""), search_quota.UNKNOWN_KEY_ID)
+        self.assertEqual(search_quota.key_fingerprint(None), search_quota.UNKNOWN_KEY_ID)
+
+
 class RecordSearchUsageTests(SearchQuotaTestBase):
     def test_records_calls_units_and_errors_per_key_day(self):
         with mock.patch("backend.search_quota.metering.today_shanghai", return_value="2026-07-07"):
             search_quota.record_search_usage(
-                provider="serper", key_index=1, calls=1, units=2.0, errors=0
+                provider="serper", key_id=fp(SERPER_KEYS[1]), calls=1, units=2.0, errors=0
             )
             search_quota.record_search_usage(
-                provider="serper", key_index=1, calls=1, units=1.0, errors=0
+                provider="serper", key_id=fp(SERPER_KEYS[1]), calls=1, units=1.0, errors=0
             )
             search_quota.record_search_usage(
-                provider="serper", key_index=0, calls=0, units=0.0, errors=1
+                provider="serper", key_id=fp(SERPER_KEYS[0]), calls=0, units=0.0, errors=1
             )
 
         rows = accounts.get_search_usage_history("2026-07-07")
         self.assertEqual(len(rows), 2)
-        by_key = {r["key_index"]: r for r in rows}
-        self.assertEqual(by_key[1]["calls"], 2)
-        self.assertEqual(by_key[1]["units"], 3.0)
-        self.assertEqual(by_key[0]["errors"], 1)
+        by_key = {r["key_id"]: r for r in rows}
+        self.assertEqual(by_key[fp(SERPER_KEYS[1])]["calls"], 2)
+        self.assertEqual(by_key[fp(SERPER_KEYS[1])]["units"], 3.0)
+        self.assertEqual(by_key[fp(SERPER_KEYS[0])]["errors"], 1)
 
-    def test_negative_or_missing_key_index_folds_to_sentinel(self):
+    def test_missing_key_id_folds_to_sentinel(self):
         with mock.patch("backend.search_quota.metering.today_shanghai", return_value="2026-07-07"):
             search_quota.record_search_usage(
-                provider="brave", key_index=None, calls=1, units=1.0, errors=0
+                provider="brave", key_id=None, calls=1, units=1.0, errors=0
             )
         rows = accounts.get_search_usage_history("2026-07-07")
-        self.assertEqual(rows[0]["key_index"], -1)
+        self.assertEqual(rows[0]["key_id"], search_quota.UNKNOWN_KEY_ID)
 
     def test_persists_quota_snapshot_to_app_config(self):
         snapshot = {"month_remaining": 950, "month_limit": 1000, "observed_at": 1751000000.0}
+        kid = fp(BRAVE_KEYS[0])
         with mock.patch("backend.search_quota.metering.today_shanghai", return_value="2026-07-07"):
             search_quota.record_search_usage(
-                provider="brave", key_index=0, calls=1, units=1.0, errors=0, quota_snapshot=snapshot
+                provider="brave", key_id=kid, calls=1, units=1.0, errors=0, quota_snapshot=snapshot
             )
-        raw = accounts.get_config("search_quota_snapshot:brave:0")
+        raw = accounts.get_config(f"search_quota_snapshot:brave:{kid}")
         self.assertEqual(json.loads(raw), snapshot)
 
     def test_recorder_is_best_effort_and_never_raises(self):
@@ -129,18 +153,51 @@ class RecordSearchUsageTests(SearchQuotaTestBase):
         ):
             # 不应上抛——记账故障不能影响搜索
             search_quota.record_search_usage(
-                provider="serper", key_index=0, calls=1, units=1.0, errors=0
+                provider="serper", key_id=fp(SERPER_KEYS[0]), calls=1, units=1.0, errors=0
             )
 
 
+class EnqueueSearchUsageTests(SearchQuotaTestBase):
+    def test_enqueue_lands_in_db_via_background_worker(self):
+        with mock.patch("backend.search_quota.metering.today_shanghai", return_value="2026-07-07"):
+            search_quota.enqueue_search_usage(
+                provider="serper", key_id=fp(SERPER_KEYS[0]), calls=1, units=1.0, errors=0
+            )
+            self.assertTrue(search_quota.wait_for_usage_idle(timeout=5))
+        rows = accounts.get_search_usage_history("2026-07-07")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["calls"], 1)
+
+    def test_enqueue_never_blocks_or_raises_when_queue_full(self):
+        # 塞满有界队列：多出来的必须被丢弃而不是阻塞/抛错（丢监控数据 > 卡用户搜索）
+        with mock.patch.object(search_quota, "_ensure_usage_worker"):   # 不起 worker，队列只进不出
+            fresh_queue = search_quota.queue.Queue(maxsize=4)
+            with mock.patch.object(search_quota, "_usage_queue", fresh_queue):
+                for _ in range(10):
+                    search_quota.enqueue_search_usage(
+                        provider="serper", key_id="x", calls=1, units=1.0, errors=0
+                    )
+                self.assertEqual(fresh_queue.qsize(), 4)
+
+    def test_malformed_kwargs_do_not_kill_worker(self):
+        with mock.patch("backend.search_quota.metering.today_shanghai", return_value="2026-07-07"):
+            search_quota.enqueue_search_usage(bogus_field="boom")   # record 不认识的形状
+            search_quota.enqueue_search_usage(
+                provider="serper", key_id=fp(SERPER_KEYS[0]), calls=1, units=1.0, errors=0
+            )
+            self.assertTrue(search_quota.wait_for_usage_idle(timeout=5))
+        rows = accounts.get_search_usage_history("2026-07-07")
+        self.assertEqual(len(rows), 1)   # 畸形消息被吞掉、正常消息照常落库
+
+
 class FetchTavilyUsageTests(SearchQuotaTestBase):
-    def _ok_response(self, plan_usage=100, plan_limit=1000):
+    def _ok_response(self, plan_usage=100, plan_limit=1000, plan="Free", key_usage=42):
         resp = mock.Mock()
         resp.status_code = 200
         resp.json.return_value = {
-            "key": {"usage": 42, "limit": None},
+            "key": {"usage": key_usage, "limit": None},
             "account": {
-                "current_plan": "Free",
+                "current_plan": plan,
                 "plan_usage": plan_usage,
                 "plan_limit": plan_limit,
             },
@@ -200,15 +257,15 @@ class BuildReportTests(SearchQuotaTestBase):
 
     def _seed_usage(self):
         # serper：一次性 credits——全时段累计进估算（含 6 月的历史行）
-        accounts.add_search_usage("serper", 0, "2026-06-20", calls=100, units=100.0)
-        accounts.add_search_usage("serper", 1, "2026-07-07", calls=40, units=41.0)
+        accounts.add_search_usage("serper", fp(SERPER_KEYS[0]), "2026-06-20", calls=100, units=100.0)
+        accounts.add_search_usage("serper", fp(SERPER_KEYS[1]), "2026-07-07", calls=40, units=41.0)
         # exa：usd 估算按 calls × est_cost_per_call
-        accounts.add_search_usage("exa", 0, "2026-07-01", calls=500, units=500.0)
+        accounts.add_search_usage("exa", fp(EXA_KEYS[0]), "2026-07-01", calls=500, units=500.0)
         # brave：本月至今 30 次（monthly 估算窗口只认 7 月，6 月行不算）
-        accounts.add_search_usage("brave", 0, "2026-06-30", calls=999, units=999.0)
-        accounts.add_search_usage("brave", 0, "2026-07-06", calls=30, units=30.0)
+        accounts.add_search_usage("brave", fp(BRAVE_KEYS[0]), "2026-06-30", calls=999, units=999.0)
+        accounts.add_search_usage("brave", fp(BRAVE_KEYS[0]), "2026-07-06", calls=30, units=30.0)
         # 失败计数
-        accounts.add_search_usage("serper", 0, "2026-07-07", errors=2)
+        accounts.add_search_usage("serper", fp(SERPER_KEYS[0]), "2026-07-07", errors=2)
 
     def _build(self, config=None, **kwargs):
         with mock.patch("backend.search_quota.metering.today_shanghai", return_value=self.TODAY):
@@ -230,13 +287,37 @@ class BuildReportTests(SearchQuotaTestBase):
         self.assertEqual(tavily["total_remaining"], 800.0)
         self.assertEqual(tavily["keys"][0]["remaining"], 800.0)
         self.assertEqual(tavily["keys"][1]["error"], "http 401")
-        # key 标签只露尾 4 位，绝不回显完整 key
-        self.assertNotIn("tvly-aaaa1111", json.dumps(report))
+
+    def test_tavily_dedupes_same_account_keys(self):
+        # 两把 key 属同一账号：plan 字段账号级，逐 key 求和会翻倍 → 必须去重
+        same_account = {"ok": True, "plan": "Free", "plan_usage": 200.0, "plan_limit": 1000.0,
+                        "key_usage": 10.0, "key_limit": None}
+        live = [dict(same_account), dict(same_account)]
+        with mock.patch("backend.search_quota.fetch_tavily_usage", return_value=live):
+            report = self._build()
+        tavily = next(p for p in report["providers"] if p["name"] == "tavily")
+        self.assertEqual(tavily["total_quota"], 1000.0)     # 不是 2000
+        self.assertEqual(tavily["total_used"], 200.0)       # 不是 400
+        self.assertIn("去重", tavily["note"])
+
+    def test_report_never_echoes_api_keys_or_their_tails(self):
+        live = [
+            {"ok": True, "plan": "Free", "plan_usage": 1.0, "plan_limit": 1000.0,
+             "key_usage": None, "key_limit": None},
+            {"ok": True, "plan": "Free", "plan_usage": 2.0, "plan_limit": 1000.0,
+             "key_usage": None, "key_limit": None},
+        ]
+        with mock.patch("backend.search_quota.fetch_tavily_usage", return_value=live):
+            report = self._build()
+        dump = json.dumps(report, ensure_ascii=False)
+        for key in (*TAVILY_KEYS, *BRAVE_KEYS, *SERPER_KEYS, *EXA_KEYS):
+            self.assertNotIn(key, dump)
+            self.assertNotIn(key[-4:], dump)   # 连尾 4 位都不许出现（label 只用 sha256 指纹）
 
     def test_brave_uses_observed_header_snapshot(self):
         self._seed_usage()
         accounts.set_config(
-            "search_quota_snapshot:brave:0",
+            f"search_quota_snapshot:brave:{fp(BRAVE_KEYS[0])}",
             json.dumps({"month_remaining": 940, "month_limit": 1000, "observed_at": 1751000000.0}),
         )
         report = self._build(include_live=False)
@@ -250,7 +331,7 @@ class BuildReportTests(SearchQuotaTestBase):
         # brave 文档：月配额段 0 = unlimited（计量档）→ 无月度信号，回退本地估算
         self._seed_usage()
         accounts.set_config(
-            "search_quota_snapshot:brave:0",
+            f"search_quota_snapshot:brave:{fp(BRAVE_KEYS[0])}",
             json.dumps({"month_remaining": 0, "month_limit": 0, "observed_at": 1751000000.0}),
         )
         report = self._build(include_live=False)
@@ -269,19 +350,23 @@ class BuildReportTests(SearchQuotaTestBase):
         self.assertEqual(serper["total_used"], 141.0)     # 100 + 41（全时段 units 真值）
         self.assertEqual(serper["total_remaining"], 4859.0)
 
+    def test_retired_key_usage_excluded_from_estimate(self):
+        # 换掉的 key（指纹不在当前配置里）的历史消耗不再拖累新 key 的剩余估算
+        self._seed_usage()
+        accounts.add_search_usage("serper", fp("serper-key-RETIRED"), "2026-06-01", calls=2500, units=2500.0)
+        report = self._build(include_live=False)
+        serper = next(p for p in report["providers"] if p["name"] == "serper")
+        self.assertEqual(serper["total_used"], 141.0)     # 不含退役 key 的 2500
+
     def test_serper_estimate_includes_baseline_used(self):
-        config = _make_pool_config()
-        serper_cfg = _provider_cfg(
-            api_keys=("serper-key-0001", "serper-key-0002"),
-            quota=ManagedSearchQuotaConfig(
-                model="one_time", unit="credits", per_key_quota=2500, baseline_used=1200
+        config = _make_pool_config(providers_override={
+            "serper": _provider_cfg(
+                api_keys=SERPER_KEYS,
+                quota=ManagedSearchQuotaConfig(
+                    model="one_time", unit="credits", per_key_quota=2500, baseline_used=1200
+                ),
             ),
-        )
-        providers = dict(config.providers)
-        providers["serper"] = serper_cfg
-        config = ManagedSearchPoolConfig(
-            version=1, providers=providers, routing=config.routing, limits=config.limits
-        )
+        })
         self._seed_usage()
         report = self._build(config, include_live=False)
         serper = next(p for p in report["providers"] if p["name"] == "serper")
@@ -297,12 +382,9 @@ class BuildReportTests(SearchQuotaTestBase):
         self.assertEqual(exa["total_remaining"], 8.0)
 
     def test_no_quota_declared_yields_source_none_with_observed_counts(self):
-        config = _make_pool_config()
-        providers = dict(config.providers)
-        providers["serper"] = _provider_cfg(api_keys=("serper-key-0001",))
-        config = ManagedSearchPoolConfig(
-            version=1, providers=providers, routing=config.routing, limits=config.limits
-        )
+        config = _make_pool_config(providers_override={
+            "serper": _provider_cfg(api_keys=SERPER_KEYS),
+        })
         self._seed_usage()
         report = self._build(config, include_live=False)
         serper = next(p for p in report["providers"] if p["name"] == "serper")

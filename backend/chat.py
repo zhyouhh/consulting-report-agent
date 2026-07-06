@@ -5650,9 +5650,11 @@ class ChatHandler:
                     cache_path=get_search_cache_path(),
                 ),
                 providers=providers,
+                # enqueue（非阻塞，有界队列 + 后台线程落库）：记账绝不阻塞搜索路径——
+                # 同步写 SQLite 在 busy 时最长等 5s，会卡住 provider 调用。
                 # lambda 晚绑模块属性（而非直接引用函数对象）：测试 reload(search_quota) 后
                 # 单例仍指向活模块的实现（与 metering 模块限定同一理由）。
-                usage_recorder=lambda **kwargs: search_quota.record_search_usage(**kwargs),
+                usage_recorder=lambda **kwargs: search_quota.enqueue_search_usage(**kwargs),
             )
             return _SEARCH_ROUTER_SINGLETON
 

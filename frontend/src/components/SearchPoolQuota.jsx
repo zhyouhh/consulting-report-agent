@@ -119,6 +119,7 @@ function ProviderCard({ provider }) {
         </div>
       ) : null}
 
+      {provider.note && <div className="text-2xs text-warn">{provider.note}</div>}
       {provider.source === 'estimated' && (
         <div className="text-2xs text-t3">{meta.hint}</div>
       )}
@@ -279,6 +280,8 @@ export default function SearchPoolQuota({ data, error }) {
     return <div className="text-13 text-t3">正在读取搜索池额度…</div>
   }
   if (!data.configured) {
+    // 「配置坏了」（后端给 error）和「没配置」是两回事，不能混着报
+    if (data.error) return <div className="text-13 text-error">{data.error}</div>
     return <div className="text-13 text-t3">未配置搜索池（缺 managed_search_pool.json），无额度数据。</div>
   }
 

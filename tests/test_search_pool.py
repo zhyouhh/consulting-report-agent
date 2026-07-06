@@ -11,6 +11,7 @@ from backend.config import (
     ManagedSearchRoutingConfig,
 )
 from backend.search_pool import SearchRouter
+from backend.search_quota import UNKNOWN_KEY_ID, key_fingerprint
 from backend.search_providers import (
     ProviderSearchResult,
     SearchItem,
@@ -553,11 +554,38 @@ class SearchUsageRecorderTests(unittest.TestCase):
 
         self.assertEqual(len(recorded), 1)
         self.assertEqual(recorded[0]["provider"], "serper")
-        self.assertEqual(recorded[0]["key_index"], 1)
+        # 测试配置 serper 只有单 key "k"：key_index=1 越界 → 身份回落 UNKNOWN（不误记到别的 key）
+        self.assertEqual(recorded[0]["key_id"], UNKNOWN_KEY_ID)
         self.assertEqual(recorded[0]["calls"], 1)
         self.assertEqual(recorded[0]["units"], 2.0)
         self.assertEqual(recorded[0]["errors"], 0)
         self.assertEqual(recorded[0]["quota_snapshot"], snapshot)
+
+    def test_recorder_maps_key_index_to_config_key_fingerprint(self):
+        recorded = []
+        result = ProviderSearchResult(
+            provider="serper",
+            items=[SearchItem(title="t", snippet="s", url="https://e.com/a", domain="e.com", score=1.0)],
+            result_type="success",
+            key_index=0,
+            units_used=1.0,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            router = SearchRouter(
+                config=_make_config(),
+                state_store=self._make_state(tmpdir),
+                providers={
+                    "serper": FakeProvider(result),
+                    "brave": FakeProvider(_make_result("brave")),
+                    "tavily": FakeProvider(_make_result("tavily")),
+                    "exa": FakeProvider(_make_result("exa")),
+                },
+                usage_recorder=lambda **kwargs: recorded.append(kwargs),
+            )
+            router.search("猪猪侠", project_id="demo", turn_search_count=0)
+
+        # 记账身份 = 配置里该下标 key 的 sha256 指纹（_provider_cfg 的 key 是 "k"）
+        self.assertEqual(recorded[0]["key_id"], key_fingerprint("k"))
 
     def test_recorder_called_with_error_row_on_provider_failure(self):
         recorded = []
@@ -581,9 +609,32 @@ class SearchUsageRecorderTests(unittest.TestCase):
         error_rows = [r for r in recorded if r["errors"] == 1]
         self.assertEqual(len(error_rows), 1)
         self.assertEqual(error_rows[0]["provider"], "serper")
-        self.assertEqual(error_rows[0]["key_index"], 1)
         self.assertEqual(error_rows[0]["calls"], 0)
         self.assertEqual(error_rows[0]["units"], 0.0)
+
+    def test_recorder_passes_error_quota_snapshot_through(self):
+        # brave 429 的响应头快照（remaining=0）挂在错误对象上，必须透传给记账
+        recorded = []
+        failure = SearchProviderError("brave", "rate_limited", "too many requests")
+        failure.key_index = 0
+        failure.quota_snapshot = {"month_remaining": 0, "month_limit": 1000, "observed_at": 1.0}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            router = SearchRouter(
+                config=_make_config(primary=["brave"], secondary=[]),
+                state_store=self._make_state(tmpdir),
+                providers={
+                    "serper": FakeProvider(_make_result("serper")),
+                    "brave": FakeProvider(failure),
+                    "tavily": FakeProvider(_make_result("tavily")),
+                    "exa": FakeProvider(_make_result("exa")),
+                },
+                usage_recorder=lambda **kwargs: recorded.append(kwargs),
+            )
+            router.search("猪猪侠", project_id="demo", turn_search_count=0,
+                          native_search=mock.Mock(return_value=None))
+
+        error_rows = [r for r in recorded if r["errors"] == 1]
+        self.assertEqual(error_rows[0]["quota_snapshot"]["month_remaining"], 0)
 
     def test_recorder_not_called_for_cooldown_skips_or_cache_hits(self):
         recorded = []

@@ -249,8 +249,12 @@ class AdminSearchQuotaTests(AdminApiTestBase):
     def test_returns_report_with_estimated_remaining(self):
         from unittest import mock as _mock
         from backend import metering
+        from backend.search_quota import key_fingerprint
         self._login_as_admin()
-        accounts.add_search_usage("serper", 0, metering.today_shanghai(), calls=10, units=12.0)
+        accounts.add_search_usage(
+            "serper", key_fingerprint("serper-key-0001"), metering.today_shanghai(),
+            calls=10, units=12.0,
+        )
         # load_managed_search_pool_config 是端点内局部 import，patch 目标是 backend.config
         with _mock.patch("backend.config.load_managed_search_pool_config",
                          return_value=self._pool_config()):

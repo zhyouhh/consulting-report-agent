@@ -488,7 +488,8 @@ def admin_search_quota(refresh: bool = False, admin_uid: str = Depends(get_curre
 
     数据源按 provider 各取所能（报告里逐 provider 标 source）：tavily 实时 /usage（服务端
     5 分钟 TTL 缓存，refresh=true 强刷）、brave 搜索响应头被动快照、serper/exa 本地记账估算。
-    未配置搜索池（开发机缺 managed_search_pool.json）→ configured=false 优雅降级，不 500。
+    未配置搜索池（开发机缺 managed_search_pool.json）→ configured=false 优雅降级；
+    配置存在但解析失败 → configured=false + error（「配置坏了」不能伪装成「没配置」）。
     同步 def：FastAPI 线程池执行，tavily 拉取的阻塞不占事件循环。
     """
     from .config import load_managed_search_pool_config
@@ -496,8 +497,15 @@ def admin_search_quota(refresh: bool = False, admin_uid: str = Depends(get_curre
 
     try:
         pool_config = load_managed_search_pool_config()
-    except (FileNotFoundError, ValueError, OSError):
+    except FileNotFoundError:
         return {"configured": False, "providers": [], "history": []}
+    except (ValueError, OSError) as exc:
+        return {
+            "configured": False,
+            "providers": [],
+            "history": [],
+            "error": f"搜索池配置解析失败：{exc}",
+        }
     report = search_quota.build_search_quota_report(pool_config, force_refresh=bool(refresh))
     return {"configured": True, **report}
 
