@@ -100,6 +100,27 @@ def init_db() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(usage_daily)")}
         if "failclosed_tokens" not in cols:
             conn.execute("ALTER TABLE usage_daily ADD COLUMN failclosed_tokens INTEGER NOT NULL DEFAULT 0")
+        # 既有库迁移：search_usage_daily 的 key 身份从列表下标（key_index INTEGER，短命中间版）
+        # 改为 sha256 指纹（key_id TEXT）。旧表存在时 CREATE IF NOT EXISTS 是 no-op，
+        # 不迁移则新 INSERT/SELECT 直接失败（记账静默停摆 + 报告端点 500）。
+        # 旧行按 'legacy-index:{n}' 保留（进历史趋势；因指纹不匹配天然不入当前 key 的估算）。
+        search_cols = {r["name"] for r in conn.execute("PRAGMA table_info(search_usage_daily)")}
+        if "key_index" in search_cols and "key_id" not in search_cols:
+            conn.executescript(
+                """
+                ALTER TABLE search_usage_daily RENAME TO search_usage_daily_legacy;
+                CREATE TABLE search_usage_daily(
+                    provider TEXT NOT NULL, key_id TEXT NOT NULL, day TEXT NOT NULL,
+                    calls INTEGER NOT NULL DEFAULT 0,
+                    units REAL NOT NULL DEFAULT 0,
+                    errors INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(provider, key_id, day));
+                INSERT INTO search_usage_daily(provider,key_id,day,calls,units,errors)
+                  SELECT provider, 'legacy-index:'||key_index, day, calls, units, errors
+                  FROM search_usage_daily_legacy;
+                DROP TABLE search_usage_daily_legacy;
+                """
+            )
 
 
 def create_user(username, password, is_admin=False, must_change_password=False) -> str:

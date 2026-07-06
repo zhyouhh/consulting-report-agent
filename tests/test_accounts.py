@@ -343,3 +343,31 @@ class SearchUsageDailyTests(unittest.TestCase):
         accounts.init_db()
         accounts.add_search_usage("brave", "fp-a", "2026-07-07", calls=1, units=1.0)
         self.assertEqual(len(accounts.get_search_usage_totals()), 1)
+
+    def test_init_db_migrates_legacy_key_index_schema(self):
+        # 短命中间版 schema（key_index INTEGER）：CREATE IF NOT EXISTS 对旧表是 no-op，
+        # 必须重建迁移，否则新 INSERT/SELECT 直接失败（记账静默停摆 + 报告端点 500）。
+        with accounts._db() as conn:
+            conn.executescript(
+                """
+                DROP TABLE search_usage_daily;
+                CREATE TABLE search_usage_daily(
+                    provider TEXT NOT NULL, key_index INTEGER NOT NULL, day TEXT NOT NULL,
+                    calls INTEGER NOT NULL DEFAULT 0,
+                    units REAL NOT NULL DEFAULT 0,
+                    errors INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(provider, key_index, day));
+                INSERT INTO search_usage_daily(provider,key_index,day,calls,units,errors)
+                  VALUES('serper', 1, '2026-07-06', 10, 12.0, 2);
+                """
+            )
+        accounts.init_db()
+        # 旧行按 legacy-index 身份保留（进历史；指纹不匹配 → 不入当前 key 估算）
+        rows = accounts.get_search_usage_history("2026-07-01")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["key_id"], "legacy-index:1")
+        self.assertEqual(rows[0]["units"], 12.0)
+        # 新契约照常可写可读；再跑一次 init_db 幂等
+        accounts.add_search_usage("serper", "fp-new", "2026-07-07", calls=1, units=1.0)
+        accounts.init_db()
+        self.assertEqual(len(accounts.get_search_usage_totals()), 2)

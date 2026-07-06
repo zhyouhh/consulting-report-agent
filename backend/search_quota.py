@@ -354,8 +354,9 @@ def build_search_quota_report(
             live = fetch_tavily_usage(pcfg.api_keys, force_refresh=force_refresh)
             any_ok = False
             # plan_usage/plan_limit 是**账号级**字段：多 key 属同一账号时逐 key 求和会翻倍。
-            # 以 (plan, plan_usage, plan_limit) 元组近似账号身份去重（同账号在同一报告内
-            # 拿到的元组必然一致；两个全新零用量账号会误合并——宁可少报不虚报，note 说明）。
+            # 以 (plan, plan_usage, plan_limit) 元组近似账号身份去重。已知模糊性：**任何**
+            # 两个恰好同 plan 同用量同上限的不同账号都会被误合并（不限于零用量新账号）——
+            # 方向恒为少报不虚报；触发时 note 提示管理员人工核对。
             seen_accounts: set[tuple] = set()
             used_sum = 0.0
             limit_sum = 0.0
