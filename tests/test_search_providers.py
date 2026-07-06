@@ -226,5 +226,109 @@ class SearchProvidersTests(unittest.TestCase):
         )
 
 
+class SearchUsageAttributionTests(unittest.TestCase):
+    """搜索池额度监控的记账元数据：key 归属 / serper credits / brave 响应头快照。"""
+
+    def test_result_carries_rotating_key_index(self):
+        session = mock.Mock()
+        session.post.return_value = _mock_response(payload={"organic": []})
+        adapter = SerperProvider(api_keys=["a", "b", "c"], session=session)
+
+        indexes = [adapter.search("q").key_index for _ in range(4)]
+
+        self.assertEqual(indexes, [0, 1, 2, 0])
+
+    def test_single_key_result_key_index_is_zero(self):
+        session = mock.Mock()
+        session.post.return_value = _mock_response(payload={"organic": []})
+        adapter = SerperProvider(api_key="k", session=session)
+
+        self.assertEqual(adapter.search("q").key_index, 0)
+
+    def test_provider_error_carries_key_index(self):
+        session = mock.Mock()
+        session.post.side_effect = [
+            _mock_response(payload={"organic": []}),
+            _mock_response(status_code=429, text="too many requests"),
+        ]
+        adapter = SerperProvider(api_keys=["a", "b"], session=session)
+        adapter.search("q")   # 用掉 key 0
+
+        with self.assertRaises(SearchProviderError) as exc:
+            adapter.search("q")
+
+        self.assertEqual(exc.exception.key_index, 1)
+
+    def test_serper_units_used_reads_response_credits(self):
+        session = mock.Mock()
+        session.post.return_value = _mock_response(payload={"organic": [], "credits": 2})
+        adapter = SerperProvider(api_key="k", session=session)
+
+        self.assertEqual(adapter.search("q").units_used, 2.0)
+
+    def test_serper_units_used_falls_back_to_one_on_malformed_credits(self):
+        session = mock.Mock()
+        for credits in (None, "two", True, -1, 10**9):
+            payload = {"organic": []}
+            if credits is not None:
+                payload["credits"] = credits
+            session.post.return_value = _mock_response(payload=payload)
+            adapter = SerperProvider(api_key="k", session=session)
+            self.assertEqual(adapter.search("q").units_used, 1.0)
+
+    def test_non_serper_units_used_defaults_to_one(self):
+        session = mock.Mock()
+        session.post.return_value = _mock_response(payload={"results": []})
+        adapter = TavilyProvider(api_key="k", session=session)
+
+        self.assertEqual(adapter.search("q").units_used, 1.0)
+
+    def test_brave_quota_snapshot_from_rate_limit_headers(self):
+        session = mock.Mock()
+        response = _mock_response(payload={"web": {"results": []}})
+        response.headers = {
+            "X-RateLimit-Limit": "1, 1000",
+            "X-RateLimit-Remaining": "1, 940",
+        }
+        session.get.return_value = response
+        adapter = BraveProvider(api_key="k", session=session)
+
+        result = adapter.search("q")
+
+        self.assertIsNotNone(result.quota_snapshot)
+        self.assertEqual(result.quota_snapshot["month_remaining"], 940)
+        self.assertEqual(result.quota_snapshot["month_limit"], 1000)
+        self.assertIn("observed_at", result.quota_snapshot)
+
+    def test_brave_snapshot_none_when_headers_missing_or_malformed(self):
+        session = mock.Mock()
+        for headers in ({}, {"X-RateLimit-Remaining": "5"}, {"X-RateLimit-Remaining": "a, b"}):
+            response = _mock_response(payload={"web": {"results": []}})
+            response.headers = headers
+            session.get.return_value = response
+            adapter = BraveProvider(api_key="k", session=session)
+            self.assertIsNone(adapter.search("q").quota_snapshot)
+
+    def test_snapshot_does_not_leak_across_calls(self):
+        # 第一次带头、第二次不带：thread-local 快照必须逐调用清空，不残留上次的值
+        session = mock.Mock()
+        with_headers = _mock_response(payload={"web": {"results": []}})
+        with_headers.headers = {"X-RateLimit-Remaining": "1, 940", "X-RateLimit-Limit": "1, 1000"}
+        without_headers = _mock_response(payload={"web": {"results": []}})
+        without_headers.headers = {}
+        session.get.side_effect = [with_headers, without_headers]
+        adapter = BraveProvider(api_key="k", session=session)
+
+        self.assertIsNotNone(adapter.search("q").quota_snapshot)
+        self.assertIsNone(adapter.search("q").quota_snapshot)
+
+    def test_non_brave_provider_has_no_quota_snapshot(self):
+        session = mock.Mock()
+        session.post.return_value = _mock_response(payload={"organic": []})
+        adapter = SerperProvider(api_key="k", session=session)
+
+        self.assertIsNone(adapter.search("q").quota_snapshot)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -666,3 +666,85 @@ class HealStaleManagedModelTests(unittest.TestCase):
 
         self.assertIs(updated, settings)
         self.assertIsNone(msg)
+
+
+class SearchPoolQuotaConfigTests(unittest.TestCase):
+    """managed_search_pool.json 的 quota 静态声明块：整体可选、字段带默认、类型校验。"""
+
+    def _write_pool(self, tmpdir, provider_extra=None):
+        provider = {
+            "enabled": True,
+            "api_keys": ["k1", "k2"],
+            "weight": 3,
+            "minute_limit": 60,
+            "daily_soft_limit": 1200,
+            "cooldown_seconds": 180,
+        }
+        if provider_extra:
+            provider.update(provider_extra)
+        (Path(tmpdir) / "managed_search_pool.json").write_text(
+            json.dumps({
+                "version": 1,
+                "providers": {"serper": provider},
+                "routing": {"primary": ["serper"], "secondary": [], "native_fallback": True},
+                "limits": {
+                    "per_turn_searches": 5,
+                    "project_minute_limit": 30,
+                    "global_minute_limit": 60,
+                    "memory_cache_ttl_seconds": 21600,
+                    "project_cache_ttl_seconds": 86400,
+                },
+            }),
+            encoding="utf-8",
+        )
+
+    def _load(self, tmpdir):
+        with mock.patch("backend.config.get_base_path", return_value=Path(tmpdir)):
+            return load_managed_search_pool_config()
+
+    def test_quota_block_absent_defaults_to_undeclared(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_pool(tmpdir)
+            config = self._load(tmpdir)
+        quota = config.providers["serper"].quota
+        self.assertEqual(quota.model, "")
+        self.assertEqual(quota.per_key_quota, 0.0)
+        self.assertEqual(quota.baseline_used, 0.0)
+        self.assertEqual(quota.est_cost_per_call, 1.0)
+
+    def test_quota_block_parses_declared_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_pool(tmpdir, {"quota": {
+                "model": "one_time", "unit": "credits",
+                "per_key_quota": 2500, "baseline_used": 120, "est_cost_per_call": 1,
+            }})
+            config = self._load(tmpdir)
+        quota = config.providers["serper"].quota
+        self.assertEqual(quota.model, "one_time")
+        self.assertEqual(quota.unit, "credits")
+        self.assertEqual(quota.per_key_quota, 2500.0)
+        self.assertEqual(quota.baseline_used, 120.0)
+
+    def test_quota_invalid_model_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_pool(tmpdir, {"quota": {"model": "weekly"}})
+            with self.assertRaises(ValueError):
+                self._load(tmpdir)
+
+    def test_quota_invalid_unit_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_pool(tmpdir, {"quota": {"unit": "points"}})
+            with self.assertRaises(ValueError):
+                self._load(tmpdir)
+
+    def test_quota_negative_number_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_pool(tmpdir, {"quota": {"per_key_quota": -5}})
+            with self.assertRaises(ValueError):
+                self._load(tmpdir)
+
+    def test_quota_non_object_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_pool(tmpdir, {"quota": "monthly"})
+            with self.assertRaises(ValueError):
+                self._load(tmpdir)

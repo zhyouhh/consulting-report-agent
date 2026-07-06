@@ -87,6 +87,12 @@ def init_db() -> None:
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 failclosed_tokens INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(uid, day));
+            CREATE TABLE IF NOT EXISTS search_usage_daily(
+                provider TEXT NOT NULL, key_index INTEGER NOT NULL, day TEXT NOT NULL,
+                calls INTEGER NOT NULL DEFAULT 0,
+                units REAL NOT NULL DEFAULT 0,
+                errors INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(provider, key_index, day));
             """
         )
         # 既有库迁移：failclosed_tokens（fail-closed 估算计费 token，独立于真实 cache_miss——
@@ -274,6 +280,46 @@ def get_usage_history(since_day: str) -> list[dict]:
             "SELECT uid, day, cost_micro_yuan, cache_hit_tokens, cache_miss_tokens, output_tokens, failclosed_tokens"
             " FROM usage_daily WHERE day >= ? ORDER BY day ASC, uid ASC",
             (str(since_day),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_search_usage(provider, key_index, day, calls=0, units=0.0, errors=0) -> None:
+    """搜索池用量记账（provider × key × 天，原子累加）。
+
+    calls = 成功响应数；errors = 失败数（不计 units——429/鉴权失败通常不扣 provider 额度）；
+    units = provider 计量单位消耗（serper 为响应体 credits 真值，其余 1/调用）。
+    day 与 usage_daily 同一上海时区日界字符串（调用方用 metering.today_shanghai 计算）。
+    """
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO search_usage_daily(provider,key_index,day,calls,units,errors)"
+            " VALUES(?,?,?,?,?,?)"
+            " ON CONFLICT(provider,key_index,day) DO UPDATE SET"
+            "   calls=calls+excluded.calls,"
+            "   units=units+excluded.units,"
+            "   errors=errors+excluded.errors",
+            (str(provider), int(key_index), str(day), int(calls), float(units), int(errors)))
+
+
+def get_search_usage_history(since_day: str) -> list[dict]:
+    """自 since_day（含）起的搜索用量逐日明细，按天/provider/key 升序。"""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT provider, key_index, day, calls, units, errors FROM search_usage_daily"
+            " WHERE day >= ? ORDER BY day ASC, provider ASC, key_index ASC",
+            (str(since_day),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_search_usage_totals() -> list[dict]:
+    """全时段累计（provider × key）：一次性 credits 类 provider 的剩余估算基础。"""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT provider, key_index, SUM(calls) calls, SUM(units) units, SUM(errors) errors"
+            " FROM search_usage_daily GROUP BY provider, key_index"
+            " ORDER BY provider ASC, key_index ASC",
         ).fetchall()
     return [dict(r) for r in rows]
 

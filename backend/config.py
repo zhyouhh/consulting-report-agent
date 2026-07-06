@@ -90,6 +90,25 @@ def get_default_managed_client_token(base_path: Path | None = None) -> str:
 
 
 @dataclass(frozen=True)
+class ManagedSearchQuotaConfig:
+    """provider 额度静态声明（全部可选，纯展示/估算用——不参与限流门禁）。
+
+    - model: "monthly"（每月重置）| "one_time"（一次性 credits，用完不恢复）| ""（未声明）
+    - unit: 额度计量单位（credits / usd / requests）
+    - per_key_quota: 每把 key 的额度（unit 计）；0 = 未声明
+    - baseline_used: 记账启用前已消耗的量（provider 级合计，unit 计）——本地记账
+      只能从上线那天算起，之前在 provider dashboard 上看到的历史消耗填这里
+    - est_cost_per_call: 无真值来源的 provider（如 exa）按调用次数估算消耗时的单价（unit 计）
+    """
+
+    model: str = ""
+    unit: str = "requests"
+    per_key_quota: float = 0.0
+    baseline_used: float = 0.0
+    est_cost_per_call: float = 1.0
+
+
+@dataclass(frozen=True)
 class ManagedSearchProviderConfig:
     enabled: bool
     api_key: str
@@ -98,6 +117,7 @@ class ManagedSearchProviderConfig:
     daily_soft_limit: int
     cooldown_seconds: int
     api_keys: tuple[str, ...] = ()
+    quota: ManagedSearchQuotaConfig = ManagedSearchQuotaConfig()
 
     def __post_init__(self) -> None:
         # 兼容单 key（api_key）与多 key 轮询（api_keys）：两者互相回填，
@@ -162,6 +182,40 @@ def _parse_provider_api_keys(name: str, payload: dict) -> tuple[str, ...]:
     return (single,) if single else ()
 
 
+_SEARCH_QUOTA_MODELS = {"", "monthly", "one_time"}
+_SEARCH_QUOTA_UNITS = {"credits", "usd", "requests"}
+
+
+def _optional_number(payload: dict, key: str, *, default: float, name: str) -> float:
+    value = payload.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError(f"managed_search_pool.json 中 {name}.quota.{key} 必须是非负数字")
+    return float(value)
+
+
+def _parse_provider_quota(name: str, payload: object) -> ManagedSearchQuotaConfig:
+    """quota 块整体可选（旧配置/随桌面包分发的存量配置无此块，缺省即「未声明」）。"""
+    if payload is None:
+        return ManagedSearchQuotaConfig()
+    if not isinstance(payload, dict):
+        raise ValueError(f"managed_search_pool.json 中 {name}.quota 必须是 JSON object")
+    model = payload.get("model", "")
+    if not isinstance(model, str) or model not in _SEARCH_QUOTA_MODELS:
+        raise ValueError(f"managed_search_pool.json 中 {name}.quota.model 只接受 monthly/one_time")
+    unit = payload.get("unit", "requests")
+    if not isinstance(unit, str) or unit not in _SEARCH_QUOTA_UNITS:
+        raise ValueError(f"managed_search_pool.json 中 {name}.quota.unit 只接受 credits/usd/requests")
+    return ManagedSearchQuotaConfig(
+        model=model,
+        unit=unit,
+        per_key_quota=_optional_number(payload, "per_key_quota", default=0.0, name=name),
+        baseline_used=_optional_number(payload, "baseline_used", default=0.0, name=name),
+        est_cost_per_call=_optional_number(payload, "est_cost_per_call", default=1.0, name=name),
+    )
+
+
 def _require_provider_entry(name: str, payload: dict) -> ManagedSearchProviderConfig:
     if not isinstance(payload, dict):
         raise ValueError(f"managed_search_pool.json 中 {name} 配置格式不正确")
@@ -179,6 +233,7 @@ def _require_provider_entry(name: str, payload: dict) -> ManagedSearchProviderCo
         minute_limit=_require_int(payload, "minute_limit"),
         daily_soft_limit=_require_int(payload, "daily_soft_limit"),
         cooldown_seconds=_require_int(payload, "cooldown_seconds"),
+        quota=_parse_provider_quota(name, payload.get("quota")),
     )
 
 

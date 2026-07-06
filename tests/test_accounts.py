@@ -292,3 +292,54 @@ class AdminAccountsTests(unittest.TestCase):
         self.assertGreaterEqual(len(active), 1, f"活跃 admin 归零！results={results}")
         # 至少一个请求被原子守卫拒绝（不可能两个都 ok）
         self.assertIn("rejected", results.values(), f"两请求都成功 → 守卫失效；results={results}")
+
+
+class SearchUsageDailyTests(unittest.TestCase):
+    """搜索池用量表（provider × key × 天）：累加 / 历史 / 全时段汇总。"""
+
+    def setUp(self):
+        self._tmp = Path(os.path.realpath(tempfile.mkdtemp()))
+        self._env = mock.patch.dict(os.environ, {"CRA_DATA_ROOT": str(self._tmp)})
+        self._env.start(); accounts.init_db()
+
+    def tearDown(self):
+        self._env.stop(); shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_add_search_usage_accumulates_atomically(self):
+        accounts.add_search_usage("serper", 0, "2026-07-07", calls=1, units=1.0)
+        accounts.add_search_usage("serper", 0, "2026-07-07", calls=1, units=2.0, errors=1)
+        rows = accounts.get_search_usage_history("2026-07-07")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["calls"], 2)
+        self.assertEqual(rows[0]["units"], 3.0)
+        self.assertEqual(rows[0]["errors"], 1)
+
+    def test_keys_and_providers_are_separate_rows(self):
+        accounts.add_search_usage("serper", 0, "2026-07-07", calls=1, units=1.0)
+        accounts.add_search_usage("serper", 1, "2026-07-07", calls=1, units=1.0)
+        accounts.add_search_usage("exa", 0, "2026-07-07", calls=1, units=1.0)
+        rows = accounts.get_search_usage_history("2026-07-07")
+        self.assertEqual(len(rows), 3)
+
+    def test_history_filters_by_since_day(self):
+        accounts.add_search_usage("serper", 0, "2026-06-01", calls=5, units=5.0)
+        accounts.add_search_usage("serper", 0, "2026-07-07", calls=1, units=1.0)
+        rows = accounts.get_search_usage_history("2026-07-01")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["day"], "2026-07-07")
+
+    def test_totals_aggregate_across_days(self):
+        accounts.add_search_usage("serper", 0, "2026-06-01", calls=5, units=5.0, errors=1)
+        accounts.add_search_usage("serper", 0, "2026-07-07", calls=1, units=2.0)
+        accounts.add_search_usage("serper", 1, "2026-07-07", calls=3, units=3.0)
+        totals = {(r["provider"], r["key_index"]): r for r in accounts.get_search_usage_totals()}
+        self.assertEqual(totals[("serper", 0)]["calls"], 6)
+        self.assertEqual(totals[("serper", 0)]["units"], 7.0)
+        self.assertEqual(totals[("serper", 0)]["errors"], 1)
+        self.assertEqual(totals[("serper", 1)]["calls"], 3)
+
+    def test_init_db_migration_is_idempotent(self):
+        accounts.init_db()
+        accounts.init_db()
+        accounts.add_search_usage("brave", 0, "2026-07-07", calls=1, units=1.0)
+        self.assertEqual(len(accounts.get_search_usage_totals()), 1)

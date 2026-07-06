@@ -517,5 +517,138 @@ class SearchRouterTests(unittest.TestCase):
         self.assertEqual(second["error_type"], "backend_error")
 
 
+class SearchUsageRecorderTests(unittest.TestCase):
+    """usage_recorder 注入：成功/失败都记账、冷却跳过不记账、回调异常不影响搜索。"""
+
+    def _make_state(self, tmpdir):
+        return SearchStateStore(
+            runtime_state_path=Path(tmpdir) / "state.json",
+            cache_path=Path(tmpdir) / "cache.json",
+        )
+
+    def test_recorder_called_on_success_with_units_and_snapshot(self):
+        recorded = []
+        snapshot = {"month_remaining": 940, "month_limit": 1000, "observed_at": 1.0}
+        result = ProviderSearchResult(
+            provider="serper",
+            items=[SearchItem(title="t", snippet="s", url="https://e.com/a", domain="e.com", score=1.0)],
+            result_type="success",
+            key_index=1,
+            units_used=2.0,
+            quota_snapshot=snapshot,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            router = SearchRouter(
+                config=_make_config(),
+                state_store=self._make_state(tmpdir),
+                providers={
+                    "serper": FakeProvider(result),
+                    "brave": FakeProvider(_make_result("brave")),
+                    "tavily": FakeProvider(_make_result("tavily")),
+                    "exa": FakeProvider(_make_result("exa")),
+                },
+                usage_recorder=lambda **kwargs: recorded.append(kwargs),
+            )
+            router.search("猪猪侠", project_id="demo", turn_search_count=0)
+
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["provider"], "serper")
+        self.assertEqual(recorded[0]["key_index"], 1)
+        self.assertEqual(recorded[0]["calls"], 1)
+        self.assertEqual(recorded[0]["units"], 2.0)
+        self.assertEqual(recorded[0]["errors"], 0)
+        self.assertEqual(recorded[0]["quota_snapshot"], snapshot)
+
+    def test_recorder_called_with_error_row_on_provider_failure(self):
+        recorded = []
+        failure = SearchProviderError("serper", "rate_limited", "too many requests")
+        failure.key_index = 1
+        with tempfile.TemporaryDirectory() as tmpdir:
+            router = SearchRouter(
+                config=_make_config(),
+                state_store=self._make_state(tmpdir),
+                providers={
+                    "serper": FakeProvider(failure),
+                    "brave": FakeProvider(_make_result("brave")),
+                    "tavily": FakeProvider(_make_result("tavily")),
+                    "exa": FakeProvider(_make_result("exa")),
+                },
+                usage_recorder=lambda **kwargs: recorded.append(kwargs),
+            )
+            result = router.search("猪猪侠", project_id="demo", turn_search_count=0)
+
+        self.assertEqual(result["provider"], "brave")
+        error_rows = [r for r in recorded if r["errors"] == 1]
+        self.assertEqual(len(error_rows), 1)
+        self.assertEqual(error_rows[0]["provider"], "serper")
+        self.assertEqual(error_rows[0]["key_index"], 1)
+        self.assertEqual(error_rows[0]["calls"], 0)
+        self.assertEqual(error_rows[0]["units"], 0.0)
+
+    def test_recorder_not_called_for_cooldown_skips_or_cache_hits(self):
+        recorded = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._make_state(tmpdir)
+            with mock.patch("backend.search_state.time.time", return_value=1000):
+                state.mark_provider_failure("serper", error_type="rate_limited", cooldown_seconds=180)
+            router = SearchRouter(
+                config=_make_config(project_minute_limit=100, global_minute_limit=100),
+                state_store=state,
+                providers={
+                    "serper": FakeProvider(_make_result("serper")),
+                    "brave": FakeProvider(_make_result("brave")),
+                    "tavily": FakeProvider(_make_result("tavily")),
+                    "exa": FakeProvider(_make_result("exa")),
+                },
+                usage_recorder=lambda **kwargs: recorded.append(kwargs),
+            )
+            with mock.patch("backend.search_pool.time.time", return_value=1001):
+                first = router.search("猪猪侠", project_id="demo", turn_search_count=0)
+                second = router.search("猪猪侠", project_id="demo", turn_search_count=0)
+
+        self.assertEqual(first["provider"], "brave")
+        self.assertTrue(second["cached"])
+        # 冷却中的 serper 未真正调用不记账；缓存命中也不记账 → 只有 brave 的一条成功记录
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["provider"], "brave")
+
+    def test_recorder_exception_does_not_break_search(self):
+        def broken_recorder(**kwargs):
+            raise RuntimeError("db down")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            router = SearchRouter(
+                config=_make_config(),
+                state_store=self._make_state(tmpdir),
+                providers={
+                    "serper": FakeProvider(_make_result("serper")),
+                    "brave": FakeProvider(_make_result("brave")),
+                    "tavily": FakeProvider(_make_result("tavily")),
+                    "exa": FakeProvider(_make_result("exa")),
+                },
+                usage_recorder=broken_recorder,
+            )
+            result = router.search("猪猪侠", project_id="demo", turn_search_count=0)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["provider"], "serper")
+
+    def test_router_without_recorder_keeps_existing_behavior(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            router = SearchRouter(
+                config=_make_config(),
+                state_store=self._make_state(tmpdir),
+                providers={
+                    "serper": FakeProvider(_make_result("serper")),
+                    "brave": FakeProvider(_make_result("brave")),
+                    "tavily": FakeProvider(_make_result("tavily")),
+                    "exa": FakeProvider(_make_result("exa")),
+                },
+            )
+            result = router.search("猪猪侠", project_id="demo", turn_search_count=0)
+
+        self.assertEqual(result["status"], "success")
+
+
 if __name__ == "__main__":
     unittest.main()

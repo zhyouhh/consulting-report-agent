@@ -36,6 +36,7 @@ from .independent_review import (
 )
 from . import metering  # 用模块限定访问 metering.QuotaExceededError 等（见 __init__ 注释：reload 安全）
 from . import provider_retry  # 瞬态错误分类 + 指数退避（与 independent_review 共享）
+from . import search_quota  # 搜索池用量记账（router 注入，best-effort）
 from .models import SystemNotice
 from .search_pool import SearchRouter
 from .search_providers import (
@@ -5649,6 +5650,9 @@ class ChatHandler:
                     cache_path=get_search_cache_path(),
                 ),
                 providers=providers,
+                # lambda 晚绑模块属性（而非直接引用函数对象）：测试 reload(search_quota) 后
+                # 单例仍指向活模块的实现（与 metering 模块限定同一理由）。
+                usage_recorder=lambda **kwargs: search_quota.record_search_usage(**kwargs),
             )
             return _SEARCH_ROUTER_SINGLETON
 

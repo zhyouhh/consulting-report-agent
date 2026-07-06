@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import logging
 import threading
 import time
 from typing import Callable
@@ -8,6 +9,8 @@ from typing import Callable
 from backend.config import ManagedSearchPoolConfig
 from backend.search_providers import ProviderSearchResult, SearchItem, SearchProviderError
 from backend.search_state import SearchStateStore
+
+logger = logging.getLogger(__name__)
 
 
 class SearchRouter:
@@ -21,12 +24,40 @@ class SearchRouter:
         config: ManagedSearchPoolConfig,
         state_store: SearchStateStore,
         providers: dict[str, object],
+        usage_recorder: Callable[..., None] | None = None,
     ) -> None:
         self.config = config
         self.state_store = state_store
         self.providers = providers
+        # 用量记账回调（搜索池额度监控）：签名 (provider=, key_index=, calls=, units=, errors=, quota_snapshot=)。
+        # None = 不记账（向后兼容既有构造方）；回调必须 best-effort，这里再兜一层防御。
+        self.usage_recorder = usage_recorder
         self._layer_cursors = {"primary": 0, "secondary": 0}
         self._cursor_lock = threading.Lock()
+
+    def _record_usage(
+        self,
+        provider_name: str,
+        key_index: int | None,
+        *,
+        calls: int,
+        units: float,
+        errors: int,
+        quota_snapshot: dict | None = None,
+    ) -> None:
+        if self.usage_recorder is None:
+            return
+        try:
+            self.usage_recorder(
+                provider=provider_name,
+                key_index=key_index,
+                calls=calls,
+                units=units,
+                errors=errors,
+                quota_snapshot=quota_snapshot,
+            )
+        except Exception:
+            logger.warning("[search-usage] 记账回调异常（忽略，不影响搜索）", exc_info=True)
 
     def search(
         self,
@@ -70,10 +101,27 @@ class SearchRouter:
                 try:
                     provider_result = provider.search(query)
                 except SearchProviderError as exc:
+                    # 失败也记账（errors 列）：额度面板需要看到失败率；units 不计
+                    #（429/鉴权失败通常不扣 provider 额度）。冷却跳过的不经此处、不记账。
+                    self._record_usage(
+                        provider_name,
+                        getattr(exc, "key_index", None),
+                        calls=0,
+                        units=0.0,
+                        errors=1,
+                    )
                     provider_errors.append(exc)
                     self._mark_provider_failure(provider_name, exc)
                     continue
 
+                self._record_usage(
+                    provider_name,
+                    provider_result.key_index,
+                    calls=1,
+                    units=provider_result.units_used,
+                    errors=0,
+                    quota_snapshot=provider_result.quota_snapshot,
+                )
                 self.state_store.mark_provider_success(provider_name)
                 if provider_result.result_type == "empty_result":
                     empty_result = provider_result

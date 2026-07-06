@@ -482,6 +482,26 @@ def admin_usage_history(days: int = 30, admin_uid: str = Depends(get_current_adm
     return {"since": since, "today": today, "rows": rows}
 
 
+@app.get("/api/admin/search-quota")
+def admin_search_quota(refresh: bool = False, admin_uid: str = Depends(get_current_admin)):
+    """搜索池额度监控（admin 面板）。
+
+    数据源按 provider 各取所能（报告里逐 provider 标 source）：tavily 实时 /usage（服务端
+    5 分钟 TTL 缓存，refresh=true 强刷）、brave 搜索响应头被动快照、serper/exa 本地记账估算。
+    未配置搜索池（开发机缺 managed_search_pool.json）→ configured=false 优雅降级，不 500。
+    同步 def：FastAPI 线程池执行，tavily 拉取的阻塞不占事件循环。
+    """
+    from .config import load_managed_search_pool_config
+    from . import search_quota
+
+    try:
+        pool_config = load_managed_search_pool_config()
+    except (FileNotFoundError, ValueError, OSError):
+        return {"configured": False, "providers": [], "history": []}
+    report = search_quota.build_search_quota_report(pool_config, force_refresh=bool(refresh))
+    return {"configured": True, **report}
+
+
 @app.get("/api/admin/invite-code")
 def admin_get_invite_code(admin_uid: str = Depends(get_current_admin)):
     return {"invite_code": accounts.get_config("invite_code") or ""}

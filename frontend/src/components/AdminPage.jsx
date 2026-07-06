@@ -9,6 +9,7 @@ import {
 import { applyTheme, getInitialTheme, toggleTheme } from '../utils/theme'
 import { IconSun, IconMoon, IconShield } from './icons'
 import UsageTrendChart from './UsageTrendChart'
+import SearchPoolQuota from './SearchPoolQuota'
 
 // 管理控制台独立页面（2026-07-06）：/admin 路由整页渲染（原弹窗 AdminPanel 升级而来）。
 // 设计沿用主界面海军蓝双主题 token 体系；功能 = 概览统计 + 近 30 日用量趋势/明细
@@ -59,6 +60,11 @@ export default function AdminPage() {
   const [usageFilter, setUsageFilter] = useState('all')   // 用户筛选：联动趋势图 + 明细表
   const [usageRange, setUsageRange] = useState(30)        // 时间范围（天）：联动趋势图 + 明细表
   const [err, setErr] = useState('')
+  // 搜索池额度独立取数：tavily 实时查询可能慢（多 key 串行最坏数秒），
+  // 不进 reload 的 Promise.all——加载慢/失败都不拖累核心管理数据。
+  const [searchQuota, setSearchQuota] = useState(null)
+  const [searchQuotaErr, setSearchQuotaErr] = useState('')
+  const [searchQuotaBusy, setSearchQuotaBusy] = useState(false)
 
   useEffect(() => {
     axios.get('/api/auth/me', { skipUnauthedHandler: true })
@@ -90,6 +96,20 @@ export default function AdminPage() {
     }
   }
   useEffect(() => { if (authState === 'ready') reload() }, [authState])
+
+  async function loadSearchQuota(refresh = false) {
+    setSearchQuotaBusy(true)
+    try {
+      const r = await axios.get(`/api/admin/search-quota${refresh ? '?refresh=true' : ''}`)
+      setSearchQuota(r.data)
+      setSearchQuotaErr('')
+    } catch (e) {
+      setSearchQuotaErr(normalizeAuthError(e, '读取搜索池额度失败'))
+    } finally {
+      setSearchQuotaBusy(false)
+    }
+  }
+  useEffect(() => { if (authState === 'ready') loadSearchQuota() }, [authState])
 
   const days = useMemo(
     () => (usage ? listDays(usage.since, usage.today) : []),
@@ -274,6 +294,22 @@ export default function AdminPage() {
               ))}
             </div>
           </div>
+        </SectionCard>
+
+        {/* 搜索池额度：tavily 实时 / brave 被动观测 / serper·exa 本地估算（来源标签见卡片） */}
+        <SectionCard
+          title="搜索池额度"
+          actions={
+            <button
+              onClick={() => loadSearchQuota(true)}
+              disabled={searchQuotaBusy}
+              className="text-abright hover:text-accent text-13 disabled:opacity-50"
+            >
+              {searchQuotaBusy ? '刷新中…' : '刷新'}
+            </button>
+          }
+        >
+          <SearchPoolQuota data={searchQuota} error={searchQuotaErr} />
         </SectionCard>
 
         {/* 用户管理（保留可编辑额度 input——用户硬要求，别改回只读） */}

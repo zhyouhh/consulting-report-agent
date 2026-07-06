@@ -211,3 +211,66 @@ class AdminUsageHistoryTests(AdminApiTestBase):
         resp_min = self.client.get("/api/admin/usage?days=-5")   # 夹到 1 → since=today
         self.assertEqual(resp_min.status_code, 200)
         self.assertEqual(resp_min.json()["since"], today)
+
+
+class AdminSearchQuotaTests(AdminApiTestBase):
+    """GET /api/admin/search-quota：admin 门禁 + 报告装配 + 缺配置优雅降级。"""
+
+    def _pool_config(self):
+        from backend.config import (
+            ManagedSearchLimitsConfig,
+            ManagedSearchPoolConfig,
+            ManagedSearchProviderConfig,
+            ManagedSearchQuotaConfig,
+            ManagedSearchRoutingConfig,
+        )
+        return ManagedSearchPoolConfig(
+            version=1,
+            providers={
+                "serper": ManagedSearchProviderConfig(
+                    enabled=True, api_key="serper-key-0001",
+                    api_keys=("serper-key-0001",),
+                    weight=3, minute_limit=60, daily_soft_limit=1200, cooldown_seconds=180,
+                    quota=ManagedSearchQuotaConfig(model="one_time", unit="credits", per_key_quota=2500),
+                ),
+            },
+            routing=ManagedSearchRoutingConfig(primary=["serper"], secondary=[], native_fallback=True),
+            limits=ManagedSearchLimitsConfig(
+                per_turn_searches=5, project_minute_limit=30, global_minute_limit=60,
+                memory_cache_ttl_seconds=21600, project_cache_ttl_seconds=86400,
+            ),
+        )
+
+    def test_requires_admin(self):
+        self._login_as_regular_user()
+        resp = self.client.get("/api/admin/search-quota")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_returns_report_with_estimated_remaining(self):
+        from unittest import mock as _mock
+        from backend import metering
+        self._login_as_admin()
+        accounts.add_search_usage("serper", 0, metering.today_shanghai(), calls=10, units=12.0)
+        # load_managed_search_pool_config 是端点内局部 import，patch 目标是 backend.config
+        with _mock.patch("backend.config.load_managed_search_pool_config",
+                         return_value=self._pool_config()):
+            resp = self.client.get("/api/admin/search-quota")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["configured"])
+        serper = next(p for p in body["providers"] if p["name"] == "serper")
+        self.assertEqual(serper["source"], "estimated")
+        self.assertEqual(serper["total_quota"], 2500.0)
+        self.assertEqual(serper["total_used"], 12.0)
+        self.assertEqual(serper["total_remaining"], 2488.0)
+        # 响应不得包含完整 api key
+        self.assertNotIn("serper-key-0001", resp.text)
+
+    def test_missing_pool_config_degrades_gracefully(self):
+        from unittest import mock as _mock
+        self._login_as_admin()
+        with _mock.patch("backend.config.load_managed_search_pool_config",
+                         side_effect=FileNotFoundError("no file")):
+            resp = self.client.get("/api/admin/search-quota")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["configured"])
