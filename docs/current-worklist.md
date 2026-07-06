@@ -13,7 +13,7 @@
 
 **背景**：用户提出「管理面板看不清搜索池各渠道额度/用量」。联网调研四家 provider 官方能力（结论：只有 tavily 有干净用量 API；brave 只有响应头；serper/exa 只能本地记账）+ 本地摸底（此前**零持久记账**：限流窗口 1h 即扔、无 provider/key 维度；`daily_soft_limit`/`minute_limit` 是从未执行的摆设配置）。用户拍板：只管 web 端（桌面版没人用）、serper 2500/key、exa $10/key 全赠送、brave 已设限额按 $5/月（约 1000 次）算、新 exa key 入池、**权重烧反了要重排**（月度重置的 tavily/brave 该当主力、一次性库存 serper/exa 该做兜底）。
 
-**交付（commits `1c463aa`→`a3dc251`→`47ff389`→`34e6352` 本地 main，未 push）**：
+**交付（commits `1c463aa`→`a3dc251`→`47ff389`→`34e6352` + docs `262f325`，✅ 2026-07-07 已 push origin + 服务器 git realign）**：
 - **持久记账**：`accounts.search_usage_daily`（provider × key_id × 天；calls/units/errors 原子累加）。**key 身份 = sha256 指纹**（`search_quota.key_fingerprint`，非机密、跨配置重排/换 key 稳定），绝不用列表下标（Codex BLOCKER：重排会把旧账记到新 key 头上）；含 `key_index`→`key_id` 幂等迁移（短命中间 schema 的库自动重建，旧行按 `legacy-index:{n}` 保留）。
 - **记账零阻塞**：搜索路径只 `enqueue_search_usage`（有界队列 512 + daemon worker 落库，满即丢+日志）——同步写 SQLite busy 最长 5s 会卡 provider 调用（Codex BLOCKER）。
 - **数据源三档**（`backend/search_quota.py` 新叶子模块，报告逐 provider 标 source）：tavily=`live`（GET /usage 逐 key 实时、5min TTL 缓存、**账号级字段按 (plan,usage,limit) 元组去重且仅 used>0 触发**——部署实测月初三个零用量账号被误折成 1000/1000，修后 3000/3000）；brave=`observed`（响应头月度段快照，**观测在状态码判断之前**——429 恰带 remaining=0，快照挂 `SearchProviderError.quota_snapshot` 走错误记账路径透传）；serper/exa=`estimated`（serper 按响应体 `credits` 真值累计、exa 按 calls×`est_cost_per_call`；monthly 按本月至今、one_time 按全时段+`baseline_used`；**只按当前配置 key 指纹归集**，退役 key 不拖累估算）。

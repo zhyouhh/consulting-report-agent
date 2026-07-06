@@ -7,6 +7,11 @@
   - `GET /models`
   - `POST /chat/completions`
 
+## Known Consumers
+
+- CRA desktop/web clients (this repo).
+- `data-news-collecter` (https://datanews.z0y0h.work, Cloudflare Worker, sibling repo) — uses the same client token for news scoring/summaries/chat since 2026-07-07. **Rotating `MANAGED_PROXY_CLIENT_TOKEN` requires updating that worker's `LLM_TOKEN` secret too** (`wrangler secret put LLM_TOKEN` in that repo).
+
 ## Runtime Shape
 
 - Nginx keeps the original `location /` -> `127.0.0.1:3000` route for `new-api`.

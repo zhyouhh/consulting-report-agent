@@ -462,7 +462,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 ## admin 搜索池额度监控（2026-07-07 实施 + Codex 3 轮审 APPROVED + 部署 kr-web-01）
 
-搜索池（serper/brave/tavily/exa）的额度/用量监控进 `/admin` 页。改搜索记账 / provider 适配器 / 额度报告 / 搜索池配置前必读。commits `1c463aa`→`34e6352`（本地 main）。
+搜索池（serper/brave/tavily/exa）的额度/用量监控进 `/admin` 页。改搜索记账 / provider 适配器 / 额度报告 / 搜索池配置前必读。commits `1c463aa`→`34e6352` + docs `262f325`。
 
 - **新叶子模块 `backend/search_quota.py`**（只依赖 accounts/metering/config + requests，**绝不 import chat/skill/main**）：记账 + tavily 实时拉取 + 报告装配。
 - **key 身份 = sha256 指纹**（`key_fingerprint`，前 12 hex，非机密、跨配置重排/换 key 稳定）：`accounts.search_usage_daily(provider, key_id, day)` + 快照 app_config 键 + 报告 join 全按指纹；**绝不用列表下标当持久身份**（重排 key 会把旧账记到新 key 头上，Codex BLOCKER）。`init_db` 含 `key_index`→`key_id` 幂等迁移（旧行 `legacy-index:{n}` 保留进历史、指纹不匹配天然不入估算）。
@@ -492,7 +492,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。
 
-**多 key 轮询**：每个 provider 支持配多个 key（`managed_search_pool.json` 里 `api_keys: [...]` 列表；旧 `api_key` 单值仍兼容，`config.py:ManagedSearchProviderConfig.__post_init__` 互相回填）。`BaseSearchProvider._next_api_key()` 每次 search **线程安全轮转**取一个 key 传给 `_request_payload(query, api_key)`，把负载摊到多账号；`daily_soft_limit` 应按 key 数缩放才有实际余量。改 key/限额后**要重启**（路由单例不热重载）。
+**多 key 轮询**：每个 provider 支持配多个 key（`managed_search_pool.json` 里 `api_keys: [...]` 列表；旧 `api_key` 单值仍兼容，`config.py:ManagedSearchProviderConfig.__post_init__` 互相回填）。`BaseSearchProvider._next_api_key()` 每次 search **线程安全轮转**取一个 key 传给 `_request_payload(query, api_key)`，把负载摊到多账号。⚠️ per-provider `minute_limit`/`daily_soft_limit` 是**从未被执行的摆设字段**（只解析不消费，别当成生效门禁）；额度可见性与 per-key 用量记账见上方「## admin 搜索池额度监控」段。改 key/限额后**要重启**（路由单例不热重载）。
 
 路由单例在 `ChatHandler` 里（`_SEARCH_ROUTER_SINGLETON`），`managed_search_pool.json` 一旦加载不会热重载，改配置需要重启。
 

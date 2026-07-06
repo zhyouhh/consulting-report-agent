@@ -91,6 +91,7 @@ sidecar 容器可留可停。normalizer 幂等，opencode 若日后修回标准�
 
 ## 注意
 
+- **渠道 61 优先级（2026-07-07 加）**：ds 组现让 **ch61 opencode 为主渠道（priority 2）、ch57 官渠为 failover（priority 1）**，避免两渠道同优先级被 new-api 加权随机分流——分流会把同一会话的连续轮次打散到两家**独立缓存**上、命中率腰斩（80%→59%，miss 是 hit 的 120× 直接推高成本）。new-api 选路=先取最高 priority 层、失败重试才降级，故高 priority=主、低=自动 failover。改渠道 61 base_url/分组时**勿把 priority 改回与 57 同级**。备份 `one-api.db.bak-dspriority-<date>`；回滚=priority 改回 1 + 重启。详见 `VPS-fix-private/notes/jp-app-01.md` 2026-07-07 条。
 - 本服务不鉴权，只面向内部（new-api 同网络）——**绝不对公网暴露**。opencode key 由 new-api
   每请求经 Authorization 透传，本服务不落盘不缓存。
 - 回归测试：`tests/test_opencode_normalizer.py`（normalizer 纯函数 + app 流式规范化/透传/错误/鉴权头）。
