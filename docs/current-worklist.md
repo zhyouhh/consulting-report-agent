@@ -11,7 +11,7 @@
 
 最后更新：2026-07-06（**试用反馈两问题 ✅ 已实施 + 模型调用自动重试 + /admin 独立管理页 + mac 4 测试结清**，详见下条；2026-07-04 条的方案背景保留作历史）：
 
-**收口状态**：Codex（gpt-5.5 xhigh）单轮终审 + 对抗红队 **APPROVED**（首轮 1 BLOCKER 被 index.html 主题 bootstrap 证据否掉并撤回）→ commit `2bfa2ec`（本地 main，**未 push**）→ **✅ 已部署 kr-web-01**（前端 dist swap bundle `index-D1efA8fM.js` + file-push 5 个后端文件 + systemd 重启，公网 smoke 8/8：health/新 bundle/`/admin` 200+no-cache/usage 端点 401 门禁/未知路由仍 404）。回滚点=服务器 `/opt/cra-rollback-20260706/` + `frontend/dist.old`。⚠️ 服务器 git 工作树因 file-push 偏离 `f56e765`——**下次 push origin 后须在服务器 `git reset --hard origin/main` realign**。
+**收口状态**：Codex（gpt-5.5 xhigh）单轮终审 + 对抗红队 **APPROVED**（首轮 1 BLOCKER 被 index.html 主题 bootstrap 证据否掉并撤回）→ commit `2bfa2ec` + 文档同步 `7c7e4a4`（**✅ 已 push origin**）→ **✅ 已部署 kr-web-01**（前端 dist swap bundle `index-D1efA8fM.js` + file-push 5 个后端文件 + systemd 重启，公网 smoke 8/8：health/新 bundle/`/admin` 200+no-cache/usage 端点 401 门禁/未知路由仍 404）。回滚点=服务器 `/opt/cra-rollback-20260706/` + `frontend/dist.old`。✅ 服务器 git 已 `reset --hard origin/main` realign 到 `7c7e4a4`（运行文件 sha 与提交一致、无需重启），file-push 偏离已消除。
 
 **本批交付（2026-07-06，四件套 + 顺手项）**：
 - **反馈① ✅**：S1「确认大纲」/ S7「归档」按钮从直连 checkpoint API 改为**代用户发确认消息走主模型**（`ChatPanel.sendUserMessage` 暴露 imperative handle → App/MobileShell `onSendPrompt` → `StageAdvanceControl.sendConfirmMessage`；忙时 toast 提示不静默）。模型撞门禁自愈缺失文件（research-plan.md / delivery-log.md）再推进。S4/S5 保持直连、S6 不动（演示功能未做）。纯前端，锁测 `stageAdvanceControl.test.mjs`。

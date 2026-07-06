@@ -429,7 +429,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 ## 试用反馈两修复 + 模型调用重试 + /admin 独立管理页（2026-07-06）
 
-四件套（commit `2bfa2ec` 本地 main；Codex 单轮终审 + 对抗红队 APPROVED；**已部署 kr-web-01**：dist swap bundle `index-D1efA8fM.js` + file-push 5 个后端文件 + systemd 重启，公网 smoke 8/8 过；回滚点 = 服务器 `/opt/cra-rollback-20260706/` + `frontend/dist.old`；**服务器 git 工作树因 file-push 偏离 `f56e765`，下次 push origin 后须 `git reset --hard origin/main` realign**）（反馈①阶段按钮代发自愈 / 反馈②内部提示进后台 / provider 瞬态重试 / admin 独立页面），改阶段按钮 / system_notice / provider 调用错误路径 / admin 面板前必读：
+四件套（commit `2bfa2ec` 本地 main；Codex 单轮终审 + 对抗红队 APPROVED；**已部署 kr-web-01**：dist swap bundle `index-D1efA8fM.js` + file-push 5 个后端文件 + systemd 重启，公网 smoke 8/8 过；回滚点 = 服务器 `/opt/cra-rollback-20260706/` + `frontend/dist.old`；✅ 已 push origin 且服务器已 `git reset --hard origin/main` realign 到 `7c7e4a4`、运行文件 sha 与提交一致）（反馈①阶段按钮代发自愈 / 反馈②内部提示进后台 / provider 瞬态重试 / admin 独立页面），改阶段按钮 / system_notice / provider 调用错误路径 / admin 面板前必读：
 
 - **S1/S7 阶段按钮 = 代发消息走主模型**（反馈①）：`ChatPanel` imperative handle 暴露 `sendUserMessage(text)`（忙时返回 false，**不静默排队**），App/MobileShell 以 `onSendPrompt` 传链 WorkspacePanel→StagePanel→`StageAdvanceControl.sendConfirmMessage`。S1/S7 **不再直连** `POST /checkpoints/*`（无模型在环撞门禁即 400 死路）；**S4/S5 保持直连**（内容阈值 / 独立审查报告，代发救不了）；S6 演示功能未做不动。移动端代发成功后 closeAll 关右抽屉。锁测 `stageAdvanceControl.test.mjs` + `independentReviewDrawer.source.test.mjs`（handle 形状）。
 - **内部提示全走后台日志**（反馈②）：write-gate 类 `system_notice` 一律 `surface_to_user=False`（`_yield_user_visible_notices` 自动打 `[internal-notice]` 日志）——**新增门禁 notice 别再开 True**，用户对「请调用 advance_stage」无从操作；模型自我修正旁白（畸形 tool_calls/自我循环/声称写入未写/汇报轮禁工具）**不 yield `type:"tool"`**、打 `[self-heal]` 日志；`type:"error"` 硬错误保留给用户。重试耗尽兜底文案（`_build_required_write_failure_message`）是用户可见文案，**写人话、禁工具名/路径**。前端橙框渲染机制保留（未来真需用户动手的通知可用）。
