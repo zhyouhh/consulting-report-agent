@@ -649,8 +649,10 @@ class SkillEngineTests(unittest.TestCase):
             expected_workspace_dir = projects_dir / "demo"
             expected_project_dir = expected_workspace_dir / ".consulting-report"
 
-            self.assertEqual(Path(project["workspace_dir"]), expected_workspace_dir)
-            self.assertEqual(Path(project["project_dir"]), expected_project_dir)
+            # 两侧 resolve()：macOS tempdir 走 /var→/private/var symlink，引擎返回已解析
+            # 真实路径；resolve 后比较在 Windows/mac 上语义一致（worklist 已挂的小活，2026-07-06 结清）。
+            self.assertEqual(Path(project["workspace_dir"]).resolve(), expected_workspace_dir.resolve())
+            self.assertEqual(Path(project["project_dir"]).resolve(), expected_project_dir.resolve())
             self.assertTrue((expected_project_dir / "plan" / "project-overview.md").exists())
 
     def test_create_project_rejects_non_directory_workspace_with_clean_message(self):
@@ -882,8 +884,11 @@ class SkillEngineTests(unittest.TestCase):
             (content_dir / "report_draft_v1.md").write_text("# Canonical draft", encoding="utf-8")
             report_path = engine.get_primary_report_path("demo")
 
+            # 同上：resolve 两侧再取相对路径（mac /var symlink 下 relative_to 才不炸）。
             self.assertEqual(
-                Path(report_path).relative_to(projects_dir / "demo" / ".consulting-report").as_posix(),
+                Path(report_path).resolve().relative_to(
+                    (projects_dir / "demo" / ".consulting-report").resolve()
+                ).as_posix(),
                 "content/report_draft_v1.md",
             )
 

@@ -81,3 +81,29 @@ class StaticCacheHeaderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpaFallbackRouteTests(StaticCacheHeaderTests):
+    """2026-07-06 /admin 独立页面：SPA 客户端路由白名单回退 index.html。"""
+
+    def test_admin_route_falls_back_to_index_with_no_cache(self):
+        r = self.client.get("/admin")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("root", r.text)   # 服务的是 index.html shell
+        self.assertIn("no-cache", r.headers.get("cache-control", ""))
+
+    def test_unknown_route_still_404(self):
+        # 白名单外的未知路径不回退——保持 404（陈旧 bundle 404 可见性前提）。
+        r = self.client.get("/not-a-route")
+        self.assertEqual(r.status_code, 404)
+
+    def test_missing_asset_still_404(self):
+        r = self.client.get("/assets/index-gone.js")
+        self.assertEqual(r.status_code, 404)
+
+
+# 置空继承的 test_（避免基类用例在子类重复跑）
+for _inh in dir(StaticCacheHeaderTests):
+    if _inh.startswith("test_") and _inh not in SpaFallbackRouteTests.__dict__:
+        setattr(SpaFallbackRouteTests, _inh, None)
+del _inh

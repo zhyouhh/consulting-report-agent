@@ -738,6 +738,17 @@ const ChatPanel = forwardRef(function ChatPanel({
   const flushNextPendingTriggerRef = useRef(flushNextPendingTrigger)
   flushNextPendingTriggerRef.current = flushNextPendingTrigger
 
+  // 阶段按钮「代发」入口（2026-07-06 反馈①）：把一条固定确认文案当普通用户消息发出、
+  // 渲染用户气泡——与用户亲手打字确认完全同路径，主模型撞后端门禁后能自愈缺失文件再推进
+  // （直连 checkpoint API 无模型在环，撞门禁即死路）。聊天忙时返回 false 交调用方提示，
+  // 不静默排队（用户在场，排队会让按钮看起来没反应）。
+  const sendUserMessage = useCallback((text) => {
+    const trimmed = typeof text === 'string' ? text.trim() : ''
+    if (!trimmed || loading || uploading) return false
+    startStream({ messageText: trimmed, renderUserBubble: true })
+    return true
+  }, [startStream, loading, uploading])
+
   // Drop pending same-type triggers for the active project when the user STARTS a new run (called
   // from WorkspacePanel). The new run overwrites the store tombstone, so a stale pending flush
   // would be run-bound-rejected and report the older successful review as a spurious error (B2).
@@ -749,7 +760,7 @@ const ChatPanel = forwardRef(function ChatPanel({
     )
   }, [])
 
-  useImperativeHandle(ref, () => ({ triggerSystemTurn, dropPendingReviewTriggers }), [triggerSystemTurn, dropPendingReviewTriggers])
+  useImperativeHandle(ref, () => ({ triggerSystemTurn, dropPendingReviewTriggers, sendUserMessage }), [triggerSystemTurn, dropPendingReviewTriggers, sendUserMessage])
 
   const sendMessage = async () => {
     const trimmedInput = input.trim()

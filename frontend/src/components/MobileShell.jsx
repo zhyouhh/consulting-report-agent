@@ -64,6 +64,13 @@ export default function MobileShell(props) {
   const handleDropPendingReviewTriggers = (t) => chatPanelRef.current?.dropPendingReviewTriggers(t)
   // 继续扩写/回退插入 prompt 后关右抽屉，否则输入框在抽屉背后像没反应。
   const handleInsertPrompt = (text) => { onInsertPrompt(text); closeAll() }
+  // 阶段按钮「代发」（S1 确认大纲 / S7 归档）：代发成功后关右抽屉落回聊天看进展；
+  // 忙时返回 false（不关抽屉），由按钮侧给出提示。
+  const handleSendPrompt = (text) => {
+    const ok = chatPanelRef.current?.sendUserMessage(text) ?? false
+    if (ok) closeAll()
+    return ok
+  }
 
   return (
     <div className="relative w-screen bg-bg overflow-hidden" style={{ height: '100dvh' }} onTouchStart={onShellTouchStart} onTouchEnd={onShellTouchEnd} onTouchCancel={onShellTouchCancel}>
@@ -129,6 +136,7 @@ export default function MobileShell(props) {
           onProjectMutated={onProjectMutated}
           onCheckpointSet={onCheckpointSet}
           onInsertPrompt={handleInsertPrompt}
+          onSendPrompt={handleSendPrompt}
           onTriggerSystemTurn={handleTriggerSystemTurn}
           onDropPendingReviewTriggers={handleDropPendingReviewTriggers}
         />

@@ -21,6 +21,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   onProjectMutated,
   onCheckpointSet,
   onInsertPrompt,
+  onSendPrompt,
   onTriggerSystemTurn,
   onDropPendingReviewTriggers,
   width,
@@ -364,6 +365,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
           onExportDraft={exportDraft}
           onCheckpointSet={onCheckpointSet}
           onInsertPrompt={onInsertPrompt}
+          onSendPrompt={onSendPrompt}
           reviewRunning={reviewRunning}
         />
       ) : activeTab === 'files' ? (

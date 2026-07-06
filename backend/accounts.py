@@ -254,6 +254,21 @@ def add_usage(uid, day, cost_micro_yuan, hit, miss, output) -> None:
             (uid, day, int(cost_micro_yuan), int(hit), int(miss), int(output)))
 
 
+def get_usage_history(since_day: str) -> list[dict]:
+    """自 ``since_day``（含，'YYYY-MM-DD'）起的全用户逐日用量，按天升序。
+
+    day 列本身就是上海时区日界字符串（metering.today_shanghai 写入），字典序 == 日期序。
+    since_day 由调用方（main.py）用 metering 计算——accounts 是叶子层，不 import metering。
+    """
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT uid, day, cost_micro_yuan, cache_hit_tokens, cache_miss_tokens, output_tokens"
+            " FROM usage_daily WHERE day >= ? ORDER BY day ASC, uid ASC",
+            (str(since_day),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_usage_today(uid, day) -> dict:
     with _db() as conn:
         row = conn.execute(

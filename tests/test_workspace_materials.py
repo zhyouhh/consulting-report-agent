@@ -159,8 +159,9 @@ class WorkspaceMaterialTests(unittest.TestCase):
 
             project_dir = workspace_dir / ".consulting-report"
             self.assertEqual(project["name"], "demo")
-            self.assertEqual(project["workspace_dir"], str(workspace_dir))
-            self.assertEqual(project["project_dir"], str(project_dir))
+            # 两侧 resolve()：mac tempdir /var→/private/var symlink（同 test_skill_engine 注释）。
+            self.assertEqual(Path(project["workspace_dir"]).resolve(), workspace_dir.resolve())
+            self.assertEqual(Path(project["project_dir"]).resolve(), project_dir.resolve())
             self.assertEqual(project["theme"], "AI 鎴樼暐瑙勫垝")
             self.assertEqual(project["target_audience"], "executive audience")
             self.assertEqual(project["expected_length"], "3000 words")
@@ -617,7 +618,7 @@ class WorkspaceMaterialTests(unittest.TestCase):
             material = imported[0]
             copied_path = workspace_dir / ".consulting-report" / material["stored_rel_path"]
             self.assertEqual(material["source_type"], "imported")
-            self.assertEqual(material["original_path"], str(external_file))
+            self.assertEqual(Path(material["original_path"]).resolve(), external_file.resolve())
             self.assertTrue(copied_path.exists())
             self.assertEqual(copied_path.read_text(encoding="utf-8"), "琛屼笟鏁版嵁鍐呭")
 

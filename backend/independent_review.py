@@ -7,6 +7,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -15,6 +16,7 @@ from openai import OpenAI
 
 from .config import Settings
 from . import metering  # 模块限定访问 metering.QuotaExceededError 等（reload 安全，见 _quota_notice 注释）
+from . import provider_retry  # 瞬态错误分类 + 指数退避（与 chat.py 共享）
 from .report_quality import scan_placeholders, build_placeholder_grounding
 from .skill import SkillEngine
 from .stream_parsing import ThinkingStreamParser
@@ -513,18 +515,45 @@ class IndependentReviewAgent:
             if is_cancelled():
                 yield from cancel_and_return(iteration)
                 return
-            try:
-                response = client.chat.completions.create(**request_kwargs)
-            except (metering.QuotaExceededError, metering.ModelPausedError) as qe:
-                if store is not None and run_id is not None:
-                    store.set_errored(store_key, run_id, snapshot_now(iteration))
-                yield {"type": "error", "detail": _quota_notice(qe)}
-                return
-            except Exception as exc:
-                if store is not None and run_id is not None:
-                    store.set_errored(store_key, run_id, snapshot_now(iteration))
-                yield {"type": "error", "detail": f"模型调用失败：{str(exc)}"}
-                return
+            # 2026-07-06 重试机制：create 对瞬态错误（连接/超时/429/5xx）指数退避重试，
+            # progress 事件把「正在重试」透给审查窗口状态行；确定性 4xx 仍立即失败
+            # （流中途断开不在此重试——断点续审已覆盖，用户可点「继续审查」）。
+            create_attempt = 0
+            while True:
+                try:
+                    response = client.chat.completions.create(**request_kwargs)
+                    break
+                except (metering.QuotaExceededError, metering.ModelPausedError) as qe:
+                    if store is not None and run_id is not None:
+                        store.set_errored(store_key, run_id, snapshot_now(iteration))
+                    yield {"type": "error", "detail": _quota_notice(qe)}
+                    return
+                except Exception as exc:
+                    create_attempt += 1
+                    if (
+                        create_attempt < provider_retry.CREATE_MAX_ATTEMPTS
+                        and provider_retry.is_retryable_provider_error(exc)
+                        and not is_cancelled()
+                    ):
+                        delay = provider_retry.backoff_seconds(create_attempt)
+                        logger.warning(
+                            "[provider-retry] review create 失败，第 %s/%s 次重试（%.0fs 后）: %s",
+                            create_attempt,
+                            provider_retry.CREATE_MAX_ATTEMPTS - 1,
+                            delay,
+                            exc,
+                        )
+                        yield {
+                            "type": "progress",
+                            "step": "retrying",
+                            "detail": f"连接不稳定，正在自动重试（第 {create_attempt}/{provider_retry.CREATE_MAX_ATTEMPTS - 1} 次）…",
+                        }
+                        time.sleep(delay)
+                        continue
+                    if store is not None and run_id is not None:
+                        store.set_errored(store_key, run_id, snapshot_now(iteration))
+                    yield {"type": "error", "detail": f"模型调用失败：{str(exc)}"}
+                    return
 
             # ---- 小型流式解析器（参照 chat.py 主循环 emit_parsed_stream_events，审查版）----
             # content 经 ThinkingStreamParser 剥 <think> 后逐段 yield content_delta；

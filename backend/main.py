@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 from urllib.parse import urlparse
 
@@ -445,6 +446,37 @@ def admin_list_users(admin_uid: str = Depends(get_current_admin)):
             "daily_cap_yuan": round(cap / 1_000_000, 4),
         })
     return out
+
+
+@app.get("/api/admin/usage")
+def admin_usage_history(days: int = 30, admin_uid: str = Depends(get_current_admin)):
+    """近 N 天全用户逐日用量（admin 面板历史趋势）。
+
+    行粒度 = (uid, day)，字段与 usage_daily 一致（cost 换算成元）。username 服务端 join，
+    前端不需要再拉一次用户表来配名。days 夹在 [1, 90]——usage_daily 本身很小
+    （行数 = 用户数 × 活跃天数），90 天上限只是防御性参数卫生。
+    """
+    from datetime import date, timedelta
+
+    from backend import metering   # 模块限定（B2 铁律，避 reload 异常身份失配）
+
+    days = max(1, min(int(days), 90))
+    today = metering.today_shanghai()
+    since = (date.fromisoformat(today) - timedelta(days=days - 1)).isoformat()
+    usernames = {u["uid"]: u["username"] for u in accounts.list_all_users()}
+    rows = [
+        {
+            "uid": r["uid"],
+            "username": usernames.get(r["uid"], r["uid"][:8]),
+            "day": r["day"],
+            "cost_yuan": round(r["cost_micro_yuan"] / 1_000_000, 4),
+            "cache_hit_tokens": r["cache_hit_tokens"],
+            "cache_miss_tokens": r["cache_miss_tokens"],
+            "output_tokens": r["output_tokens"],
+        }
+        for r in accounts.get_usage_history(since)
+    ]
+    return {"since": since, "today": today, "rows": rows}
 
 
 @app.get("/api/admin/invite-code")
@@ -1404,8 +1436,29 @@ class _SPAStaticFiles(StaticFiles):
             return "public, max-age=31536000, immutable"
         return None
 
+    # SPA 客户端路由白名单（2026-07-06 /admin 独立页面）：这些路径没有对应静态文件，
+    # 回退到 index.html 由前端按 pathname 渲染对应页面。刻意用白名单而非「所有 404 都回退」——
+    # 陈旧 shell 引用已删 bundle 的 assets 404 必须保持 404（那是 no-cache 修复链的可见性前提）。
+    _SPA_FALLBACK_ROUTES = frozenset({"admin"})
+
     async def get_response(self, path, scope):
-        response = await super().get_response(path, scope)
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            # Starlette StaticFiles 对 not-found 是抛 HTTPException(404)，不是返回 404 响应。
+            norm = path.replace("\\", "/").strip("/")
+            if exc.status_code != 404 or norm not in self._SPA_FALLBACK_ROUTES:
+                raise
+            # 直接回 index.html 文件（不用 "."——目录形态会触发 StaticFiles 的
+            # 「/admin → /admin/」307 目录重定向，多一跳；文件形态一次到位）。
+            path = "index.html"
+            response = await super().get_response(path, scope)
+        if response.status_code == 404:
+            # 兼容返回 404 响应（而非抛异常）的实现路径，行为一致。
+            norm = path.replace("\\", "/").strip("/")
+            if norm in self._SPA_FALLBACK_ROUTES:
+                path = "index.html"
+                response = await super().get_response(path, scope)
         cache_control = self._cache_control_for(path)
         if cache_control:
             # 200 FileResponse 与 304 NotModifiedResponse 都是带可变 headers 的 Response，

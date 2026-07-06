@@ -946,8 +946,8 @@ class ChatRuntimeTests(unittest.TestCase):
         closing = [e for e in events if e.get("type") == "tool_result" and e["id"] == "call-1"]
         self.assertEqual(len(closing), 1)
         self.assertEqual(closing[0]["status"], "error")
-        # The malformed diagnostic (type:"tool") is preserved, not replaced by the orphan-close.
-        self.assertTrue(
+        # 2026-07-06 反馈②：畸形条目旁白转后台日志，不再作为 type:"tool" 推给用户。
+        self.assertFalse(
             any(e.get("type") == "tool" and "畸形" in str(e.get("data", "")) for e in events)
         )
 
@@ -2912,7 +2912,8 @@ class ChatRuntimeTests(unittest.TestCase):
                 engine,
             )
 
-            events = list(handler.chat_stream(project["id"], "继续"))
+            with mock.patch("backend.chat.time.sleep"):   # 2026-07-06：瞬态重试退避不真等
+                events = list(handler.chat_stream(project["id"], "继续"))
 
         self.assertTrue(any(event["type"] == "usage" for event in events))
         self.assertEqual(
@@ -5778,9 +5779,16 @@ class ChatRuntimeTests(unittest.TestCase):
             "请先用真实文件工具完成这些文件落盘：新建或整体重写用 `write_file`",
         ]
         for label, message in messages.items():
-            with self.subTest(message=label):
-                self.assertIn("content/report_draft_v1.md", message)
-                self.assertIn("edit_file", message)
+            # 2026-07-06 反馈②：failure 是给用户看的兜底文案，改为人话、不出现内部路径/工具名；
+            # 模型侧 feedback / write_file_rejection 仍必须点名 canonical 路径与 edit_file。
+            if label != "failure":
+                with self.subTest(message=label):
+                    self.assertIn("content/report_draft_v1.md", message)
+                    self.assertIn("edit_file", message)
+            else:
+                with self.subTest(message=label):
+                    self.assertNotIn("write_file", message)
+                    self.assertNotIn("append_report_draft", message)
             for bad_phrase in bad_write_file_recommendations:
                 with self.subTest(message=label, bad_phrase=bad_phrase):
                     self.assertNotIn(bad_phrase, message)
@@ -6100,7 +6108,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 {"CONSULTING_REPORT_DEBUG_DUMP": "1",
                  "CRA_DATA_ROOT": self._billing_tmp.name},
                 clear=True,
-            ):
+            ), mock.patch("backend.chat.time.sleep"):
                 result = handler.chat(self.project_id, secret_message)
 
             payload_path = debug_dir / "payload-latest.json"
@@ -6781,7 +6789,8 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("stage_checkpoints.json 是用户确认真值源", result["message"])
         self.assertNotIn("read_file", result["message"])
         self.assertEqual(notices[-1]["category"], "checkpoint_forge_blocked")
-        self.assertTrue(notices[-1]["surface_to_user"])
+        # 2026-07-06 反馈②：写门禁提示改为内部通知（模型自愈路径，用户无从操作）。
+        self.assertFalse(notices[-1]["surface_to_user"])
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_rejects_checkpoints_path_via_relative_and_case_variants(self, mock_openai):
@@ -6832,15 +6841,16 @@ class ChatRuntimeTests(unittest.TestCase):
             iter([self._make_chunk(content="收到")]),
         ]
 
-        events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
+        with self.assertLogs("backend.chat", level="INFO") as captured:
+            events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
         notices = [event for event in events if event["type"] == "system_notice"]
 
-        self.assertEqual(len(notices), 1)
-        self.assertEqual(notices[0]["category"], "non_plan_write_blocked")
-        self.assertIsNone(notices[0]["path"])
-        self.assertTrue(notices[0]["reason"])
-        self.assertTrue(notices[0]["user_action"])
-        self.assertNotIn("surface_to_user", notices[0])
+        # 2026-07-06 反馈②：写门禁提示不再推给用户（SSE 无 system_notice），
+        # 改走 [internal-notice] 后台日志留痕。
+        self.assertEqual(notices, [])
+        self.assertTrue(
+            any("[internal-notice] non_plan_write_blocked" in line for line in captured.output)
+        )
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_blocks_data_log_format_hint_write_in_s0(self, mock_openai):
@@ -7282,14 +7292,19 @@ class ChatRuntimeTests(unittest.TestCase):
             iter([self._make_chunk(content="收到")]),
         ]
 
-        events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
+        with self.assertLogs("backend.chat", level="INFO") as captured:
+            events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
         notices = [event for event in events if event["type"] == "system_notice"]
 
-        categories = [notice["category"] for notice in notices]
-        self.assertEqual(len(notices), 2)
-        self.assertEqual(categories.count("stage_write_blocked"), 1)
-        self.assertEqual(categories.count("non_plan_write_blocked"), 1)
-        self.assertTrue(all("surface_to_user" not in notice for notice in notices))
+        # 2026-07-06 反馈②：两类门禁通知都转内部日志，SSE 不再出现；日志各留一条（dedup 仍生效）。
+        self.assertEqual(notices, [])
+        internal_lines = [line for line in captured.output if "[internal-notice]" in line]
+        self.assertEqual(
+            sum("stage_write_blocked" in line for line in internal_lines), 1
+        )
+        self.assertEqual(
+            sum("non_plan_write_blocked" in line for line in internal_lines), 1
+        )
 
     @mock.patch("backend.chat.OpenAI")
     def test_system_notice_reset_between_turns(self, mock_openai):
@@ -7314,13 +7329,24 @@ class ChatRuntimeTests(unittest.TestCase):
             iter([self._make_chunk(content="第二轮")]),
         ]
 
-        first_events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
-        second_events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
+        with self.assertLogs("backend.chat", level="INFO") as first_captured:
+            first_events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
+        with self.assertLogs("backend.chat", level="INFO") as second_captured:
+            second_events = list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
 
-        first_notices = [event for event in first_events if event["type"] == "system_notice"]
-        second_notices = [event for event in second_events if event["type"] == "system_notice"]
-        self.assertEqual(len(first_notices), 1)
-        self.assertEqual(len(second_notices), 1)
+        # 2026-07-06 反馈②：SSE 不再出现 system_notice；内部日志每轮各一条（跨轮 dedup 会重置）。
+        self.assertEqual(
+            [event for event in first_events if event["type"] == "system_notice"], []
+        )
+        self.assertEqual(
+            [event for event in second_events if event["type"] == "system_notice"], []
+        )
+        self.assertEqual(
+            sum("[internal-notice]" in line for line in first_captured.output), 1
+        )
+        self.assertEqual(
+            sum("[internal-notice]" in line for line in second_captured.output), 1
+        )
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_non_streaming_includes_system_notices_in_response(self, mock_openai):
@@ -7364,11 +7390,15 @@ class ChatRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        result = handler.chat(self.project_id, "继续", max_iterations=2)
+        with self.assertLogs("backend.chat", level="INFO") as captured:
+            result = handler.chat(self.project_id, "继续", max_iterations=2)
 
+        # 2026-07-06 反馈②：写门禁通知转内部日志，非流式响应不再携带 system_notices。
         self.assertIn("system_notices", result)
-        self.assertEqual(len(result["system_notices"]), 1)
-        self.assertEqual(result["system_notices"][0].category, "non_plan_write_blocked")
+        self.assertFalse(result["system_notices"])
+        self.assertTrue(
+            any("[internal-notice] non_plan_write_blocked" in line for line in captured.output)
+        )
 
     @mock.patch("backend.chat.OpenAI")
     def test_chat_retries_when_assistant_claims_outline_written_without_actual_write(self, mock_openai):
@@ -7780,8 +7810,8 @@ class ChatRuntimeTests(unittest.TestCase):
         tool_messages = [event["data"] for event in events if event["type"] == "tool"]
         content_messages = [event["data"] for event in events if event["type"] == "content"]
         tool_call_events = [event for event in events if event["type"] == "tool_call"]
-        # Diagnostic "claimed-write-without-actual-write" stays a plain type:"tool" event.
-        self.assertTrue(any("声称已更新文件但未实际写入" in message for message in tool_messages))
+        # 2026-07-06 反馈②：自我修正旁白转后台日志，SSE 不再出现该诊断；重试行为本身保留。
+        self.assertFalse(any("声称已更新文件但未实际写入" in message for message in tool_messages))
         # The real write_file call is now a structured tool_call event.
         self.assertTrue(any(event.get("tool") == "write_file" for event in tool_call_events))
         self.assertIn("现在已经真实写入 notes。", "".join(content_messages))
@@ -10939,7 +10969,8 @@ class StageClaimMismatchNoticeTests(ChatRuntimeTests):
         notices = handler._turn_context.get("pending_system_notices", [])
         self.assertEqual(len(notices), 1)
         self.assertEqual(notices[0]["category"], "stage_claim_without_checkpoint")
-        self.assertTrue(notices[0]["surface_to_user"])
+        # 2026-07-06 反馈②：阶段声称不符提示改为内部通知（自愈路径，用户无从操作）。
+        self.assertFalse(notices[0]["surface_to_user"])
         self.assertIn("advance_stage", notices[0]["user_action"])
 
     def test_stage_claim_notice_coexists_with_prior_user_visible_notice(self):
@@ -11039,12 +11070,18 @@ class StageClaimMismatchNoticeTests(ChatRuntimeTests):
             self._make_chunk(content="已进入 S2。"),
         ])
 
-        events = list(handler.chat_stream(self.project_id, "继续", max_iterations=1))
+        with self.assertLogs("backend.chat", level="INFO") as captured:
+            events = list(handler.chat_stream(self.project_id, "继续", max_iterations=1))
 
         notices = [event for event in events if event["type"] == "system_notice"]
-        self.assertEqual(len(notices), 1)
-        self.assertEqual(notices[0]["category"], "stage_claim_without_checkpoint")
-        self.assertIn("advance_stage", notices[0]["user_action"])
+        # 2026-07-06 反馈②：SSE 不再出现该通知，改走内部日志。
+        self.assertEqual(notices, [])
+        self.assertTrue(
+            any(
+                "[internal-notice] stage_claim_without_checkpoint" in line
+                for line in captured.output
+            )
+        )
 
     def test_stage_claim_detector_ignores_section_transition_prose(self):
         handler = self._make_handler_with_project()
@@ -11133,12 +11170,17 @@ class StageClaimMismatchNoticeTests(ChatRuntimeTests):
             ],
         )
 
-        result = handler.chat(self.project_id, "继续", max_iterations=1)
+        with self.assertLogs("backend.chat", level="INFO") as captured:
+            result = handler.chat(self.project_id, "继续", max_iterations=1)
 
-        notices = result.get("system_notices") or []
-        self.assertEqual(len(notices), 1)
-        self.assertEqual(notices[0].category, "stage_claim_without_checkpoint")
-        self.assertTrue(notices[0].surface_to_user)
+        # 2026-07-06 反馈②：非流式响应不再携带该通知，改走内部日志。
+        self.assertFalse(result.get("system_notices"))
+        self.assertTrue(
+            any(
+                "[internal-notice] stage_claim_without_checkpoint" in line
+                for line in captured.output
+            )
+        )
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):
@@ -11737,10 +11779,15 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
 
         handler = self._make_handler_with_project()
         self._mark_s0_confirmation_completed(handler)
-        mock_openai.return_value.chat.completions.create.return_value = broken_stream()
+        # 2026-07-06 重试机制：无可见输出的断流会自动重试——每次 create 都要给一条
+        # 新的坏流（复用已耗尽的生成器会被当成空流正常收尾），并 patch sleep 免真实退避等待。
+        mock_openai.return_value.chat.completions.create.side_effect = (
+            lambda **kwargs: broken_stream()
+        )
 
         with mock.patch.object(handler, "_should_emit_s5_welcome", return_value=True), \
-                mock.patch.object(handler, "_mark_s5_welcome_shown") as mark_shown:
+                mock.patch.object(handler, "_mark_s5_welcome_shown") as mark_shown, \
+                mock.patch("backend.chat.time.sleep"):
             events = list(handler.chat_stream(self.project_id, "进入审查", max_iterations=1))
 
         self.assertTrue(any(event.get("type") == "error" for event in events))
@@ -15114,10 +15161,11 @@ class B2BillingWiringTests(ChatRuntimeTests):
         import pathlib
         src = pathlib.Path(__file__).resolve().parents[1].joinpath("backend/chat.py").read_text(encoding="utf-8")
         i = src.index("for chunk in response:")          # 主流式消费锚点（chat.py 仅此处用此短语）
-        # 窗口覆盖循环体（含 tool-pill 早发 pending tool_call）+ 紧随 try/except/finally。
-        # 实测该区间内仅有这一处 finally（主流式 metered-stream finally，close 在 ~4068），
-        # 故 5000 窗口仍唯一锚定它、不会误捕别处无关 close（假绿防护不变）。
-        window = src[i:i + 5000]
+        # 窗口覆盖循环体（含 tool-pill 早发 pending tool_call + 2026-07-06 断流重试分支）
+        # + 紧随 try/except/finally。实测该区间内仅有这一处 finally（主流式 metered-stream
+        # finally），故 8000 窗口仍唯一锚定它、不会误捕别处无关 close（假绿防护不变，
+        # 下方 count==1 断言兜底）。
+        window = src[i:i + 8000]
         self.assertIn("finally:", window)
         self.assertIn("response.close()", window)
         # 防御性：确认窗口内只有这一处 finally（早发块若再膨胀把无关 finally 推进窗口会被这里挡住）。
@@ -15262,4 +15310,135 @@ class B2BillingSettleTests(ChatRuntimeTests):
 for _inh in dir(ChatRuntimeTests):
     if _inh.startswith("test_") and _inh not in B2BillingSettleTests.__dict__:
         setattr(B2BillingSettleTests, _inh, None)
+del _inh
+
+
+class ProviderRetryStreamTests(ChatRuntimeTests):
+    """2026-07-06 重试机制：初次 create + 流中断的瞬态错误自动重试（指数退避 + 用户反馈）。"""
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_stream_retries_midstream_failure_before_visible_output(self, mock_openai):
+        # 「无首包」断流（managed 长链路高发）：尚无任何用户可见输出 → 静默重发本迭代。
+        from backend import provider_retry
+
+        handler = self._make_handler_with_project()
+
+        def broken_stream():
+            raise RuntimeError("no first packet")
+            yield  # pragma: no cover
+
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            broken_stream(),
+            iter([self._make_chunk(content="重试后成功。")]),
+        ]
+
+        with mock.patch("backend.chat.time.sleep") as mock_sleep:
+            events = list(handler.chat_stream(self.project_id, "继续", max_iterations=1))
+
+        contents = "".join(e["data"] for e in events if e["type"] == "content")
+        self.assertIn("重试后成功。", contents)
+        self.assertEqual([e for e in events if e["type"] == "error"], [])
+        retry_lines = [
+            e for e in events
+            if e["type"] == "tool" and "自动重试" in str(e.get("data", ""))
+        ]
+        self.assertEqual(len(retry_lines), 1)
+        mock_sleep.assert_called_once_with(provider_retry.backoff_seconds(1))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_stream_does_not_retry_after_visible_output(self, mock_openai):
+        # 已经流出正文再断 → 不重发（重发会把内容在气泡里重复），维持原报错行为。
+        handler = self._make_handler_with_project()
+
+        def failing_after_content():
+            yield self._make_chunk(content="第一段")
+            raise RuntimeError("mid stream broke")
+
+        mock_openai.return_value.chat.completions.create.side_effect = [failing_after_content()]
+
+        events = list(handler.chat_stream(self.project_id, "继续", max_iterations=1))
+
+        self.assertTrue([e for e in events if e["type"] == "error"])
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 1)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_create_does_not_retry_deterministic_4xx(self, mock_openai):
+        # 确定性客户端错误（400）重试只会重复失败：立即报错、不睡退避。
+        handler = self._make_handler_with_project()
+        err = RuntimeError("bad request")
+        err.status_code = 400
+        mock_openai.return_value.chat.completions.create.side_effect = err
+
+        with mock.patch("backend.chat.time.sleep") as mock_sleep:
+            events = list(handler.chat_stream(self.project_id, "继续", max_iterations=1))
+
+        self.assertTrue([e for e in events if e["type"] == "error"])
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_create_retries_transient_then_succeeds(self, mock_openai):
+        handler = self._make_handler_with_project()
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            ConnectionError("connection reset"),
+            iter([self._make_chunk(content="恢复了。")]),
+        ]
+
+        with mock.patch("backend.chat.time.sleep"):
+            events = list(handler.chat_stream(self.project_id, "继续", max_iterations=1))
+
+        contents = "".join(e["data"] for e in events if e["type"] == "content")
+        self.assertIn("恢复了。", contents)
+        self.assertEqual([e for e in events if e["type"] == "error"], [])
+        retry_lines = [
+            e for e in events
+            if e["type"] == "tool" and "自动重试" in str(e.get("data", ""))
+        ]
+        self.assertEqual(len(retry_lines), 1)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_stream_retry_budget_exhausts_to_single_error(self, mock_openai):
+        from backend import provider_retry
+
+        handler = self._make_handler_with_project()
+
+        def broken_stream():
+            raise RuntimeError("still broken")
+            yield  # pragma: no cover
+
+        mock_openai.return_value.chat.completions.create.side_effect = (
+            lambda **kwargs: broken_stream()
+        )
+
+        with mock.patch("backend.chat.time.sleep"):
+            events = list(handler.chat_stream(self.project_id, "继续", max_iterations=1))
+
+        errors = [e for e in events if e["type"] == "error"]
+        self.assertEqual(len(errors), 1)
+        # 1 次原始 + STREAM_MAX_RETRIES 次重试后收敛为一条硬错误。
+        self.assertEqual(
+            mock_openai.return_value.chat.completions.create.call_count,
+            1 + provider_retry.STREAM_MAX_RETRIES,
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_nostream_create_retries_transient_then_succeeds(self, mock_openai):
+        handler = self._make_handler_with_project()
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            ConnectionError("connection reset"),
+            SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(message=SimpleNamespace(content="恢复了。", tool_calls=[]))],
+            ),
+        ]
+
+        with mock.patch("backend.chat.time.sleep"):
+            result = handler.chat(self.project_id, "继续", max_iterations=1)
+
+        self.assertIn("恢复了。", result["content"])
+
+
+for _inh in dir(ChatRuntimeTests):
+    if _inh.startswith("test_") and _inh not in ProviderRetryStreamTests.__dict__:
+        setattr(ProviderRetryStreamTests, _inh, None)
 del _inh

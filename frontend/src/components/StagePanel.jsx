@@ -128,6 +128,7 @@ export default function StagePanel({
   onExportDraft,
   onCheckpointSet,
   onInsertPrompt,
+  onSendPrompt,
   reviewRunning = false,
 }) {
   const summary = summarizeWorkspace(workspace)
@@ -212,6 +213,7 @@ export default function StagePanel({
           summary={summary}
           onCheckpointSet={onCheckpointSet}
           onInsertPrompt={onInsertPrompt}
+          onSendPrompt={onSendPrompt}
           stageToolsRunning={reviewRunning}
         />
 

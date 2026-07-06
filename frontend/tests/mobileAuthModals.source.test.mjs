@@ -33,14 +33,14 @@ test("SettingsModal 窄屏：宽收缩 + 限高滚动", () => {
   assert.match(s, /overflow-y-auto/);
 });
 
-test("AdminPanel 窄屏：宽收缩 + 限高滚动 + 用户表横向滚动 + 内层 min-w", () => {
-  const s = read("AdminPanel.jsx");
-  assert.match(s, /w-\[min\(680px,calc\(100vw-32px\)\)\]/);
-  assert.match(s, /max-h-\[calc\(100dvh-32px\)\]/);
+test("AdminPage（独立页）窄屏：表格横向滚动 + 内层 min-w + 响应式栅格", () => {
+  // 2026-07-06：AdminPanel 弹窗升级为 /admin 独立页面，窄屏约束改到页内表格容器。
+  const s = read("AdminPage.jsx");
   assert.match(s, /overflow-x-auto/);
-  // 内层 role=table 带 min-w-[600px]（桌面 ≤630px 内容区不横滚、窄屏才横滚）
-  const tableTag = s.match(/<div role="table"[^>]*>/)?.[0] || "";
-  assert.match(tableTag, /min-w-\[600px\]/);
+  assert.match(s, /min-w-\[600px\]/);   // 用户表内层
+  assert.match(s, /min-w-\[560px\]/);   // 用量明细内层
+  assert.match(s, /min-\[640px\]:grid-cols-4/);   // 概览卡片窄屏回退 2 列
+  assert.match(s, /min-\[720px\]:grid-cols-2/);   // 邀请码/域名窄屏回退单列
 });
 
 test("ProjectCreate/Settings 双列窄屏回退单列", () => {

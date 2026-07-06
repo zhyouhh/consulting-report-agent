@@ -163,3 +163,51 @@ class AdminWriteEndpointTests(AdminApiTestBase):
         self.assertEqual(resp.status_code, 200)
         active = [u for u in accounts.list_all_users() if u["is_admin"] and not u["disabled"]]
         self.assertGreaterEqual(len(active), 1)
+
+
+class AdminUsageHistoryTests(AdminApiTestBase):
+    """2026-07-06 /admin 独立页面：历史用量端点。"""
+
+    def test_usage_requires_admin(self):
+        self._login_as_regular_user()
+        resp = self.client.get("/api/admin/usage")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_usage_returns_rows_with_username_join(self):
+        from backend import metering
+        self._login_as_admin()
+        uid = accounts.create_user("grace", "pw-123456")
+        today = metering.today_shanghai()
+        accounts.add_usage(uid, today, cost_micro_yuan=1_234_000, hit=1000, miss=200, output=300)
+
+        resp = self.client.get("/api/admin/usage?days=7")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["today"], today)
+        rows = [r for r in body["rows"] if r["uid"] == uid]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["username"], "grace")
+        self.assertEqual(rows[0]["day"], today)
+        self.assertAlmostEqual(rows[0]["cost_yuan"], 1.234)
+        self.assertEqual(rows[0]["cache_hit_tokens"], 1000)
+        self.assertEqual(rows[0]["cache_miss_tokens"], 200)
+        self.assertEqual(rows[0]["output_tokens"], 300)
+
+    def test_usage_days_clamped_and_old_rows_excluded(self):
+        from backend import metering
+        self._login_as_admin()
+        uid = accounts.create_user("henry", "pw-123456")
+        today = metering.today_shanghai()
+        accounts.add_usage(uid, today, 1_000_000, 10, 10, 10)
+        accounts.add_usage(uid, "2000-01-01", 9_000_000, 90, 90, 90)   # 远古行必须被窗口排除
+
+        resp = self.client.get("/api/admin/usage?days=99999")   # 夹到 90
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        days = [r["day"] for r in body["rows"]]
+        self.assertIn(today, days)
+        self.assertNotIn("2000-01-01", days)
+
+        resp_min = self.client.get("/api/admin/usage?days=-5")   # 夹到 1 → since=today
+        self.assertEqual(resp_min.status_code, 200)
+        self.assertEqual(resp_min.json()["since"], today)

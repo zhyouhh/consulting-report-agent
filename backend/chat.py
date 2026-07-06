@@ -35,6 +35,7 @@ from .independent_review import (
     get_independent_review_lock,
 )
 from . import metering  # 用模块限定访问 metering.QuotaExceededError 等（见 __init__ 注释：reload 安全）
+from . import provider_retry  # 瞬态错误分类 + 指数退避（与 independent_review 共享）
 from .models import SystemNotice
 from .search_pool import SearchRouter
 from .search_providers import (
@@ -2739,14 +2740,15 @@ class ChatHandler:
             "不要只口头说明已完成，也不要把工具调用写在聊天正文里。"
         )
     def _build_required_write_failure_message(self, missing_paths: list[str]) -> str:
-        joined = "、".join(f"`{path}`" for path in missing_paths)
+        # 2026-07-06 反馈②连带：这是重试耗尽后直接展示给用户的兜底文案——写人话、
+        # 引导下一步动作，不出现工具名/文件路径等内部术语（内部细节走日志留痕）。
+        logger.info(
+            "[self-heal] 要求写入的报告文件重试耗尽仍未更新: %s", missing_paths
+        )
         return (
-            f"这轮没有检测到报告草稿 {joined} 被实际更新。"
-            "请重新发送更新报告正文的请求；我会要求模型按意图调用 "
-            "`append_report_draft` 完成新增/续写，或先 `read_file` 再调用 "
-            "`edit_file(file_path, old_string, new_string)` 修改已有正文；"
-            "`old_string` 需要锚定草稿中唯一且足够具体的原文。"
-            "不会对 `content/report_draft_v1.md` 使用 `write_file`。"
+            "抱歉，这一轮尝试更新报告正文没有成功，草稿内容保持原样、没有丢失。"
+            "请把刚才的要求再发一次；如果还是不行，试着把要求说得更具体一些"
+            "（比如指明要修改哪一章、补充哪部分内容）。"
         )
     def _build_self_correction_loop_feedback(self) -> str:
         return (
@@ -2890,6 +2892,8 @@ class ChatHandler:
         required_write_retries = 0
         self_correction_retries = 0
         system_trigger_no_tools_retries = 0
+        # 流中断瞬态重试的 per-turn 总预算（防抖动网络下跨迭代无界重试）。
+        stream_retry_attempts = 0
         assistant_message = ""
         buffer_required_write_content = bool(obligation_write_snapshots)
         compressed = False
@@ -2926,7 +2930,12 @@ class ChatHandler:
                 return
 
             include_usage_requested = self.settings.mode == "managed"
-            for retry in range(2):
+            # 2026-07-06 重试机制：初次 create 对瞬态错误（连接/超时/429/5xx）指数退避
+            # 重试并向用户反馈进度；确定性 4xx 立即失败不浪费等待。usage 参数兼容回退
+            # （上游不认 stream_options）单独计，不占瞬态重试次数。
+            create_attempt = 0
+            usage_param_retry_used = False
+            while True:
                 request_kwargs = {
                     "model": active_model,
                     "messages": conversation,
@@ -2953,11 +2962,34 @@ class ChatHandler:
                     yield {"type": "error", "data": self._format_quota_error(qe)}
                     return
                 except Exception as e:
-                    if include_usage_requested and self._should_retry_stream_without_usage(e):
+                    if (
+                        include_usage_requested
+                        and not usage_param_retry_used
+                        and self._should_retry_stream_without_usage(e)
+                    ):
+                        usage_param_retry_used = True
                         include_usage_requested = False
                         continue
-                    if retry < 1:
-                        time.sleep(2)
+                    create_attempt += 1
+                    if (
+                        create_attempt < provider_retry.CREATE_MAX_ATTEMPTS
+                        and provider_retry.is_retryable_provider_error(e)
+                    ):
+                        delay = provider_retry.backoff_seconds(create_attempt)
+                        logger.warning(
+                            "[provider-retry] create 失败，第 %s/%s 次重试（%.0fs 后）: %s",
+                            create_attempt,
+                            provider_retry.CREATE_MAX_ATTEMPTS - 1,
+                            delay,
+                            e,
+                        )
+                        yield {
+                            "type": "tool",
+                            "data": provider_retry.retry_status_text(
+                                create_attempt, provider_retry.CREATE_MAX_ATTEMPTS - 1
+                            ),
+                        }
+                        time.sleep(delay)
                         continue
                     self._debug_dump_request(request_kwargs, label="stream", error=e, note=f"iteration={iterations}")
                     yield {
@@ -2982,9 +3014,12 @@ class ChatHandler:
             stream_buffer = ""
             parser = ThinkingStreamParser()
             self_correction_loop_detected = False
+            # 本迭代是否已向前端 yield 过用户可见输出（正文/思考/工具 pill）。
+            # 流中途断开时以此判定能否静默重发本迭代（重发已见内容会在气泡里重复）。
+            iteration_visible_output = False
 
             def emit_parsed_stream_events(parsed_events: list[dict]):
-                nonlocal accumulated, stream_buffer
+                nonlocal accumulated, stream_buffer, iteration_visible_output
                 for parsed_event in parsed_events:
                     event_type = parsed_event.get("type")
                     event_data = parsed_event.get("data")
@@ -2994,6 +3029,7 @@ class ChatHandler:
                         collected_message["reasoning_content"] = (
                             collected_message.get("reasoning_content", "") + event_data
                         )
+                        iteration_visible_output = True
                         yield parsed_event
                         continue
                     if event_type != "content":
@@ -3005,6 +3041,7 @@ class ChatHandler:
                     if not buffer_required_write_content:
                         safe, held = stream_split_safe_tail(stream_buffer)
                         if safe:
+                            iteration_visible_output = True
                             yield {"type": "content", "data": safe}
                         stream_buffer = held
 
@@ -3056,6 +3093,7 @@ class ChatHandler:
                                 # 前端按 id 合并。汇报轮丢工具，故跳过早发以免孤儿 pending pill。
                                 announced_tool_call_indexes.add(tc_chunk.index)
                                 announced_pending[tc["id"]] = tc["function"]["name"]
+                                iteration_visible_output = True
                                 yield {
                                     "type": "tool_call",
                                     "id": tc["id"],
@@ -3065,6 +3103,34 @@ class ChatHandler:
                                     ),
                                 }
             except Exception as e:
+                # 2026-07-06 重试机制：流中途断开（含「无首包」读超时——managed 长链路
+                # 的高发故障）只要本迭代尚无任何用户可见输出，对瞬态错误退避后重发本迭代
+                # ——per-iteration 状态（collected/parser/accumulated）都会在循环顶重建，
+                # current_turn_messages 未动，重发是干净的。已有可见输出则维持原行为
+                # （报错并保留已流式内容），避免重发把内容在气泡里重复一遍。
+                if (
+                    not iteration_visible_output
+                    and stream_retry_attempts < provider_retry.STREAM_MAX_RETRIES
+                    and provider_retry.is_retryable_provider_error(e)
+                ):
+                    stream_retry_attempts += 1
+                    delay = provider_retry.backoff_seconds(stream_retry_attempts)
+                    logger.warning(
+                        "[provider-retry] 流中断，第 %s/%s 次重试（%.0fs 后）: %s",
+                        stream_retry_attempts,
+                        provider_retry.STREAM_MAX_RETRIES,
+                        delay,
+                        e,
+                    )
+                    yield {
+                        "type": "tool",
+                        "data": provider_retry.retry_status_text(
+                            stream_retry_attempts, provider_retry.STREAM_MAX_RETRIES
+                        ),
+                    }
+                    time.sleep(delay)
+                    # continue 会先走 finally 关闭本次 response（恰好结算一次），再重建迭代。
+                    continue
                 yield from emit_parsed_stream_events(parser.flush())
                 self._debug_dump_request(request_kwargs, label="stream-iter", error=e, note=f"iteration={iterations}")
                 yield {
@@ -3099,20 +3165,15 @@ class ChatHandler:
                 # 这里在 _execute_tool 之前一律拦下，绝不执行任何工具、不产生副作用。
                 if accumulated.strip():
                     # 模式①：本轮已有可见文本，直接忽略 tool_calls，用 content 正常收尾。
-                    yield {
-                        "type": "tool",
-                        "data": "⚠️ 本轮为纯转述（禁工具），已忽略上游返回的工具调用。",
-                    }
+                    # 2026-07-06 反馈②：自我修正旁白不再推给用户（下同 [self-heal] 日志留痕）。
+                    logger.info("[self-heal] system_trigger_no_tools: 已忽略上游返回的工具调用（本轮已有可见文本）")
                     collected_message["tool_calls"] = []
                 elif system_trigger_no_tools_retries < self.MAX_SYSTEM_TRIGGER_NO_TOOLS_RETRIES:
                     # 模式②：只有 tool_call 无可见文本，注入 corrective 让模型改用纯文本汇报。
                     # 用"纯文本 assistant + user 反馈"做合规隔板，保持 user/model 严格交替，
                     # 避免连续 user 触发官渠角色交替 400。
                     system_trigger_no_tools_retries += 1
-                    yield {
-                        "type": "tool",
-                        "data": "⚠️ 本轮为纯转述（禁工具），正在要求模型直接用文字向用户汇报。",
-                    }
+                    logger.info("[self-heal] system_trigger_no_tools: 注入 corrective 要求模型改用纯文本汇报")
                     current_turn_messages.append({
                         "role": "assistant",
                         "content": "（本轮为纯转述，不调用任何工具。）",
@@ -3128,10 +3189,7 @@ class ChatHandler:
                     continue
                 else:
                     # 重试上限耗尽且仍无可见文本：丢弃 tool_calls，走空回复兜底，绝不执行工具。
-                    yield {
-                        "type": "tool",
-                        "data": "⚠️ 本轮为纯转述（禁工具），已丢弃上游返回的工具调用。",
-                    }
+                    logger.info("[self-heal] system_trigger_no_tools: 重试耗尽，已丢弃上游返回的工具调用")
                     collected_message["tool_calls"] = []
 
             if collected_message["tool_calls"]:
@@ -3156,10 +3214,7 @@ class ChatHandler:
 
                 if malformed_reasons:
                     self._turn_context["s0_non_whitelist_tool_attempted"] = True
-                    yield {
-                        "type": "tool",
-                        "data": "⚠️ 上条 tool_calls 被上游合并成畸形条目，本轮作废并让模型重发。",
-                    }
+                    logger.info("[self-heal] 上条 tool_calls 被上游合并成畸形条目，本轮作废并让模型重发: %s", "；".join(malformed_reasons))
                     # 本轮作废、不执行任何工具——收尾已早发的 pending tool_call（同 id error），
                     # 否则前端 pill 永久转圈。重试会以新 id 产生新 pill（可接受）。诊断事件不替换。
                     yield from self._flush_pending_tool_calls(announced_pending, "工具参数无效")
@@ -3246,10 +3301,7 @@ class ChatHandler:
                     and self_correction_retries < self.MAX_SELF_CORRECTION_RETRIES
                 ):
                     self_correction_retries += 1
-                    yield {
-                        "type": "tool",
-                        "data": "⚠️ 检测到助手进入自我修正循环，正在要求它停止反思文本并重试。",
-                    }
+                    logger.info("[self-heal] 检测到助手自我修正循环，注入反馈要求重试")
                     current_turn_messages.append({"role": "assistant", "content": candidate_message})
                     current_turn_messages.append({
                         "role": "user",
@@ -3259,10 +3311,7 @@ class ChatHandler:
                 missing_writes = self._get_missing_expected_writes(candidate_message, successful_writes)
                 if missing_writes and missing_write_retries < self.MAX_MISSING_WRITE_RETRIES:
                     missing_write_retries += 1
-                    yield {
-                        "type": "tool",
-                        "data": "⚠️ 检测到上条回复声称已更新文件但未实际写入，正在要求助手补做真实落盘。",
-                    }
+                    logger.info("[self-heal] 上条回复声称已更新文件但未实际写入，注入反馈要求补做真实落盘: %s", missing_writes)
                     current_turn_messages.append({"role": "assistant", "content": candidate_message})
                     current_turn_messages.append({
                         "role": "user",
@@ -3277,10 +3326,7 @@ class ChatHandler:
                 if not required_satisfied:
                     if required_write_retries < self.MAX_MISSING_WRITE_RETRIES:
                         required_write_retries += 1
-                        yield {
-                            "type": "tool",
-                            "data": "⚠️ 本轮要求更新报告正文，但未检测到草稿文件变化，正在要求助手调用文件工具重试。",
-                        }
+                        logger.info("[self-heal] 本轮要求更新报告正文但未检测到草稿变化，注入反馈要求重试: %s", missing_required_writes)
                         current_turn_messages.append({"role": "assistant", "content": candidate_message})
                         current_turn_messages.append({
                             "role": "user",
@@ -3433,7 +3479,9 @@ class ChatHandler:
                 self._turn_context = self._new_turn_context(can_write_non_plan=True)
                 return {"content": str(exc), "token_usage": None}
 
-            for retry in range(2):
+            # 2026-07-06 重试机制（非流式版）：瞬态错误指数退避重试，确定性 4xx 立即失败。
+            create_attempt = 0
+            while True:
                 timeout = 120.0 if "v3.2" in active_model.lower() else 30.0
                 request_kwargs = {
                     "model": active_model,
@@ -3456,8 +3504,20 @@ class ChatHandler:
                     return {"content": self._format_quota_error(qe), "token_usage": None,
                             "system_notices": None}
                 except Exception as e:
-                    if retry < 1:
-                        time.sleep(2)
+                    create_attempt += 1
+                    if (
+                        create_attempt < provider_retry.CREATE_MAX_ATTEMPTS
+                        and provider_retry.is_retryable_provider_error(e)
+                    ):
+                        delay = provider_retry.backoff_seconds(create_attempt)
+                        logger.warning(
+                            "[provider-retry] nostream create 失败，第 %s/%s 次重试（%.0fs 后）: %s",
+                            create_attempt,
+                            provider_retry.CREATE_MAX_ATTEMPTS - 1,
+                            delay,
+                            e,
+                        )
+                        time.sleep(delay)
                         continue
                     self._debug_dump_request(
                         request_kwargs,
@@ -4539,6 +4599,9 @@ class ChatHandler:
             )
 
         reason = self._canonical_write_file_rejected_message()
+        # 2026-07-06 反馈②：写门禁提示是「模型撞门→模型自愈」的内部对话，用户无从操作
+        # （下同：本文件所有 write-gate 类 notice 一律 surface_to_user=False，
+        # 走 _yield_user_visible_notices 的 [internal-notice] 日志留痕，后台可查）。
         self._emit_system_notice_once(
             category="report_draft_destructive_write_blocked",
             path=self.skill_engine.REPORT_DRAFT_PATH,
@@ -4547,7 +4610,7 @@ class ChatHandler:
                 "正文首次成稿或续写请用 `append_report_draft`；"
                 "修改已有正文请先 `read_file`，再用 `edit_file`。"
             ),
-            surface_to_user=True,
+            surface_to_user=False,
         )
         return {"status": "error", "message": reason}
 
@@ -5248,7 +5311,7 @@ class ChatHandler:
                 path=normalized_preview,
                 reason=reason,
                 user_action=f"请改写到 `{self.skill_engine.REPORT_DRAFT_PATH}` 后再继续。",
-                surface_to_user=True,
+                surface_to_user=False,
             )
             return {"status": "error", "message": reason}
         if project_path and normalized_early in self._S0_BLOCKED_PLAN_FILES:
@@ -5266,7 +5329,7 @@ class ChatHandler:
                         "请先按 SKILL.md §S0 发一轮 3-5 个打包追问，"
                         "用户回答或跳过后再写正式产出文件。"
                     ),
-                    surface_to_user=True,
+                    surface_to_user=False,
                 )
                 return {"status": "error", "message": reason}
         non_plan_write_block_reason = self._non_plan_write_block_reason(project_id, file_path)
@@ -5277,7 +5340,7 @@ class ChatHandler:
                 path=None,
                 reason=reason,
                 user_action="请先让用户确认大纲或明确要求继续正文后，再尝试写正式内容。",
-                surface_to_user=True,
+                surface_to_user=False,
             )
             return {"status": "error", "message": reason}
         if self._should_require_fetch_url_before_write(project_id, file_path):
@@ -5300,7 +5363,7 @@ class ChatHandler:
                 path=normalized_path,
                 reason=stage_write_error,
                 user_action=self._stage_write_block_user_action(normalized_path),
-                surface_to_user=True,
+                surface_to_user=False,
             )
             return {"status": "error", "message": stage_write_error}
         if source_tool_name == "write_file":
@@ -5318,7 +5381,7 @@ class ChatHandler:
                         "正文首次成稿或续写请用 `append_report_draft`；"
                         "修改已有正文请先 `read_file`，再用 `edit_file`。"
                     ),
-                    surface_to_user=True,
+                    surface_to_user=False,
                 )
                 return {"status": "error", "message": canonical_write_file_error}
         mutation_limit_error = self._validate_canonical_draft_turn_mutation_limit(
@@ -5330,7 +5393,7 @@ class ChatHandler:
                 path=normalized_path,
                 reason=mutation_limit_error,
                 user_action="请基于当前已落盘的正文结果直接向用户汇报，本轮不要继续改动正文。",
-                surface_to_user=True,
+                surface_to_user=False,
             )
             return self._canonical_draft_tool_error_result(project_id, mutation_limit_error)
         if self.skill_engine.is_protected_stage_checkpoints_path(normalized_path):
@@ -5343,7 +5406,7 @@ class ChatHandler:
                 path=normalized_path,
                 reason=reason,
                 user_action="请调用 advance_stage 推进阶段；不要尝试直接写这个文件。",
-                surface_to_user=True,
+                surface_to_user=False,
             )
             return {"status": "error", "message": reason}
         read_before_write_error = self._validate_existing_file_read_before_write(
@@ -5373,7 +5436,7 @@ class ChatHandler:
                 path=normalized_path,
                 reason=signature_error,
                 user_action="请联系用户在右侧工作区完成对应的确认后再写入",
-                surface_to_user=True,
+                surface_to_user=False,
             )
             return {"status": "error", "message": signature_error}
         analysis_refs_error = self._validate_analysis_notes_refs_for_write(
@@ -7045,7 +7108,7 @@ class ChatHandler:
             path=None,
             reason="助手声称推进阶段，但本轮没有成功调用 advance_stage。",
             user_action="请先调用 advance_stage；如果阶段未推进，请明确说明当前仍停留在原阶段。",
-            surface_to_user=True,
+            surface_to_user=False,
         )
 
     def _emit_system_notice_once(

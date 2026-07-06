@@ -4,7 +4,6 @@ import Sidebar from './components/Sidebar'
 import Login from './components/Login'
 import ChatPanel from './components/ChatPanel'
 import WorkspacePanel from './components/WorkspacePanel'
-import AdminPanel from './components/AdminPanel'
 import ForcePasswordChange from './components/ForcePasswordChange'
 import ErrorBoundary from './components/ErrorBoundary'
 import axios from 'axios'
@@ -39,7 +38,9 @@ function App() {
   const [injectedPrompt, setInjectedPrompt] = useState(null)
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
-  const [showAdmin, setShowAdmin] = useState(false)
+  // 管理控制台已是独立页面（/admin，2026-07-06）：新标签打开，保住主应用内存态
+  // （ChatPanel 消息/工具记录在导航离开时会丢）。
+  const openAdmin = () => { window.open('/admin', '_blank', 'noopener') }
   // 设备形态首屏锁定：触屏（pointer: coarse）走移动壳，桌面走原三栏。刻意只读一次、无 matchMedia 监听——
   // 桌面缩窗永不变形（移动适配按设备而非按宽度），且避免运行时切壳卸载子树丢状态。
   const [isMobile] = useState(() => isCoarsePointer())
@@ -412,7 +413,7 @@ function App() {
           onDeleteProject={deleteProject}
           onSettingsSaved={loadSettings}
           onLoggedOut={() => setAuthUser(null)}
-          onOpenAdmin={() => setShowAdmin(true)}
+          onOpenAdmin={openAdmin}
           onToggleTheme={onToggleTheme}
           onMaterialsMerged={handleMaterialsMerged}
           onMaterialDeleted={handleMaterialDeleted}
@@ -434,7 +435,7 @@ function App() {
             onSettingsSaved={loadSettings}
             authUser={authUser}
             onLoggedOut={() => setAuthUser(null)}
-            onOpenAdmin={() => setShowAdmin(true)}
+            onOpenAdmin={openAdmin}
             theme={theme}
             onToggleTheme={onToggleTheme}
             currentStageCode={workspaceProjectId === currentProjectId ? workspace?.stage_code : undefined}
@@ -478,6 +479,7 @@ function App() {
                 onProjectMutated={handleProjectMutated}
                 onCheckpointSet={loadWorkspace}
                 onInsertPrompt={(text) => setInjectedPrompt(text)}
+                onSendPrompt={(text) => chatPanelRef.current?.sendUserMessage(text) ?? false}
                 onTriggerSystemTurn={(triggerType, metadata) => chatPanelRef.current?.triggerSystemTurn(triggerType, metadata)}
                 onDropPendingReviewTriggers={(triggerType) => chatPanelRef.current?.dropPendingReviewTriggers(triggerType)}
               />
@@ -486,7 +488,6 @@ function App() {
         </div>
       </div>
       )}
-      {showAdmin && authUser?.is_admin && <AdminPanel onClose={() => setShowAdmin(false)} />}
     </ErrorBoundary>
   )
 }

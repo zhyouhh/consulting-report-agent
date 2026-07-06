@@ -179,7 +179,8 @@ test("ChatPanel exposes dropPendingReviewTriggers and prunes via dropPendingTrig
   const src = chatPanelSrc();
   assert.match(src, /dropPendingTriggersByType\(/);
   // exposed on the imperative handle so WorkspacePanel can prune at run-start.
-  assert.match(src, /\{ triggerSystemTurn, dropPendingReviewTriggers \}/);
+  // （2026-07-06 反馈①后 handle 还带 sendUserMessage——阶段按钮代发入口。）
+  assert.match(src, /\{ triggerSystemTurn, dropPendingReviewTriggers, sendUserMessage \}/);
 });
 
 test("ReviewChatWindow isMobile (default false): portal fullscreen, no drag, stop-label", () => {

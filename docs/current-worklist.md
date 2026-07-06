@@ -9,6 +9,32 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
+最后更新：2026-07-06（**试用反馈两问题 ✅ 已实施 + 模型调用自动重试 + /admin 独立管理页 + mac 4 测试结清**，详见下条；2026-07-04 条的方案背景保留作历史）：
+
+**本批交付（2026-07-06，四件套 + 顺手项）**：
+- **反馈① ✅**：S1「确认大纲」/ S7「归档」按钮从直连 checkpoint API 改为**代用户发确认消息走主模型**（`ChatPanel.sendUserMessage` 暴露 imperative handle → App/MobileShell `onSendPrompt` → `StageAdvanceControl.sendConfirmMessage`；忙时 toast 提示不静默）。模型撞门禁自愈缺失文件（research-plan.md / delivery-log.md）再推进。S4/S5 保持直连、S6 不动（演示功能未做）。纯前端，锁测 `stageAdvanceControl.test.mjs`。
+- **反馈② ✅**：内部门禁提示不再泄漏给用户——A 类 10 处 write-gate `system_notice` 全翻 `surface_to_user=False`（走 `[internal-notice]` 日志）；B 类 7 处 `type:"tool"` 自我修正旁白改 `[self-heal]` 后台日志；C 类硬错误保留；`_build_required_write_failure_message` 兜底文案改人话（无工具名/路径）。净效果：用户只见正常回复/工具 pill/硬错误。
+- **模型调用自动重试 ✅**（原「managed 长链路偶发 timeout/无首包」的正面解）：新叶子模块 `backend/provider_retry.py`（瞬态分类：无状态码网络错误 + 408/425/429/5xx；确定性 4xx 不重试；指数退避 2s/4s/8s 封顶）。chat.py 流式 create 3 次尝试 + 用户可见「正在自动重试」状态行；**流中途断开（含无首包）在「本迭代尚无用户可见输出」时静默重发本迭代**（per-turn 预算 3 次，`iteration_visible_output` 判定）；非流式同款（无 yield）；independent_review create 同款（progress 事件透状态、断流靠断点续审）。回归 `tests/test_provider_retry.py` + `ProviderRetryStreamTests`。
+- **/admin 独立管理页 ✅**：AdminPanel 弹窗升级为 `域名/admin` 整页（`main.jsx` pathname 分流 + 后端 `_SPAStaticFiles._SPA_FALLBACK_ROUTES` 白名单回退 index.html 一跳直达；侧栏盾牌按钮新标签打开保主应用内存态）。新增 `GET /api/admin/usage?days=30`（accounts.get_usage_history，(uid,day) 行粒度 + username join）；页面 = 概览 4 卡（今日/7 日/30 日消耗、注册用户）+ 近 30 日趋势柱图（纯 div/token 体系、hover 明细）+ 用量明细表（按用户筛选、命中率列）+ 原用户管理/邀请码/允许域名全保留（额度列仍可编辑）。鉴权自理（未登录/非 admin/需改密三拦截态）。浏览器 E2E smoke 过（深浅主题/拦截态/数据渲染）。回归 `AdminUsageHistoryTests`/`SpaFallbackRouteTests`/`adminUsage.test.mjs`/`adminPage.source.test.mjs`。
+- **顺手项 ✅**：mac `/var→/private/var` 4 个已知测试失败结清（断言两侧 `resolve()`，Windows 恒等无影响）——后端 1554 首次 mac 全绿；顺带修掉旧 create-retry 循环「usage 参数回退在最后一次尝试触发时复用陈旧 response」的潜伏 bug（重试循环重构为显式 while + 计数）。
+
+最后更新：2026-07-04（领导试用反馈 2 个 UX 问题——已排查根因 + 方案讨论定稿；**✅ 2026-07-06 已按此方案实施，见上条**）：
+
+**问题一：阶段推进按钮点了报错、但在聊天里打字确认却能自愈（S1「确认大纲」+ 同类 S6/S7）**
+- **根因**：阶段按钮（`StageAdvanceControl.jsx`）走 `postCheckpoint` **直连** `POST /checkpoints/{name}`（`main.py:1236`）→ `record_stage_checkpoint`→`_validate_stage_checkpoint_transition` 撞门禁抛 `ValueError`→端点 400→前端 `showError` toast **死路**（无模型在环、没人补缺失文件）；而聊天打字确认 = 主模型调 `advance_stage` 撞同一门禁→**看到报错文本→自己 `write_file` 补缺失文件→重推→过**（自愈）。且 S1 按钮 enable 条件 `isS1ConfirmOutlineEnabled`（`workspaceSummary.js:82`）**只看 `outline_ready`+`methodology_declared`、不看 `research_plan_ready`**——outline 一写完按钮就亮、还催用户点，但后端此刻要 research-plan.md 会拒。
+- **各阶段门禁自愈性核查（已逐个读 `_stage_*_completion_state` + `_validate_stage_checkpoint_transition`）**：
+  - **✅ 可代发自愈（门禁卡的是「模型可写文件」、且路径真实可达）**：**S1=research-plan.md**（`skill.py:609`）；**S7=delivery-log.md**（`skill.py:820` `_has_effective_delivery_log`）← 用户记的「点归档提示没有归档报告」就是这个。S7 到达时上游 checkpoint 已过（`next_stage_hint` `skill.py:1756`），残余只差这一个模型写的文件。
+  - **⏸️ S6 演示同属此类门禁（presentation-plan.md，`skill.py:736`）但本次排除**：① **演示材料功能未做**——presentation-plan.md 只是计划 md（模板仅「演示目标/演示结构」两节），**无任何真实 PPT/slides 生成**，「演示准备完成」只是打 checkpoint；② **默认不可达**——建项目弹窗 `ProjectCreateModal` 只有〔报告类型/主题/截止/篇幅〕**无「交付形式」选项**、`project-overview.md` 模板硬编 `交付形式: 仅报告`、`_extract_delivery_mode`（`skill.py:1930`）仅当「演示」出现在交付形式行才返 `报告+演示`，即**只有 S0 访谈里用户明确要演示、模型手动改 overview 才进 S6**。故 S6 待演示功能真正落地再套同一代发模式。（附带：整套 S6 stepper 段/按钮/门禁/presentation-plan.md 目前是半截遗留，将来补齐 or 裁掉是独立产品决策。）
+  - **❌ 不能代发、保持直连**：S4「完成撰写开始审查」卡的是**内容阈值**（报告字数≥floor / data-log≥N源 / analysis≥N引用，`skill.py:642-653`）——非一次写文件能补，且按钮字数不够本就不显（`isS4ReviewButtonVisible`）；S5「审查通过」卡的是**独立审查报告**（`independent-review.md`，主模型**硬禁写**、须用户点「独立审查」，`skill.py:694`），报错已点名按钮、文案合理。
+- **方案（用户拍板 = 永远代发）**：把 **S1/S7** 两个按钮从「直连 checkpoint API」改成「系统代用户发一条确认消息走主模型」（复用 `ChatPanel.triggerSystemTurn` / system-trigger 机制），模型撞门禁自愈缺失文件再推进；**S4/S5 保持直连不动，S6 演示功能未做暂不涉及**。取舍：就绪时也多走一个模型轮（用户接受，低频操作、且更透明）。
+
+**问题二：给模型看的内部门禁提示，被用户看到（如「写入 analysis-notes.md 前需先补足 data-log 有效来源 11/12…请先通过 advance_stage 推进」）**
+- **完整盘点（用户会看到的「内部提示」三套机制）**：**A. 橙色警告框** `system_notice`（`surface_to_user=True`，8 类 write-gate block：stage_write_blocked/s0_write_blocked/non_plan_write_blocked/report_draft_path_blocked/report_draft_destructive_write_blocked/checkpoint_forge_blocked/write_blocked(signature)/stage_claim_without_checkpoint；`chat.py:5251/5269/5280/5303/5321/5346/5376/7048`，渲染 `ChatPanel.jsx:921`）；**B. ⚠️ 诊断行** `type:"tool"`（7 条模型自我修正旁白，含用户记得的「声称已更新文件但未实际写入」，`chat.py:3104/3114/3133/3161/3251/3264/3282`，渲染 `ChatPanel.jsx:547`）；**C. 硬错误** `type:"error"`（断流/上游报错/额度/审查状态——**该保留给用户**）。
+- **判断（用户假设成立）**：A+B **无一条真需要用户动手**，全是「模型撞后端门→模型自己重试/改路」；用户对「请通过 advance_stage 推进」什么都做不了。唯一文案提「联系用户」的 signature 那条 gate 的是 **N7 已退役的 `review-checklist.md`**（`_has_effective_review_checklist` 死代码）+ S7 归档边角（归档另有按钮承载），基本是死的。现状本身不自洽：同为模型自愈的写门禁，read-before-write 藏着（`surface_to_user=False`，`chat.py:5360`）、stage-write-block 却露（True）——是层层堆出来的、非设计。
+- **方案**：**A 全翻 `surface_to_user=False`**（翻 False 自动走 `_yield_user_visible_notices` 的 `[internal-notice]` `logger.info`，`chat.py:7084`，后台可查记录调试——对齐用户「后台看记录处理」）；**B 的 ⚠️ 诊断对用户隐藏**（隐藏时补一条 server 日志保可调试）；**C 保留**。**连带 audit** 重试耗尽的兜底失败文案（`_build_required_write_failure_message` 类）改用户话术——防全藏后模型自愈失败时用户看到「一轮莫名结束、零线索」。净效果：用户只看到 ①正常回复 ②真实工具 pill ③硬错误。
+
+（两条均**试用期结束后再实施**；纯前后端 UX，不碰 DeepSeek 官渠兼容 / 信任边界 / 租户隔离。相关根因排查见本次会话。）
+
 最后更新：2026-07-03（**opencode SSE 规范化 sidecar ✅ 实施 + Codex 双轨审 5 轮 APPROVED + merge main `f2e7f92`（--no-ff）+ 部署上线 jp-app-01 + 端到端全链验证**——分支 `feat/opencode-sse-normalizer` 保留）：
 
 **背景（部门试用第一天排查）**：为省成本给 CRA 接了 opencode go 包月渠道（new-api 渠道 61），用户发现 new-api 后台看不到该渠道的缓存、疑影响计费。排查实证：opencode 在 **2026-07-01→02** 间把流式响应改成非标准格式（`usage` 挂 finish 正文块而非规范末尾 `choices:[]` 空块 + `[DONE]` 后多发私有块），new-api 只从空块取 usage → 抓不到 → 回退 `local_count_tokens` → cache=0 → 下游 CRA 按最贵未命中档计费（deepseek-v4-pro miss 3.0 vs hit 0.025 元/百万，差 120×）。**opencode 本身物理确有缓存、usage 字段完整（实测同 prompt 第 2 次 hit 命中）；new-api/薄网关无 bug——纯上游格式回归**。升级 new-api 不解决（相关 issue #3309/#3389 均 OPEN、changelog 无此修复）。

@@ -98,3 +98,45 @@ test("StageAdvanceControl S1 hint uses s1ConfirmDisabledReason (source guard)", 
   // disabledReason 必须被条件渲染用到，不只 import（防止 import 后从不使用）
   assert.match(src, /\{disabledReason\}/);
 });
+
+// ── 2026-07-06 反馈①：S1/S7 代发自愈 source-guard ────────────────────────────
+// S1「确认大纲」/ S7「归档」不再直连 checkpoint API（无模型在环、撞门禁即 400 死路），
+// 改为代用户发确认消息走主模型自愈。S4/S5 保持直连（内容阈值 / 独立审查报告，代发救不了）。
+
+test("S1/S7 代发走主模型，不再直连 checkpoint POST（source guard）", () => {
+  const src = readFileSync(
+    new URL("../src/components/StageAdvanceControl.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(src, /postCheckpoint\('outline-confirmed'\)/);
+  assert.doesNotMatch(src, /postCheckpoint\('delivery-archived'\)/);
+  assert.match(src, /sendConfirmMessage\('我确认当前大纲/);
+  assert.match(src, /sendConfirmMessage\('我确认报告已交付/);
+  // 忙时必须给用户反馈，不静默丢弃
+  assert.match(src, /const ok = onSendPrompt\?\.\(text\) \?\? false/);
+  assert.match(src, /if \(!ok\) showError\(/);
+  // S4/S5 保持直连
+  assert.match(src, /postCheckpoint\('review-started'\)/);
+  assert.match(src, /postCheckpoint\('review-passed'\)/);
+});
+
+test("ChatPanel 暴露 sendUserMessage 且忙时返回 false（source guard）", () => {
+  const src = readFileSync(
+    new URL("../src/components/ChatPanel.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(src, /useImperativeHandle\(ref, \(\) => \(\{ triggerSystemTurn, dropPendingReviewTriggers, sendUserMessage \}\)/);
+  // 忙态守卫：loading/uploading 时不发、返回 false
+  assert.match(src, /if \(!trimmed \|\| loading \|\| uploading\) return false/);
+  // 代发渲染用户气泡（与打字确认同路径）
+  assert.match(src, /startStream\(\{ messageText: trimmed, renderUserBubble: true \}\)/);
+});
+
+test("App/MobileShell 把 onSendPrompt 接到 ChatPanel.sendUserMessage（source guard）", () => {
+  const appSrc = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  assert.match(appSrc, /onSendPrompt=\{\(text\) => chatPanelRef\.current\?\.sendUserMessage\(text\) \?\? false\}/);
+  const mobileSrc = readFileSync(new URL("../src/components/MobileShell.jsx", import.meta.url), "utf8");
+  assert.match(mobileSrc, /onSendPrompt=\{handleSendPrompt\}/);
+  // 移动端代发成功后关右抽屉（动作后关抽屉铁律）
+  assert.match(mobileSrc, /const ok = chatPanelRef\.current\?\.sendUserMessage\(text\) \?\? false\s*\n\s*if \(ok\) closeAll\(\)/);
+});

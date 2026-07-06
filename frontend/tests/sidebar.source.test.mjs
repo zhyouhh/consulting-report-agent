@@ -33,8 +33,9 @@ test('ProjectCreateModal 标题/副标题/各字段 label 齐全', () => {
   assert.match(s, /预期篇幅/)
 })
 
-test('AdminPanel 用户表保留可编辑额度 + 状态色标 + grid 表头', () => {
-  const s = readFileSync(new URL('../src/components/AdminPanel.jsx', import.meta.url), 'utf8')
+test('AdminPage 用户表保留可编辑额度 + 状态色标 + grid 表头', () => {
+  // 2026-07-06：AdminPanel 弹窗升级为 /admin 独立页面（AdminPage），本约束原样保留。
+  const s = readFileSync(new URL('../src/components/AdminPage.jsx', import.meta.url), 'utf8')
   // 额度列仍是可编辑 input（用户明确要求保留）
   assert.match(s, /onBlur=\{\(e\) => setCap\(/)
   // 状态用 success/warn token 着色（正常绿 / 已禁用橙）

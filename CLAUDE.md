@@ -427,6 +427,16 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - 测试全是 source-guard + 纯函数（**无 jsdom**）：`tests/deviceMode.test.mjs`、`mobileShell.source.test.mjs`、`mobileAuthModals.source.test.mjs` + `appInitGating`/`workspacePanel`/`filePreviewPanel`/`independentReviewDrawer` 追加。前端 488/488。强 guard 铁律：source-guard 须自验「改坏门控→FAIL」（本批多次挖出 `[\s\S]*?` 跨标签/跨结构假阳性，已全改成 tag-bounded / 结构锚定）。**已知未自动覆盖**（smoke 时人工 DOM/CSS 核）：窄视口 modal 收缩、审查窗 portal 真触发、真触屏 pointer 判定。
 - 部署：frontend-only dist swap → kr-web-01（见 [[w2c-deploy-status]]）。详见 memory [[mobile-web-adaptation-status]]。
 
+## 试用反馈两修复 + 模型调用重试 + /admin 独立管理页（2026-07-06）
+
+四件套（反馈①阶段按钮代发自愈 / 反馈②内部提示进后台 / provider 瞬态重试 / admin 独立页面），改阶段按钮 / system_notice / provider 调用错误路径 / admin 面板前必读：
+
+- **S1/S7 阶段按钮 = 代发消息走主模型**（反馈①）：`ChatPanel` imperative handle 暴露 `sendUserMessage(text)`（忙时返回 false，**不静默排队**），App/MobileShell 以 `onSendPrompt` 传链 WorkspacePanel→StagePanel→`StageAdvanceControl.sendConfirmMessage`。S1/S7 **不再直连** `POST /checkpoints/*`（无模型在环撞门禁即 400 死路）；**S4/S5 保持直连**（内容阈值 / 独立审查报告，代发救不了）；S6 演示功能未做不动。移动端代发成功后 closeAll 关右抽屉。锁测 `stageAdvanceControl.test.mjs` + `independentReviewDrawer.source.test.mjs`（handle 形状）。
+- **内部提示全走后台日志**（反馈②）：write-gate 类 `system_notice` 一律 `surface_to_user=False`（`_yield_user_visible_notices` 自动打 `[internal-notice]` 日志）——**新增门禁 notice 别再开 True**，用户对「请调用 advance_stage」无从操作；模型自我修正旁白（畸形 tool_calls/自我循环/声称写入未写/汇报轮禁工具）**不 yield `type:"tool"`**、打 `[self-heal]` 日志；`type:"error"` 硬错误保留给用户。重试耗尽兜底文案（`_build_required_write_failure_message`）是用户可见文案，**写人话、禁工具名/路径**。前端橙框渲染机制保留（未来真需用户动手的通知可用）。
+- **provider 瞬态重试**：叶子模块 `backend/provider_retry.py`（**只依赖 stdlib**，chat/independent_review 共享；分类 = 无状态码网络错误全瞬态 + `TRANSIENT_STATUS_CODES`，4xx 确定性错误不重试；退避 2/4/8s 封顶）。chat.py 流式与非流式 create 各 3 次尝试（重构为显式 while + 计数——**旧 `for retry in range(2)` 有「usage 参数回退在末次尝试触发→复用陈旧 response」潜伏 bug，别改回**）；**流中断重发仅当 `iteration_visible_output=False`**（正文/思考/工具 pill 任一已 yield 即不重发，防气泡内容重复），per-turn 预算 `STREAM_MAX_RETRIES`；重试状态行用 `type:"tool"` 透给用户（「连接不稳定，正在自动重试…」——这是反馈②后该通道唯一的后端产出）。计费不变式：`continue` 前必经 `finally: response.close()` 恰好结算一次。Quota/Paused 异常在分类器之前截获、绝不重试。回归 `tests/test_provider_retry.py` + `ProviderRetryStreamTests`。**测试注意**：mock create 失败路径须 `mock.patch("backend.chat.time.sleep")` + 每次 create 给**新**的坏流（复用已耗尽生成器会被当空流正常收尾）。
+- **/admin 独立管理页**：`main.jsx` 按 `pathname` 正则 `/^\/admin\/?$/` 分流渲染 `AdminPage`（不引路由库）；后端 `_SPAStaticFiles._SPA_FALLBACK_ROUTES` **白名单**回退（404 → 直接回 `index.html` 文件——**别用 `"."` 目录形态**，会触发 StaticFiles 307 目录重定向多一跳；**别把白名单改成「所有 404 都回退」**，assets 404 可见性是 no-cache 修复链前提）。新端点 `GET /api/admin/usage?days=30`（`accounts.get_usage_history(since_day)`——accounts 叶子层**不 import metering**，since 由 main.py 算好传入；行粒度 (uid,day) + username join）。`AdminPage` 鉴权自理（`/api/auth/me` + `skipUnauthedHandler`，未登录/非 admin/需改密三拦截态都给「返回主页」出口）；纯 div/token 柱状图（**无图表库**）；聚合逻辑在 `utils/adminUsage.js` 纯函数（node:test 直测）；**用户表额度列仍可编辑**（用户硬要求）。侧栏盾牌按钮 `window.open('/admin','_blank','noopener')` 新标签开（保主应用 ChatPanel 内存态）；`AdminPanel.jsx` 弹窗已删。错误 detail 一律 `normalizeAuthError` 归一。回归：`AdminUsageHistoryTests` / `SpaFallbackRouteTests` / `adminUsage.test.mjs` / `adminPage.source.test.mjs`。
+- 顺手结清：mac `/var→/private/var` 4 个已知测试失败（断言两侧 `resolve()`，Windows 恒等）——mac 后端 1554 全绿，CLAUDE.md「macOS 注意点 3」的例外已不存在。
+
 ## opencode SSE 规范化 sidecar（2026-07-03 上线 jp-app-01）
 
 `opencode_proxy/`（镜像 `managed_proxy/` 约定：`create_app(settings)` 工厂 + `NormalizerSettings` dataclass + 非 root Dockerfile）是 new-api ↔ opencode.ai/zen 之间的薄反向代理。修 opencode 2026-07-01→02 起的**非标准流式格式**（把 `usage` 挂在 finish 正文块上，而非 OpenAI 规范的末尾 `choices:[]` 空块 + `[DONE]` 后多发私有块）——该格式让 new-api 抓不到流式 usage → 回退本地估 token（`local_count_tokens`）→ cache=0 → 下游 CRA 按最贵未命中档计费（deepseek-v4-pro miss 3.0 vs hit 0.025 元/百万，差 120×）。opencode 本身物理确有缓存且 usage 字段完整，纯流式格式回归；new-api/薄网关无 bug。改 sidecar / 计费链前必读。部署/回滚见 `docs/opencode-normalizer-deployment.md`。
@@ -504,7 +514,7 @@ cd frontend && npm install && npm run build && cd ..   # 必须 build，否则 S
 
 1. **私有文件不在 git 里，要从 Windows 机拷过去**：`managed_client_token.txt`、`managed_search_pool.json`（`.gitignore` 忽略）放仓库根，否则 managed 模式认证不了 / 内置搜索不工作。临时方案：设置里切 `custom` 模式自填 OpenAI 兼容 key，无需这两个文件也能跑通对话与写作。
 2. **S5「导出可审草稿」需本机装 pandoc**（W2-C 已去 Windows 化）：导出改纯 Python 调 pandoc（`report_tools._resolve_pandoc()`：打包/Windows 态优先包内 `pandoc.exe`，否则走系统 `pandoc`）。mac 开发态须 `brew install pandoc`，否则导出返回友好错误「未找到 pandoc」。原 `export_draft.ps1` 硬编码 `powershell` 的问题已不存在（脚本已删）。见下方「## W2-C」段。
-3. **4 个测试在 mac 上失败属环境差异、非真 bug**：`test_skill_engine.py` / `test_workspace_materials.py` 里涉及 `tempfile` 路径比对的用例，因 macOS `/var`→`/private/var` symlink、临时路径未解析 vs 已解析不相等而失败，**Windows 上通过**。要 mac 全绿需把这些用例的临时路径断言改走 `os.path.realpath`/`.resolve()`（独立小活，见 worklist N-section）。
+3. ~~**4 个测试在 mac 上失败属环境差异**~~（**✅ 2026-07-06 已结清**：`test_skill_engine.py` / `test_workspace_materials.py` 的 `tempfile` 路径断言两侧统一 `.resolve()`，macOS `/var`→`/private/var` symlink 不再误报，Windows 恒等无影响——mac 后端现应全绿）。
 
 ## 文档与追踪
 

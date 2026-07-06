@@ -21,13 +21,11 @@ test('App: initializeApp 调用受 must_change_password 守卫（不在改密前
   )
 })
 
-// NIT 2：AdminPanel 挂载兜底再 gate 一层 is_admin（入口已 gated，showAdmin 只可能被 admin 置真，但纵深防御）。
-test('App: AdminPanel 挂载额外兜底 is_admin', () => {
-  assert.match(
-    src,
-    /showAdmin\s*&&\s*authUser\??\.is_admin\s*&&\s*<AdminPanel/,
-    'AdminPanel 挂载应为 showAdmin && authUser?.is_admin && <AdminPanel ...>',
-  )
+// 2026-07-06：管理控制台改为独立页面（/admin 新标签打开），App 不再挂 AdminPanel 弹窗。
+test('App: admin 入口为新标签打开 /admin，不再挂弹窗', () => {
+  assert.match(src, /window\.open\('\/admin', '_blank', 'noopener'\)/)
+  assert.doesNotMatch(src, /AdminPanel/)
+  assert.doesNotMatch(src, /showAdmin/)
 })
 
 // 侧边栏额度数字曾陈旧（只随初始 /me 拉一次）：聊天每轮结束 + 窗口聚焦时须刷新 /me 额度字段。
@@ -95,7 +93,7 @@ test('App: 侧栏 currentStageCode 受 workspaceProjectId 守卫（防切项目�
   )
 })
 
-test("App: isMobile 首屏锁定 + MobileShell 分支 + 桌面分支结构原样 + AdminPanel 上提", () => {
+test("App: isMobile 首屏锁定 + MobileShell 分支 + 桌面分支结构原样", () => {
   const s = src;
   // 首屏锁定，无运行时 matchMedia 监听
   assert.match(s, /import \{ isCoarsePointer \} from ['"]\.\/utils\/deviceMode['"]/);
@@ -110,6 +108,4 @@ test("App: isMobile 首屏锁定 + MobileShell 分支 + 桌面分支结构原样
   assert.match(s, /onMouseDown=\{startWorkspaceResize\}/);
   assert.match(s, /cursor-col-resize/);
   assert.match(s, /showWorkspacePanel &&/);
-  // AdminPanel 上提为分支兄弟（在 ErrorBoundary 内、两壳之外渲染一次）
-  assert.match(s, /\{showAdmin && authUser\?\.is_admin && <AdminPanel/);
 })
