@@ -9,7 +9,13 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
-最后更新：2026-07-06（**试用反馈两问题 ✅ 已实施 + 模型调用自动重试 + /admin 独立管理页 + mac 4 测试结清**，详见下条；2026-07-04 条的方案背景保留作历史）：
+最后更新：2026-07-06 晚（**fail-closed 计费污染修复 + admin 用量趋势折线图 ✅ 已实施 + Codex 单轮审 APPROVED + 部署 kr-web-01**）：
+
+**排查起点**：用户报 07-06 面板缓存命中率特别低（37-60%）。**结论：面板没算错、真实缓存健康（new-api 侧 64.6%、重度用户 ~72%），是 fail-closed 计费污染数据**——流中断（停止按钮/手机切后台断 SSE）按 256k 上限全额记 miss（¥0.768/次），07-06 单日 7 次 = ¥5.6 幽灵账（当日 42%）+ 命中率虚低 16pp；07-01 起累计 ~¥10。三方对账实证（usage_daily vs new-api logs vs managed-proxy 计数，233 请求全对上），排除了 opencode sidecar / 渠道路由 / provider_retry 嫌疑（当日流量跑的还是旧代码，22:05 才部署新版）。
+
+**交付**：① metering fail-closed 改**请求感知估算**（messages+tools 字符三档估 token 上界 + 已流出 completion 按输出价补计 + clamp 到旧 ceiling 绝不更贵）；② `usage_daily.failclosed_tokens` 独立列（幽灵 tokens 不再进 cache_miss、命中率恢复真实；`init_db` 幂等 ALTER 迁移老库）；③ GeneratorExit（消费方关流）不 bump 暂停计数（防手机切后台 3 次锁死当日模型），provider 真异常仍计；④ fail-closed 结算加 warning 日志（本次事故零日志、全靠对账定位）；⑤ admin 趋势图重做：平滑折线（单调三次插值不过冲）多序列双轴 + hover/点击数值卡 + 用户×时间范围(7/30/90 日)双筛选联动趋势图与明细表（概览卡固定全局 30 日）。**历史污染数据不回填**（per-user 无法从 usage_daily 反推、new-api 无用户维度，放弃 surgery——07-06 前的面板命中率仍偏低属已知历史噪声）。Codex 单轮审出 2 BLOCKER（漏计已流出输出 / emoji 密度非上界）+ 1 NIT（全零假轴）全修后 **APPROVED**。后端 1571 / 前端 529 / build 全绿 + 本地浏览器 E2E（双主题/tooltip/联动）。**部署（第五笔）**：bundle `index-Rwor1vmc.js` + file-push 3 后端文件（metering/accounts/main）+ 重启 + DB 启动自动迁移（已验列存在），公网 smoke 过、journal 干净；回滚点 `/opt/cra-rollback-20260706b/`（3 旧文件 + app.db.bak）。硬约束记 CLAUDE.md「## fail-closed 计费修复 + admin 用量趋势折线图」段。⚠️ 本批 commit 后须在服务器 `git fetch && git reset --hard origin/main` realign（file-push 偏离）。
+
+上一批：2026-07-06 白天（**试用反馈两问题 ✅ 已实施 + 模型调用自动重试 + /admin 独立管理页 + mac 4 测试结清**，详见下条；2026-07-04 条的方案背景保留作历史）：
 
 **收口状态**：Codex（gpt-5.5 xhigh）单轮终审 + 对抗红队 **APPROVED**（首轮 1 BLOCKER 被 index.html 主题 bootstrap 证据否掉并撤回）→ commit `2bfa2ec` + 文档同步 `7c7e4a4`（**✅ 已 push origin**）→ **✅ 已部署 kr-web-01**（前端 dist swap bundle `index-D1efA8fM.js` + file-push 5 个后端文件 + systemd 重启，公网 smoke 8/8：health/新 bundle/`/admin` 200+no-cache/usage 端点 401 门禁/未知路由仍 404）。回滚点=服务器 `/opt/cra-rollback-20260706/` + `frontend/dist.old`。✅ 服务器 git 已 `reset --hard origin/main` realign 到 `7c7e4a4`（运行文件 sha 与提交一致、无需重启），file-push 偏离已消除。
 

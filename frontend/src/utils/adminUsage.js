@@ -13,10 +13,10 @@ export function listDays(since, today) {
   return out
 }
 
-// 按天聚合后端 rows（行粒度 = uid×day）：总消耗/命中/未命中/输出 + 当天活跃用户数。
-// days 之外的行丢弃（窗口由后端 since 控制，这里只做防御）。
+// 按天聚合后端 rows（行粒度 = uid×day）：总消耗/命中/未命中/输出/中断估算 + 当天活跃用户数。
+// days 之外的行丢弃（窗口由 days 列表控制——时间范围切换 = 换 days，行集不动）。
 export function aggregateByDay(rows, days) {
-  const map = new Map(days.map((d) => [d, { day: d, cost: 0, hit: 0, miss: 0, output: 0, users: 0 }]))
+  const map = new Map(days.map((d) => [d, { day: d, cost: 0, hit: 0, miss: 0, output: 0, failclosed: 0, users: 0 }]))
   for (const r of Array.isArray(rows) ? rows : []) {
     const slot = map.get(r?.day)
     if (!slot) continue
@@ -24,6 +24,7 @@ export function aggregateByDay(rows, days) {
     slot.hit += Number(r.cache_hit_tokens) || 0
     slot.miss += Number(r.cache_miss_tokens) || 0
     slot.output += Number(r.output_tokens) || 0
+    slot.failclosed += Number(r.failclosed_tokens) || 0
     slot.users += 1
   }
   return days.map((d) => map.get(d))
@@ -59,18 +60,12 @@ export function formatTokenCount(n) {
   return String(Math.round(v))
 }
 
-// 柱状图高度比例（0..1）：以窗口内最大单日消耗为满高；全 0 时全部返回 0。
-export function barRatio(cost, maxCost) {
-  const c = Number(cost) || 0
-  const m = Number(maxCost) || 0
-  if (m <= 0 || c <= 0) return 0
-  return Math.min(1, c / m)
-}
-
-// 明细行过滤 + 排序（日期降序、同日按用户名升序）；uid 为空/'all' 时不过滤。
-export function filterUsageRows(rows, uid) {
+// 明细行过滤 + 排序（日期降序、同日按用户名升序）；uid 为空/'all' 时不过滤；
+// sinceDay 给定时只留 day >= sinceDay（'YYYY-MM-DD' 字典序 == 日期序，与后端 usage_daily.day 一致）。
+export function filterUsageRows(rows, uid, sinceDay) {
   const list = Array.isArray(rows) ? rows.slice() : []
-  const filtered = uid && uid !== 'all' ? list.filter((r) => r?.uid === uid) : list
+  const byUser = uid && uid !== 'all' ? list.filter((r) => r?.uid === uid) : list
+  const filtered = sinceDay ? byUser.filter((r) => typeof r?.day === 'string' && r.day >= sinceDay) : byUser
   return filtered.sort((a, b) => {
     if (a.day !== b.day) return a.day < b.day ? 1 : -1
     return String(a.username || '').localeCompare(String(b.username || ''))

@@ -4,10 +4,11 @@ import { formatYuan } from '../utils/quotaFormat'
 import { capPayload, validateNewPassword } from '../utils/adminApi'
 import { normalizeAuthError } from '../utils/authError'
 import {
-  listDays, aggregateByDay, usageOverview, hitRateLabel, formatTokenCount, barRatio, filterUsageRows,
+  listDays, aggregateByDay, usageOverview, hitRateLabel, formatTokenCount, filterUsageRows,
 } from '../utils/adminUsage'
 import { applyTheme, getInitialTheme, toggleTheme } from '../utils/theme'
 import { IconSun, IconMoon, IconShield } from './icons'
+import UsageTrendChart from './UsageTrendChart'
 
 // 管理控制台独立页面（2026-07-06）：/admin 路由整页渲染（原弹窗 AdminPanel 升级而来）。
 // 设计沿用主界面海军蓝双主题 token 体系；功能 = 概览统计 + 近 30 日用量趋势/明细
@@ -36,37 +37,12 @@ function SectionCard({ title, children, actions }) {
   )
 }
 
-// 近 N 日逐日消耗柱状图：纯 div/flex 实现（无图表依赖），随主题 token 自动换色。
-// hover 用原生 title 提示当日明细（日期/消耗/命中率/输出/活跃用户）。
-function UsageChart({ perDay }) {
-  const maxCost = Math.max(0, ...perDay.map((d) => d.cost))
-  return (
-    <div>
-      <div className="flex items-end gap-[3px] h-28" role="img" aria-label="近 30 日每日消耗柱状图">
-        {perDay.map((d) => {
-          const ratio = barRatio(d.cost, maxCost)
-          return (
-            <div
-              key={d.day}
-              className="flex-1 min-w-0 flex flex-col justify-end h-full"
-              title={`${d.day}\n消耗 ${formatYuan(d.cost)}\n缓存命中率 ${hitRateLabel(d.hit, d.miss)}\n输出 ${formatTokenCount(d.output)} tokens\n活跃用户 ${d.users}`}
-            >
-              <div
-                className={ratio > 0 ? 'w-full rounded-t-[3px] bg-accent/75 hover:bg-accent' : 'w-full rounded-t-[3px] bg-track'}
-                style={{ height: ratio > 0 ? `${Math.max(ratio * 100, 3)}%` : '2px' }}
-              />
-            </div>
-          )
-        })}
-      </div>
-      <div className="flex justify-between mt-1 text-2xs text-t3 font-mono">
-        <span>{perDay[0]?.day?.slice(5) ?? ''}</span>
-        <span>{perDay[Math.floor(perDay.length / 2)]?.day?.slice(5) ?? ''}</span>
-        <span>{perDay[perDay.length - 1]?.day?.slice(5) ?? ''}</span>
-      </div>
-    </div>
-  )
-}
+// 趋势时间范围选项（天）：fetch 一次 90 天数据，切范围只在前端换 days 窗口，不重新请求。
+const USAGE_RANGES = [
+  { days: 7, label: '近 7 日' },
+  { days: 30, label: '近 30 日' },
+  { days: 90, label: '近 90 日' },
+]
 
 export default function AdminPage() {
   const [theme, setTheme] = useState(getInitialTheme)
@@ -80,7 +56,8 @@ export default function AdminPage() {
   const [hosts, setHosts] = useState('')
   const [defaultHosts, setDefaultHosts] = useState([])
   const [usage, setUsage] = useState(null)      // {since, today, rows}
-  const [usageFilter, setUsageFilter] = useState('all')
+  const [usageFilter, setUsageFilter] = useState('all')   // 用户筛选：联动趋势图 + 明细表
+  const [usageRange, setUsageRange] = useState(30)        // 时间范围（天）：联动趋势图 + 明细表
   const [err, setErr] = useState('')
 
   useEffect(() => {
@@ -100,7 +77,7 @@ export default function AdminPage() {
         axios.get('/api/admin/users'),
         axios.get('/api/admin/invite-code'),
         axios.get('/api/admin/allowed-hosts'),
-        axios.get('/api/admin/usage?days=30'),
+        axios.get('/api/admin/usage?days=90'),
       ])
       setUsers(u.data)
       setInvite(c.data.invite_code)
@@ -118,11 +95,21 @@ export default function AdminPage() {
     () => (usage ? listDays(usage.since, usage.today) : []),
     [usage],
   )
-  const perDay = useMemo(() => aggregateByDay(usage?.rows, days), [usage, days])
-  const overview = useMemo(() => usageOverview(perDay), [perDay])
+  // 概览卡固定全局近 30 日（全站健康度），不随用户/时间筛选变。
+  const overview = useMemo(
+    () => usageOverview(aggregateByDay(usage?.rows, days.slice(-30))),
+    [usage, days],
+  )
+  // 趋势图 + 明细表共用筛选：用户（usageFilter）× 时间范围（usageRange）。
+  const rangeDays = useMemo(() => days.slice(-usageRange), [days, usageRange])
+  const filteredRows = useMemo(() => {
+    const rows = usage?.rows || []
+    return usageFilter === 'all' ? rows : rows.filter((r) => r?.uid === usageFilter)
+  }, [usage, usageFilter])
+  const perDay = useMemo(() => aggregateByDay(filteredRows, rangeDays), [filteredRows, rangeDays])
   const detailRows = useMemo(
-    () => filterUsageRows(usage?.rows, usageFilter),
-    [usage, usageFilter],
+    () => filterUsageRows(usage?.rows, usageFilter, rangeDays[0]),
+    [usage, usageFilter, rangeDays],
   )
   const usageUsers = useMemo(() => {
     const seen = new Map()
@@ -217,9 +204,23 @@ export default function AdminPage() {
           <StatCard label="注册用户" value={String(users.length)} hint={`已禁用 ${users.filter((u) => u.disabled).length}`} />
         </div>
 
-        {/* 用量趋势 */}
-        <SectionCard title="近 30 日用量趋势">
-          {perDay.length ? <UsageChart perDay={perDay} /> : <div className="text-13 text-t3">暂无用量数据</div>}
+        {/* 用量趋势：与明细表共用「用户 × 时间范围」筛选 */}
+        <SectionCard
+          title={`用量趋势 · ${usageFilter === 'all' ? '全部用户' : (usageUsers.find((u) => u.uid === usageFilter)?.username || '')}`}
+          actions={
+            <select
+              value={usageRange}
+              onChange={(e) => setUsageRange(Number(e.target.value))}
+              aria-label="趋势时间范围"
+              className="bg-field border border-border rounded-btn px-2 py-1 text-12 text-text focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              {USAGE_RANGES.map((r) => (
+                <option key={r.days} value={r.days}>{r.label}</option>
+              ))}
+            </select>
+          }
+        >
+          {perDay.length ? <UsageTrendChart perDay={perDay} /> : <div className="text-13 text-t3">暂无用量数据</div>}
         </SectionCard>
 
         {/* 用量明细 */}
@@ -259,7 +260,14 @@ export default function AdminPage() {
                 >
                   <span role="cell" className="text-t2 font-mono">{r.day.slice(5)}</span>
                   <span role="cell" className="text-text truncate">{r.username}</span>
-                  <span role="cell" className="text-right text-text font-mono tabular-nums">{formatYuan(r.cost_yuan)}</span>
+                  <span
+                    role="cell"
+                    className="text-right text-text font-mono tabular-nums"
+                    title={r.failclosed_tokens > 0 ? `含中断估算计费 ${formatTokenCount(r.failclosed_tokens)} tokens（流中断未取到真实 usage）` : undefined}
+                  >
+                    {formatYuan(r.cost_yuan)}
+                    {r.failclosed_tokens > 0 && <span className="text-warn">*</span>}
+                  </span>
                   <span role="cell" className="text-right text-t2 font-mono tabular-nums">{hitRateLabel(r.cache_hit_tokens, r.cache_miss_tokens)}</span>
                   <span role="cell" className="text-right text-t2 font-mono tabular-nums">{formatTokenCount(r.output_tokens)}</span>
                 </div>

@@ -1,4 +1,5 @@
 # tests/test_metering.py
+import math
 import unittest
 from backend import metering
 from backend.config import DEFAULT_MANAGED_MODEL_PRICING, DEFAULT_MANAGED_MODEL
@@ -415,6 +416,133 @@ class MissCounterTests(MeteredNonStreamTests):
             c.chat.completions.create(model="deepseek-v4-pro", messages=[], stream=False)  # 不抛 = 自动清零
         finally:
             self.m.today_shanghai = orig
+
+
+# tests/test_metering.py（追加，2026-07-06 fail-closed 请求感知估算 + failclosed 独立列）
+class FailClosedEstimateTests(MeteredNonStreamTests):
+    _MSGS = [{"role": "system", "content": "你是写咨询报告的助手。" * 40},
+             {"role": "user", "content": "帮我写一份市场分析。" * 20}]
+
+    def test_estimator_counts_cjk_and_ascii(self):
+        est = self.m.estimate_request_tokens_upper_bound(
+            {"messages": [{"role": "user", "content": "中文四个字" + "abcd"}]})
+        # 5 CJK×1 + 4 ascii/2 + role extras + margin + base：只锁「有值且量级合理」
+        self.assertIsNotNone(est)
+        self.assertLess(est, 3000)
+
+    def test_estimator_returns_none_for_multimodal_or_bad_shape(self):
+        self.assertIsNone(self.m.estimate_request_tokens_upper_bound(None))
+        self.assertIsNone(self.m.estimate_request_tokens_upper_bound({"messages": []}))
+        self.assertIsNone(self.m.estimate_request_tokens_upper_bound(
+            {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]}))
+        self.assertIsNone(self.m.estimate_request_tokens_upper_bound({"messages": ["not-a-dict"]}))
+
+    def test_estimator_emoji_and_symbols_priced_higher_than_ascii(self):
+        # Codex BLOCKER round2：emoji/非 ASCII 非 CJK 字符 token 密度高（实测 1-3/字符），
+        # ÷2 不是上界 → 按 2/字符计。1000 个 emoji 的估算必须 ≥ 2000 token（margin 前）。
+        emoji_est = self.m.estimate_request_tokens_upper_bound(
+            {"messages": [{"content": "\U0001F600" * 1000}]})
+        ascii_est = self.m.estimate_request_tokens_upper_bound(
+            {"messages": [{"content": "a" * 1000}]})
+        self.assertGreaterEqual(emoji_est - ascii_est, int(1000 * 1.5))  # emoji 2/字 vs ascii 0.5/字
+
+    def test_estimator_counts_tools_and_tool_calls(self):
+        base = self.m.estimate_request_tokens_upper_bound({"messages": self._MSGS})
+        with_tools = self.m.estimate_request_tokens_upper_bound(
+            {"messages": self._MSGS, "tools": [{"type": "function", "function": {"name": "web_search", "description": "d" * 400}}]})
+        self.assertGreater(with_tools, base)
+
+    def test_fail_closed_bills_estimate_into_failclosed_column(self):
+        # 有 messages 的请求缺 usage → 按估算计费（远小于 256k ceiling），tokens 进 failclosed 列、miss 保持 0。
+        c = self._client(None)
+        c.chat.completions.create(model="deepseek-v4-pro", messages=self._MSGS, stream=False)
+        est = self.m.estimate_request_tokens_upper_bound({"messages": self._MSGS, "stream": False, "model": "deepseek-v4-pro"})
+        day = self.m.today_shanghai()
+        row = [r for r in self.accounts.get_usage_history(day) if r["uid"] == "u1"][0]
+        self.assertEqual(row["failclosed_tokens"], est)
+        self.assertEqual(row["cache_miss_tokens"], 0)      # 命中率统计不被污染
+        self.assertEqual(row["cost_micro_yuan"], est * 3)  # est × p_miss(3)
+        self.assertLess(est, 256000)
+
+    def test_fail_closed_estimate_clamped_to_model_ceiling(self):
+        huge = [{"role": "user", "content": "字" * 600_000}]   # 估算 > 256k
+        c = self._client(None)
+        c.chat.completions.create(model="deepseek-v4-pro", messages=huge, stream=False)
+        day = self.m.today_shanghai()
+        row = [r for r in self.accounts.get_usage_history(day) if r["uid"] == "u1"][0]
+        self.assertEqual(row["failclosed_tokens"], 256000)   # clamp 到 ceiling，绝不比旧封顶更贵
+
+    def test_stream_interrupt_bills_streamed_completion_at_output_price(self):
+        # Codex BLOCKER round2：短 prompt + 已流出长输出后断流 → 已流出的 completion 字符
+        # 按 1 token/字符 ×1.15 计输出价，不能只按 prompt 估算漏掉输出成本。
+        self.m._miss_counter.clear()
+        streamed = "答" * 4000   # 4000 字符已流出
+        chunk_with_text = _Chunk()
+        chunk_with_text.choices = [type("C", (), {"delta": type("D", (), {"content": streamed})()})()]
+        c = self._stream_client([chunk_with_text, _Chunk()])
+        gen = c.chat.completions.create(model="deepseek-v4-pro", messages=self._MSGS, stream=True)
+        next(gen)
+        gen.close()   # 中断，无 usage
+        day = self.m.today_shanghai()
+        row = [r for r in self.accounts.get_usage_history(day) if r["uid"] == "u1"][0]
+        prompt_est = self.m.estimate_request_tokens_upper_bound({"messages": self._MSGS})
+        completion_est = math.ceil(4000 * 1.15)
+        self.assertEqual(row["failclosed_tokens"], prompt_est + completion_est)
+        self.assertEqual(row["cost_micro_yuan"], prompt_est * 3 + completion_est * 6)  # miss价 + 输出价
+
+    def test_stream_generator_exit_bills_but_does_not_bump_pause(self):
+        # 消费方关流（用户停止/断连/瞬态重试关旧流）→ 照常 fail-closed 计费，但不累计暂停计数——
+        # 否则手机切后台 3 次就把该用户当日模型锁死。
+        self.m._miss_counter.clear()
+        for _ in range(4):
+            chunks = [_Chunk(), _Chunk()]
+            c = self._stream_client(chunks)
+            gen = c.chat.completions.create(model="deepseek-v4-pro", messages=self._MSGS, stream=True)
+            next(gen)
+            gen.close()   # GeneratorExit → fail-closed 计费但 bump_pause=False
+        day = self.m.today_shanghai()
+        row = [r for r in self.accounts.get_usage_history(day) if r["uid"] == "u1"][0]
+        self.assertGreater(row["failclosed_tokens"], 0)      # 计了 4 次估算账
+        self.assertEqual(self.m._miss_counter, {})            # 暂停计数未动
+        # 第 5 次照常可发起（未被暂停）
+        c = self._stream_client([_Chunk()])
+        list(c.chat.completions.create(model="deepseek-v4-pro", messages=self._MSGS, stream=True))
+
+    def test_stream_provider_error_still_bumps_pause(self):
+        # provider 真异常（非消费方关流）仍计暂停计数：连续 3 次后第 4 次 reserve 拦截。
+        self.m._miss_counter.clear()
+        def _make_boom():
+            def _boom():
+                yield _Chunk()
+                raise RuntimeError("provider dropped")
+            return _boom()
+        class _SC:
+            def __init__(self): self.calls = []
+            def create(self, **kw): self.calls.append(kw); return _make_boom()
+        class _Ch:
+            def __init__(self): self.completions = _SC()
+        class _Raw:
+            def __init__(self): self.chat = _Ch()
+        from backend.config import DEFAULT_MANAGED_MODEL_PRICING
+        c = self.m.MeteredManagedClient(_Raw(), uid="u1", model_pricing=DEFAULT_MANAGED_MODEL_PRICING)
+        for _ in range(3):
+            with self.assertRaises(RuntimeError):
+                list(c.chat.completions.create(model="deepseek-v4-pro", messages=self._MSGS, stream=True))
+        with self.assertRaises(self.m.ModelPausedError):
+            c.chat.completions.create(model="deepseek-v4-pro", messages=self._MSGS, stream=True)
+
+    def _stream_client(self, chunks):
+        class _StreamCompletions:
+            def __init__(self): self.calls = []
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                return iter(chunks)
+        class _Chat:
+            def __init__(self): self.completions = _StreamCompletions()
+        class _Raw:
+            def __init__(self): self.chat = _Chat()
+        from backend.config import DEFAULT_MANAGED_MODEL_PRICING
+        return self.m.MeteredManagedClient(_Raw(), uid="u1", model_pricing=DEFAULT_MANAGED_MODEL_PRICING)
 
 
 # tests/test_metering.py（追加）

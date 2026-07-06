@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  listDays, aggregateByDay, usageOverview, hitRateLabel, formatTokenCount, barRatio, filterUsageRows,
+  listDays, aggregateByDay, usageOverview, hitRateLabel, formatTokenCount, filterUsageRows,
 } from '../src/utils/adminUsage.js'
 
 // ── listDays ─────────────────────────────────────────────────────────────────
@@ -31,12 +31,24 @@ const ROWS = [
 test('aggregateByDay 按天聚合消耗/tokens/活跃用户数，空日补零', () => {
   const perDay = aggregateByDay(ROWS, ['2026-07-04', '2026-07-05', '2026-07-06'])
   assert.equal(perDay.length, 3)
-  assert.deepEqual(perDay[0], { day: '2026-07-04', cost: 0, hit: 0, miss: 0, output: 0, users: 0 })
+  assert.deepEqual(perDay[0], { day: '2026-07-04', cost: 0, hit: 0, miss: 0, output: 0, failclosed: 0, users: 0 })
   assert.equal(perDay[1].cost, 2.0)
   assert.equal(perDay[1].users, 2)
   assert.equal(perDay[1].hit, 800)
   assert.equal(perDay[2].cost, 2.0)
   assert.equal(perDay[2].users, 1)
+})
+
+test('aggregateByDay 汇总 failclosed_tokens（缺字段安全归零）', () => {
+  const perDay = aggregateByDay(
+    [
+      { uid: 'a', day: '2026-07-06', cost_yuan: 1, failclosed_tokens: 256000 },
+      { uid: 'b', day: '2026-07-06', cost_yuan: 1, failclosed_tokens: 100000 },
+      { uid: 'c', day: '2026-07-06', cost_yuan: 1 },   // 老 API 无字段
+    ],
+    ['2026-07-06'],
+  )
+  assert.equal(perDay[0].failclosed, 356000)
 })
 
 test('aggregateByDay 窗口外的行丢弃、非数值安全归零', () => {
@@ -66,7 +78,7 @@ test('usageOverview 空输入安全', () => {
   assert.equal(o.last7Cost, 0)
 })
 
-// ── hitRateLabel / formatTokenCount / barRatio ──────────────────────────────
+// ── hitRateLabel / formatTokenCount ──────────────────────────────────────────
 
 test('hitRateLabel 常规/零分母', () => {
   assert.equal(hitRateLabel(800, 200), '80%')
@@ -81,13 +93,6 @@ test('formatTokenCount 紧凑显示', () => {
   assert.equal(formatTokenCount('junk'), '0')
 })
 
-test('barRatio 比例夹在 [0,1]、全零安全', () => {
-  assert.equal(barRatio(5, 10), 0.5)
-  assert.equal(barRatio(20, 10), 1)
-  assert.equal(barRatio(0, 0), 0)
-  assert.equal(barRatio(3, 0), 0)
-})
-
 // ── filterUsageRows ──────────────────────────────────────────────────────────
 
 test('filterUsageRows 按 uid 过滤 + 日期降序', () => {
@@ -96,6 +101,13 @@ test('filterUsageRows 按 uid 过滤 + 日期降序', () => {
   assert.equal(all[0].day, '2026-07-06')
   const onlyA = filterUsageRows(ROWS, 'a')
   assert.deepEqual(onlyA.map((r) => r.day), ['2026-07-06', '2026-07-05'])
+})
+
+test('filterUsageRows sinceDay 时间窗（含当日）与 uid 复合过滤', () => {
+  assert.deepEqual(filterUsageRows(ROWS, 'all', '2026-07-06').map((r) => r.day), ['2026-07-06'])
+  assert.deepEqual(filterUsageRows(ROWS, 'a', '2026-07-05').map((r) => r.day), ['2026-07-06', '2026-07-05'])
+  assert.equal(filterUsageRows(ROWS, 'all', '2027-01-01').length, 0)
+  assert.equal(filterUsageRows(ROWS, 'all', undefined).length, 3)   // 不给 sinceDay = 不过滤
 })
 
 test('filterUsageRows 不改原数组、空输入安全', () => {

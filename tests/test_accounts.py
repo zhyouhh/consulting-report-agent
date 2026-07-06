@@ -155,6 +155,31 @@ class UsageDailyTests(unittest.TestCase):
     def test_get_usage_today_zero_when_absent(self):
         self.assertEqual(accounts.get_usage_today("nobody", "2026-06-22")["cost_micro_yuan"], 0)
 
+    def test_add_usage_failclosed_column_accumulates_separately(self):
+        # fail-closed 估算 token 独立列：不混入 cache_miss（2026-07-06 命中率污染修复）。
+        accounts.add_usage("u1", "2026-07-06", 100, hit=1, miss=2, output=3, failclosed=256)
+        accounts.add_usage("u1", "2026-07-06", 50, 0, 0, 0, failclosed=100)
+        row = [r for r in accounts.get_usage_history("2026-07-06") if r["uid"] == "u1"][0]
+        self.assertEqual(row["failclosed_tokens"], 356)
+        self.assertEqual(row["cache_miss_tokens"], 2)   # miss 不被 failclosed 污染
+        self.assertEqual(row["cost_micro_yuan"], 150)
+
+    def test_init_db_migrates_legacy_usage_daily_without_failclosed_column(self):
+        # 已部署库（B2 老 schema、无 failclosed_tokens）→ init_db 幂等 ALTER 补列、旧行默认 0。
+        with accounts._db() as conn:
+            conn.execute("DROP TABLE usage_daily")
+            conn.execute(
+                "CREATE TABLE usage_daily(uid TEXT NOT NULL, day TEXT NOT NULL,"
+                " cost_micro_yuan INTEGER NOT NULL DEFAULT 0, cache_hit_tokens INTEGER NOT NULL DEFAULT 0,"
+                " cache_miss_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,"
+                " PRIMARY KEY(uid, day))")
+            conn.execute("INSERT INTO usage_daily(uid,day,cost_micro_yuan) VALUES('legacy','2026-07-01',42)")
+        accounts.init_db()   # 迁移
+        row = [r for r in accounts.get_usage_history("2026-07-01") if r["uid"] == "legacy"][0]
+        self.assertEqual(row["failclosed_tokens"], 0)
+        self.assertEqual(row["cost_micro_yuan"], 42)
+        accounts.init_db()   # 再跑一次：幂等不炸
+
     def test_effective_cap_prefers_user_override_then_global_then_default(self):
         # 无 override、无 app_config → 默认 5_000_000
         uid = accounts.create_user("alice", "pw-strong-123")

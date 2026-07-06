@@ -243,11 +243,11 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 **新增叶子模块 `backend/metering.py`**（**只依赖 accounts/config/context_policy，绝不 import chat/skill/main/independent_review**）：
 - `price_micro_yuan(model,hit,miss,completion,pricing)` 三档计价（token×元每百万token=微元，`round`；未知模型 `FALLBACK_MODEL_PRICING`）。
 - `extract_billing_usage(usage)` → `BillingUsage|None`。读 deepseek `prompt_cache_hit/miss_tokens`+`completion_tokens`（miss 缺失回退 `prompt-hit`）。**fail-closed 契约（红队 4 轮锁死）**：单值经 `_coerce_token`——None（字段缺省）→0；present-but-malformed（非 int/float、bool、inf/nan、负、> `_MAX_PLAUSIBLE_TOKENS`=1e9）一律 raise→返回 None。**绝不静默归零**（归零会假记 0 费用 + 复位缺失计数、绕过暂停保护）。
-- `MeteredManagedClient(raw,uid,model_pricing)`：镜像 `.chat.completions.create`，调用前 `_reserve`（`used>=cap`→`QuotaExceededError`；缺失计数≥3→`ModelPausedError`），调用后/流末 `_settle`（`add_usage` 原子累加 + 成功清缺失计数）。**流式 `_metered_stream` 在 `finally` 恰好结算一次**（自然结束/provider 异常/GeneratorExit 一律 fail-closed），`finally` 内 settle 包独立内层 finally（settle 抛错不遮蔽在途异常、底层流必 `close()`，`sys.exc_info()` 判在途异常）。`__getattr__` 透传非 `.chat.completions.create` 调用面（如 `.responses`）。
+- `MeteredManagedClient(raw,uid,model_pricing)`：镜像 `.chat.completions.create`，调用前 `_reserve`（`used>=cap`→`QuotaExceededError`；缺失计数≥3→`ModelPausedError`），调用后/流末 `_settle`（`add_usage` 原子累加 + 成功清缺失计数）。**流式 `_metered_stream` 在 `finally` 恰好结算一次**（自然结束/provider 异常/GeneratorExit 一律 fail-closed），`finally` 内 settle 包独立内层 finally（settle 抛错不遮蔽在途异常、底层流必 `close()`，`sys.exc_info()` 判在途异常）。`__getattr__` 透传非 `.chat.completions.create` 调用面（如 `.responses`）。**⚠️ fail-closed 结算的金额与去向 2026-07-06 已改**（256k 封顶 → 请求感知估算 + `failclosed_tokens` 独立列 + GeneratorExit 不计暂停），见下方「## fail-closed 计费修复 + admin 用量趋势折线图」段——settle-once/不抛/不静默归零等不变式**未变**。
 - `wrap_client_for_billing(raw,uid,settings)`：managed→`MeteredManagedClient`；custom→裸 client。
 - `today_shanghai()` UTC+8 日界；`_miss_counter` 进程级 per-(uid,model,**day**)（day 入键 → 暂停次日自动清零）。
 
-**accounts.py**：`usage_daily(uid,day,cost_micro_yuan,cache_hit/miss_tokens,output_tokens, PK(uid,day))` 原子 `ON CONFLICT DO UPDATE` 累加；`get_usage_today`/`add_usage`/`get_effective_daily_cap_micro`（user override `users.daily_cost_micro_yuan` → 全局 `app_config.global_daily_cap_micro_yuan` → 默认 `DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN`=5_000_000）/`set_user_daily_cap_micro`。
+**accounts.py**：`usage_daily(uid,day,cost_micro_yuan,cache_hit/miss_tokens,output_tokens,failclosed_tokens, PK(uid,day))` 原子 `ON CONFLICT DO UPDATE` 累加（`failclosed_tokens` 2026-07-06 加列，`init_db` 幂等 ALTER 迁移老库）；`get_usage_today`/`add_usage`/`get_effective_daily_cap_micro`（user override `users.daily_cost_micro_yuan` → 全局 `app_config.global_daily_cap_micro_yuan` → 默认 `DEFAULT_GLOBAL_DAILY_CAP_MICRO_YUAN`=5_000_000）/`set_user_daily_cap_micro`。
 
 **接线硬约束**：
 - chat.py / independent_review.py：managed 模式 `self.client = metering.wrap_client_for_billing(...)`，5 个调用点（主流式/sync/压缩/视觉/审查）调用语法零改动自动计费。**metering 引用必须模块限定**（`from . import metering` + `metering.QuotaExceededError`，**不用** `from .metering import` 拷贝名）——`importlib.reload(metering)` 在同模块对象内重建异常类、拷贝名变陈旧与 wrapper 实抛的活类 isinstance 失配（仅测试态 reload 触发，但保持模块限定使套件顺序无关）。
@@ -436,6 +436,29 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - **provider 瞬态重试**：叶子模块 `backend/provider_retry.py`（**只依赖 stdlib**，chat/independent_review 共享；分类 = 无状态码网络错误全瞬态 + `TRANSIENT_STATUS_CODES`，4xx 确定性错误不重试；退避 2/4/8s 封顶）。chat.py 流式与非流式 create 各 3 次尝试（重构为显式 while + 计数——**旧 `for retry in range(2)` 有「usage 参数回退在末次尝试触发→复用陈旧 response」潜伏 bug，别改回**）；**流中断重发仅当 `iteration_visible_output=False`**（正文/思考/工具 pill 任一已 yield 即不重发，防气泡内容重复），per-turn 预算 `STREAM_MAX_RETRIES`；重试状态行用 `type:"tool"` 透给用户（「连接不稳定，正在自动重试…」——这是反馈②后该通道唯一的后端产出）。计费不变式：`continue` 前必经 `finally: response.close()` 恰好结算一次。Quota/Paused 异常在分类器之前截获、绝不重试。回归 `tests/test_provider_retry.py` + `ProviderRetryStreamTests`。**测试注意**：mock create 失败路径须 `mock.patch("backend.chat.time.sleep")` + 每次 create 给**新**的坏流（复用已耗尽生成器会被当空流正常收尾）。
 - **/admin 独立管理页**：`main.jsx` 按 `pathname` 正则 `/^\/admin\/?$/` 分流渲染 `AdminPage`（不引路由库）；后端 `_SPAStaticFiles._SPA_FALLBACK_ROUTES` **白名单**回退（404 → 直接回 `index.html` 文件——**别用 `"."` 目录形态**，会触发 StaticFiles 307 目录重定向多一跳；**别把白名单改成「所有 404 都回退」**，assets 404 可见性是 no-cache 修复链前提）。新端点 `GET /api/admin/usage?days=30`（`accounts.get_usage_history(since_day)`——accounts 叶子层**不 import metering**，since 由 main.py 算好传入；行粒度 (uid,day) + username join）。`AdminPage` 鉴权自理（`/api/auth/me` + `skipUnauthedHandler`，未登录/非 admin/需改密三拦截态都给「返回主页」出口）；纯 div/token 柱状图（**无图表库**）；聚合逻辑在 `utils/adminUsage.js` 纯函数（node:test 直测）；**用户表额度列仍可编辑**（用户硬要求）。侧栏盾牌按钮 `window.open('/admin','_blank','noopener')` 新标签开（保主应用 ChatPanel 内存态）；`AdminPanel.jsx` 弹窗已删。错误 detail 一律 `normalizeAuthError` 归一。回归：`AdminUsageHistoryTests` / `SpaFallbackRouteTests` / `adminUsage.test.mjs` / `adminPage.source.test.mjs`。
 - 顺手结清：mac `/var→/private/var` 4 个已知测试失败（断言两侧 `resolve()`，Windows 恒等）——mac 后端 1554 全绿，CLAUDE.md「macOS 注意点 3」的例外已不存在。
+
+## fail-closed 计费修复 + admin 用量趋势折线图（2026-07-06 晚，Codex 单轮审 APPROVED + 已部署 kr-web-01）
+
+用户报「07-06 面板缓存命中率特别低（37-60%）」，排查结论：**面板没算错、真实缓存健康（~65-72%），是 fail-closed 计费在污染数据**。改 metering fail-closed / usage_daily schema / admin 图表前必读。
+
+**根因（三方对账实证：CRA usage_daily vs new-api logs vs managed-proxy 请求数）**：流在 usage 块到达前中断（用户点停止 / 手机切后台断 SSE / 瞬态断流）→ `_settle` 按 deepseek-v4-pro **256k 上下文上限全额记 cache_miss**（¥0.768/次）。07-06 实测 233 个请求两侧全对上，但 CRA 多记 ~190 万幽灵 miss = **7 次中断 ≈ ¥5.6 = 当日账单 42%**；幽灵 miss 同时把命中率从真实 64.6%（new-api 侧）拖到面板 48.7%。07-01 起累计幽灵账约 ¥10。
+
+**修复（backend/metering.py + accounts.py + main.py，硬约束）**：
+- **请求感知估算**：fail-closed 结算改按本次 create kwargs 估 token 上界——`estimate_request_tokens_upper_bound`（messages+tools；字符三档：CJK 1/字、ASCII 0.5/字、其余（emoji 等）2/字；×1.15 margin + 2000 base；多模态/异常形态返 None→回落模型 ceiling；估算恒 `min(est, ceiling)` **绝不比旧封顶更贵**）。**已流出的 completion**（`chunk_completion_chars` 逐 chunk 累计 delta content/reasoning_content/tool_calls 字符；非流式 `response_completion_chars`）按 1 token/字符 ×1.15 计**输出价**补上——只按 prompt 估算会漏「短 prompt + 长输出后断流」（Codex BLOCKER）。**诚实定性**：近似上界而非任意 Unicode 严格上界（base64 密度实测 ~0.7/字符略超 0.575 估算）——滥用者中断「逃掉」的差价远小于其自身配额消耗，经济上无利可图；严格上界=旧 256k 封顶=对正常用户 42% 幽灵账，取舍偏典型用户。
+- **`failclosed_tokens` 独立列**：fail-closed 账 `add_usage(cost, 0, 0, 0, failclosed=billed)`，**绝不进 cache_miss**（进 miss 就是本次命中率污染事故本身）；`usage_daily` 加列 + `init_db` PRAGMA 检查幂等 ALTER 迁移；`/api/admin/usage` rows 透出该字段，前端图表 tooltip「含中断估算 N tokens」+ 明细表消耗列橙色 `*`。
+- **GeneratorExit 不计暂停**：`_metered_stream` finally 里 `sys.exc_info()` 判 GeneratorExit（消费方关流=用户停止/断连/重试关旧流）→ `bump_pause=False`——否则手机切后台 3 次就把该用户当日模型 `ModelPausedError` 锁死；provider 真异常 / 自然结束无 usage 仍计数（暂停保护的本意=provider 不报 usage 的计费盲飞）。计费本身照常（无逃单后门）。
+- fail-closed 结算现打 `[metering] fail-closed settle` warning 日志（本次事故零日志、全靠对账定位——观测性补上）。
+- settle-once / settle 不抛 / `extract_billing_usage` 不静默归零 / `finally: response.close()` 等既有不变式**全部未动**；历史已污染数据（07-01~06 约 ¥10 + 对应 miss）**不回填**（per-user 无法从 usage_daily 反推、new-api 侧无用户维度，已放弃 surgery）。
+- **回归**：`tests/test_metering.py::FailClosedEstimateTests`（估算器/emoji 档/clamp/failclosed 列/GeneratorExit 不暂停/provider 异常仍暂停/流中断补计输出）、`test_accounts.py`（failclosed 累加 + 老库迁移幂等）。
+
+**admin 用量趋势折线图（前端，任务同批）**：柱状图 → 平滑多序列 SVG 折线（`components/UsageTrendChart.jsx` + 纯函数层 `utils/usageChart.js`——Fritsch–Carlson 单调三次插值 `smoothPathD`，**平滑但不过冲**：零值日不画负假谷）。硬约束：
+- 序列 = 输入(hit+miss)/缓存命中/输出 走左轴 tokens、消耗走右轴 ¥ 虚线；`axisMax()` 全零侧返 0 → 只标基线 0 不渲染假刻度；hover/点击（`onPointerMove`+`onClick`）吸附最近日 → 竖线 + 数值卡（全序列值 + 命中率 + 活跃用户 + failclosed 提示）。
+- **图表颜色类三份写死**（stroke-/bg-/fill-）在 `SERIES` 常量——Tailwind JIT 按源码字面量扫描，**禁运行时拼类名**（`replace('bg-','fill-')` 会让类静默缺失，source-guard 锁死）。
+- **用户 × 时间范围双筛选联动**：`usageFilter`（明细卡的用户 select）+ `usageRange`（趋势卡的 7/30/90 日 select）同时驱动趋势图与明细表；**概览 4 卡固定全局近 30 日**不随筛选漂移（`aggregateByDay(usage?.rows, days.slice(-30))`，source-guard 锁）。fetch `days=90` 一次、范围切换纯前端切片不重请求。
+- 宽度经 ResizeObserver 实测像素（不用 viewBox 拉伸防文字变形）；`filterUsageRows(rows, uid, sinceDay)` 第三参时间窗；`barRatio`/`niceTicks` 已删（勿引用）。
+- **回归**：`frontend/tests/usageChart.test.mjs`（插值不过冲/轴/坐标/序列构建）、`adminUsage.test.mjs`、`adminPage.source.test.mjs`。
+
+**部署（2026-07-06 晚，第五笔）**：dist swap bundle `index-Rwor1vmc.js` + file-push 3 后端文件（metering/accounts/main）+ 重启 → 启动时 `init_db` 自动迁移 DB（已验列存在）；smoke：公网 health/新 bundle/`/admin` 200/usage 端点 401 门禁/journal 干净。**回滚点 `/opt/cra-rollback-20260706b/`（3 旧文件 + app.db.bak）**——注意回滚代码须同时回滚 DB 或容忍多余列（老 add_usage 6 参 INSERT 对多列表安全）。
 
 ## opencode SSE 规范化 sidecar（2026-07-03 上线 jp-app-01）
 

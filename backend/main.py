@@ -473,6 +473,9 @@ def admin_usage_history(days: int = 30, admin_uid: str = Depends(get_current_adm
             "cache_hit_tokens": r["cache_hit_tokens"],
             "cache_miss_tokens": r["cache_miss_tokens"],
             "output_tokens": r["output_tokens"],
+            # fail-closed 估算计费 token（流中断无 usage）：独立于真实 hit/miss，前端据此提示
+            # 「该日消耗含估算计费」，且不污染缓存命中率。
+            "failclosed_tokens": r["failclosed_tokens"],
         }
         for r in accounts.get_usage_history(since)
     ]

@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 // 2026-07-06：管理控制台从弹窗（AdminPanel）升级为 /admin 独立页面（AdminPage）。
+// 同日晚：用量趋势柱状图 → 平滑折线图（UsageTrendChart），用户 × 时间范围双筛选联动趋势图+明细表。
 const src = readFileSync(new URL('../src/components/AdminPage.jsx', import.meta.url), 'utf8')
+const chartSrc = readFileSync(new URL('../src/components/UsageTrendChart.jsx', import.meta.url), 'utf8')
 const mainSrc = readFileSync(new URL('../src/main.jsx', import.meta.url), 'utf8')
 
 test('main.jsx 按 pathname 分流 /admin → AdminPage（含 StrictMode/ErrorBoundary 包裹）', () => {
@@ -17,9 +19,33 @@ test('AdminPage 覆盖全部 admin 端点 + 历史用量端点 + 复用 adminApi
   assert.match(src, /\/api\/admin\/users\/\$\{[^}]+\}\/(password|cap|disabled)/)
   assert.match(src, /\/api\/admin\/invite-code\/rotate/)
   assert.match(src, /\/api\/admin\/allowed-hosts/)
-  assert.match(src, /\/api\/admin\/usage\?days=30/)
+  assert.match(src, /\/api\/admin\/usage\?days=90/)   // 拉满 90 天，范围切换纯前端切片不重请求
   assert.match(src, /from '\.\.\/utils\/adminApi'/)
   assert.match(src, /from '\.\.\/utils\/adminUsage'/)
+})
+
+test('用量趋势 = 平滑折线图组件 + 用户/时间范围双筛选联动趋势与明细', () => {
+  assert.match(src, /import UsageTrendChart from '\.\/UsageTrendChart'/)
+  assert.match(src, /<UsageTrendChart perDay=\{perDay\}/)
+  // 双筛选：usageFilter（用户）与 usageRange（时间窗）同时进入 perDay（趋势）与 detailRows（明细）
+  assert.match(src, /aggregateByDay\(filteredRows, rangeDays\)/)
+  assert.match(src, /filterUsageRows\(usage\?\.rows, usageFilter, rangeDays\[0\]\)/)
+  assert.match(src, /aria-label="趋势时间范围"/)
+  assert.match(src, /aria-label="按用户筛选用量明细"/)
+  // 概览卡保持全局近 30 日，不随筛选漂移
+  assert.match(src, /aggregateByDay\(usage\?\.rows, days\.slice\(-30\)\)/)
+})
+
+test('UsageTrendChart：单调平滑（不过冲）+ 点击/hover 数值卡 + 主题 token 类（无裸 hex/无运行时拼类名）', () => {
+  assert.match(chartSrc, /from '\.\.\/utils\/usageChart'/)
+  assert.match(chartSrc, /smoothPathD/)
+  assert.match(chartSrc, /onPointerMove/)
+  assert.match(chartSrc, /onClick/)
+  assert.match(chartSrc, /role="img"/)
+  assert.doesNotMatch(chartSrc, /#[0-9a-fA-F]{3,8}\b/)
+  assert.doesNotMatch(chartSrc, /replace\('bg-'/)   // Tailwind JIT 扫不到运行时拼接的类名
+  // failclosed（中断估算计费）只进提示、不混进序列
+  assert.match(chartSrc, /含中断估算/)
 })
 
 test('AdminPage 鉴权自理：me 判定 + 三种拦截态给出返回主页出口', () => {
@@ -43,8 +69,8 @@ test('AdminPage 主题随 token 体系：无裸 hex / 无 dark: 前缀（scrim �
   assert.doesNotMatch(src, /className="[^"]*dark:/)
 })
 
-test('AdminPage 图表纯 CSS/DIV 实现（不引图表库）+ hover 明细 title', () => {
+test('图表自绘 SVG（不引图表库）+ 明细表保留缓存命中率列', () => {
   assert.doesNotMatch(src, /from 'recharts'|from 'chart\.js'|from 'echarts'/)
+  assert.doesNotMatch(chartSrc, /from 'recharts'|from 'chart\.js'|from 'echarts'/)
   assert.match(src, /缓存命中率/)
-  assert.match(src, /role="img"/)
 })

@@ -85,9 +85,15 @@ def init_db() -> None:
                 cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0,
+                failclosed_tokens INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(uid, day));
             """
         )
+        # 既有库迁移：failclosed_tokens（fail-closed 估算计费 token，独立于真实 cache_miss——
+        # 否则中断流的保守封顶会污染缓存命中率统计）。ALTER 幂等：已存在则跳过。
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(usage_daily)")}
+        if "failclosed_tokens" not in cols:
+            conn.execute("ALTER TABLE usage_daily ADD COLUMN failclosed_tokens INTEGER NOT NULL DEFAULT 0")
 
 
 def create_user(username, password, is_admin=False, must_change_password=False) -> str:
@@ -240,18 +246,21 @@ def seed_config_if_absent(key, value) -> None:
         conn.execute("INSERT OR IGNORE INTO app_config(key,value) VALUES(?,?)", (key, value))
 
 
-def add_usage(uid, day, cost_micro_yuan, hit, miss, output) -> None:
+def add_usage(uid, day, cost_micro_yuan, hit, miss, output, failclosed=0) -> None:
     # 原子累加：首行 INSERT、已存在则 DO UPDATE 累加（spec §5.4）。
+    # failclosed = fail-closed 估算计费 token（流中断无 usage 时的保守上界），
+    # 与真实 cache_hit/miss 分列——混进 miss 会把命中率统计打烂（2026-07-06 实测 7 次中断致当日命中率虚低 16pp）。
     with _db() as conn:
         conn.execute(
-            "INSERT INTO usage_daily(uid,day,cost_micro_yuan,cache_hit_tokens,cache_miss_tokens,output_tokens)"
-            " VALUES(?,?,?,?,?,?)"
+            "INSERT INTO usage_daily(uid,day,cost_micro_yuan,cache_hit_tokens,cache_miss_tokens,output_tokens,failclosed_tokens)"
+            " VALUES(?,?,?,?,?,?,?)"
             " ON CONFLICT(uid,day) DO UPDATE SET"
             "   cost_micro_yuan=cost_micro_yuan+excluded.cost_micro_yuan,"
             "   cache_hit_tokens=cache_hit_tokens+excluded.cache_hit_tokens,"
             "   cache_miss_tokens=cache_miss_tokens+excluded.cache_miss_tokens,"
-            "   output_tokens=output_tokens+excluded.output_tokens",
-            (uid, day, int(cost_micro_yuan), int(hit), int(miss), int(output)))
+            "   output_tokens=output_tokens+excluded.output_tokens,"
+            "   failclosed_tokens=failclosed_tokens+excluded.failclosed_tokens",
+            (uid, day, int(cost_micro_yuan), int(hit), int(miss), int(output), int(failclosed)))
 
 
 def get_usage_history(since_day: str) -> list[dict]:
@@ -262,7 +271,7 @@ def get_usage_history(since_day: str) -> list[dict]:
     """
     with _db() as conn:
         rows = conn.execute(
-            "SELECT uid, day, cost_micro_yuan, cache_hit_tokens, cache_miss_tokens, output_tokens"
+            "SELECT uid, day, cost_micro_yuan, cache_hit_tokens, cache_miss_tokens, output_tokens, failclosed_tokens"
             " FROM usage_daily WHERE day >= ? ORDER BY day ASC, uid ASC",
             (str(since_day),),
         ).fetchall()
