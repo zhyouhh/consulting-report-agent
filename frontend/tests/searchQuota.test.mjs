@@ -13,7 +13,8 @@ test('providerTitle：已知渠道给品牌名，未知回显原名', () => {
 })
 
 test('sourceMeta：四种来源都有标签+口径提示，未知回退 none', () => {
-  assert.equal(sourceMeta('live').label, '实时')
+  assert.equal(sourceMeta('live').label, '官方额度')
+  assert.match(sourceMeta('live').hint, /滞后|延迟|非实时|即时/)   // 诚实性守护：不得再宣称「实时」
   assert.equal(sourceMeta('observed').label, '被动观测')
   assert.equal(sourceMeta('estimated').label, '本地估算')
   assert.match(sourceMeta('estimated').hint, /不含其它部署/)

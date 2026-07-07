@@ -8,7 +8,7 @@ import { dayXs, smoothPathD, axisMax, yPixel, nearestIndex, xLabelIndices } from
 
 // 管理控制台·搜索池额度板块：每 provider 一张卡（剩余/来源/调用统计/逐 key 明细）
 // + 近 31 日各渠道调用趋势折线。数据来自 GET /api/admin/search-quota（AdminPage 取数）。
-// 三种数据质量（实时/被动观测/本地估算）在卡片上明示，估算类带口径提示——不装精确。
+// 三种数据质量（官方额度/被动观测/本地估算）在卡片上明示，官方额度/估算类带口径提示——不装精确。
 
 const CHART_HEIGHT = 180
 const PAD = { top: 12, right: 16, bottom: 24, left: 40 }
@@ -120,7 +120,7 @@ function ProviderCard({ provider }) {
       ) : null}
 
       {provider.note && <div className="text-2xs text-warn">{provider.note}</div>}
-      {provider.source === 'estimated' && (
+      {(provider.source === 'estimated' || provider.source === 'live') && (
         <div className="text-2xs text-t3">{meta.hint}</div>
       )}
     </div>

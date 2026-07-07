@@ -296,7 +296,7 @@ export default function AdminPage() {
           </div>
         </SectionCard>
 
-        {/* 搜索池额度：tavily 实时 / brave 被动观测 / serper·exa 本地估算（来源标签见卡片） */}
+        {/* 搜索池额度：tavily 官方额度（约 1h 滞后）/ brave 被动观测 / serper·exa 本地估算（来源标签见卡片） */}
         <SectionCard
           title="搜索池额度"
           actions={

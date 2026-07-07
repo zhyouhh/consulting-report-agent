@@ -9,6 +9,14 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
+最后更新：2026-07-08（**搜索池额度卡片「实时」标签误导修正 ✅ 纯前端 + 部署 kr-web-01**）：
+
+**背景**：用户报 tavily 卡片「明明有 3 次调用，但剩余仍 3000/3000、进度条不动」。**排查结论：非 bug**——面板「今日 N 次」=本地记账（实时准），「剩余 3000/3000」=tavily 官方 `/usage` 的 `plan_usage`（source=`live`），两套数据故意解耦。**决定性实测（后台每 2min 轮询 tavily `/usage`）**：打一次确认成功的真实搜索后一路 0，第 ~43min 从 0 直接跳到 2（两次积压同刻批量结算）→ **tavily `/usage` 端到端滞后 ~45-55min 且批量周期性 flush（非实时表，官方宣传的 "real-time" 不准）；`tvly-dev-` 开发版 key 是计数的**。真因＝数据源特性 +「实时」标签误导。
+
+**修法（用户拍 A，纯前端 4 处、后端零改动）**：`utils/searchQuota.js` `SOURCE_META.live` 标签「实时」→「官方额度」+ hint 改「来自 provider 官方用量接口，可能滞后约 1 小时、不随每次搜索即时变化；实时用量以「今日 N 次」为准」；`SearchPoolQuota.jsx` 官方额度卡片**可见**渲染该 hint（`source==='estimated'||==='live'` 都显示 `meta.hint`，不再只藏 hover）；`searchQuota.test.mjs` 同步断言 + 加诚实性守护 `/滞后|延迟|非实时|即时/`（挡再退回宣称实时）；`AdminPage.jsx`/注释分类文案同步。**未走 Codex**（用户默许文案级微改省审）。
+
+**交付**：前端 544 测试 + build 绿；frontend-only dist swap bundle `index-CZ4-BpLR.js`（systemd 未重启、`dist.old` 留回滚）；公网 smoke 三句新文案在线（HTTP 200）。commit + push origin（本条 KB 同步一并）。**⏳ 未做（非阻塞）**：serper/exa 历史消耗校准 `baseline_used`（07-07 已记）；tavily 滞后是 provider 特性、无法消除，只能诚实标注。内容见 memory [[search-pool-quota-monitoring]] + [[w2c-deploy-status]]。
+
 最后更新：2026-07-07 晚（**admin 搜索池额度监控 ✅ 已实施 + Codex 3 轮审至 APPROVED + 部署 kr-web-01 + 端到端验证**）：
 
 **背景**：用户提出「管理面板看不清搜索池各渠道额度/用量」。联网调研四家 provider 官方能力（结论：只有 tavily 有干净用量 API；brave 只有响应头；serper/exa 只能本地记账）+ 本地摸底（此前**零持久记账**：限流窗口 1h 即扔、无 provider/key 维度；`daily_soft_limit`/`minute_limit` 是从未执行的摆设配置）。用户拍板：只管 web 端（桌面版没人用）、serper 2500/key、exa $10/key 全赠送、brave 已设限额按 $5/月（约 1000 次）算、新 exa key 入池、**权重烧反了要重排**（月度重置的 tavily/brave 该当主力、一次性库存 serper/exa 该做兜底）。

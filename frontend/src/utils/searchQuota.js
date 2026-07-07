@@ -1,5 +1,5 @@
 // 管理控制台·搜索池额度的纯函数层（与 SearchPoolQuota 渲染解耦，node:test 直测）。
-// 数据源见后端 backend/search_quota.py：tavily 实时 / brave 被动观测 / serper·exa 本地估算，
+// 数据源见后端 backend/search_quota.py：tavily 官方额度（约 1h 滞后）/ brave 被动观测 / serper·exa 本地估算，
 // 前端职责 = 中文文案 + 数值格式化 + 趋势序列构建，不做任何额度语义推断。
 
 export const PROVIDER_ORDER = ['tavily', 'brave', 'serper', 'exa']
@@ -17,7 +17,7 @@ export function providerTitle(name) {
 
 // 数据来源标签 + 诚实性提示（估算类必须说明口径，不能装作精确值）
 const SOURCE_META = {
-  live: { label: '实时', hint: '来自 provider 官方用量接口（约 5 分钟缓存）' },
+  live: { label: '官方额度', hint: '来自 provider 官方用量接口，可能滞后约 1 小时、不随每次搜索即时变化；实时用量以「今日 N 次」为准' },
   observed: { label: '被动观测', hint: '来自最近一次搜索响应头，随使用自动更新' },
   estimated: { label: '本地估算', hint: '按本服务记账估算，不含其它部署的消耗，实际剩余可能更少' },
   none: { label: '未声明', hint: '未配置额度信息，仅显示调用统计' },
