@@ -9,6 +9,16 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
+最后更新：2026-07-08（**v2 图表生成能力 spec 写完 + Codex 4 轮审 APPROVED → deferred 到试用稳定后再做**）：
+
+**性质**：设计阶段交付、**不立刻实施**。用户定为 v2 升级功能，等试用期稳定 + 用户反馈收敛后再进 writing-plans → 实施。spec = `docs/superpowers/specs/2026-07-08-report-chart-generation-design.md`。
+
+**做什么**：让主模型生成图辅助报告——数据图（柱/线/饼/瀑布/漏斗，matplotlib）+ 结构图（2×2/价值链/流程/路线图 后端模板；v2.1 graphviz 任意流程图）。全流程「生成 → 落盘 `content/assets/` → 正文 `![]()` 引用（走现成 `append_report_draft`）→ 预览所见即所得 → docx 导出嵌图」。架构 = 一条共用尾巴（渲染→落盘→引用→预览→导出）+ 两个可插拔的头（数据图 matplotlib / 结构图 模板→graphviz），分期 v2.0（数据图+模板结构图+全尾巴）/ v2.1（graphviz）。定位同 R5：canonical skill `business-charts.md` 等模块设计过但嵌入后死掉（无 run_python 工具、HTML 嵌不进 docx）→ 后端工具重实现。
+
+**拍板决策**：混合触发（模型自主插 + 用户可要）；防编造 = 强建议（`source` 挂图脚 + sidecar 留痕 + S5 加第 6 审查维度，不硬门禁——派生数据 CAGR/汇总/预测会被硬门禁误伤）；render-at-generation（预览=导出同一 PNG）。
+
+**Codex 4 轮挖出的实施必守坑（全写进 spec，详见 memory [[report-charts-v2-spec]]）**：① 生成≠插入 → 工具自带 preflight 门禁（复用 `check_report_writing_stage`+`check_outline_confirmed`+`check_no_fetch_url_pending`）；② 导出/sweep 竞态 → sweep 与导出解耦 + grace period（导出只读不删）；③ 线程 timeout 杀不掉 matplotlib → 靠输入 caps、不承诺硬超时；④「零计费」错 → 两工具 schema 每轮吃 prompt token，加 schema-size 回归钉上限；⑤ pyplot 非线程安全（8-worker 并发）→ Agg + OO API；⑥ 文件树集成重 → v2.0 降级不进文件树（删图=删引用+orphan sweep）。**最易漏落地坑**：Linux 服务器默认无中文字体 → 必须塞思源黑体/Noto CJK + PyInstaller `datas` 打包（含 mpl-data），否则图全方框。
+
 最后更新：2026-07-08（**搜索池额度卡片「实时」标签误导修正 ✅ 纯前端 + 部署 kr-web-01**）：
 
 **背景**：用户报 tavily 卡片「明明有 3 次调用，但剩余仍 3000/3000、进度条不动」。**排查结论：非 bug**——面板「今日 N 次」=本地记账（实时准），「剩余 3000/3000」=tavily 官方 `/usage` 的 `plan_usage`（source=`live`），两套数据故意解耦。**决定性实测（后台每 2min 轮询 tavily `/usage`）**：打一次确认成功的真实搜索后一路 0，第 ~43min 从 0 直接跳到 2（两次积压同刻批量结算）→ **tavily `/usage` 端到端滞后 ~45-55min 且批量周期性 flush（非实时表，官方宣传的 "real-time" 不准）；`tvly-dev-` 开发版 key 是计数的**。真因＝数据源特性 +「实时」标签误导。
