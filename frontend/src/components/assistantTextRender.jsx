@@ -15,6 +15,15 @@ function hastTextOf(node) {
   return (node.children || []).map(hastTextOf).join('')
 }
 
+// 锚点子树里是否存在解析命中的 code 节点——必须递归到任意深度：
+// [**`outline.md`**](url) 的 code 嵌在 strong 里、[`a.md` 和 `outline.md`](url) 命中的
+// 不是首个 code 子节点，只查直接子级都会漏（codex 红队三轮 BLOCKER）。
+function hasResolvableCodeDescendant(node) {
+  if (!node) return false
+  if (node.tagName === 'code' && resolveWorkspaceFileLink(hastTextOf(node))) return true
+  return (node.children || []).some(hasResolvableCodeDescendant)
+}
+
 // 文件内链（2026-07-09 试用反馈③）：助手正文里反引号提到的已知工作区文件名
 // （`outline.md` / `plan/outline.md` 等，白名单精确匹配）渲染成可点击链接，直达文件 tab。
 // 匹配不上的 inline code 原样走共享样式；块级 code 不参与。
@@ -28,8 +37,7 @@ function buildFileLinkComponents(onOpenFile) {
     // 命中的 code 子节点时解包掉锚点，只留内层按钮（codex 红队 BLOCKER 二轮）。
     // 纯文本锚点 [outline.md](url)（无反引号）不解包：那是模型给的外部链接，保持原样。
     a: ({ node, children, ...props }) => {
-      const codeChild = (node?.children || []).find((c) => c.tagName === 'code')
-      if (codeChild && resolveWorkspaceFileLink(hastTextOf(codeChild))) {
+      if (hasResolvableCodeDescendant(node)) {
         return <>{children}</>
       }
       return baseAnchor({ children, ...props })

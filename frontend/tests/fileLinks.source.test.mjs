@@ -72,9 +72,14 @@ test("anchors wrapping a resolvable backticked filename are unwrapped (keyboard-
   // 键盘用户 Tab 到外层 <a> 按 Enter：事件目标是 <a>，子按钮的 preventDefault 拦不到 →
   // 必须在渲染层解包锚点（codex 红队 BLOCKER 二轮）。纯文本锚点保持原样。
   const anchorBlock = s.slice(s.indexOf("a: ({ node, children, ...props }) => {"), s.indexOf("code: ({"));
-  assert.match(anchorBlock, /c\.tagName === 'code'/);
-  assert.match(anchorBlock, /resolveWorkspaceFileLink\(hastTextOf\(codeChild\)\)/);
+  assert.match(anchorBlock, /hasResolvableCodeDescendant\(node\)/);
   assert.match(anchorBlock, /return <>\{children\}<\/>/);
+  // 检查必须递归任意深度（strong 嵌套 / 多 code 子节点），不得退回只查直接子级的 find()
+  //（codex 红队三轮 BLOCKER）。
+  const helper = s.slice(s.indexOf("function hasResolvableCodeDescendant"), s.indexOf("function buildFileLinkComponents"));
+  assert.match(helper, /node\.tagName === 'code' && resolveWorkspaceFileLink\(hastTextOf\(node\)\)/);
+  assert.match(helper, /\.some\(hasResolvableCodeDescendant\)/);
+  assert.doesNotMatch(anchorBlock, /\.find\(/);
 });
 
 test("App ensures the workspace panel is visible before opening a file (desktop)", () => {
