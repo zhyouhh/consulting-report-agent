@@ -16,9 +16,11 @@ export default function MobileShell(props) {
     onLoggedOut, onOpenAdmin, onToggleTheme,
     onMaterialsMerged, onMaterialDeleted, onProjectMutated, onCheckpointSet,
     onInsertPrompt, onInjectedPromptConsumed,
+    autoStartProjectId, onAutoStartConsumed,
   } = props
 
   const chatPanelRef = useRef(null)
+  const workspacePanelRef = useRef(null)
   const [drawer, setDrawer] = useState(DRAWER_NONE)
   const closeAll = () => setDrawer(DRAWER_NONE)
   const toggleLeft = () => setDrawer((d) => nextDrawerState(d, 'toggleLeft'))
@@ -71,6 +73,13 @@ export default function MobileShell(props) {
     if (ok) closeAll()
     return ok
   }
+  // 文件内链：聊天区 pill / 正文文件名点击 → 拉开右抽屉 + 工作区打开该文件。
+  // WorkspacePanel 常驻挂载（关闭只是 off-canvas），ref 始终可用，无需等 mount。
+  const handleOpenWorkspaceFile = (path) => {
+    if (!path) return
+    setDrawer((d) => nextDrawerState(d, 'openRight'))
+    workspacePanelRef.current?.openFile(path)
+  }
 
   return (
     <div className="relative w-screen bg-bg overflow-hidden" style={{ height: '100dvh' }} onTouchStart={onShellTouchStart} onTouchEnd={onShellTouchEnd} onTouchCancel={onShellTouchCancel}>
@@ -89,6 +98,9 @@ export default function MobileShell(props) {
           onToggleWorkspacePanel={toggleRight}
           injectedPrompt={injectedPrompt}
           onInjectedPromptConsumed={onInjectedPromptConsumed}
+          autoStartProjectId={autoStartProjectId}
+          onAutoStartConsumed={onAutoStartConsumed}
+          onOpenWorkspaceFile={handleOpenWorkspaceFile}
         />
       </div>
 
@@ -125,6 +137,7 @@ export default function MobileShell(props) {
         style={{ right: drawer === DRAWER_RIGHT ? '0' : '-110%', visibility: drawer === DRAWER_RIGHT ? 'visible' : 'hidden' }}
       >
         <WorkspacePanel
+          ref={workspacePanelRef}
           isMobile={true}
           width="100%"
           projectId={currentProjectId}

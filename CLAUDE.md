@@ -96,7 +96,7 @@ S4 阶段（大纲已确认）报告正文唯一规范路径是 `content/report_
 - `canonical_draft_mutations` 是 list；每轮最多 `MAX_CANONICAL_MUTATIONS_PER_TURN`（现 10）次 canonical draft mutation，超限错误必须带 mutations 摘要和真实进度。
 - read-before-write：先 `read_file` 才能改（首次起草除外）；mtime 变了要重读
 
-**Turn-end 对账**：`_chat_*_unlocked` no-tool-call 分支检测 `canonical_obligation` set + `canonical_draft_mutations` 为空 + assistant 文本声称已写 → 注入 corrective user message + retry。只兜底"完全没写却声称写了"，不解决 partial obligation retry。
+**Turn-end 对账（⚠️ 2026-07-09 义务机制手术后）**：只剩「声称 vs 实际」一条——`_get_missing_expected_writes`（解析 assistant 文本里声称写过的文件，对比 `successful_writes`）→ `_build_missing_write_feedback` 纠偏重试。**意图分类驱动的 canonical_obligation 整套已删**（`_required_writes_satisfied` 硬强制 / 「更新报告正文没有成功」兜底文案 / `_maybe_inject_obligation_retry` / 义务→`can_write_non_plan` 权限解锁 / 义务快照与流式缓冲 flag），不要恢复——裸关键词（优化/修改…）扫长消息误伤率高，S0-S3 会绕开阶段门禁 + 轮末误导文案（试用反馈截图实锤）。`detect_user_message_intent` 仅存 3 个窄消费方：edit_file↔append 工具路由互拦（append 侧 modify 拦截**必须带 `draft_exists` 条件**）+ 全篇重写解锁。已接受的空隙：无路径口头声称（"正文已写完"，无反引号路径）+ 实际没写 → 不再兜（用户 2026-07-09 拍板）。见「## 试用反馈批次（2026-07-09）」。
 
 **历史背景**：原 `<draft-action>` tag system + classifier + gate + scope enforcement 整套（含 fix4 v5 amendment）已于 2026-05-06 删除；4 专用工具中的 3 个旧工具与 gemini 时代 obligation / family-lock 控制层已于 2026-05-09 DeepSeek migration 删除。详见 `docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md`。
 
@@ -108,7 +108,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 |---|---|---|
 | 工作区"独立审查"按钮 | `plan/independent-review.md` | `backend/independent_review.py:IndependentReviewAgent`（独立 LLM 会话，5 维度判断，含「语言专业性·去 AI 味」）|
 
-报告就绪后前端自动起一轮主代理 turn（`ChatRequest.system_trigger` 协议 + `_chat_stream_unlocked` 内 `if system_trigger:` 分支；现仅 `independent_review_done` 一种 trigger）。
+报告就绪后前端自动起一轮主代理 turn（`ChatRequest.system_trigger` 协议 + `_chat_stream_unlocked` 内 `if system_trigger:` 分支；现有 `independent_review_done` 与 `project_created` 两种 trigger——**禁工具是 review 汇报轮专属的 trust boundary，`project_created` 开场轮带完整工具**，见「## 试用反馈批次（2026-07-09）」）。
 
 **去 AI 味（N7 Humanizer-zh）**：独立审查维度⑤=「语言专业性·去 AI 味」，规则在 review prompt 内置。辅以**确定性占位符扫描** `backend/report_quality.py:scan_placeholders` / `build_placeholder_grounding`（穷举正文半成品标记），首轮把命中清单作 grounding 注入审查会话（`UNTRUSTED_DATA` 包裹、定界符中和、50 行上限）。trust boundary 标记与中和器抽到 leaf 模块 `backend/trust_boundary.py`（`UNTRUSTED_DATA_OPEN/CLOSE` + neutralizer），`report_quality` 与 `independent_review` 共享 import。
 
@@ -474,6 +474,16 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - **前端** `SearchPoolQuota.jsx` + `utils/searchQuota.js`（纯函数 node:test 直测）：**独立 effect 取数、不进 reload 的 `Promise.all`**（tavily 慢/挂不拖累核心管理数据，source-guard 锁）；序列颜色类三份写死字面量（JIT 铁律）；估算卡必须带口径提示（「不含其它部署消耗」）；`SOURCE_META.live` 标签＝「官方额度」（非「实时」）+ hint 点破 ~1h 滞后并指向本地实时「今日 N 次」，`estimated`/`live` 两类卡片都可见渲染 `meta.hint`（`searchQuota.test.mjs` 诚实性守护 `/滞后|延迟|非实时|即时/` 挡退回宣称实时）。
 - **回归**：`tests/test_search_quota.py`（指纹/队列/tavily 缓存与去重/报告装配/估算窗口/key 零回显）、`test_search_providers.py`（key 归属/serper credits/brave 快照含 429）、`test_search_pool.py`（recorder 注入语义）、`test_accounts.py`（表+迁移）、`test_admin_api.py`、前端 `searchQuota.test.mjs`/`searchPoolQuota.source.test.mjs`。
 - **部署（第六笔，2026-07-07）**：7 后端文件 + 配置 + dist swap（bundle `index-D2bYJHJ7.js`）+ 重启；回滚点 `/opt/cra-rollback-20260707/`（含 app.db.bak）。**已知余项**：serper/exa 记账启用前的历史消耗未计（可填 `baseline_used` 校准，不填=剩余偏乐观）；brave 快照等首次真实 brave 搜索才出现。
+
+## 试用反馈批次（2026-07-09 实施 + Codex 单轮审+3 轮红队 APPROVED；分支 `fix/trial-feedback-0709`，待部署）
+
+试用反馈 0709 四件套（文件栏乱跳 / 义务机制手术 / 新建项目自动需求确认 / 文件内链）。改文件树刷新 / 轮末对账 / system_trigger / 聊天区文件链接前必读：
+
+- **文件栏选中自持震荡修复**（`WorkspacePanel.jsx`）：`loadFiles` 旧版用闭包快照 `currentFile` 回写选中 + useCallback 依赖含 `currentFile` → 每次选中变化 effect 重发列表请求，两条闭包值不同的在途链交替返回把选中 A↔B 无限乒乓（用户视频「不碰键鼠自己乱动」真因，一次点击撞上在途刷新即可点火、自持续振）。修后**铁律**：loadFiles 响应回调只经 `currentFileRef`（唯一写入点在 `loadFile`，与 `setCurrentFile` 同步）读实时选中、**绝不回写闭包值**；deps 不含 `currentFile`；当前文件仍在列表只静默刷内容、消失才回落默认。isEditing early-return / `latestFileRequestRef` 乱序守卫 / 项目归属守卫全保留。锁测 `workspacePanel.source.test.mjs`（震荡三连守护）。
+- **义务机制手术**（详见上方「## S4 写正文工具」Turn-end 对账段的 ⚠️ 更新）：净删 ~580 行；`buffer_required_write_content` 整轮吞流式的行为随之消失（义务误武装轮曾全程无流式输出）。
+- **新建项目自动需求确认**（反馈③根因链：欢迎语邀请下指令 → 用户甩长需求 → S0 软门禁连拒 advance → 义务误伤夹击 → 误导文案）：新 `project_created` system trigger——前端创建项目后（App `autoStartProjectId` 标记 → ChatPanel 会话**确认为空**分支 + fired-ref 防重）触发一轮，模型主动开启 S0 访谈提问。**带完整工具**（注入的是后端静态指令非不可信数据，开场可 web_search 查背景；review 汇报轮的禁工具 trust boundary 原样保留勿动）；后端幂等（`_has_prior_s0_assistant_turn` 有助手发言即静默 no-op 零事件）；合成 kickoff user 消息不落盘（system_triggered 只持久化 assistant）。空流收尾时前端先 flush 流式队列再移除全空 assistant 占位气泡（防 EOF-without-DONE 误删）。欢迎语结尾不再邀请自由指令。`SYSTEM_TRIGGER_PROMPTS` keyset 与 `SystemTriggerType` Literal 有一致性测试锁。
+- **文件内链**（`utils/workspaceFileLinks.js` 纯函数 + pill/正文两入口）：白名单 = `FILE_DISPLAY_NAMES` 单一真值源，**精确匹配**（完整路径或唯一 basename），不做模糊匹配；`pathFromToolEvent`（append_report_draft→canonical 草稿[其 pill arg 为空、显示中文名]；write/edit/read_file→arg 解析）。pill 链接**仅 success 态**、span+role="link"（外层 Tag 可能是 button，嵌套 button 非法）；正文反引号文件名走 `buildFileLinkComponents`——**无 onOpenFile 回调时渲染与旧版逐字一致**（审查窗零回归）。**三个 codex 红队坑勿回归**：① WorkspacePanel `useImperativeHandle` deps 引用 `loadFile`，hook 必须排在其声明之后（提前即 TDZ 崩渲染，source 测试测不到，有源码顺序锁测）；② 文件名嵌在 markdown 链接里（[`outline.md`](url)）时鼠标 preventDefault 不够，键盘 Tab 到外层 `<a>` 按 Enter 仍导航——**锚点含解析命中的 code 后代节点即解包**（只留内层按钮）；③ 解包检查必须**递归任意深度**（strong 嵌套/多 code 兄弟），禁退回直接子级 `find()`。桌面 App 先保证面板可见（收起时 `setTimeout(0)` 等 remount）；移动端开右抽屉（WorkspacePanel 常驻挂载 ref 恒可用）；`WorkspacePanel.openFile` 过 `attemptLeave` 脏编辑守卫。锁测 `workspaceFileLinks.test.mjs` + `fileLinks.source.test.mjs`。
+- **明确没做**：StagePanel 阶段卡片产物链接（completedItems 是纯文案、映射脆弱，pill+文件名已覆盖主诉求）；审查迷你窗内的文件内链；反馈④的法规映射表与职责分工交互（用户拍板不做）。
 
 ## opencode SSE 规范化 sidecar（2026-07-03 上线 jp-app-01）
 

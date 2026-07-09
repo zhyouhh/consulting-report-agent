@@ -44,9 +44,10 @@ test('ChatPanel：parts 有则 MessageParts、否则 ToolCallList + renderAssist
   assert.match(src, /import MessageParts from '\.\/MessageParts'/)
   assert.match(src, /import \{ renderAssistantText \} from '\.\/assistantTextRender'/)
   assert.match(src, /msg\.parts && msg\.parts\.length/)
-  assert.match(src, /<MessageParts parts=\{msg\.parts\} \/>/)
-  // fallback 老消息：ToolCallList 堆顶 + renderAssistantText(msg.content)（与抽取前等价）
-  assert.match(src, /renderAssistantText\(msg\.content\)/)
+  assert.match(src, /<MessageParts parts=\{msg\.parts\} onOpenFile=\{onOpenWorkspaceFile\} \/>/)
+  // fallback 老消息：ToolCallList 堆顶 + renderAssistantText(msg.content, …)（与抽取前等价，
+  // 文件内链批次起带 onOpenFile options）
+  assert.match(src, /renderAssistantText\(msg\.content, \{ onOpenFile: onOpenWorkspaceFile \}\)/)
 })
 
 // ── 行为锁测：用真实纯函数模拟 ChatPanel 的 per-event parts 归约，断言时间线穿插正确 ──

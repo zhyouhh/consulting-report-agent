@@ -32,17 +32,6 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   const filePreviewRef = useRef(null)
   const uploadInputRef = useRef(null)
 
-  useImperativeHandle(ref, () => ({
-    // App 切项目 / 收起面板前调用：把离开动作转交 FilePreviewPanel 的 attemptLeave
-    //（allow 立即执行、dirty 弹三按钮后执行）。面板未挂载（非 files tab）则无编辑态，直接执行。
-    attemptLeave: (action) => {
-      const fp = filePreviewRef.current
-      if (fp?.attemptLeave) return fp.attemptLeave(action)
-      action?.()
-      return true
-    },
-  }), [])
-
   const handleTabClick = useCallback((next) => {
     // 离开「文件」tab 是一条离开路径：经统一守卫（dirty 弹三按钮后再切）。
     if (activeTab === 'files' && next !== 'files' && filePreviewRef.current?.attemptLeave) {
@@ -68,12 +57,18 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   const mountedRef = useRef(true)
   // 最新文件请求标记：丢弃乱序返回的旧 GET，防它覆盖更新的预览内容（codex 前端 quality NIT）。
   const latestFileRequestRef = useRef(null)
+  // 实时选中 ref：loadFiles 的响应回调必须经它读「此刻」的选中文件，绝不用闭包快照。
+  // 闭包快照会把过期选中写回 setCurrentFile —— 选中一变 loadFiles 身份就变、effect 再发请求，
+  // 两条闭包值不同的链交替返回即形成 A↔B 自持震荡（试用反馈「文件栏不碰键鼠自己乱动」真因）。
+  // 唯一写入点在 loadFile（与 setCurrentFile 同步），保证 ref 永远先于 state commit 反映最新导航意图。
+  const currentFileRef = useRef('plan/project-overview.md')
 
   const loadFile = useCallback(async (path, requestProject = projectId) => {
     if (!requestProject || !path) return
     // 同步提交选择：currentFile 立即反映点击，消除「导航已发起、currentFile 还没异步 commit」的窗口——
     // 否则用户在内容 GET 返回前点「编辑」会锁定到错误文件（codex 前端 quality 审 BLOCKER）。内容仍异步加载。
     setCurrentFile(path)
+    currentFileRef.current = path
     latestFileRequestRef.current = path
     try {
       const res = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/files/${path}`)
@@ -102,6 +97,34 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     return () => { mountedRef.current = false }
   }, [])
 
+  // 注意：这个 hook 必须在 loadFile 声明之后（deps 里引用它，提前会 TDZ ReferenceError 崩渲染，
+  // codex 整分支审 BLOCKER——source-guard 测试不渲染组件抓不到这类错误）。
+  useImperativeHandle(ref, () => ({
+    // App 切项目 / 收起面板前调用：把离开动作转交 FilePreviewPanel 的 attemptLeave
+    //（allow 立即执行、dirty 弹三按钮后执行）。面板未挂载（非 files tab）则无编辑态，直接执行。
+    attemptLeave: (action) => {
+      const fp = filePreviewRef.current
+      if (fp?.attemptLeave) return fp.attemptLeave(action)
+      action?.()
+      return true
+    },
+    // 文件内链（2026-07-09）：聊天区 pill / 正文文件名点击 → 切「文件」tab 并打开该文件。
+    // 当前在 files tab 且处于编辑态时同样经 attemptLeave 守卫（dirty 弹三按钮后再跳）。
+    openFile: (path) => {
+      if (!path) return
+      const doOpen = () => {
+        setActiveTab('files')
+        loadFile(path)
+      }
+      const fp = filePreviewRef.current
+      if (fp?.attemptLeave) {
+        fp.attemptLeave(doOpen)
+        return
+      }
+      doOpen()
+    },
+  }), [loadFile])
+
   const loadFiles = useCallback(async () => {
     const requestProject = projectId
     if (!requestProject) return
@@ -123,12 +146,16 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
       }
 
       const paths = res.data.files.map(file => file.path)
-      const nextDefault = paths.includes(currentFile)
-        ? currentFile
+      // 响应时经 currentFileRef 读实时选中（绝不用闭包快照，见 ref 定义处的震荡说明）：
+      // 当前文件仍在列表 → 静默重载其内容（loadFile 对同值 setCurrentFile 是 no-op，
+      // 乱序仍由 latestFileRequestRef 守卫）；只有当前文件真的从列表消失才回落默认文件。
+      const liveCurrentFile = currentFileRef.current
+      const nextFile = paths.includes(liveCurrentFile)
+        ? liveCurrentFile
         : getDefaultPreviewFile(paths)
 
-      if (nextDefault) {
-        await loadFile(nextDefault, requestProject)
+      if (nextFile) {
+        await loadFile(nextFile, requestProject)
       } else {
         setContent('')
       }
@@ -141,7 +168,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
       }
       console.error('加载文件列表失败', error)
     }
-  }, [projectId, currentFile, loadFile])
+  }, [projectId, loadFile])
 
   useEffect(() => {
     if (projectId) {

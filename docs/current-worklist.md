@@ -9,6 +9,17 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
+最后更新：2026-07-09（**试用反馈 0709 四件套 ✅ 实施 + Codex 单轮审+3 轮红队 APPROVED；分支 `fix/trial-feedback-0709` 7 commits，⏳ 待 merge main + 部署 kr-web-01**）：
+
+**来源**：`feedback/试用反馈汇总0709-咨询报告助手.xlsx`（郭红/张慧煜两条此前已响应；罗育鑫③/曾超④本批处理）+ 微信视频反馈（文件栏乱动）。四件套：
+
+1. **文件栏选中自持震荡修复**（P0 bug，`WorkspacePanel.jsx`）：loadFiles 闭包回写 + deps 含 currentFile → 两条在途链交替翻选中、A↔B 无限乒乓（不碰键鼠也动，一次点击撞上在途刷新即点火）。修 = `currentFileRef` 读实时选中 + 绝不回写闭包值 + deps 收敛。
+2. **义务机制手术**（`backend/chat.py` 净删 ~580 行）：意图关键词（「优化」等）扫长消息误武装「必须写正文」义务——截图实锤 S0 长需求被门禁与义务夹击出「更新报告正文没有成功」误导文案（大纲写成功的轮也被替换）+ 义务武装轮整轮流式被吞。删硬强制/意图权限解锁/义务快照/流缓冲 flag；留「声称 vs 实际」对账与自我循环检测；append 的 modify 互拦加 draft_exists 条件。已接受空隙：无路径口头谎称不再兜（用户拍板）。
+3. **新建项目自动需求确认**（`project_created` system trigger，带完整工具）：创建项目后模型主动开启 S0 访谈提问，拆掉「欢迎语邀请下指令→用户甩长需求→模型试图跳 S0→连环失败」链；后端幂等（已有助手发言静默 no-op）+ 合成 kickoff 消息不落盘；review 汇报轮禁工具 trust boundary 原样；欢迎语结尾改承接式。
+4. **文件内链**（`utils/workspaceFileLinks.js` + pill/正文两入口）：成功态工具 pill 的路径实参、正文反引号已知文件名（白名单精确匹配）→ 点击直达文件 tab（桌面保面板可见；移动端开右抽屉）。Codex 红队 3 轮挖出并修：useImperativeHandle TDZ 崩渲染（hook 排序）、锚点嵌按钮键盘导航逃逸（含解析命中 code 后代即解包锚点，检查递归任意深度）。
+
+**明确不做**：StagePanel 阶段卡片产物链接、审查窗内链、反馈④法规映射表/职责分工交互（用户拍板 C 类不做）。硬约束记 CLAUDE.md「## 试用反馈批次（2026-07-09）」段。后端 1622 / 前端 567 / build 全绿。**下一步：merge main + push + 部署 kr-web-01（frontend dist swap + 后端 chat.py/models.py/report_writing.py + 重启）**。
+
 最后更新：2026-07-08（**v2 图表生成能力 spec 写完 + Codex 4 轮审 APPROVED → deferred 到试用稳定后再做**）：
 
 **性质**：设计阶段交付、**不立刻实施**。用户定为 v2 升级功能，等试用期稳定 + 用户反馈收敛后再进 writing-plans → 实施。spec = `docs/superpowers/specs/2026-07-08-report-chart-generation-design.md`。

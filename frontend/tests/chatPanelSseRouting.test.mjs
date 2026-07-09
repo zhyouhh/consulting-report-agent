@@ -113,10 +113,10 @@ test("ChatPanel interleaves parts (MessageParts) with ToolCallList+renderAssista
   assert.match(source, /import \{ renderAssistantText \} from '\.\/assistantTextRender'/);
   assert.match(source, /import ToolCallList from '\.\/ToolCallList'/);
   assert.match(source, /msg\.parts && msg\.parts\.length/);
-  assert.match(source, /<MessageParts parts=\{msg\.parts\} \/>/);
-  // fallback：ToolCallList 在正文上方 + renderAssistantText(msg.content)
-  assert.match(source, /<ToolCallList toolEvents=\{msg\.toolEvents\} \/>/);
-  assert.match(source, /renderAssistantText\(msg\.content\)/);
+  assert.match(source, /<MessageParts parts=\{msg\.parts\} onOpenFile=\{onOpenWorkspaceFile\} \/>/);
+  // fallback：ToolCallList 在正文上方 + renderAssistantText(msg.content, …)（带文件内链回调）
+  assert.match(source, /<ToolCallList toolEvents=\{msg\.toolEvents\} onOpenFile=\{onOpenWorkspaceFile\} \/>/);
+  assert.match(source, /renderAssistantText\(msg\.content, \{ onOpenFile: onOpenWorkspaceFile \}\)/);
   // 旧的「从 content 文本认 emoji 工具行 → 内联 pill」整段移除。
   assert.doesNotMatch(source, /block\.type === 'tool'/);
 });

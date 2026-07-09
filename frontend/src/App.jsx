@@ -36,6 +36,8 @@ function App() {
   })
   const [loading, setLoading] = useState(true)
   const [injectedPrompt, setInjectedPrompt] = useState(null)
+  // 刚创建、待自动开场的项目 id（project_created 系统轮）；ChatPanel 消费后清除。
+  const [autoStartProjectId, setAutoStartProjectId] = useState(null)
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
   // 管理控制台已是独立页面（/admin，2026-07-06）：新标签打开，保住主应用内存态
@@ -226,6 +228,9 @@ function App() {
       // 切到新项目也是一条「离开当前编辑」的路径，必须过 dirty guard（与 handleSelectProject 同）——
       // 否则编辑态下点「新建报告」会让旧草稿悬挂、之后保存打到新项目（codex 前端审 BLOCKER 1）。
       const proceed = async () => {
+        // 自动开场标记：ChatPanel 确认新项目会话为空后触发 project_created 系统轮
+        //（模型主动开启需求确认提问），消费后经 onAutoStartConsumed 清除。
+        setAutoStartProjectId(createdProject.id)
         await loadProjects(createdProject.id)
         setWorkspaceRefreshToken(prev => prev + 1)
       }
@@ -280,6 +285,18 @@ function App() {
     // 仅「当前显示 → 隐藏」是离开路径（隐藏会 unmount 编辑器）；dirty 弹三按钮、把隐藏挂起。
     if (showWorkspacePanel && wp?.attemptLeave) { wp.attemptLeave(proceed); return }
     proceed()
+  }
+
+  // 文件内链（2026-07-09）：聊天区 pill / 正文文件名点击 → 确保工作区面板可见 → 打开该文件。
+  // 面板收起时先展开；ref 要等重新 mount 后才有，setTimeout(0) 排到 commit 之后再调。
+  const handleOpenWorkspaceFile = (path) => {
+    if (!path) return
+    if (!showWorkspacePanel) {
+      setShowWorkspacePanel(true)
+      setTimeout(() => workspacePanelRef.current?.openFile(path), 0)
+      return
+    }
+    workspacePanelRef.current?.openFile(path)
   }
 
   // 容器 = 「聊天区 + 分隔条 + 工作区」可调区域（排除固定宽的左侧 Sidebar）——clamp 须按这个区域
@@ -407,6 +424,8 @@ function App() {
           materials={materials}
           workspaceRefreshToken={workspaceRefreshToken}
           injectedPrompt={injectedPrompt}
+          autoStartProjectId={autoStartProjectId}
+          onAutoStartConsumed={() => setAutoStartProjectId(null)}
           workspaceStageCode={workspaceProjectId === currentProjectId ? workspace?.stage_code : undefined}
           onSelectProject={handleSelectProject}
           onCreateProject={createProject}
@@ -456,6 +475,9 @@ function App() {
             onToggleWorkspacePanel={handleToggleWorkspacePanel}
             injectedPrompt={injectedPrompt}
             onInjectedPromptConsumed={() => setInjectedPrompt(null)}
+            autoStartProjectId={autoStartProjectId}
+            onAutoStartConsumed={() => setAutoStartProjectId(null)}
+            onOpenWorkspaceFile={handleOpenWorkspaceFile}
           />
           {showWorkspacePanel && (
             <>
