@@ -121,3 +121,30 @@ test("WorkspacePanel accepts isMobile (default false) and threads it down", () =
   const reviewDrawerTag = s.match(/<IndependentReviewDrawer\b[^>]*>/)?.[0] || "";
   assert.match(reviewDrawerTag, /isMobile=\{isMobile\}/);
 });
+
+// ---- 文件栏选中自持震荡修复（试用反馈 2026-07-09：不碰键鼠选中自己乱跳）----
+
+test("loadFiles reads the live selection via currentFileRef, never a closure snapshot", () => {
+  const s = wsSrc();
+  // 响应回调必须经 ref 读「此刻」选中；闭包快照会把过期选中写回、形成 A↔B 自持震荡
+  const loadFilesBlock = s.match(/const loadFiles = useCallback\([\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || "";
+  assert.match(loadFilesBlock, /const liveCurrentFile = currentFileRef\.current/);
+  assert.match(loadFilesBlock, /paths\.includes\(liveCurrentFile\)/);
+  assert.doesNotMatch(loadFilesBlock, /paths\.includes\(currentFile\)/);
+});
+
+test("loadFiles deps exclude currentFile (selection change must not refire the list fetch)", () => {
+  const s = wsSrc();
+  const loadFilesBlock = s.match(/const loadFiles = useCallback\([\s\S]*?\}, (\[[^\]]*\])\)/);
+  assert.ok(loadFilesBlock, "loadFiles useCallback with deps array not found");
+  const deps = loadFilesBlock[1];
+  assert.doesNotMatch(deps, /currentFile/);
+  assert.match(deps, /projectId/);
+});
+
+test("loadFile mirrors the selection into currentFileRef synchronously with setCurrentFile", () => {
+  const s = wsSrc();
+  const loadFileBlock = s.match(/const loadFile = useCallback\([\s\S]*?\}, \[projectId\]\)/)?.[0] || "";
+  assert.match(loadFileBlock, /setCurrentFile\(path\)/);
+  assert.match(loadFileBlock, /currentFileRef\.current = path/);
+});
