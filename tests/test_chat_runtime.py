@@ -5758,8 +5758,9 @@ class ChatRuntimeTests(unittest.TestCase):
                 "请全文重写这份报告正文",
             )
 
-        feedback = handler._build_required_write_feedback(["content/report_draft_v1.md"])
-        failure = handler._build_required_write_failure_message(["content/report_draft_v1.md"])
+        # 2026-07-09 义务机制手术：required_write feedback/failure 文案随硬强制一并退役，
+        # 此处只剩 write_file 对 canonical 草稿的拒绝文案需要锁死（点名路径 + edit_file，
+        # 绝不推荐 write_file 整体重写）。
         write_file_rejection = handler._dispatch_write_file(
             self.project_id,
             "content/report_draft_v1.md",
@@ -5768,30 +5769,15 @@ class ChatRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(write_file_rejection.get("status"), "error")
-        write_file_rejection_message = write_file_rejection.get("message", "")
-        messages = {
-            "feedback": feedback,
-            "failure": failure,
-            "write_file_rejection": write_file_rejection_message,
-        }
-        bad_write_file_recommendations = [
+        message = write_file_rejection.get("message", "")
+        self.assertIn("content/report_draft_v1.md", message)
+        self.assertIn("edit_file", message)
+        for bad_phrase in (
             "新建或整体重写用 `write_file`",
             "请先用真实文件工具完成这些文件落盘：新建或整体重写用 `write_file`",
-        ]
-        for label, message in messages.items():
-            # 2026-07-06 反馈②：failure 是给用户看的兜底文案，改为人话、不出现内部路径/工具名；
-            # 模型侧 feedback / write_file_rejection 仍必须点名 canonical 路径与 edit_file。
-            if label != "failure":
-                with self.subTest(message=label):
-                    self.assertIn("content/report_draft_v1.md", message)
-                    self.assertIn("edit_file", message)
-            else:
-                with self.subTest(message=label):
-                    self.assertNotIn("write_file", message)
-                    self.assertNotIn("append_report_draft", message)
-            for bad_phrase in bad_write_file_recommendations:
-                with self.subTest(message=label, bad_phrase=bad_phrase):
-                    self.assertNotIn(bad_phrase, message)
+        ):
+            with self.subTest(bad_phrase=bad_phrase):
+                self.assertNotIn(bad_phrase, message)
 
 
 
@@ -13146,89 +13132,52 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
-class CanonicalObligationFieldTests(ChatRuntimeTests):
-    def test_new_turn_context_defaults_canonical_obligation_empty(self):
+class TurnContextPermissionTests(ChatRuntimeTests):
+    """2026-07-09 义务机制手术：意图分类不再武装义务、不再解锁写权限。
+
+    锁死新行为——canonical_obligation 字段整体退役；can_write_non_plan 单一来源 =
+    _should_allow_generic_non_plan_write（阶段/直写关键词/历史授权）。
+    """
+
+    def test_new_turn_context_has_no_canonical_obligation_key(self):
         handler = self._make_handler_with_project()
         ctx = handler._new_turn_context(can_write_non_plan=True)
 
-        self.assertEqual(
-            ctx.get("canonical_obligation"),
-            {"intent": None, "expected_action": None},
-        )
+        self.assertNotIn("canonical_obligation", ctx)
 
-    def test_generative_message_sets_append_action(self):
+    def test_generative_keyword_no_longer_unlocks_non_plan_write_pre_outline(self):
+        # 旧行为：「续写下一章」意图=generative → can_write_non_plan=True，S0-S3 绕开阶段门禁。
         handler = self._make_handler_with_project()
         ctx = handler._build_turn_context(self.project_id, "续写下一章")
 
-        self.assertEqual(
-            ctx.get("canonical_obligation"),
-            {"intent": "generative", "expected_action": "append"},
-        )
+        self.assertFalse(ctx.get("can_write_non_plan"))
 
-    def test_modify_message_sets_any_canonical_write_action(self):
+    def test_incidental_modify_keyword_does_not_unlock_pre_outline(self):
+        # 试用反馈截图实锤：S0 长需求含「迭代优化等阶段」被误判 modify，曾解锁 S0 写权限。
         handler = self._make_handler_with_project()
-        ctx = handler._build_turn_context(self.project_id, "把 X 改成 Y")
-
-        self.assertEqual(
-            ctx.get("canonical_obligation"),
-            {"intent": "modify", "expected_action": "any_canonical_write"},
+        ctx = handler._build_turn_context(
+            self.project_id,
+            "简述这份文件的撰写需求：包含上架纳管、迭代优化等阶段的管控要点。先制定出整体大纲。",
         )
 
-    def test_section_rewrite_phrase_sets_modify_obligation_and_required_draft_snapshot(self):
+        self.assertFalse(ctx.get("can_write_non_plan"))
+
+    def test_can_write_non_plan_equals_generic_allowance(self):
         handler = self._make_handler_with_project()
-        user_message = "请把第二章重写一下"
-        ctx = handler._build_turn_context(self.project_id, user_message)
-
-        self.assertEqual(
-            ctx.get("canonical_obligation"),
-            {"intent": "modify", "expected_action": "any_canonical_write"},
-        )
-        self.assertEqual(
-            handler._required_write_paths_for_turn(self.project_id, user_message),
-            {handler.skill_engine.REPORT_DRAFT_PATH},
-        )
-        snapshots = handler._build_obligation_write_snapshots(self.project_id, user_message)
-        self.assertEqual(set(snapshots), {handler.skill_engine.REPORT_DRAFT_PATH})
-        self.assertEqual(
-            snapshots[handler.skill_engine.REPORT_DRAFT_PATH].get("path"),
-            handler.skill_engine.REPORT_DRAFT_PATH,
-        )
-
-    def test_full_rewrite_phrase_sets_modify_obligation_and_required_draft_snapshot(self):
-        handler = self._make_handler_with_project()
-        user_message = "全文重写这份报告正文"
-        ctx = handler._build_turn_context(self.project_id, user_message)
-
-        self.assertEqual(
-            ctx.get("canonical_obligation"),
-            {"intent": "modify", "expected_action": "any_canonical_write"},
-        )
-        self.assertEqual(
-            handler._required_write_paths_for_turn(self.project_id, user_message),
-            {handler.skill_engine.REPORT_DRAFT_PATH},
-        )
-        snapshots = handler._build_obligation_write_snapshots(self.project_id, user_message)
-        self.assertEqual(set(snapshots), {handler.skill_engine.REPORT_DRAFT_PATH})
-        self.assertEqual(
-            snapshots[handler.skill_engine.REPORT_DRAFT_PATH].get("path"),
-            handler.skill_engine.REPORT_DRAFT_PATH,
-        )
-
-    def test_ambiguous_message_sets_empty_canonical_obligation(self):
-        handler = self._make_handler_with_project()
-        ctx = handler._build_turn_context(self.project_id, "看下背景资料")
-
-        self.assertEqual(
-            ctx.get("canonical_obligation"),
-            {"intent": None, "expected_action": None},
-        )
+        for message in ("把 X 改成 Y", "看下背景资料", "全文重写这份报告正文"):
+            with self.subTest(message=message):
+                ctx = handler._build_turn_context(self.project_id, message)
+                self.assertEqual(
+                    ctx.get("can_write_non_plan"),
+                    ctx.get("generic_non_plan_write_allowed"),
+                )
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
         _inherited_test_name.startswith("test_")
-        and _inherited_test_name not in CanonicalObligationFieldTests.__dict__
+        and _inherited_test_name not in TurnContextPermissionTests.__dict__
     ):
-        setattr(CanonicalObligationFieldTests, _inherited_test_name, None)
+        setattr(TurnContextPermissionTests, _inherited_test_name, None)
 del _inherited_test_name
 
 
@@ -13945,132 +13894,15 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
-class ClaimOnlyRetryWithCanonicalObligationTests(ChatRuntimeTests):
-    def _make_handler_with_empty_turn(self):
-        handler = self._make_handler_with_project()
-        handler._build_turn_context(self.project_id, "看下背景资料")
-        handler._turn_context["canonical_draft_mutations"] = []
-        return handler
+class ObligationRemovalRegressionTests(_WriteToolTestMixin, ChatRuntimeTests):
+    """2026-07-09 义务机制手术回归锁。
 
-    def test_generative_obligation_claim_without_mutation_injects_retry(self):
-        handler = self._make_handler_with_empty_turn()
-        handler._turn_context["canonical_obligation"] = {
-            "intent": "generative",
-            "expected_action": "append",
-        }
-        current_turn_messages = []
-
-        retry_fired = handler._maybe_inject_obligation_retry(
-            "正文已同步更新到 content/report_draft_v1.md。",
-            current_turn_messages,
-        )
-
-        self.assertTrue(retry_fired)
-        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
-        self.assertEqual(current_turn_messages[-1]["role"], "user")
-        self.assertIn("append_report_draft", current_turn_messages[-1]["content"])
-
-    def test_modify_obligation_claim_without_mutation_injects_retry(self):
-        handler = self._make_handler_with_empty_turn()
-        handler._turn_context["canonical_obligation"] = {
-            "intent": "modify",
-            "expected_action": "any_canonical_write",
-        }
-        current_turn_messages = []
-
-        retry_fired = handler._maybe_inject_obligation_retry(
-            "我已经把正文修改完毕。",
-            current_turn_messages,
-        )
-
-        self.assertTrue(retry_fired)
-        self.assertTrue(handler._turn_context.get("obligation_retry_fired"))
-        self.assertEqual(current_turn_messages[-1]["role"], "user")
-        self.assertIn("edit_file", current_turn_messages[-1]["content"])
-
-    def test_generative_obligation_with_mutation_does_not_retry(self):
-        handler = self._make_handler_with_empty_turn()
-        handler._turn_context["canonical_obligation"] = {
-            "intent": "generative",
-            "expected_action": "append",
-        }
-        handler._turn_context["canonical_draft_mutations"] = [
-            {"tool": "append_report_draft"}
-        ]
-        current_turn_messages = []
-
-        retry_fired = handler._maybe_inject_obligation_retry(
-            "正文已同步更新到 content/report_draft_v1.md。",
-            current_turn_messages,
-        )
-
-        self.assertFalse(retry_fired)
-        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
-        self.assertEqual(current_turn_messages, [])
-
-    def test_no_obligation_returns_false(self):
-        handler = self._make_handler_with_empty_turn()
-        handler._turn_context["canonical_obligation"] = {
-            "intent": None,
-            "expected_action": None,
-        }
-        current_turn_messages = []
-
-        retry_fired = handler._maybe_inject_obligation_retry(
-            "正文已同步更新到 content/report_draft_v1.md。",
-            current_turn_messages,
-        )
-
-        self.assertFalse(retry_fired)
-        self.assertEqual(current_turn_messages, [])
-
-    def test_retry_fired_flag_prevents_double_injection(self):
-        handler = self._make_handler_with_empty_turn()
-        handler._turn_context["canonical_obligation"] = {
-            "intent": "generative",
-            "expected_action": "append",
-        }
-        handler._turn_context["obligation_retry_fired"] = True
-        current_turn_messages = []
-
-        retry_fired = handler._maybe_inject_obligation_retry(
-            "正文已同步更新到 content/report_draft_v1.md。",
-            current_turn_messages,
-        )
-
-        self.assertFalse(retry_fired)
-        self.assertEqual(current_turn_messages, [])
-
-    def test_new_obligation_without_claim_returns_false(self):
-        handler = self._make_handler_with_empty_turn()
-        handler._turn_context["canonical_obligation"] = {
-            "intent": "generative",
-            "expected_action": "append",
-        }
-        current_turn_messages = []
-
-        retry_fired = handler._maybe_inject_obligation_retry(
-            "我准备开始起草正文。",
-            current_turn_messages,
-        )
-
-        self.assertFalse(retry_fired)
-        self.assertFalse(handler._turn_context.get("obligation_retry_fired"))
-        self.assertEqual(current_turn_messages, [])
-
-
-for _inherited_test_name in dir(ChatRuntimeTests):
-    if (
-        _inherited_test_name.startswith("test_")
-        and _inherited_test_name
-        not in ClaimOnlyRetryWithCanonicalObligationTests.__dict__
-    ):
-        setattr(ClaimOnlyRetryWithCanonicalObligationTests, _inherited_test_name, None)
-del _inherited_test_name
-
-
-class CanonicalObligationChatLoopRetryTests(_WriteToolTestMixin, ChatRuntimeTests):
-    """Task 21: chat loops must enter retry for new canonical_obligation only."""
+    ① 轮末不再有「必须真实更新正文」硬强制：意图关键词命中 + 无正文写入的轮次，
+       模型的真实回复原样返回，绝不被「抱歉，这一轮尝试更新报告正文没有成功」兜底文案替换。
+    ② S0 长需求含「优化」等裸关键词误判 modify 的轮次同样不受影响（试用反馈截图场景）。
+    ③ append_report_draft 的 modify 互拦只在草稿已存在时生效——没有草稿时把模型
+       推向 edit_file 一个不存在的文件是死路。
+    """
 
     USER_MESSAGE = "帮我写一段正文"
     CLAIM_TEXT = "正文已经写完并同步到 content/report_draft_v1.md。"
@@ -14088,109 +13920,100 @@ class CanonicalObligationChatLoopRetryTests(_WriteToolTestMixin, ChatRuntimeTest
             ],
         )
 
-    def _assert_retry_request_contains_required_write_feedback(self, mock_openai):
-        self.assertGreaterEqual(
-            mock_openai.return_value.chat.completions.create.call_count,
-            2,
-        )
-        second_messages = (
-            mock_openai.return_value.chat.completions.create
-            .call_args_list[1]
-            .kwargs["messages"]
-        )
-        self.assertTrue(
-            any(
-                message.get("role") == "assistant"
-                and message.get("content") == self.CLAIM_TEXT
-                for message in second_messages
-            ),
-            msg=second_messages,
-        )
-        corrective_message = next(
-            (
-                message
-                for message in second_messages
-                if message.get("role") == "user"
-                and "必须真实更新" in str(message.get("content") or "")
-            ),
-            None,
-        )
-        self.assertIsNotNone(corrective_message, msg=second_messages)
-        self.assertIn("append_report_draft", corrective_message["content"])
-        self.assertFalse(
-            any(message.get("role") == "tool" for message in second_messages),
-            msg=second_messages,
-        )
-
     @mock.patch("backend.chat.OpenAI")
-    def test_non_stream_retries_when_generative_canonical_obligation_claims_done_with_new_intent_signal(
-        self,
-        mock_openai,
-    ):
+    def test_non_stream_keeps_model_reply_without_forced_write_retry(self, mock_openai):
         handler = self._make_handler_with_project()
         self._setup_outline_confirmed_s4(handler)
-        append_content = "## 第一章 引言\n\n" + ("正文内容" * 60)
-        append_call = self._make_tool_call(
-            "append_report_draft",
-            json.dumps({"content": append_content}, ensure_ascii=False),
-        )
-        append_call.id = "call-append"
         mock_openai.return_value.chat.completions.create.side_effect = [
             self._assistant_response(self.CLAIM_TEXT),
-            self._assistant_response("", tool_calls=[append_call]),
-            self._assistant_response("正文草稿已实际写入。"),
         ]
 
         result = handler.chat(self.project_id, self.USER_MESSAGE, max_iterations=4)
 
-        self.assertIn("正文草稿已实际写入", result["content"])
-        self._assert_retry_request_contains_required_write_feedback(mock_openai)
+        self.assertEqual(
+            mock_openai.return_value.chat.completions.create.call_count, 1,
+        )
+        self.assertIn(self.CLAIM_TEXT, result["content"])
+        self.assertNotIn("尝试更新报告正文没有成功", result["content"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_stream_retries_when_generative_canonical_obligation_claims_done_with_new_intent_signal(
-        self,
-        mock_openai,
-    ):
+    def test_stream_s0_incidental_modify_keyword_keeps_model_reply(self, mock_openai):
+        # 截图场景：S0 用户甩长需求（含「迭代优化等阶段」→ 误判 modify），模型正常回复
+        # 提问/计划文本。旧机制会重试 2 次后把整轮替换成误导性失败文案且全程吞掉流式输出。
         handler = self._make_handler_with_project()
-        self._setup_outline_confirmed_s4(handler)
-        append_content = "## 第一章 引言\n\n" + ("正文内容" * 60)
+        reply = "收到，我先确认几个关键问题：报告的目标读者是谁？"
         mock_openai.return_value.chat.completions.create.side_effect = [
-            iter([self._make_chunk(content=self.CLAIM_TEXT)]),
-            iter([
-                self._make_chunk(
-                    tool_calls=[
-                        self._make_stream_tool_call_chunk(
-                            0,
-                            id="call-append",
-                            name="append_report_draft",
-                            arguments=json.dumps({"content": append_content}, ensure_ascii=False),
-                        )
-                    ]
-                )
-            ]),
-            iter([self._make_chunk(content="正文草稿已实际写入。")]),
+            iter([self._make_chunk(content=reply)]),
         ]
 
-        events = list(handler.chat_stream(self.project_id, self.USER_MESSAGE, max_iterations=4))
+        events = list(handler.chat_stream(
+            self.project_id,
+            "简述这份文件的撰写需求：包含上架纳管、迭代优化等阶段的管控要点。先制定出整体大纲。",
+            max_iterations=4,
+        ))
 
-        self.assertTrue(
-            any(
-                event.get("type") == "content"
-                and "正文草稿已实际写入" in event.get("data", "")
-                for event in events
-            ),
-            msg=events,
+        self.assertEqual(
+            mock_openai.return_value.chat.completions.create.call_count, 1,
         )
-        self._assert_retry_request_contains_required_write_feedback(mock_openai)
+        streamed = "".join(
+            event.get("data", "")
+            for event in events
+            if event.get("type") == "content"
+        )
+        self.assertIn(reply, streamed)
+        self.assertNotIn("尝试更新报告正文没有成功", streamed)
+
+    def test_append_allowed_without_draft_when_message_has_incidental_modify_keyword(self):
+        # S4 + 无草稿 + 消息含「优化」（误判 modify）→ append 必须放行（首稿唯一路径）。
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        handler._turn_context = handler._build_turn_context(
+            self.project_id, "按大纲开始写第一章，注意优化语言表达",
+        )
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "append_report_draft",
+                json.dumps(
+                    {"content": "## 第一章 引言\n\n" + ("正文内容" * 60)},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(result.get("status"), "success", msg=result)
+
+    def test_append_still_rejected_for_modify_intent_when_draft_exists(self):
+        # 草稿已存在时，modify 意图仍互拦到 edit_file（防重复追加同章）。
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        self._put_draft("# 报告标题\n## 第一章\n" + ("既有正文" * 60))
+        self._trigger_read_file(handler)
+        handler._turn_context = handler._build_turn_context(
+            self.project_id, "把第一章改成更正式的表述",
+        )
+        self._trigger_read_file(handler)
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "append_report_draft",
+                json.dumps({"content": "## 追加章\n\n" + ("新内容" * 60)}, ensure_ascii=False),
+            ),
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("edit_file", result.get("message", ""))
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
         _inherited_test_name.startswith("test_")
         and _inherited_test_name
-        not in CanonicalObligationChatLoopRetryTests.__dict__
+        not in ObligationRemovalRegressionTests.__dict__
     ):
-        setattr(CanonicalObligationChatLoopRetryTests, _inherited_test_name, None)
+        setattr(ObligationRemovalRegressionTests, _inherited_test_name, None)
 del _inherited_test_name
 
 
@@ -14508,53 +14331,6 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
         self.assertEqual(result.get("canonical_action"), "text_delete")
         self.assertNotIn("引言段", self._draft_text())
         self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
-
-    def test_section_delete_satisfies_required_write_when_draft_shrinks(self):
-        handler = self._make_handler_with_project()
-        draft = (
-            "# 报告标题\n"
-            "## 第一章 保留\n"
-            + ("保留内容" * 30)
-            + "\n## 第二章 删除\n"
-            + ("删除内容" * 12)
-            + "\n"
-        )
-        self._prepare_canonical_edit(handler, draft=draft, user_message="删掉第二章")
-        snapshots = {
-            self.CANONICAL: handler._snapshot_project_file(self.project_id, self.CANONICAL)
-        }
-
-        result = self._call_edit_file(handler, self.CANONICAL, "## 第二章 删除", "")
-        satisfied, missing = handler._required_writes_satisfied(self.project_id, snapshots)
-
-        self.assertEqual(result.get("status"), "success")
-        self.assertEqual(result.get("canonical_action"), "section_delete")
-        self.assertTrue(satisfied)
-        self.assertEqual(missing, [])
-
-    def test_text_delete_satisfies_required_write_when_draft_shrinks(self):
-        handler = self._make_handler_with_project()
-        draft = (
-            "# 报告标题\n"
-            "## 第一章 保留\n"
-            + ("保留内容" * 30)
-            + "\n需要删除的一句话\n"
-            "## 第二章 保留\n"
-            + ("继续保留" * 12)
-            + "\n"
-        )
-        self._prepare_canonical_edit(handler, draft=draft, user_message="删掉这句话")
-        snapshots = {
-            self.CANONICAL: handler._snapshot_project_file(self.project_id, self.CANONICAL)
-        }
-
-        result = self._call_edit_file(handler, self.CANONICAL, "需要删除的一句话\n", "")
-        satisfied, missing = handler._required_writes_satisfied(self.project_id, snapshots)
-
-        self.assertEqual(result.get("status"), "success")
-        self.assertEqual(result.get("canonical_action"), "text_delete")
-        self.assertTrue(satisfied)
-        self.assertEqual(missing, [])
 
     def test_empty_old_string_rejected_with_append_hint(self):
         handler = self._make_handler_with_project()

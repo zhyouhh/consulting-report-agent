@@ -41,36 +41,6 @@ def resolve_section_anchor(anchor: str, draft: str) -> Optional[str]:
     return "".join(lines[start:end])
 
 
-# ---- Assistant text claim detection (per spec §3.5 §7.6) ----
-
-_TEXT_CLAIM_RE_1 = re.compile(
-    r"(?:已|已经|完成|写完|改完|重写完|替换完|同步|落盘)"
-    r"[^。！？!?\n]{0,30}"
-    r"(?:正文|草稿|报告|章节|第[一二三四五六七八九十0-9]+章|content/report_draft_v1\.md)"
-)
-_TEXT_CLAIM_RE_2 = re.compile(
-    r"(?:正文|草稿|报告|章节|第[一二三四五六七八九十0-9]+章)"
-    r"[^。！？!?\n]{0,30}"
-    r"(?:已|已经|完成|写完|改完|重写完|替换完|同步|落盘)"
-)
-
-
-def assistant_text_claims_modification(text: str) -> bool:
-    """启发式判定 assistant_message 是否声称已修改正文（vs 仅意图陈述）。
-
-    True 表示文本含"已完成"标志 + 正文相关名词。
-    False 表示仅含"我会/我将"等意图陈述 OR 完全不含相关词。
-
-    用法：spec §3.5 turn-end 对账。如果 obligation 存在 + 没 mutation +
-    text claim → 触发 retry corrective message。
-    """
-    has_claim = bool(_TEXT_CLAIM_RE_1.search(text) or _TEXT_CLAIM_RE_2.search(text))
-    if has_claim:
-        return True
-    # 无声称 → 不撒谎
-    return False
-
-
 # ---- Pre-write invariant checks (per spec §3.1) ----
 
 def check_report_writing_stage(

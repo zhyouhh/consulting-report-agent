@@ -5,7 +5,6 @@ import unittest
 
 from backend.report_writing import (
     MAX_CANONICAL_MUTATIONS_PER_TURN,
-    assistant_text_claims_modification,
     check_no_fetch_url_pending,
     check_no_mixed_intent_in_turn,
     check_no_prior_canonical_mutation_in_turn,
@@ -127,38 +126,6 @@ class ResolveSectionAnchorTests(unittest.TestCase):
         )
         result = resolve_section_anchor("## 第二章 战略选择\r\n旧正文不用信", draft)
         self.assertEqual(result, "## 第二章 战略选择\r\n战略正文 1\r\n")
-
-
-class AssistantTextClaimsModificationTests(unittest.TestCase):
-    def test_explicit_completion_returns_true(self):
-        self.assertTrue(assistant_text_claims_modification(
-            "我已经把第二章重写完毕，请查看。",
-        ))
-        self.assertTrue(assistant_text_claims_modification(
-            "正文已同步更新到 content/report_draft_v1.md。",
-        ))
-        self.assertTrue(assistant_text_claims_modification(
-            "草稿完成第三章的扩写。",
-        ))
-
-    def test_intent_only_returns_false(self):
-        self.assertFalse(assistant_text_claims_modification(
-            "我会重写第二章，请稍等。",
-        ))
-        self.assertFalse(assistant_text_claims_modification(
-            "我准备开始起草正文。",
-        ))
-
-    def test_unrelated_text_returns_false(self):
-        self.assertFalse(assistant_text_claims_modification(
-            "我不太确定这块怎么处理。",
-        ))
-
-    def test_intent_plus_completion_returns_true(self):
-        # "我会修改" + "已完成" 混合 — 仍按完成处理（model 在文本里同时混合时算撒谎风险）
-        self.assertTrue(assistant_text_claims_modification(
-            "我会重写第二章，已经完成了起草。",
-        ))
 
 
 class CheckHelpersTests(unittest.TestCase):

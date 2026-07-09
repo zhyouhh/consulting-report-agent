@@ -2476,22 +2476,6 @@ class ChatHandler:
 
         return nodes
 
-    def _required_write_paths_for_turn(self, project_id: str, user_message: str) -> set[str]:
-        del project_id
-        obligation = (self._turn_context or {}).get("canonical_obligation") or {}
-        intent = obligation.get("intent") if isinstance(obligation, dict) else None
-        if intent not in {"generative", "modify"}:
-            intent = detect_user_message_intent(user_message)
-        if intent not in {"generative", "modify"}:
-            return set()
-        return {self.skill_engine.REPORT_DRAFT_PATH}
-
-    def _build_obligation_write_snapshots(self, project_id: str, user_message: str) -> dict[str, dict]:
-        return {
-            path: self._snapshot_project_file(project_id, path)
-            for path in self._required_write_paths_for_turn(project_id, user_message)
-        }
-
     def _snapshot_project_file(self, project_id: str, normalized_path: str) -> dict:
         normalized = self._normalize_project_file_path(normalized_path)
         project_path = self.skill_engine.get_project_path(project_id)
@@ -2547,75 +2531,6 @@ class ChatHandler:
             "mtime": stat.st_mtime,
         }
 
-    def _required_writes_satisfied(
-        self,
-        project_id: str,
-        snapshots: dict[str, dict],
-        successful_write_events: dict[str, list[dict]] | None = None,
-    ) -> tuple[bool, list[str]]:
-        del successful_write_events
-        missing: list[str] = []
-        for path, before in snapshots.items():
-            current = self._snapshot_project_file(project_id, path)
-            before_exists = bool(before.get("exists"))
-            current_exists = bool(current.get("exists"))
-            if self._required_existing_write_satisfied(
-                project_id,
-                path,
-                before,
-                current,
-            ):
-                continue
-            if (
-                not before_exists
-                and current_exists
-                and self._project_file_has_substantive_required_write(project_id, path)
-            ):
-                continue
-            missing.append(path)
-        return not missing, missing
-
-    def _required_existing_write_satisfied(
-        self,
-        project_id: str,
-        normalized_path: str,
-        before: dict,
-        current: dict,
-    ) -> bool:
-        if not (
-            before.get("exists")
-            and current.get("exists")
-            and current.get("sha256") != before.get("sha256")
-        ):
-            return False
-        if not self._is_canonical_report_draft_path(normalized_path):
-            return True
-
-        before_word_count = int(before.get("word_count") or 0)
-        current_word_count = int(current.get("word_count") or 0)
-        if (
-            current_word_count < before_word_count
-            and not self._current_canonical_draft_allows_shrinkage()
-        ):
-            return False
-        return self._project_file_has_substantive_required_write(project_id, normalized_path)
-
-    def _current_canonical_draft_allows_shrinkage(self) -> bool:
-        mutation = self._latest_canonical_draft_change()
-        if not isinstance(mutation, dict):
-            return False
-        return (
-            mutation.get("tool") == "edit_file"
-            and mutation.get("canonical_action")
-            in {
-                "section_rewrite",
-                "section_delete",
-                "text_replace",
-                "text_delete",
-                "full_rewrite",
-            }
-        )
-
     def _canonical_edit_missing_old_string_guidance(
         self,
         project_id: str,
@@ -2654,41 +2569,9 @@ class ChatHandler:
         except OSError:
             return None
 
-    def _project_file_has_substantive_required_write(self, project_id: str, normalized_path: str) -> bool:
-        project_path = self.skill_engine.get_project_path(project_id)
-        if not project_path:
-            return False
-        try:
-            normalized = self.skill_engine.normalize_file_path(project_id, normalized_path)
-        except ValueError:
-            return False
-        if self._is_canonical_report_draft_path(normalized):
-            normalized = self.skill_engine.REPORT_DRAFT_PATH
-        target = project_path / normalized
-        if not target.exists() or not target.is_file():
-            return False
-        try:
-            text = target.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            return False
-        if self._is_canonical_report_draft_path(normalized):
-            return (
-                self._count_report_append_substantive_chars(text)
-                >= self.APPEND_REPORT_DRAFT_MIN_SUBSTANTIVE_CHARS
-            )
-        return self.skill_engine._has_substantive_body(text)
-
     def _get_missing_expected_writes(self, assistant_message: str, successful_writes: set[str]) -> list[str]:
-        if self._canonical_draft_obligation_satisfied():
-            return []
         expected = self._expected_plan_writes_for_message(assistant_message)
         return sorted(path for path in expected if path not in successful_writes)
-
-    def _canonical_draft_obligation_satisfied(self) -> bool:
-        return bool(
-            self._has_canonical_obligation()
-            and self._latest_canonical_draft_change()
-        )
 
     def _build_missing_write_feedback(self, missing_files: list[str]) -> str:
         joined = "、".join(f"`{path}`" for path in missing_files)
@@ -2727,30 +2610,6 @@ class ChatHandler:
             "落盘成功后，再用一句话说明实际已写入哪些文件。"
         )
 
-    def _build_required_write_feedback(self, missing_paths: list[str]) -> str:
-        joined = "、".join(f"`{path}`" for path in missing_paths)
-        return (
-            f"用户本轮要求更新报告正文，因此必须真实更新 {joined}。"
-            "刚才未检测到该文件按用户意图完成更新。"
-            "请按用户意图调用真实写正文工具："
-            "新增或续写正文用 `append_report_draft`；"
-            "修改已有正文请先调用 `read_file` 核对原文，再调用 "
-            "`edit_file(file_path, old_string, new_string)`，"
-            "`old_string` 要取自草稿中唯一且足够具体的原文锚点。"
-            "不要对 `content/report_draft_v1.md` 使用 `write_file`。"
-            "不要只口头说明已完成，也不要把工具调用写在聊天正文里。"
-        )
-    def _build_required_write_failure_message(self, missing_paths: list[str]) -> str:
-        # 2026-07-06 反馈②连带：这是重试耗尽后直接展示给用户的兜底文案——写人话、
-        # 引导下一步动作，不出现工具名/文件路径等内部术语（内部细节走日志留痕）。
-        logger.info(
-            "[self-heal] 要求写入的报告文件重试耗尽仍未更新: %s", missing_paths
-        )
-        return (
-            "抱歉，这一轮尝试更新报告正文没有成功，草稿内容保持原样、没有丢失。"
-            "请把刚才的要求再发一次；如果还是不行，试着把要求说得更具体一些"
-            "（比如指明要修改哪一章、补充哪部分内容）。"
-        )
     def _build_self_correction_loop_feedback(self) -> str:
         return (
             "你刚刚进入了反复“修正/纠正”的自我循环。"
@@ -2781,7 +2640,6 @@ class ChatHandler:
             self._turn_context = self._build_turn_context(project_id, "")
             self._turn_context["system_triggered"] = True
             self._turn_context["user_message_text"] = ""
-            self._turn_context["canonical_obligation"] = None
             self._turn_context["checkpoint_event"] = None
 
             trigger_prompt = SYSTEM_TRIGGER_PROMPTS.get(system_trigger)
@@ -2861,7 +2719,6 @@ class ChatHandler:
             provider_user_message = current_user_message
             transient_system_messages = [{"role": "system", "content": trigger_prompt}]
             include_current_user = True
-            obligation_write_snapshots = {}
             # 汇报轮禁工具：本轮只做纯转述，不允许任何工具调用。
             self._turn_context["system_trigger_no_tools"] = True
         else:
@@ -2882,7 +2739,6 @@ class ChatHandler:
             }
             transient_system_messages = None
             include_current_user = True
-            obligation_write_snapshots = self._build_obligation_write_snapshots(project_id, user_message)
             if self._should_emit_s5_welcome(project_id):
                 welcome_injected = True
                 transient_system_messages = [{"role": "system", "content": S5_WELCOME_PROMPT}]
@@ -2890,17 +2746,14 @@ class ChatHandler:
 
         iterations = 0
         missing_write_retries = 0
-        required_write_retries = 0
         self_correction_retries = 0
         system_trigger_no_tools_retries = 0
         # 流中断瞬态重试的 per-turn 总预算（防抖动网络下跨迭代无界重试）。
         stream_retry_attempts = 0
         assistant_message = ""
-        buffer_required_write_content = bool(obligation_write_snapshots)
         compressed = False
         policy = self._resolve_context_policy()
         successful_writes: set[str] = set()
-        successful_write_events: dict[str, list[dict]] = {}
         current_turn_messages: List[Dict] = []
         token_usage = self._normalize_provider_usage(
             None,
@@ -3039,12 +2892,11 @@ class ChatHandler:
                     accumulated += event_data
                     collected_message["content"] = accumulated
                     stream_buffer += event_data
-                    if not buffer_required_write_content:
-                        safe, held = stream_split_safe_tail(stream_buffer)
-                        if safe:
-                            iteration_visible_output = True
-                            yield {"type": "content", "data": safe}
-                        stream_buffer = held
+                    safe, held = stream_split_safe_tail(stream_buffer)
+                    if safe:
+                        iteration_visible_output = True
+                        yield {"type": "content", "data": safe}
+                    stream_buffer = held
 
             try:
                 for chunk in response:
@@ -3265,9 +3117,7 @@ class ChatHandler:
                         project_id=project_id,
                     )
                     if write_event:
-                        write_path = write_event["path"]
-                        successful_writes.add(write_path)
-                        successful_write_events.setdefault(write_path, []).append(write_event)
+                        successful_writes.add(write_event["path"])
                     for notice in self._yield_user_visible_notices():
                         yield {
                             "type": "system_notice",
@@ -3319,39 +3169,6 @@ class ChatHandler:
                         "content": self._build_missing_write_feedback(missing_writes),
                     })
                     continue
-                required_satisfied, missing_required_writes = self._required_writes_satisfied(
-                    project_id,
-                    obligation_write_snapshots,
-                    successful_write_events,
-                )
-                if not required_satisfied:
-                    if required_write_retries < self.MAX_MISSING_WRITE_RETRIES:
-                        required_write_retries += 1
-                        logger.info("[self-heal] 本轮要求更新报告正文但未检测到草稿变化，注入反馈要求重试: %s", missing_required_writes)
-                        current_turn_messages.append({"role": "assistant", "content": candidate_message})
-                        current_turn_messages.append({
-                            "role": "user",
-                            "content": self._build_required_write_feedback(missing_required_writes),
-                        })
-                        continue
-                    assistant_message = self._build_required_write_failure_message(missing_required_writes)
-                    accumulated = ""
-                    stream_buffer = ""
-                    token_usage = self._normalize_provider_usage(
-                        stream_usage,
-                        policy,
-                        preflight_compaction_used=compressed,
-                    )
-                    break
-                # Task 3 fix1: obligation-only streaming still emits text before this
-                # advisory retry decision. Buffer/rollback-safe stream events are
-                # deferred to Task 5 cleanup if cutover smoke shows real impact.
-                if self._has_canonical_obligation_retry_signal():
-                    current_turn_messages.append({"role": "assistant", "content": candidate_message})
-                    if self._maybe_inject_obligation_retry(candidate_message, current_turn_messages):
-                        continue
-                    # retry not fired (no claim text) — remove the pre-appended assistant msg
-                    current_turn_messages.pop()
                 assistant_message = candidate_message
                 token_usage = self._normalize_provider_usage(
                     stream_usage,
@@ -3361,13 +3178,9 @@ class ChatHandler:
                 break
         else:
             assistant_message = "抱歉，工具调用轮次过多，已停止本轮，请缩小检索范围或改成分步提问。"
-            if buffer_required_write_content:
-                accumulated = ""
-                stream_buffer = ""
-            else:
-                yield {"type": "content", "data": assistant_message}
-                accumulated = assistant_message
-                stream_buffer = ""
+            yield {"type": "content", "data": assistant_message}
+            accumulated = assistant_message
+            stream_buffer = ""
 
         result_content = self._finalize_assistant_turn(
             project_id,
@@ -3389,11 +3202,7 @@ class ChatHandler:
             result_content,
             user_message=str(current_user_message.get("content") or ""),
         )
-        already_emitted_len = (
-            0
-            if buffer_required_write_content
-            else len(accumulated) - len(stream_buffer)
-        )
+        already_emitted_len = len(accumulated) - len(stream_buffer)
         remainder = result_content[already_emitted_len:]
         if remainder:
             yield {"type": "content", "data": remainder}
@@ -3444,17 +3253,14 @@ class ChatHandler:
             "transient_attachments": transient_attachments or [],
         }
         active_model = self._get_active_model_name()
-        obligation_write_snapshots = self._build_obligation_write_snapshots(project_id, user_message)
 
         iterations = 0
         missing_write_retries = 0
-        required_write_retries = 0
         self_correction_retries = 0
         assistant_message = ""
         compressed = False
         policy = self._resolve_context_policy()
         successful_writes: set[str] = set()
-        successful_write_events: dict[str, list[dict]] = {}
         current_turn_messages: List[Dict] = []
         token_usage = self._normalize_provider_usage(
             None,
@@ -3547,9 +3353,7 @@ class ChatHandler:
                         project_id=project_id,
                     )
                     if write_event:
-                        write_path = write_event["path"]
-                        successful_writes.add(write_path)
-                        successful_write_events.setdefault(write_path, []).append(write_event)
+                        successful_writes.add(write_event["path"])
                     current_turn_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -3578,33 +3382,6 @@ class ChatHandler:
                         "content": self._build_missing_write_feedback(missing_writes),
                     })
                     continue
-                required_satisfied, missing_required_writes = self._required_writes_satisfied(
-                    project_id,
-                    obligation_write_snapshots,
-                    successful_write_events,
-                )
-                if not required_satisfied:
-                    if required_write_retries < self.MAX_MISSING_WRITE_RETRIES:
-                        required_write_retries += 1
-                        current_turn_messages.append({"role": "assistant", "content": candidate_message})
-                        current_turn_messages.append({
-                            "role": "user",
-                            "content": self._build_required_write_feedback(missing_required_writes),
-                        })
-                        continue
-                    assistant_message = self._build_required_write_failure_message(missing_required_writes)
-                    token_usage = self._normalize_provider_usage(
-                        getattr(response, "usage", None),
-                        policy,
-                        preflight_compaction_used=compressed,
-                    )
-                    break
-                if self._has_canonical_obligation_retry_signal():
-                    current_turn_messages.append({"role": "assistant", "content": candidate_message})
-                    if self._maybe_inject_obligation_retry(candidate_message, current_turn_messages):
-                        continue
-                    # retry not fired (no claim text) — remove the pre-appended assistant msg
-                    current_turn_messages.pop()
                 assistant_message = candidate_message
                 token_usage = self._normalize_provider_usage(
                     getattr(response, "usage", None),
@@ -5217,7 +4994,9 @@ class ChatHandler:
             return {"status": "error", "message": err}
 
         user_msg = self._turn_context.get("user_message_text", "") or ""
-        if detect_user_message_intent(user_msg) == "modify":
+        # 工具路由互拦仅在草稿已存在时有意义：没有草稿就让模型去 edit_file 一个不存在的
+        # 文件是死路（试用反馈截图实锤：S0 长需求含「优化」二字即被误判 modify）。
+        if draft_exists and detect_user_message_intent(user_msg) == "modify":
             return {
                 "status": "error",
                 "message": (
@@ -6670,66 +6449,6 @@ class ChatHandler:
             f"{evidence_rule}\n{concurrency_rule}\n{attachment_data_rule}\n\n{project_context}"
         )
 
-    def _has_canonical_obligation_retry_signal(self) -> bool:
-        context = self._turn_context or {}
-        if context.get("obligation_retry_fired"):
-            return False
-        if context.get("canonical_draft_mutations"):
-            return False
-
-        new_obligation = context.get("canonical_obligation") or {}
-        new_intent = (
-            new_obligation.get("intent") if isinstance(new_obligation, dict) else None
-        )
-        return (
-            new_intent in ("generative", "modify")
-        )
-
-    def _has_canonical_obligation(self) -> bool:
-        obligation = (self._turn_context or {}).get("canonical_obligation") or {}
-        intent = obligation.get("intent") if isinstance(obligation, dict) else None
-        return intent in {"generative", "modify"}
-
-    def _user_message_has_canonical_write_intent(self, user_message: str) -> bool:
-        return detect_user_message_intent(user_message) in {"generative", "modify"}
-
-    def _maybe_inject_obligation_retry(
-        self, assistant_text: str, current_turn_messages: List[Dict] | None = None,
-    ) -> bool:
-        """spec §3.5 §7.6: turn-end obligation reconciliation.
-
-        Returns True if a corrective synthetic user message was injected
-        (caller should `continue` the chat loop). False otherwise.
-        """
-        if current_turn_messages is None:
-            return False
-        if self._turn_context.get("obligation_retry_fired"):
-            return False  # 防重复
-        from backend.report_writing import assistant_text_claims_modification
-
-        new_obligation = self._turn_context.get("canonical_obligation") or {}
-        new_intent = (
-            new_obligation.get("intent") if isinstance(new_obligation, dict) else None
-        )
-        if new_intent in ("generative", "modify"):
-            if self._turn_context.get("canonical_draft_mutations"):
-                return False
-            if not assistant_text_claims_modification(assistant_text):
-                return False
-            if new_intent == "generative":
-                tool_hint = "`append_report_draft`"
-            else:
-                tool_hint = "`edit_file`"
-            corrective = (
-                "你在回复中声称已修改正文，但本轮没有成功调用写正文工具。"
-                f"请实际调用 {tool_hint} 完成正文写入，不要只在文字中声明已完成。"
-            )
-            self._inject_synthetic_user_correction(corrective, current_turn_messages)
-            self._turn_context["obligation_retry_fired"] = True
-            return True
-
-        return False
-
     def _inject_synthetic_user_correction(
         self, text: str, current_turn_messages: List[Dict] | None = None,
     ) -> None:
@@ -6755,7 +6474,6 @@ class ChatHandler:
             "s0_confirmation_completed": True,
             "s0_non_whitelist_tool_attempted": False,
             "user_message_text": "",                  # spec §3.3 NEW
-            "canonical_obligation": {"intent": None, "expected_action": None},
             "read_file_snapshots": {},                # spec §3.7 NEW
         }
 
@@ -6807,22 +6525,14 @@ class ChatHandler:
         self._turn_context["user_message_text"] = self._extract_user_message_text(
             {"role": "user", "content": user_message}
         )
-        intent = detect_user_message_intent(user_message)
-        expected_action = {
-            "generative": "append",
-            "modify": "any_canonical_write",
-            "ambiguous": None,
-        }[intent]
-        self._turn_context["canonical_obligation"] = {
-            "intent": None if intent == "ambiguous" else intent,
-            "expected_action": expected_action,
-        }
+        # 2026-07-09 义务机制手术：意图分类不再武装「必须写正文」义务，也不再解锁写权限。
+        # 裸关键词（优化/修改/调整…）扫长消息误伤率高：S0-S3 会绕开阶段门禁 + 轮末打出
+        # 「更新正文没有成功」误导文案（试用反馈截图实锤）。权限单一来源 = generic
+        # （阶段分支在 S4+ 无条件放行，直写关键词/历史授权兜住 S2/S3 的显式请求）。
+        # 意图分类仅保留工具路由（edit_file↔append 互拦）与全篇重写解锁两个窄消费方。
         generic_non_plan_write_allowed = self._should_allow_generic_non_plan_write(project_id, user_message)
         self._turn_context["generic_non_plan_write_allowed"] = generic_non_plan_write_allowed
-        self._turn_context["can_write_non_plan"] = (
-            generic_non_plan_write_allowed
-            or bool(self._has_canonical_obligation())
-        )
+        self._turn_context["can_write_non_plan"] = generic_non_plan_write_allowed
         return self._turn_context
 
     def _turn_read_file_paths(self) -> set[str]:
@@ -7172,10 +6882,8 @@ class ChatHandler:
         ]
 
     def _should_allow_non_plan_write(self, project_id: str, user_message: str) -> bool:
-        if self._is_non_plan_write_blocking_message(user_message):
-            return False
-        if self._user_message_has_canonical_write_intent(user_message):
-            return True
+        # 2026-07-09 义务机制手术后：意图分类不再解锁写权限（S0-S3 会绕开阶段门禁），
+        # 权限单一来源 = generic（阶段/直写关键词/历史授权）。保留此 facade 供测试与语义锚点。
         return self._should_allow_generic_non_plan_write(project_id, user_message)
 
     def _should_allow_generic_non_plan_write(self, project_id: str, user_message: str) -> bool:
