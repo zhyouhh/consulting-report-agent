@@ -5,6 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from . import chart_assets
 from .config import get_base_path
 
 
@@ -33,6 +34,21 @@ def export_reviewable_draft(report_path: str, output_dir: str) -> dict:
             "filename": "",
         }
 
+    # 导出前 asset 硬校验（图表 spec §4.6）：pandoc 缺图可能 rc=0 只告警，产出静默丢图的
+    # docx——不可接受。缺失就带清单友好失败、不进 pandoc。全程只读 assets、绝不 sweep。
+    missing_assets = chart_assets.list_missing_assets(Path(report_path))
+    if missing_assets:
+        missing_list = "、".join(missing_assets)
+        return {
+            "status": "error",
+            "output": (
+                f"导出中止：正文引用了 {len(missing_assets)} 张缺失的图片（{missing_list}）。"
+                "请让助手重新生成对应图表，或删除正文中的失效图片引用后再导出。"
+            ),
+            "output_path": "",
+            "filename": "",
+        }
+
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     final_path = out_dir / (Path(report_path).stem + ".docx")
@@ -41,8 +57,10 @@ def export_reviewable_draft(report_path: str, output_dir: str) -> dict:
     os.close(fd)  # Windows 文件占用：pandoc 才能写该路径
     tmp_path = Path(tmp_name)
     try:
+        # --resource-path 指向草稿父目录（content/）：正文里 `assets/x.png` 相对引用命中，
+        # pandoc 原生把 PNG 作为嵌入 media 打进 docx（图表 spec §4.6）。
         result = subprocess.run(
-            [pandoc, report_path, "-o", str(tmp_path)],
+            [pandoc, report_path, "--resource-path", str(Path(report_path).parent), "-o", str(tmp_path)],
             capture_output=True,
             text=True,
             encoding="utf-8",

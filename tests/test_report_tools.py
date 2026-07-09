@@ -116,3 +116,76 @@ class ExportReviewableDraftTests(unittest.TestCase):
         res = report_tools.export_reviewable_draft(str(self.report), str(self.out))
         self.assertEqual(res["status"], "error")
         self.assertIn("pandoc", res["output"])
+
+
+class ExportChartAssetTests(unittest.TestCase):
+    """图表 spec §4.6：导出前 asset 硬校验 + --resource-path 嵌图。"""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.content = Path(self._tmp.name) / "content"
+        (self.content / "assets").mkdir(parents=True)
+        self.out = Path(self._tmp.name) / "output"
+        self.report = self.content / "report_draft_v1.md"
+
+    @mock.patch("backend.report_tools._resolve_pandoc", return_value="/usr/bin/pandoc")
+    @mock.patch("backend.report_tools.subprocess.run")
+    def test_missing_asset_fails_with_list_before_pandoc(self, m_run, m_pandoc):
+        # pandoc 缺图可能 rc=0 只告警 → 产出静默丢图的 docx，不可接受；缺失必须带清单失败。
+        self.report.write_text("![a](assets/chart-gone.png)", encoding="utf-8")
+        res = report_tools.export_reviewable_draft(str(self.report), str(self.out))
+        self.assertEqual(res["status"], "error")
+        self.assertIn("assets/chart-gone.png", res["output"])
+        m_run.assert_not_called()  # 根本不进 pandoc
+
+    @mock.patch("backend.report_tools._resolve_pandoc", return_value="/usr/bin/pandoc")
+    @mock.patch("backend.report_tools.subprocess.run")
+    def test_present_assets_pass_and_resource_path_added(self, m_run, m_pandoc):
+        (self.content / "assets" / "chart-ok.png").write_bytes(b"\x89PNG")
+        self.report.write_text("![a](assets/chart-ok.png)", encoding="utf-8")
+
+        def fake_run(cmd, **kw):
+            Path(cmd[cmd.index("-o") + 1]).write_text("docx")
+            # --resource-path 指向草稿父目录（content/），相对引用才解析命中
+            self.assertIn("--resource-path", cmd)
+            self.assertEqual(cmd[cmd.index("--resource-path") + 1], str(self.content))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        m_run.side_effect = fake_run
+        res = report_tools.export_reviewable_draft(str(self.report), str(self.out))
+        self.assertEqual(res["status"], "ok")
+
+    @mock.patch("backend.report_tools._resolve_pandoc", return_value="/usr/bin/pandoc")
+    @mock.patch("backend.report_tools.subprocess.run")
+    def test_chartless_report_no_regression(self, m_run, m_pandoc):
+        self.report.write_text("# 无图报告\n\n正文。", encoding="utf-8")
+
+        def fake_run(cmd, **kw):
+            Path(cmd[cmd.index("-o") + 1]).write_text("docx")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        m_run.side_effect = fake_run
+        res = report_tools.export_reviewable_draft(str(self.report), str(self.out))
+        self.assertEqual(res["status"], "ok")
+
+    def test_real_pandoc_embeds_png_media(self):
+        # 全链 make-or-break：真实 pandoc 时验证 PNG 真进 docx media（无 pandoc 自动跳过）。
+        import shutil
+        import zipfile
+        if not shutil.which("pandoc"):
+            self.skipTest("pandoc not installed")
+        from backend.chart_render import render_chart
+        png = render_chart(
+            "bar", {"categories": ["甲", "乙"], "values": [3, 5]}, "乙类占比更高", "测试来源",
+        )
+        (self.content / "assets" / "chart-real.png").write_bytes(png)
+        self.report.write_text(
+            "# 报告\n\n结论段。\n\n![乙类占比更高](assets/chart-real.png)\n", encoding="utf-8",
+        )
+        res = report_tools.export_reviewable_draft(str(self.report), str(self.out))
+        self.assertEqual(res["status"], "ok")
+        with zipfile.ZipFile(res["output_path"]) as docx:
+            media = [n for n in docx.namelist() if n.startswith("word/media/")]
+            self.assertTrue(media, "docx 内无嵌入图片 media")

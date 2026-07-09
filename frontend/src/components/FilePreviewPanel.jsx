@@ -15,6 +15,7 @@ import {
   saveSucceeded, saveFailed, reloadAfterConflict, guardLeave,
 } from '../utils/fileEditState'
 import { DEFAULT_TREE_PCT, computeTreePct } from '../utils/filePanelLayout'
+import { resolveAssetSrc } from '../utils/assetUrl'
 import { showError } from '../utils/toast'
 
 const markdownComponents = {
@@ -41,6 +42,8 @@ const markdownComponents = {
   td: ({ children }) => (
     <td className="border border-border px-4 py-2 text-text">{children}</td>
   ),
+  // img 在 buildMarkdownComponents 里按 projectId 重写 src（图表资产路由）；
+  // 这里保留默认渲染供无 projectId 场景回退。
   img: ({ src, alt }) => (
     <img src={src} alt={alt} className="max-w-full h-auto rounded-lg shadow-card my-4" />
   ),
@@ -60,12 +63,29 @@ const markdownComponents = {
 
 const DRAFT_PATH = 'content/report_draft_v1.md'
 
+// projectId 感知的 markdown 组件工厂（图表 spec §4.5）：只有 img 需要按项目重写
+// 相对 assets/ 引用到二进制路由，其余组件复用模块级常量（引用不变、渲染不重建）。
+function buildMarkdownComponents(projectId) {
+  if (!projectId) return markdownComponents
+  return {
+    ...markdownComponents,
+    img: ({ src, alt }) => (
+      <img
+        src={resolveAssetSrc(src, projectId)}
+        alt={alt}
+        className="max-w-full h-auto rounded-lg shadow-card my-4"
+      />
+    ),
+  }
+}
+
 const FilePreviewPanel = forwardRef(function FilePreviewPanel({
   files = [],
   currentFile,
   content,
   currentStage = null,
   reviewStale = false,
+  projectId = null,
   onSelectFile,
   onSaveFile,
   onReloadFile,
@@ -108,6 +128,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
     () => Boolean(files.find((f) => f.path === currentFile)?.editable),
     [files, currentFile],
   )
+  const mdComponents = useMemo(() => buildMarkdownComponents(projectId), [projectId])
   const groups = useMemo(() => buildFileTree(files, currentStage), [files, currentStage])
   const inEdit = edit.mode === 'edit'
   const isDraft = currentFile === DRAFT_PATH
@@ -355,7 +376,7 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={[rehypeKatex, rehypeHighlight, rehypeRaw]}
-              components={markdownComponents}
+              components={mdComponents}
             >
               {content}
             </ReactMarkdown>

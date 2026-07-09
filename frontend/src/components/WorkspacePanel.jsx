@@ -403,6 +403,7 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
           content={content}
           currentStage={workspace?.stage_code}
           reviewStale={Boolean(workspace?.flags?.review_stale)}
+          projectId={projectId}
           onSelectFile={loadFile}
           onSaveFile={handleSaveFile}
           onReloadFile={reloadFile}

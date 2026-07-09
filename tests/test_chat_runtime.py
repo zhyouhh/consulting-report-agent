@@ -15269,3 +15269,158 @@ for _inh in dir(ChatRuntimeTests):
     if _inh.startswith("test_") and _inh not in ProviderRetryStreamTests.__dict__:
         setattr(ProviderRetryStreamTests, _inh, None)
 del _inh
+
+
+class CreateVisualToolTests(ChatRuntimeTests):
+    """图表工具（create_chart / create_diagram）：schema、preflight 门禁、生成/插入分离。"""
+
+    def _start_visual_turn(self, handler, stage_code="S4", *, confirm_outline=True,
+                           user_message="给营收对比配个图"):
+        if confirm_outline:
+            handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        stage_patcher = mock.patch.object(
+            handler.skill_engine, "_infer_stage_state",
+            return_value=self._mock_stage_state(stage_code),
+        )
+        stage_patcher.start()
+        self.addCleanup(stage_patcher.stop)
+        handler._turn_context = handler._build_turn_context(self.project_id, user_message)
+
+    def _chart_call(self, **overrides):
+        args = {
+            "kind": "bar",
+            "title": "华东贡献过半营收",
+            "data": {"categories": ["华东", "华南"], "values": [420, 380]},
+            "source": "公司 2025 年报",
+        }
+        args.update(overrides)
+        return self._make_tool_call("create_chart", json.dumps(args, ensure_ascii=False))
+
+    def test_schemas_registered_and_within_token_budget(self):
+        handler = self._make_handler_with_project()
+        tools = handler._build_tools()
+        names = [t["function"]["name"] for t in tools]
+        self.assertIn("create_chart", names)
+        self.assertIn("create_diagram", names)
+        # 计费口径（图表 spec §6）：tools 每轮随请求发送按 prompt 计费；两 schema 的
+        # token 成本钉死上限（对齐「方法论块 ≤2k」的做法）。实测 ~937。
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        total = sum(
+            len(enc.encode(json.dumps(t, ensure_ascii=False)))
+            for t in tools
+            if t["function"]["name"] in ("create_chart", "create_diagram")
+        )
+        self.assertLessEqual(total, 1200)
+
+    def test_blocked_before_s4(self):
+        handler = self._make_handler_with_project()
+        self._start_visual_turn(handler, stage_code="S2")
+        result = handler._execute_tool(self.project_id, self._chart_call())
+        self.assertEqual(result["status"], "error")
+        self.assertIn("S4", result["message"])
+
+    def test_blocked_without_outline_confirmed(self):
+        handler = self._make_handler_with_project()
+        self._start_visual_turn(handler, stage_code="S4", confirm_outline=False)
+        result = handler._execute_tool(self.project_id, self._chart_call())
+        self.assertEqual(result["status"], "error")
+        self.assertIn("大纲", result["message"])
+
+    def test_blocked_when_fetch_url_pending(self):
+        # 证据门（图表 spec §4.1 关键且易漏）：web_search 后未 fetch_url 不得据摘要画图。
+        handler = self._make_handler_with_project()
+        self._start_visual_turn(handler)
+        handler._turn_context["web_search_performed"] = True
+        handler._turn_context["fetch_url_performed"] = False
+        result = handler._execute_tool(self.project_id, self._chart_call())
+        self.assertEqual(result["status"], "error")
+        self.assertIn("fetch_url", result["message"])
+
+    def test_create_chart_success_writes_png_sidecar_and_sanitized_markdown(self):
+        handler = self._make_handler_with_project()
+        self._start_visual_turn(handler)
+        result = handler._execute_tool(
+            self.project_id,
+            self._chart_call(title="营收[增长]显著(超预期)"),
+        )
+        self.assertEqual(result["status"], "success")
+        chart_id = result["chart_id"]
+        png = self.project_dir / "content" / "assets" / f"{chart_id}.png"
+        sidecar = self.project_dir / "content" / "assets" / f"{chart_id}.json"
+        self.assertTrue(png.read_bytes().startswith(b"\x89PNG"))
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        self.assertEqual(payload["source"], "公司 2025 年报")
+        self.assertEqual(payload["title"], "营收[增长]显著(超预期)")  # 完整 title 进留痕
+        # alt 净化：[]() 剥掉，引用不破格式
+        self.assertEqual(result["markdown"], f"![营收增长显著超预期](assets/{chart_id}.png)")
+
+    def test_create_diagram_success(self):
+        handler = self._make_handler_with_project()
+        self._start_visual_turn(handler)
+        call = self._make_tool_call("create_diagram", json.dumps({
+            "kind": "process",
+            "title": "全流程三步走",
+            "spec": {"steps": [{"label": "受理"}, {"label": "评审"}, {"label": "签约"}]},
+        }, ensure_ascii=False))
+        result = handler._execute_tool(self.project_id, call)
+        self.assertEqual(result["status"], "success")
+        self.assertIn("assets/", result["markdown"])
+
+    def test_generation_does_not_count_canonical_mutation(self):
+        # 生成 ≠ 插入（图表 spec §4.1）：生成不预扣 draft mutation 名额。
+        handler = self._make_handler_with_project()
+        self._start_visual_turn(handler)
+        result = handler._execute_tool(self.project_id, self._chart_call())
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(handler._turn_context.get("canonical_draft_mutations"), [])
+
+    def test_render_error_returns_friendly_message(self):
+        handler = self._make_handler_with_project()
+        self._start_visual_turn(handler)
+        result = handler._execute_tool(
+            self.project_id,
+            self._chart_call(data={"categories": ["a"], "values": [1, 2]}),
+        )
+        self.assertEqual(result["status"], "error")
+        self.assertIn("一致", result["message"])
+        self.assertNotIn("Traceback", result["message"])
+
+    def test_s0_first_turn_blocks_visual_tools(self):
+        handler = self._make_handler_with_project()
+        self._start_visual_turn(handler)
+        handler._turn_context["s0_confirmation_completed"] = False
+        result = handler._execute_tool(self.project_id, self._chart_call())
+        self.assertEqual(result["status"], "error")
+        self.assertIn("澄清", result["message"])
+
+    def test_old_orphan_swept_on_next_generation(self):
+        # 机会性清扫：下次生成时清掉早于 grace 窗口且未被草稿引用的旧图。
+        import os as _os
+        import time as _time
+        from backend import chart_assets
+        handler = self._make_handler_with_project()
+        self._start_visual_turn(handler)
+        assets = self.project_dir / "content" / "assets"
+        assets.mkdir(parents=True, exist_ok=True)
+        orphan = assets / "chart-000000000000.png"
+        orphan.write_bytes(b"p")
+        old = _time.time() - chart_assets.SWEEP_GRACE_SECONDS - 60
+        _os.utime(orphan, (old, old))
+        result = handler._execute_tool(self.project_id, self._chart_call())
+        self.assertEqual(result["status"], "success")
+        self.assertFalse(orphan.exists())
+
+    def test_system_prompt_contains_chart_discipline(self):
+        handler = self._make_handler_with_project()
+        handler._turn_context = handler._build_turn_context(self.project_id, "你好")
+        prompt = handler._build_system_prompt(self.project_id)
+        self.assertIn("一图一结论", prompt)
+        self.assertIn("create_chart", prompt)
+
+
+# 置空继承的 test_（repo 既有 pattern，避免 targeted class run 重跑整个父套件）
+for _inh in dir(ChatRuntimeTests):
+    if _inh.startswith("test_") and _inh not in CreateVisualToolTests.__dict__:
+        setattr(CreateVisualToolTests, _inh, None)
+del _inh

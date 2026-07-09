@@ -72,3 +72,20 @@ class VersionInfoTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChartPackagingTests(unittest.TestCase):
+    def test_spec_bundles_fonts_and_matplotlib(self):
+        # 图表 spec §5：CJK 字体与 mpl-data 必须显式进 datas，缺则打包态方框/崩。
+        content = (ROOT / "consulting_report.spec").read_text(encoding="utf-8")
+        self.assertIn("('fonts', 'fonts')", content)
+        self.assertIn("collect_data_files('matplotlib')", content)
+        self.assertIn("matplotlib.backends.backend_agg", content)
+
+    def test_repo_ships_cjk_fonts_with_license(self):
+        for name in ("NotoSansCJKsc-Regular.otf", "NotoSansCJKsc-Bold.otf", "LICENSE"):
+            self.assertTrue((ROOT / "fonts" / name).is_file(), f"fonts/{name} 缺失")
+
+    def test_requirements_pin_matplotlib(self):
+        content = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        self.assertIn("matplotlib==", content)

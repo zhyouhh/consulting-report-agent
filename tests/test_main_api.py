@@ -2571,3 +2571,56 @@ class B2ChatQuotaTests(_LocalMockEngineMixin, unittest.TestCase):
             mock_get_handler.assert_not_called()       # 预检短路、未构造 handler
         self.assertEqual(resp.status_code, 200)        # 友好返回、非 500、不 build handler
         self.assertIn("额度", resp.json()["content"])    # 提示在 content（system_notices 是对象模型、置 None）
+
+
+class ChartAssetApiTests(unittest.TestCase):
+    """图表 spec §4.5：/assets 二进制路由——属主放行 / 越界拒 / 只服务 png / 长缓存头。"""
+
+    def setUp(self):
+        self.client = TestClient(main_module.app)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        from backend.skill import SkillEngine
+        repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+        self.engine = SkillEngine(Path(self._tmp.name) / "projects", repo_skill_dir)
+        project = self.engine.create_project({
+            "name": "demo", "workspace_dir": str(Path(self._tmp.name) / "ws"),
+            "project_type": "strategy-consulting", "theme": "t",
+            "target_audience": "a", "deadline": "2026-04-01",
+            "expected_length": "3000 words", "notes": "n",
+        })
+        self.pid = project["id"]
+        self.project_dir = Path(project["project_dir"])
+        self.assets = self.project_dir / "content" / "assets"
+        self.assets.mkdir(parents=True, exist_ok=True)
+        (self.assets / "chart-ok.png").write_bytes(b"\x89PNG\r\n\x1a\nBYTES")
+        (self.assets / "chart-ok.json").write_text("{}", encoding="utf-8")
+        self.addCleanup(_install_local_engine(self.engine))
+
+    def test_owner_gets_png_with_immutable_cache(self):
+        res = self.client.get(f"/api/projects/{self.pid}/assets/chart-ok.png")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.headers["content-type"], "image/png")
+        self.assertTrue(res.content.startswith(b"\x89PNG"))
+        # chart_id 每次铸新、内容不可变 → immutable 长缓存是正确的
+        self.assertIn("immutable", res.headers.get("cache-control", ""))
+
+    def test_missing_asset_404(self):
+        res = self.client.get(f"/api/projects/{self.pid}/assets/chart-gone.png")
+        self.assertEqual(res.status_code, 404)
+
+    def test_sidecar_json_not_served(self):
+        res = self.client.get(f"/api/projects/{self.pid}/assets/chart-ok.json")
+        self.assertEqual(res.status_code, 404)
+
+    def test_traversal_rejected(self):
+        # 项目根放一个越界目标；URL 编码的 ../ 不得逃出 assets 目录
+        (self.project_dir / "secret.png").write_bytes(b"\x89PNGSECRET")
+        res = self.client.get(
+            f"/api/projects/{self.pid}/assets/..%2F..%2Fsecret.png"
+        )
+        self.assertIn(res.status_code, (404, 400))
+
+    def test_unknown_project_404(self):
+        res = self.client.get("/api/projects/no-such-project/assets/chart-ok.png")
+        self.assertEqual(res.status_code, 404)

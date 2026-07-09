@@ -34,6 +34,12 @@ binaries.append((str(pandoc_binary_file), '.'))
 # N6 attachment pipeline: bundle document-conversion & OCR deps
 datas += collect_data_files('markitdown') + collect_data_files('magika') + collect_data_files('rapidocr_onnxruntime')
 
+# Chart generation: bundled CJK fonts (repo asset — target machines have no reliable CJK
+# font, missing them renders tofu boxes) + matplotlib mpl-data (explicit per design spec,
+# don't rely on the PyInstaller hook alone).
+datas.append(('fonts', 'fonts'))
+datas += collect_data_files('matplotlib')
+
 hiddenimports = [
     'uvicorn.logging',
     'uvicorn.loops',
@@ -49,6 +55,7 @@ hiddenimports = [
     'webview.platforms.edgechromium',
 ]
 hiddenimports += collect_submodules('markitdown') + ['rapidocr_onnxruntime', 'onnxruntime']
+hiddenimports += ['matplotlib.backends.backend_agg']
 
 a = Analysis(
     ['app.py'],

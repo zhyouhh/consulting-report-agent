@@ -1273,6 +1273,28 @@ def export_draft_download(scope: ProjectScope = Depends(require_project)):
     )
 
 
+@app.get("/api/projects/{project_id}/assets/{asset_name}")
+def get_project_asset(asset_name: str, scope: ProjectScope = Depends(require_project)):
+    """图表资产二进制路由（图表 spec §4.5）：预览器把草稿里相对 `assets/x.png` 重写到这里。
+
+    多租户隔离经 require_project（非属主 404）；路径守卫对齐 W2-C 下载端点
+    （resolve + parents 校验，拒 ../ 与 symlink 越界）。chart_id 每次铸新、PNG 内容
+    不可变，故可发 immutable 长缓存。
+    """
+    project_path = scope.engine.get_project_path(scope.project_id)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    assets_root = (project_path / "content" / "assets").resolve()
+    target = (assets_root / asset_name).resolve()
+    if assets_root not in target.parents or target.suffix != ".png" or not target.is_file():
+        raise HTTPException(status_code=404, detail="图片不存在")
+    return FileResponse(
+        path=str(target),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 @app.delete("/api/projects/{project_id}")
 async def delete_project(scope: ProjectScope = Depends(require_project)):
     try:

@@ -182,3 +182,23 @@ test("preview scroll container carries relative — removing it regresses page-h
   assert.ok(m, 'preview scroll container not found');
   assert.match(m[1], /(^|\s)relative(\s|$)/);
 });
+
+// ---- 图表资产预览（图表 spec §4.5）：img src 按 projectId 重写到 /assets 路由 ----
+
+test("chart assets: img components are projectId-aware via factory + memo", () => {
+  const s = src();
+  assert.match(s, /from ['"]\.\.\/utils\/assetUrl['"]/);
+  assert.match(s, /resolveAssetSrc\(src,\s*projectId\)/);
+  assert.match(s, /function buildMarkdownComponents\(projectId\)/);
+  // 记忆化：projectId 不变不重建组件表；ReactMarkdown 必须消费工厂产物而非模块级常量
+  assert.match(s, /useMemo\(\(\) => buildMarkdownComponents\(projectId\), \[projectId\]\)/);
+  assert.match(s, /components=\{mdComponents\}/);
+  assert.doesNotMatch(s, /components=\{markdownComponents\}/);
+});
+
+test("chart assets: WorkspacePanel passes projectId into FilePreviewPanel", () => {
+  const ws = readFileSync(path.join(__dirname, "../src/components/WorkspacePanel.jsx"), "utf-8");
+  const block = ws.match(/<FilePreviewPanel[\s\S]*?\/>/);
+  assert.ok(block, "WorkspacePanel 必须渲染 FilePreviewPanel");
+  assert.match(block[0], /projectId=\{projectId\}/);
+});

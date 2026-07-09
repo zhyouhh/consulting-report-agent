@@ -9,6 +9,10 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
+最后更新：2026-07-10（**报告图表生成 ✅ 一次性实施 v2.0+v2.1 合并（spec 三处优化：砍 graphviz 换纯 Python 布局 / 无 cache-bust / 物理尺寸控图宽）；⚠️ 未部署 kr-web-01**）：
+
+**交付**：20 种图（数据图 12 + 结构图 8）全流程「create_chart/create_diagram 工具 → content/assets/ 原子落盘（PNG+sidecar）→ 模型经 append/edit 插引用 → 预览 img 重写到 /assets 路由所见即所得 → 导出前缺图硬校验 + --resource-path 真嵌 docx → S5 条件性第 6 维图表审查」。新叶子 `chart_style/chart_limits/chart_render/diagram_render/chart_assets`；字体 `fonts/NotoSansCJKsc-*.otf` 进仓库（OFL）；requirements + PyInstaller spec 已收口。后端 1696 / 前端 577 / build / 真 pandoc 嵌图 E2E 全绿。硬约束记 CLAUDE.md「## 报告图表生成」段。**待办**：① 部署 kr-web-01（git pull 带 fonts/ + venv 装 matplotlib + 重启；前端 dist swap）；② 真模型 GUI E2E（让 deepseek 真调一次 create_chart 全链）；③ spec §12 余项（签名版式扩充/原地编辑/assets 进文件树）仍在 backlog。
+
 最后更新：2026-07-10（**文件预览 KaTeX 空白区修复 ✅ 一行修 + 部署 kr-web-01（第八笔：frontend-only dist swap，bundle `index-NcjEo2bt.js`）**）：
 
 **试用反馈**：选中长文件（报告正文/分析记录）后整页下方多出可滚动空白区。**根因**：预览 markdown 走 rehype-katex，KaTeX 每个公式输出 `position:absolute` 的 `.katex-mathml` 隐藏层；预览滚动容器非 positioned → 锚点越级到 FilePreviewPanel 根（relative）→ 逃出 overflow 裁剪 → 文档被撑高（线上实测 782→3616px）。触发条件是「内容含公式」而非单纯长——纯文字/宽表格/长代码块均复现不出，最终在线上真实项目抓到。**修**：滚动容器加 `relative`（`FilePreviewPanel.jsx` 一行）+ source-guard 锁死；顺带防住 rehypeRaw 可能引入的其它 absolute 元素。前端 568 测试 + build 绿；线上真实项目验证零溢出。约束记 CLAUDE.md「## 工作区文件栏 + 可编辑预览（R3）」段。**部署途中实翻 tar 解压坑**（在 frontend/ 直接解包 merge 进 live dist 再挪走 → ~30s 无 dist 可服务，已恢复；教训记 CLAUDE.md 部署流程段）。

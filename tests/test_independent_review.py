@@ -1494,6 +1494,57 @@ class IndependentReviewAgentTests(unittest.TestCase):
         self.assertNotIn("UNTRUSTED_DATA", joined)  # 降级未注入
         # 关键：run() 未因扫描异常崩溃（capture 正常返回即证明）
 
+    # ---- 图表维度（条件性第 6 维，图表 spec §4.7）----
+
+    def _make_agent_with_chart_draft(self):
+        """草稿引用一张生成图 + 对应 sidecar 落盘。"""
+        agent, store, run_id, project_id = self._make_agent_with_draft(
+            "# 报告\n\n结论段。\n\n![数字化业务领跑](assets/chart-abcdef123456.png)\n"
+        )
+        project_dir = agent.skill_engine.get_project_path(project_id)
+        assets = project_dir / "content" / "assets"
+        assets.mkdir(parents=True, exist_ok=True)
+        (assets / "chart-abcdef123456.json").write_text(
+            '{"kind": "bar", "title": "数字化业务领跑", "source": "公司年报"}',
+            encoding="utf-8",
+        )
+        return agent, store, run_id, project_id
+
+    def test_chart_addendum_and_grounding_injected_when_charts_referenced(self):
+        from backend.independent_review import CHART_REVIEW_ADDENDUM
+        agent, store, run_id, project_id = self._make_agent_with_chart_draft()
+        msgs = self._capture_first_request_messages(agent, project_id, store, run_id)
+        self.assertTrue(msgs[0]["content"].endswith(CHART_REVIEW_ADDENDUM))
+        user_msgs = [m for m in msgs if m.get("role") == "user"]
+        # 图表 grounding 与占位符 grounding 合并成同一条 user（连续 user 触发官渠 400）
+        self.assertEqual(len(user_msgs), 1)
+        self.assertIn("chart-abcdef123456", user_msgs[0]["content"])
+        self.assertIn("公司年报", user_msgs[0]["content"])
+        self.assertIn("UNTRUSTED_DATA", user_msgs[0]["content"])
+
+    def test_no_charts_system_prompt_verbatim_unchanged(self):
+        # 无图项目零回归：system prompt 逐字等于原始常量、无图表 grounding。
+        from backend.independent_review import INDEPENDENT_REVIEW_SYSTEM_PROMPT
+        agent, store, run_id, project_id = self._make_agent_with_draft("干净正文，无图。")
+        msgs = self._capture_first_request_messages(agent, project_id, store, run_id)
+        self.assertEqual(msgs[0]["content"], INDEPENDENT_REVIEW_SYSTEM_PROMPT)
+        joined = "\n".join(m.get("content", "") for m in msgs if isinstance(m.get("content"), str))
+        self.assertNotIn("图表审查", joined)
+
+    def test_chart_reference_without_sidecar_no_addendum(self):
+        # 引用了图但 sidecar 缺失（手工引用/被清扫）→ 无留痕可注入，不启用第 6 维
+        from backend.independent_review import INDEPENDENT_REVIEW_SYSTEM_PROMPT
+        agent, store, run_id, project_id = self._make_agent_with_draft(
+            "![图](assets/chart-999999999999.png)"
+        )
+        msgs = self._capture_first_request_messages(agent, project_id, store, run_id)
+        self.assertEqual(msgs[0]["content"], INDEPENDENT_REVIEW_SYSTEM_PROMPT)
+
+    def test_anchor_contract_untouched_by_chart_dimension(self):
+        # 完备性锚点契约不动：仍是 5 个维度 H2（第 6 维是附加输出、advisory）。
+        from backend.independent_review import INDEPENDENT_REVIEW_ANCHORS
+        self.assertEqual(len(INDEPENDENT_REVIEW_ANCHORS), 5)
+
 
 class ReviewSessionStoreTests(unittest.TestCase):
     """Task 3.1: in-process resume store — two-lock split / CAS no-revive / atomic replace /
