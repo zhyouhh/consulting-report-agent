@@ -13,10 +13,10 @@ const src = readFileSync(
 test('MessageParts：按 type 分派，tool→ToolCallPill(event=p)、text→renderAssistantText(p.text)、空守卫', () => {
   // 按片段 type 分派
   assert.match(src, /p\.type === 'tool'/)
-  // tool 段 → ToolCallPill 传 event={p}
-  assert.match(src, /ToolCallPill\s+event=\{p\}/)
-  // text 段 → renderAssistantText(p.text)
-  assert.match(src, /renderAssistantText\(p\.text\)/)
+  // tool 段 → ToolCallPill 传 event={p} + 文件内链回调透传
+  assert.match(src, /ToolCallPill\s+event=\{p\}\s+onOpenFile=\{onOpenFile\}/)
+  // text 段 → renderAssistantText(p.text, { onOpenFile })（文件内链批次起带 options）
+  assert.match(src, /renderAssistantText\(p\.text, \{ onOpenFile \}\)/)
   // 空 parts 守卫返回 null
   assert.match(src, /!parts \|\| !parts\.length/)
 })

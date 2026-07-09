@@ -287,6 +287,18 @@ function App() {
     proceed()
   }
 
+  // 文件内链（2026-07-09）：聊天区 pill / 正文文件名点击 → 确保工作区面板可见 → 打开该文件。
+  // 面板收起时先展开；ref 要等重新 mount 后才有，setTimeout(0) 排到 commit 之后再调。
+  const handleOpenWorkspaceFile = (path) => {
+    if (!path) return
+    if (!showWorkspacePanel) {
+      setShowWorkspacePanel(true)
+      setTimeout(() => workspacePanelRef.current?.openFile(path), 0)
+      return
+    }
+    workspacePanelRef.current?.openFile(path)
+  }
+
   // 容器 = 「聊天区 + 分隔条 + 工作区」可调区域（排除固定宽的左侧 Sidebar）——clamp 须按这个区域
   // 预留 MIN_CHAT_WIDTH，否则把整窗宽（含 Sidebar）算进去会让聊天区被挤到 ~100px。容器在主界面
   // 渲染（登录后）才挂载，故用 callback ref：挂载即用真实宽度把存储宽度夹一次（修「存的宽超出当前窗口、
@@ -465,6 +477,7 @@ function App() {
             onInjectedPromptConsumed={() => setInjectedPrompt(null)}
             autoStartProjectId={autoStartProjectId}
             onAutoStartConsumed={() => setAutoStartProjectId(null)}
+            onOpenWorkspaceFile={handleOpenWorkspaceFile}
           />
           {showWorkspacePanel && (
             <>

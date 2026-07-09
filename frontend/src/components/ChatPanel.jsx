@@ -64,6 +64,7 @@ const ChatPanel = forwardRef(function ChatPanel({
   onInjectedPromptConsumed,
   autoStartProjectId,
   onAutoStartConsumed,
+  onOpenWorkspaceFile,
 }, ref) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
@@ -1049,8 +1050,8 @@ const ChatPanel = forwardRef(function ChatPanel({
                   {/* parts 有则按时间线穿插（MessageParts）；老消息/无 parts 回落到旧分组渲染
                       （ToolCallList 堆顶 + renderAssistantText 正文，行为与抽取前等价）。 */}
                   {msg.parts && msg.parts.length
-                    ? <MessageParts parts={msg.parts} />
-                    : (<><ToolCallList toolEvents={msg.toolEvents} />{renderAssistantText(msg.content)}</>)}
+                    ? <MessageParts parts={msg.parts} onOpenFile={onOpenWorkspaceFile} />
+                    : (<><ToolCallList toolEvents={msg.toolEvents} onOpenFile={onOpenWorkspaceFile} />{renderAssistantText(msg.content, { onOpenFile: onOpenWorkspaceFile })}</>)}
                 </div>
                 <button
                   onClick={() => copyMessage(msg)}

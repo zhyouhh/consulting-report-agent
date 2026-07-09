@@ -41,7 +41,22 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
       action?.()
       return true
     },
-  }), [])
+    // 文件内链（2026-07-09）：聊天区 pill / 正文文件名点击 → 切「文件」tab 并打开该文件。
+    // 当前在 files tab 且处于编辑态时同样经 attemptLeave 守卫（dirty 弹三按钮后再跳）。
+    openFile: (path) => {
+      if (!path) return
+      const doOpen = () => {
+        setActiveTab('files')
+        loadFile(path)
+      }
+      const fp = filePreviewRef.current
+      if (fp?.attemptLeave) {
+        fp.attemptLeave(doOpen)
+        return
+      }
+      doOpen()
+    },
+  }), [loadFile])
 
   const handleTabClick = useCallback((next) => {
     // 离开「文件」tab 是一条离开路径：经统一守卫（dirty 弹三按钮后再切）。
