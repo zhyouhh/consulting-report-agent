@@ -58,8 +58,8 @@
 
 ## 数据存储
 
-- 配置文件：`C:\Users\你的用户名\.consulting-report\config.json`
-- 项目文件：`C:\Users\你的用户名\.consulting-report\projects\`
+- 配置文件：`C:\Users\你的用户名\.consulting-report\users\local\config.json`
+- 项目文件：`C:\Users\你的用户名\.consulting-report\users\local\projects\`
 
 ## 常见问题
 
@@ -70,7 +70,7 @@ A: 先打开设置，确认仍是 `试用通道`；如果试用通道暂时异�
 A: 先检查是否被杀毒软件拦截，必要时添加信任。
 
 **Q: 项目文件保存在哪里？**  
-A: 在 `C:\Users\你的用户名\.consulting-report\projects\项目名称\`。
+A: 在 `C:\Users\你的用户名\.consulting-report\users\local\projects\项目名称\`。
 
 ## 技术支持
 
