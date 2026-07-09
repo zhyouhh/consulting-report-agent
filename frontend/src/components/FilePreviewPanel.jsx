@@ -339,8 +339,10 @@ const FilePreviewPanel = forwardRef(function FilePreviewPanel({
         )}
       </div>
 
-      {/* 正文区：编辑态 textarea / 预览态 markdown */}
-      <div className="flex-1 overflow-y-auto p-[18px] bg-field">
+      {/* 正文区：编辑态 textarea / 预览态 markdown。
+          relative 不可去：KaTeX 的 .katex-mathml（及 rehypeRaw 可能引入的其它 absolute 元素）
+          需以本滚动容器为 containing block，否则会锚到外层面板根、逃出裁剪，把整页文档撑高出大片空白。 */}
+      <div className="relative flex-1 overflow-y-auto p-[18px] bg-field">
         {inEdit ? (
           <textarea
             value={edit.draft}

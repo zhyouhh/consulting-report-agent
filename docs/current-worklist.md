@@ -9,6 +9,10 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
+最后更新：2026-07-10（**文件预览 KaTeX 空白区修复 ✅ 一行修 + 部署 kr-web-01（第八笔：frontend-only dist swap，bundle `index-NcjEo2bt.js`）**）：
+
+**试用反馈**：选中长文件（报告正文/分析记录）后整页下方多出可滚动空白区。**根因**：预览 markdown 走 rehype-katex，KaTeX 每个公式输出 `position:absolute` 的 `.katex-mathml` 隐藏层；预览滚动容器非 positioned → 锚点越级到 FilePreviewPanel 根（relative）→ 逃出 overflow 裁剪 → 文档被撑高（线上实测 782→3616px）。触发条件是「内容含公式」而非单纯长——纯文字/宽表格/长代码块均复现不出，最终在线上真实项目抓到。**修**：滚动容器加 `relative`（`FilePreviewPanel.jsx` 一行）+ source-guard 锁死；顺带防住 rehypeRaw 可能引入的其它 absolute 元素。前端 568 测试 + build 绿；线上真实项目验证零溢出。约束记 CLAUDE.md「## 工作区文件栏 + 可编辑预览（R3）」段。**部署途中实翻 tar 解压坑**（在 frontend/ 直接解包 merge 进 live dist 再挪走 → ~30s 无 dist 可服务，已恢复；教训记 CLAUDE.md 部署流程段）。
+
 最后更新：2026-07-09（**试用反馈 0709 四件套 ✅ 实施 + Codex 单轮审+3 轮红队 APPROVED + merge main `c5e2ca4`（--no-ff）+ 部署 kr-web-01（第七笔：bundle `index-DnpSREU1.js` + 3 后端文件 sha256 校验 + 重启，公网 smoke 过；回滚点 `/opt/cra-rollback-20260709/` + `dist.old`）**）：
 
 **来源**：`feedback/试用反馈汇总0709-咨询报告助手.xlsx`（郭红/张慧煜两条此前已响应；罗育鑫③/曾超④本批处理）+ 微信视频反馈（文件栏乱动）。四件套：

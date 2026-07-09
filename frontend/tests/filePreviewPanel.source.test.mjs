@@ -171,3 +171,14 @@ test("drag-resize divider (cursor-row-resize) is gated by !isMobile — removal 
   const slice = s.slice(Math.max(0, idx - 200), idx);
   assert.match(slice, /\{!isMobile\s*&&/);
 });
+
+// ── 预览滚动容器必须自带 relative（KaTeX .katex-mathml absolute 逃逸修复，2026-07-10）──
+// KaTeX（及 rehypeRaw 引入的任意 absolute 元素）会以最近的 positioned 祖先为 containing block；
+// 若滚动容器不是 positioned，锚点落到外层面板根 → 逃出 overflow 裁剪 → 整页文档被撑高出空白区。
+
+test("preview scroll container carries relative — removing it regresses page-height blowout", () => {
+  const s = src();
+  const m = s.match(/className="([^"]*overflow-y-auto[^"]*bg-field[^"]*)"/);
+  assert.ok(m, 'preview scroll container not found');
+  assert.match(m[1], /(^|\s)relative(\s|$)/);
+});
