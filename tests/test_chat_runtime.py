@@ -11637,6 +11637,57 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
 
         self.assertEqual(events, [{"type": "error", "data": "未知 system_trigger: unknown"}])
 
+    @mock.patch("backend.chat.OpenAI")
+    def test_project_created_trigger_streams_interview_with_tools(self, mock_openai):
+        # 2026-07-09 新建项目自动开场：带工具（与审查汇报轮禁工具相反）、注入需求确认指令、
+        # 合成 kickoff user 消息不落 conversation.json（system_triggered 只持久化 assistant）。
+        handler = self._make_handler_with_project()
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="我先确认几个关键问题：报告的目标读者是谁？"),
+        ])
+
+        events = list(
+            handler.chat_stream(
+                self.project_id,
+                "",
+                system_trigger="project_created",
+                max_iterations=1,
+            )
+        )
+
+        self.assertTrue(any(event.get("type") == "content" for event in events))
+        create_kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
+        self.assertTrue(create_kwargs.get("tools"), msg="开场轮必须带工具（web_search 查背景等）")
+        self.assertTrue(any(
+            message.get("role") == "system" and "开启需求确认" in str(message.get("content"))
+            for message in create_kwargs["messages"]
+        ))
+        history = handler._load_conversation(self.project_id)
+        self.assertEqual([m.get("role") for m in history], ["assistant"])
+        self.assertIn("目标读者", history[0].get("content", ""))
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_project_created_trigger_noops_when_assistant_already_spoke(self, mock_openai):
+        # 幂等守卫：会话已有助手发言 → 静默 no-op（零事件、零 provider 调用、会话不动）。
+        handler = self._make_handler_with_project()
+        handler._save_conversation(self.project_id, [
+            {"role": "user", "content": "开始吧"},
+            {"role": "assistant", "content": "好的，我们开始。"},
+        ])
+
+        events = list(
+            handler.chat_stream(
+                self.project_id,
+                "",
+                system_trigger="project_created",
+                max_iterations=1,
+            )
+        )
+
+        self.assertEqual(events, [])
+        mock_openai.return_value.chat.completions.create.assert_not_called()
+        self.assertEqual(len(handler._load_conversation(self.project_id)), 2)
+
     def test_system_triggered_turn_does_not_inherit_stale_checkpoint_event(self):
         handler = self._make_handler_with_project()
         handler._turn_context = handler._build_turn_context(self.project_id, "上一轮")

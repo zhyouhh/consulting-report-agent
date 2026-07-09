@@ -62,6 +62,8 @@ const ChatPanel = forwardRef(function ChatPanel({
   onToggleWorkspacePanel,
   injectedPrompt,
   onInjectedPromptConsumed,
+  autoStartProjectId,
+  onAutoStartConsumed,
 }, ref) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
@@ -179,6 +181,10 @@ const ChatPanel = forwardRef(function ChatPanel({
               role: 'assistant',
               content: buildProjectWelcomeMessage(project || {})
             }])
+            // 新建项目自动开场：确认会话为空后触发 project_created 系统轮（模型主动开启
+            // 需求确认提问）。只在「刚创建」标记命中时触发；加载失败的 catch 分支不触发
+            //（历史状态未知）。ref 取最新闭包；后端另有 _has_prior_s0_assistant_turn 幂等兜底。
+            maybeAutoStartRef.current?.(requestProjectId)
           }
         })
         .catch(() => {
@@ -662,6 +668,14 @@ const ChatPanel = forwardRef(function ChatPanel({
       abortControllerRef.current = null
     }
     if (isActiveProjectRequest(requestProjectId)) {
+      // 空轮清理：后端幂等 no-op（如重复的 project_created 触发）零事件收尾时，移除仍然
+      // 完全为空的 assistant 占位气泡。先 flush 残留流式队列（EOF-without-DONE 时内容可能
+      // 还压在定时器队列里；React 更新按入队顺序应用，flush 先落 content 再过滤不误删）。
+      // 错误/中止路径都已写入 content，不受影响。
+      flushStreamingQueueImmediately(assistantId, requestProjectId)
+      setMessages(prev => prev.filter(m =>
+        m.id !== assistantId || m.content || m.parts?.length || m.toolEvents?.length
+      ))
       setLoading(false)
       setAbortController(current => (current === controller ? null : current))
       if (renderUserBubble) {
@@ -737,6 +751,20 @@ const ChatPanel = forwardRef(function ChatPanel({
 
   const flushNextPendingTriggerRef = useRef(flushNextPendingTrigger)
   flushNextPendingTriggerRef.current = flushNextPendingTrigger
+
+  // 新建项目自动开场（2026-07-09 试用反馈）：会话确认为空 + autoStartProjectId 命中当前项目
+  // → 触发一次 project_created 系统轮。firedRef 同步置位防重复（StrictMode 双执行 / 竞态），
+  // onAutoStartConsumed 让 App 清掉标记（切回项目不再触发）。
+  const autoStartFiredRef = useRef(null)
+  const maybeAutoStart = (loadedProjectId) => {
+    if (!autoStartProjectId || autoStartProjectId !== loadedProjectId) return
+    if (autoStartFiredRef.current === loadedProjectId) return
+    autoStartFiredRef.current = loadedProjectId
+    onAutoStartConsumed?.()
+    triggerSystemTurn('project_created')
+  }
+  const maybeAutoStartRef = useRef(maybeAutoStart)
+  maybeAutoStartRef.current = maybeAutoStart
 
   // 阶段按钮「代发」入口（2026-07-06 反馈①）：把一条固定确认文案当普通用户消息发出、
   // 渲染用户气泡——与用户亲手打字确认完全同路径，主模型撞后端门禁后能自愈缺失文件再推进

@@ -180,7 +180,10 @@ export function buildProjectWelcomeMessage(project = {}) {
     lines.push(`已有备注：${project.notes}`);
   }
 
-  lines.push("如果这些信息没问题，请直接补充你现在最想让我先做的那一步；如果有偏差，也可以直接纠正。");
+  // 2026-07-09：不再邀请用户先下指令（旧结尾句会引导用户首条消息甩长需求 →
+  // 模型误以为可跳过需求访谈，见试用反馈截图）。新建项目会自动开启需求确认提问，
+  // 欢迎语只承接信息核对。
+  lines.push("如果这些信息有偏差，可以直接纠正；接下来我会先和你确认几个需求要点。");
   return lines.join("\n");
 }
 

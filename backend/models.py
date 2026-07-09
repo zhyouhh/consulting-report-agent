@@ -56,7 +56,7 @@ class TransientAttachment(BaseModel):
         return self
 
 
-SystemTriggerType = Literal["independent_review_done"]
+SystemTriggerType = Literal["independent_review_done", "project_created"]
 
 
 class ChatRequest(BaseModel):

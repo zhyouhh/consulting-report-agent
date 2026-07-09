@@ -36,6 +36,8 @@ function App() {
   })
   const [loading, setLoading] = useState(true)
   const [injectedPrompt, setInjectedPrompt] = useState(null)
+  // 刚创建、待自动开场的项目 id（project_created 系统轮）；ChatPanel 消费后清除。
+  const [autoStartProjectId, setAutoStartProjectId] = useState(null)
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
   // 管理控制台已是独立页面（/admin，2026-07-06）：新标签打开，保住主应用内存态
@@ -226,6 +228,9 @@ function App() {
       // 切到新项目也是一条「离开当前编辑」的路径，必须过 dirty guard（与 handleSelectProject 同）——
       // 否则编辑态下点「新建报告」会让旧草稿悬挂、之后保存打到新项目（codex 前端审 BLOCKER 1）。
       const proceed = async () => {
+        // 自动开场标记：ChatPanel 确认新项目会话为空后触发 project_created 系统轮
+        //（模型主动开启需求确认提问），消费后经 onAutoStartConsumed 清除。
+        setAutoStartProjectId(createdProject.id)
         await loadProjects(createdProject.id)
         setWorkspaceRefreshToken(prev => prev + 1)
       }
@@ -407,6 +412,8 @@ function App() {
           materials={materials}
           workspaceRefreshToken={workspaceRefreshToken}
           injectedPrompt={injectedPrompt}
+          autoStartProjectId={autoStartProjectId}
+          onAutoStartConsumed={() => setAutoStartProjectId(null)}
           workspaceStageCode={workspaceProjectId === currentProjectId ? workspace?.stage_code : undefined}
           onSelectProject={handleSelectProject}
           onCreateProject={createProject}
@@ -456,6 +463,8 @@ function App() {
             onToggleWorkspacePanel={handleToggleWorkspacePanel}
             injectedPrompt={injectedPrompt}
             onInjectedPromptConsumed={() => setInjectedPrompt(null)}
+            autoStartProjectId={autoStartProjectId}
+            onAutoStartConsumed={() => setAutoStartProjectId(null)}
           />
           {showWorkspacePanel && (
             <>

@@ -16,6 +16,7 @@ export default function MobileShell(props) {
     onLoggedOut, onOpenAdmin, onToggleTheme,
     onMaterialsMerged, onMaterialDeleted, onProjectMutated, onCheckpointSet,
     onInsertPrompt, onInjectedPromptConsumed,
+    autoStartProjectId, onAutoStartConsumed,
   } = props
 
   const chatPanelRef = useRef(null)
@@ -89,6 +90,8 @@ export default function MobileShell(props) {
           onToggleWorkspacePanel={toggleRight}
           injectedPrompt={injectedPrompt}
           onInjectedPromptConsumed={onInjectedPromptConsumed}
+          autoStartProjectId={autoStartProjectId}
+          onAutoStartConsumed={onAutoStartConsumed}
         />
       </div>
 
