@@ -8,13 +8,32 @@ import { stripToolLogComments } from '../utils/toolLogStrip.mjs'
 import { splitAssistantMessageBlocks } from '../utils/chatPresentation'
 import { resolveWorkspaceFileLink } from '../utils/workspaceFileLinks'
 
+// 提取 hast 节点的纯文本（value 叶子拼接），用于判断锚点内容是否是已知文件名。
+function hastTextOf(node) {
+  if (!node) return ''
+  if (typeof node.value === 'string') return node.value
+  return (node.children || []).map(hastTextOf).join('')
+}
+
 // 文件内链（2026-07-09 试用反馈③）：助手正文里反引号提到的已知工作区文件名
 // （`outline.md` / `plan/outline.md` 等，白名单精确匹配）渲染成可点击链接，直达文件 tab。
 // 匹配不上的 inline code 原样走共享样式；块级 code 不参与。
 function buildFileLinkComponents(onOpenFile) {
   const baseCode = assistantMarkdownComponents.code
+  const baseAnchor = assistantMarkdownComponents.a
   return {
     ...assistantMarkdownComponents,
+    // [`outline.md`](url)：内层 code 会渲染成文件链接按钮，但外层 <a> 对键盘用户仍可
+    // Tab+Enter 直接触发导航（事件目标是 <a>，子按钮的 preventDefault 拦不到）——含解析
+    // 命中的 code 子节点时解包掉锚点，只留内层按钮（codex 红队 BLOCKER 二轮）。
+    // 纯文本锚点 [outline.md](url)（无反引号）不解包：那是模型给的外部链接，保持原样。
+    a: ({ node, children, ...props }) => {
+      const codeChild = (node?.children || []).find((c) => c.tagName === 'code')
+      if (codeChild && resolveWorkspaceFileLink(hastTextOf(codeChild))) {
+        return <>{children}</>
+      }
+      return baseAnchor({ children, ...props })
+    },
     code: ({ node, inline, children, ...props }) => {
       const isInline = inline ?? (node?.position?.start?.line === node?.position?.end?.line)
       if (isInline) {

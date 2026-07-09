@@ -67,6 +67,16 @@ test("assistant prose file-link click suppresses enclosing anchor navigation", (
   assert.match(s, /e\.preventDefault\(\); e\.stopPropagation\(\); onOpenFile\(linkPath\)/);
 });
 
+test("anchors wrapping a resolvable backticked filename are unwrapped (keyboard-safe)", () => {
+  const s = read("../src/components/assistantTextRender.jsx");
+  // 键盘用户 Tab 到外层 <a> 按 Enter：事件目标是 <a>，子按钮的 preventDefault 拦不到 →
+  // 必须在渲染层解包锚点（codex 红队 BLOCKER 二轮）。纯文本锚点保持原样。
+  const anchorBlock = s.slice(s.indexOf("a: ({ node, children, ...props }) => {"), s.indexOf("code: ({"));
+  assert.match(anchorBlock, /c\.tagName === 'code'/);
+  assert.match(anchorBlock, /resolveWorkspaceFileLink\(hastTextOf\(codeChild\)\)/);
+  assert.match(anchorBlock, /return <>\{children\}<\/>/);
+});
+
 test("App ensures the workspace panel is visible before opening a file (desktop)", () => {
   const s = read("../src/App.jsx");
   const handler = s.slice(
