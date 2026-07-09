@@ -32,32 +32,6 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   const filePreviewRef = useRef(null)
   const uploadInputRef = useRef(null)
 
-  useImperativeHandle(ref, () => ({
-    // App 切项目 / 收起面板前调用：把离开动作转交 FilePreviewPanel 的 attemptLeave
-    //（allow 立即执行、dirty 弹三按钮后执行）。面板未挂载（非 files tab）则无编辑态，直接执行。
-    attemptLeave: (action) => {
-      const fp = filePreviewRef.current
-      if (fp?.attemptLeave) return fp.attemptLeave(action)
-      action?.()
-      return true
-    },
-    // 文件内链（2026-07-09）：聊天区 pill / 正文文件名点击 → 切「文件」tab 并打开该文件。
-    // 当前在 files tab 且处于编辑态时同样经 attemptLeave 守卫（dirty 弹三按钮后再跳）。
-    openFile: (path) => {
-      if (!path) return
-      const doOpen = () => {
-        setActiveTab('files')
-        loadFile(path)
-      }
-      const fp = filePreviewRef.current
-      if (fp?.attemptLeave) {
-        fp.attemptLeave(doOpen)
-        return
-      }
-      doOpen()
-    },
-  }), [loadFile])
-
   const handleTabClick = useCallback((next) => {
     // 离开「文件」tab 是一条离开路径：经统一守卫（dirty 弹三按钮后再切）。
     if (activeTab === 'files' && next !== 'files' && filePreviewRef.current?.attemptLeave) {
@@ -122,6 +96,34 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     mountedRef.current = true
     return () => { mountedRef.current = false }
   }, [])
+
+  // 注意：这个 hook 必须在 loadFile 声明之后（deps 里引用它，提前会 TDZ ReferenceError 崩渲染，
+  // codex 整分支审 BLOCKER——source-guard 测试不渲染组件抓不到这类错误）。
+  useImperativeHandle(ref, () => ({
+    // App 切项目 / 收起面板前调用：把离开动作转交 FilePreviewPanel 的 attemptLeave
+    //（allow 立即执行、dirty 弹三按钮后执行）。面板未挂载（非 files tab）则无编辑态，直接执行。
+    attemptLeave: (action) => {
+      const fp = filePreviewRef.current
+      if (fp?.attemptLeave) return fp.attemptLeave(action)
+      action?.()
+      return true
+    },
+    // 文件内链（2026-07-09）：聊天区 pill / 正文文件名点击 → 切「文件」tab 并打开该文件。
+    // 当前在 files tab 且处于编辑态时同样经 attemptLeave 守卫（dirty 弹三按钮后再跳）。
+    openFile: (path) => {
+      if (!path) return
+      const doOpen = () => {
+        setActiveTab('files')
+        loadFile(path)
+      }
+      const fp = filePreviewRef.current
+      if (fp?.attemptLeave) {
+        fp.attemptLeave(doOpen)
+        return
+      }
+      doOpen()
+    },
+  }), [loadFile])
 
   const loadFiles = useCallback(async () => {
     const requestProject = projectId

@@ -24,7 +24,10 @@ function buildFileLinkComponents(onOpenFile) {
           return (
             <button
               type="button"
-              onClick={() => onOpenFile(linkPath)}
+              // preventDefault + stopPropagation：文件名可能被模型写在 markdown 链接里
+              //（[`outline.md`](url) → 按钮嵌在 <a> 内），不拦会同时触发锚点导航把整个
+              // SPA 导走、丢内存态（codex 整分支审 BLOCKER）。
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); onOpenFile(linkPath) }}
               className="rounded bg-asoft px-1.5 py-0.5 font-mono text-13 text-abright underline underline-offset-2 cursor-pointer"
               title="在文件栏打开"
             >

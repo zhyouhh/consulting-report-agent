@@ -47,6 +47,26 @@ test("WorkspacePanel exposes openFile through the edit-guard (attemptLeave)", ()
   assert.match(handleBlock, /fp\.attemptLeave\(doOpen\)/);
 });
 
+test("WorkspacePanel imperative handle sits AFTER loadFile declaration (TDZ crash guard)", () => {
+  // deps 数组 [loadFile] 在 hook 调用点即求值：若 hook 排在 const loadFile 之前，
+  // 渲染直接 ReferenceError 崩整个面板（codex 整分支审 BLOCKER——纯 source 测试渲染不到，
+  // 用源码顺序锁死）。
+  const s = read("../src/components/WorkspacePanel.jsx");
+  const loadFileIdx = s.indexOf("const loadFile = useCallback");
+  const handleIdx = s.indexOf("useImperativeHandle(ref");
+  assert.ok(loadFileIdx !== -1 && handleIdx !== -1);
+  assert.ok(
+    loadFileIdx < handleIdx,
+    "useImperativeHandle references loadFile in deps — it must come after the declaration",
+  );
+});
+
+test("assistant prose file-link click suppresses enclosing anchor navigation", () => {
+  const s = read("../src/components/assistantTextRender.jsx");
+  // [`outline.md`](url) → 按钮嵌在 <a> 内：不 preventDefault 会同时触发锚点导航把 SPA 导走。
+  assert.match(s, /e\.preventDefault\(\); e\.stopPropagation\(\); onOpenFile\(linkPath\)/);
+});
+
 test("App ensures the workspace panel is visible before opening a file (desktop)", () => {
   const s = read("../src/App.jsx");
   const handler = s.slice(
