@@ -112,7 +112,7 @@ dist/
         └── ...
 ```
 
-PyInstaller 把所有 `datas`（skill、frontend/dist、私有文件）都收到 `_internal/` 下面，`pandoc.exe` 也会跟随发布包分发，运行时通过 `sys._MEIPASS` 寻址。
+PyInstaller 把所有 `datas`（skill、frontend/dist、私有文件、`fonts/` 中文字体、matplotlib mpl-data）都收到 `_internal/` 下面，`pandoc.exe` 也会跟随发布包分发，运行时通过 `sys._MEIPASS` 寻址。
 
 ## 分发说明
 

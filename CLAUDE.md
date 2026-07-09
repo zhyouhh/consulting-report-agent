@@ -476,7 +476,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - **回归**：`tests/test_search_quota.py`（指纹/队列/tavily 缓存与去重/报告装配/估算窗口/key 零回显）、`test_search_providers.py`（key 归属/serper credits/brave 快照含 429）、`test_search_pool.py`（recorder 注入语义）、`test_accounts.py`（表+迁移）、`test_admin_api.py`、前端 `searchQuota.test.mjs`/`searchPoolQuota.source.test.mjs`。
 - **部署（第六笔，2026-07-07）**：7 后端文件 + 配置 + dist swap（bundle `index-D2bYJHJ7.js`）+ 重启；回滚点 `/opt/cra-rollback-20260707/`（含 app.db.bak）。**已知余项**：serper/exa 记账启用前的历史消耗未计（可填 `baseline_used` 校准，不填=剩余偏乐观）；brave 快照等首次真实 brave 搜索才出现。
 
-## 报告图表生成（2026-07-10 实施，spec `2026-07-08-report-chart-generation-design.md` 两期合一；**未部署 kr-web-01**）
+## 报告图表生成（2026-07-10 实施 + 同日部署 kr-web-01 第九笔；spec `2026-07-08-report-chart-generation-design.md` 两期合一）
 
 模型驱动的报告插图：数据图 12 种（bar/grouped/stacked/horizontal/line/pie/donut/waterfall/funnel/scatter/bubble/heatmap）+ 结构图 8 种（matrix_2x2/value_chain/process/roadmap/pyramid/flowchart/org_chart/tree），全流程「生成→落盘→引用→预览→docx 嵌图→审查」。改图表工具 / assets 路由 / 导出 / 预览 img / 审查 grounding 前必读：
 
@@ -488,7 +488,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - **导出（report_tools.py）**：pandoc 前 `list_missing_assets` **硬校验**（缺图带清单失败、不进 pandoc——pandoc 缺图 rc=0 只告警会产静默丢图 docx）+ `--resource-path <content/>`。无图报告零回归。
 - **S5 审查=条件性第 6 维**：草稿引用图**且 sidecar 存在**才启用——system prompt 拼 `CHART_REVIEW_ADDENDUM`（输出 `## 6. 图表审查` 章节）+ sidecar 经 `build_chart_grounding`（report_quality.py，UNTRUSTED_DATA 框定+中和）**并入占位符 grounding 同一条 user 消息**（连续 user 角色触发官渠 400，勿拆两条）；**5 维锚点契约不动**（`INDEPENDENT_REVIEW_ANCHORS` 仍 5 个，第 6 章节是附加输出 advisory）；无图项目 prompt 逐字不变（`test_no_charts_system_prompt_verbatim_unchanged` 锁死）。
 - **前端**：`utils/assetUrl.js:resolveAssetSrc`（纯函数：仅 `assets/<name>.png` 相对引用重写到 `/api/projects/<pid>/assets/`，绝对/data:/根相对/子目录不动，防双重编码）；`FilePreviewPanel` `buildMarkdownComponents(projectId)` 工厂 + `useMemo`（勿退回模块级常量直连 `components=`，source-guard 锁）；`WorkspacePanel` 传 `projectId`。聊天气泡不渲染图（已知边界，spec 非目标）。
-- **字体是仓库资产**：`fonts/NotoSansCJKsc-{Regular,Bold}.otf` + OFL LICENSE（各 16MB）；PyInstaller `datas` 加 `('fonts','fonts')` + `collect_data_files('matplotlib')` + hiddenimport `matplotlib.backends.backend_agg`；`requirements.txt` 加 `matplotlib==3.11.0`。**部署 kr-web-01 时服务器 venv 须 `pip install matplotlib` + git pull 带上 fonts/**（无需装系统字体/graphviz）。
+- **字体是仓库资产**：`fonts/NotoSansCJKsc-{Regular,Bold}.otf` + OFL LICENSE（各 16MB）；PyInstaller `datas` 加 `('fonts','fonts')` + `collect_data_files('matplotlib')` + hiddenimport `matplotlib.backends.backend_agg`；`requirements.txt` 加 `matplotlib==3.11.0`。**部署 kr-web-01（2026-07-10 第九笔已完成）**：⚠️ 服务器 venv 是 uv 建的**没有 pip**——装依赖用 `/root/.local/bin/uv pip install --python /opt/consulting-report-agent/.venv/bin/python matplotlib==3.11.0`；fonts/ 随 git 走；matplotlib 字体缓存要以服务用户 `consulting` 预热一次（`sudo -u consulting … render_chart`，否则首次出图多付几秒建缓存）；无需装系统字体/graphviz。回滚点 `/opt/cra-rollback-20260710/backend/`（5 个旧后端文件；新增文件回滚时直接删）+ `frontend/dist.old`。
 - **回归**：`tests/test_chart_render.py`（全 kind/字体/超限/并发/source-guard）、`test_chart_assets.py`（扫描契约/清扫/原子写）、`test_main_api.py::ChartAssetApiTests`、`test_report_tools.py::ExportChartAssetTests`（含真 pandoc 嵌图 E2E，无 pandoc 自动跳过）、`test_chat_runtime.py::CreateVisualToolTests`（preflight/生成不计 mutation/token 预算/S0 拦截）、`test_independent_review.py`（第 6 维条件启用/无图逐字不变/锚点 5 个）、`test_packaging_spec.py::ChartPackagingTests`、前端 `assetUrl.test.mjs` + `filePreviewPanel.source` 追加。后端 1696 / 前端 577 / build 全绿。
 
 ## 试用反馈批次（2026-07-09 实施 + Codex 单轮审+3 轮红队 APPROVED + merge main `c5e2ca4`（--no-ff）+ 部署 kr-web-01；分支 `fix/trial-feedback-0709` 保留）

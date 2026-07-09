@@ -91,7 +91,7 @@ dist/咨询报告助手/
     ...
 ```
 
-PyInstaller 把所有 `datas` 收到 `_internal/` 下面，`sys._MEIPASS` 在运行时会指向这里。
+PyInstaller 把所有 `datas` 收到 `_internal/` 下面，`sys._MEIPASS` 在运行时会指向这里。图表能力（2026-07-10）要求 `datas` 同时带上仓库 `fonts/` 中文字体与 matplotlib 的 mpl-data（`consulting_report.spec` 已配置，`tests/test_packaging_spec.py::ChartPackagingTests` 锁死）——缺字体则打包态图表全是方框。
 
 ### 3. 首次运行
 

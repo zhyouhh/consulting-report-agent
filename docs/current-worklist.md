@@ -9,9 +9,11 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
-最后更新：2026-07-10（**报告图表生成 ✅ 一次性实施 v2.0+v2.1 合并（spec 三处优化：砍 graphviz 换纯 Python 布局 / 无 cache-bust / 物理尺寸控图宽）；⚠️ 未部署 kr-web-01**）：
+最后更新：2026-07-10（**报告图表生成 ✅ 一次性实施 v2.0+v2.1 合并（spec 三处优化：砍 graphviz 换纯 Python 布局 / 无 cache-bust / 物理尺寸控图宽）+ ✅ 同日部署 kr-web-01（第九笔）**）：
 
-**交付**：20 种图（数据图 12 + 结构图 8）全流程「create_chart/create_diagram 工具 → content/assets/ 原子落盘（PNG+sidecar）→ 模型经 append/edit 插引用 → 预览 img 重写到 /assets 路由所见即所得 → 导出前缺图硬校验 + --resource-path 真嵌 docx → S5 条件性第 6 维图表审查」。新叶子 `chart_style/chart_limits/chart_render/diagram_render/chart_assets`；字体 `fonts/NotoSansCJKsc-*.otf` 进仓库（OFL）；requirements + PyInstaller spec 已收口。后端 1696 / 前端 577 / build / 真 pandoc 嵌图 E2E 全绿。硬约束记 CLAUDE.md「## 报告图表生成」段。**待办**：① 部署 kr-web-01（git pull 带 fonts/ + venv 装 matplotlib + 重启；前端 dist swap）；② 真模型 GUI E2E（让 deepseek 真调一次 create_chart 全链）；③ spec §12 余项（签名版式扩充/原地编辑/assets 进文件树）仍在 backlog。
+**交付**：20 种图（数据图 12 + 结构图 8）全流程「create_chart/create_diagram 工具 → content/assets/ 原子落盘（PNG+sidecar）→ 模型经 append/edit 插引用 → 预览 img 重写到 /assets 路由所见即所得 → 导出前缺图硬校验 + --resource-path 真嵌 docx → S5 条件性第 6 维图表审查」。新叶子 `chart_style/chart_limits/chart_render/diagram_render/chart_assets`；字体 `fonts/NotoSansCJKsc-*.otf` 进仓库（OFL）；requirements + PyInstaller spec 已收口。后端 1696 / 前端 577 / build / 真 pandoc 嵌图 E2E 全绿。硬约束记 CLAUDE.md「## 报告图表生成」段。
+
+**部署（第九笔，2026-07-10）**：10 后端文件 + fonts 3 文件 file-push（sha256 全核验）+ 服务器 venv 经 uv 装 matplotlib==3.11.0（⚠️ venv 无 pip，用 `/root/.local/bin/uv pip install --python …`）+ 服务用户 `consulting` 字体缓存预热 + dist swap bundle `index-C33MEw4D.js` + systemd 重启；服务器端真渲染冒烟（中文 OK）+ 公网 smoke 6/6（`/api/health` 200 / 新 bundle / `/admin` 200 / 鉴权 401 / assets 路由 401 门禁）。回滚点 `/opt/cra-rollback-20260710/backend/` + `frontend/dist.old`。**待办**：① 真模型 GUI E2E（让 deepseek 真调一次 create_chart 全链，观察 schema 使用手感）；② spec §12 余项（签名版式扩充/原地编辑/assets 进文件树）仍在 backlog。
 
 最后更新：2026-07-10（**文件预览 KaTeX 空白区修复 ✅ 一行修 + 部署 kr-web-01（第八笔：frontend-only dist swap，bundle `index-NcjEo2bt.js`）**）：
 
