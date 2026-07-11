@@ -37,11 +37,12 @@ export default function MobileShell(props) {
   // 删除项目刻意不关左抽屉：删完顺手在列表挑下一个。
 
   // 滑动手势：检测水平滑动方向 → 改 drawer state。不 preventDefault（保纵向滚动），不做 follow-finger。
-  // 聊天区是垂直滚动容器：横/斜滑会被浏览器接管为滚动/overscroll 导航手势，接管即发 touchcancel
-  // 而非 touchend（选项目后消息填满屏幕就必现，实机「滑动失效」真因）。修法是掐断接管本身：
-  // 壳根 touch-action: pan-y pinch-zoom（横向 pan 不再交给浏览器）+ 全局 overscroll-behavior:none
-  //（index.css，杀下拉刷新/历史导航）。touchcancel 保持纯清理——cancel 也代表系统打断（来电/通知栏/
-  // 多指接管），拿最后坐标补判会在非用户意图时误开关抽屉（codex review BLOCKER，勿改回补判）。
+  // 防御性加固（2026-07-12）：壳根 touch-action: pan-y pinch-zoom（横向 pan 不交给浏览器接管为
+  // 滚动/overscroll 导航——接管会发 touchcancel 而非 touchend、吞掉手势）+ 全局 overscroll-behavior:none
+  //（index.css，杀下拉刷新/历史导航）。注意「进项目后整个假死」的主因不是手势接管，而是 ChatPanel 根
+  // 曾缺 min-h-0 的 flex-col 滚动陷阱（见 ChatPanel.jsx 根注释），此处只是配套硬化。
+  // touchcancel 保持纯清理——cancel 也代表系统打断（来电/通知栏/多指接管），拿最后坐标补判会在
+  // 非用户意图时误开关抽屉（codex review BLOCKER，勿改回补判）。
   const touchStartRef = useRef(null)
   const onShellTouchStart = (e) => {
     const target = e.target

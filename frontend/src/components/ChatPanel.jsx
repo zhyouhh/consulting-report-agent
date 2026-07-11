@@ -912,7 +912,11 @@ const ChatPanel = forwardRef(function ChatPanel({
   }
 
   return (
-    <div className="flex-1 min-w-0 bg-chat flex flex-col">
+    // min-h-0 必须保留：MobileShell 把本组件放进 flex-col 包裹层，flex 子项主轴默认
+    // min-height:auto（不小于内容高），少了它长对话会把根撑破视口 → 消息区永不出滚动条
+    // → scrollIntoView 转而去滚 overflow-hidden 的壳根 → 顶栏/抽屉全被滚出屏幕（移动端假死真因）。
+    // 桌面三栏是 row 布局（高度走 stretch），min-h-0 无影响。
+    <div className="flex-1 min-w-0 min-h-0 bg-chat flex flex-col">
       <div className="h-[60px] flex-shrink-0 border-b border-track px-[22px] flex items-center justify-between gap-2">
         <div className="flex items-center gap-[10px] min-w-0">
           {onToggleSidebar && (

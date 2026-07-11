@@ -34,6 +34,14 @@ test("index.css 触摸设备块：overscroll-behavior none + 表单字号 16px �
   assert.match(block, /input,textarea,select\{font-size:max\(1em,16px\) !important;\}/);
 });
 
+test("ChatPanel 根必须带 min-h-0（MobileShell flex-col 滚动陷阱）", () => {
+  // MobileShell 把 ChatPanel 放进 flex-col 包裹层；flex 子项主轴默认 min-height:auto，
+  // 缺 min-h-0 时长对话把根撑破视口 → 消息区永不可滚 → scrollIntoView 去滚 overflow-hidden
+  // 壳根 → 顶栏/抽屉/scrim 全滚出屏幕（2026-07-12 试用实报「进项目后整个假死」真因）。
+  const chatPanel = readFileSync(path.join(__dirname, "../src/components/ChatPanel.jsx"), "utf-8");
+  assert.match(chatPanel, /className="flex-1 min-w-0 min-h-0 bg-chat flex flex-col"/);
+});
+
 test("index.css：overscroll-behavior 只许出现在 coarse 块内（桌面零影响铁律）", () => {
   const noComments = css().replace(/\/\*[\s\S]*?\*\//g, "");
   const withoutCoarseBlock = noComments.replace(/@media \(pointer: coarse\)\{[\s\S]*?\n\}/, "");
