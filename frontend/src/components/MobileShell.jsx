@@ -37,12 +37,18 @@ export default function MobileShell(props) {
   // 删除项目刻意不关左抽屉：删完顺手在列表挑下一个。
 
   // 滑动手势：检测水平滑动方向 → 改 drawer state。不 preventDefault（保纵向滚动），不做 follow-finger。
+  // 聊天区是垂直滚动容器：横/斜滑会被浏览器接管为滚动/overscroll 导航手势，接管即发 touchcancel
+  // 而非 touchend（选项目后消息填满屏幕就必现，实机「滑动失效」真因）。修法是掐断接管本身：
+  // 壳根 touch-action: pan-y pinch-zoom（横向 pan 不再交给浏览器）+ 全局 overscroll-behavior:none
+  //（index.css，杀下拉刷新/历史导航）。touchcancel 保持纯清理——cancel 也代表系统打断（来电/通知栏/
+  // 多指接管），拿最后坐标补判会在非用户意图时误开关抽屉（codex review BLOCKER，勿改回补判）。
   const touchStartRef = useRef(null)
   const onShellTouchStart = (e) => {
     const target = e.target
     if (target && typeof target.closest === 'function' &&
-        target.closest('input, textarea, select, button, a, [contenteditable], .overflow-x-auto')) {
-      touchStartRef.current = null; return // 交互/横滚元素上不接管手势（避免选字/横滚/点按误触发）
+        target.closest('input, textarea, select, button, a, [contenteditable], .overflow-x-auto, .fixed')) {
+      touchStartRef.current = null; return // 交互/横滚/fixed 覆盖层上不接管手势（覆盖层多开在抽屉子树内，
+      // 滑关抽屉会连带 visibility:hidden 掉正开着的弹窗）
     }
     const t = e.changedTouches && e.changedTouches[0] // 本次新增的 touch；touches[0] 多指下可能是旧手指
     touchStartRef.current = t ? { id: t.identifier, x: t.clientX, y: t.clientY } : null
@@ -82,7 +88,16 @@ export default function MobileShell(props) {
   }
 
   return (
-    <div className="relative w-screen bg-bg overflow-hidden" style={{ height: '100dvh' }} onTouchStart={onShellTouchStart} onTouchEnd={onShellTouchEnd} onTouchCancel={onShellTouchCancel}>
+    <div
+      className="relative w-screen h-screen bg-bg overflow-hidden"
+      // h-screen 是 100dvh 的解析兜底（老 WebKit 不识别 dvh 时 inline 声明被丢弃、类生效）。
+      // touch-action: pan-y pinch-zoom——纵向滚动/双指缩放交还浏览器，横向 pan 留给抽屉手势
+      //（否则横滑被浏览器当滚动/历史导航接管 → touchcancel → 手势失效）。别加 pan-x。
+      style={{ height: '100dvh', touchAction: 'pan-y pinch-zoom' }}
+      onTouchStart={onShellTouchStart}
+      onTouchEnd={onShellTouchEnd}
+      onTouchCancel={onShellTouchCancel}
+    >
       {/* 聊天主区：复用 ChatPanel 自带顶栏（侧栏按钮/工作区按钮接抽屉）。safe-area 由本壳承担。 */}
       <div className="absolute inset-0 flex flex-col min-h-0" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
         <ChatPanel

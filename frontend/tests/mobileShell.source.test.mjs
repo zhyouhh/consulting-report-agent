@@ -83,13 +83,29 @@ test("MobileShell: 抽屉滑动手势接线 + 右抽屉留 scrim 缝隙", () => 
   assert.match(s, /action === 'openRight'[\s\S]{0,80}?nextDrawerState\(d, 'openRight'\)/);
   // 右抽屉不再满屏：48px 缝隙
   assert.match(s, /w-\[min\(28rem,calc\(100vw-48px\)\)\]/);
-  // 手势忽略交互/横滚元素 + touchcancel 清理
-  assert.match(s, /closest\(['"]input, textarea, select, button, a, \[contenteditable\], \.overflow-x-auto['"]\)/);
+  // 手势忽略交互/横滚元素 + fixed 覆盖层（弹窗多开在抽屉子树内，滑关抽屉会连带 visibility:hidden 掉弹窗）
+  assert.match(s, /closest\(['"]input, textarea, select, button, a, \[contenteditable\], \.overflow-x-auto, \.fixed['"]\)/);
   assert.match(s, /onTouchCancel=\{onShellTouchCancel\}/);
   // touchstart 取本次新增 touch（changedTouches，非 touches[0]）+ touchend 无 list[0] 错配兜底
-  // 窗口 400 跨越 closest 交互/横滚过滤块（onShellTouchStart 起到首个 changedTouches 实测 313 字符）
-  assert.match(s, /onShellTouchStart[\s\S]{0,400}?changedTouches/);
+  // 窗口 800 跨越 closest 交互/横滚过滤块（含 fixed 注释后实测 <800 字符）
+  assert.match(s, /onShellTouchStart[\s\S]{0,800}?changedTouches/);
   assert.doesNotMatch(s, /identifier === start\.id\)\s*\|\|\s*list\[0\]/);
+});
+
+test("MobileShell: 浏览器手势接管防线（touch-action）+ cancel 纯清理 + 无 preventDefault", () => {
+  const s = src();
+  // 壳根 touch-action: pan-y pinch-zoom——横滑不被浏览器当滚动/历史导航接管（接管即 touchcancel、手势失效）。
+  // 绝不能加 pan-x（会把横滑还给浏览器）。
+  assert.match(s, /touchAction: 'pan-y pinch-zoom'/);
+  assert.doesNotMatch(s, /touchAction: '[^']*pan-x/);
+  // touchcancel 必须保持纯清理——cancel 也代表系统打断（来电/通知栏/多指接管），
+  // 拿最后坐标补判会在非用户意图时误开关抽屉（codex review BLOCKER，勿改回补判）
+  assert.match(s, /const onShellTouchCancel = \(\) => \{ touchStartRef\.current = null \}/);
+  assert.doesNotMatch(s, /onTouchMove/);
+  // 壳绝不 preventDefault 触摸事件（纵向滚动必须交还浏览器）；匹配真实调用形态，注释里提到不算
+  assert.doesNotMatch(s, /\.preventDefault\(/);
+  // h-screen 是 100dvh 的解析兜底（老 WebKit）
+  assert.match(s, /className="relative w-screen h-screen bg-bg overflow-hidden"/);
 });
 
 test("MobileShell: 右抽屉 WorkspacePanel isMobile + width100% + 审查汇报 closeAll + 常驻挂载", () => {

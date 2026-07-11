@@ -2,7 +2,12 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- interactive-widget=resizes-content：Android Chrome 108+ 键盘弹出时收缩布局视口
+         （100dvh 随之变小、输入框浮在键盘上方），iOS/桌面忽略该字段。
+         刻意不加 viewport-fit=cover：只有 MobileShell 底部做了 safe-area padding，顶栏/抽屉/admin 页
+         都没做四边 inset——半吊子 cover 会让内容钻进刘海/圆角安全区外（codex review BLOCKER）。
+         要加必须先给全站四边 env(safe-area-inset-*) 处理。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <title>咨询报告写作助手</title>
   <script>

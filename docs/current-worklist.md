@@ -9,6 +9,10 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
+最后更新：2026-07-12（**移动端手势劫持修复 ✅ 实施 + Codex 2 轮审 APPROVED（首轮 2 BLOCKER 已修）+ 部署 kr-web-01（第十一笔：frontend-only dist swap，bundle `index-772bqLPQ.js`）**）：
+
+**试用反馈**：手机上选了项目之后左右滑不出抽屉、上滑直接变浏览器刷新。**真因**：选项目后聊天区变成装满内容的垂直滚动容器，横/斜滑被浏览器接管为滚动/overscroll 手势（下拉刷新/历史导航），接管即发 `touchcancel` 而非 `touchend` → 手势哑掉；竖向 overscroll 链到文档根 → 原生下拉刷新。**修**（全部触摸设备 scoped、桌面零影响）：壳根 `touch-action: pan-y pinch-zoom` + `@media (pointer: coarse){html,body{overscroll-behavior:none}}` 掐断接管本身；顺带修 iOS 输入聚焦放大（表单字号 16px 下限）、安卓键盘遮输入框（viewport meta `interactive-widget=resizes-content`）、手势过滤加 `.fixed`（保抽屉子树内弹窗）、`h-screen` 兜底 100dvh。**Codex 首轮 2 BLOCKER 已修**：`viewport-fit=cover` 半吊子（只做了底部 inset）→ 整个撤掉；touchcancel 拿最后坐标补判不安全 → 撤掉、cancel 保持纯清理。前端 586/586 + build 绿。硬约束记 CLAUDE.md「## 移动端适配」段「手势劫持修复」条。**待办**：用户真机确认手感（历史教训：手感只能真机验）；iOS 16 以下无 `overscroll-behavior`（接受的支持底线）。
+
 最后更新：2026-07-11（**试用反馈 0710 批次（陈燕）✅ 全收口：四件套实施 + Codex 单轨审 2 轮 APPROVED（首轮挖出 2 BLOCKER 已修）+ 部署 kr-web-01（第十笔）+ 真模型 GUI E2E 全过 + commit `9aacb82` + push origin + 服务器 git realign**）：
 
 **来源**：`feedback/试用反馈汇总0710-咨询报告助手.xlsx` 陈燕（序号 5）8 条反馈；spec `docs/superpowers/specs/2026-07-11-mgmt-doc-granularity-and-flowchart-layout-design.md`（Opus 设计 + Fable 实施期修订 §11：clause_format S1→S1-S4 接线修正 / 双语枚举别名 / 槽位自带说明 / B 纵向判据 7→5 / 横向 fit-text+兜底 / 失败文案去 process 建议）。四件套：

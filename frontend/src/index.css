@@ -44,6 +44,16 @@ body{margin:0;font-family:'Hanken Grotesk','PingFang SC','Microsoft YaHei','Noto
 
 .selectable-content,.selectable-content *{user-select:text;-webkit-user-select:text;}
 
+/* 移动端（触摸设备）专属修正：@media (pointer: coarse) 只命中触摸主输入设备，桌面 fine-pointer 零影响。
+   ① overscroll-behavior none：杀浏览器下拉刷新与水平 overscroll 历史导航（抽屉滑动手势的前提——
+     否则横/竖滑被浏览器 UI 接管，实机表现为「上滑=刷新网页、左右滑没反应」）。
+   ② 表单控件字号下限 16px：iOS Safari 聚焦 <16px 的输入框会自动放大整页且不回弹（composer 是 15px）。
+     max(1em,16px) 保留更大字号；!important 用于压过 Tailwind 字号类（.text-15 等）的类选择器特异性。 */
+@media (pointer: coarse){
+  html,body{overscroll-behavior:none;}
+  input,textarea,select{font-size:max(1em,16px) !important;}
+}
+
 .thinking-block{margin:8px 0;padding:6px 10px;border-left:3px solid rgb(var(--col));background:rgb(var(--card2));font-size:12px;color:rgb(var(--t2));border-radius:7px;}
 .thinking-block summary{cursor:pointer;font-weight:500;color:rgb(var(--text));user-select:none;}
 .thinking-block .thinking-content{margin-top:6px;max-height:240px;overflow-y:auto;font-family:'IBM Plex Mono',monospace;white-space:pre-wrap;word-break:break-word;color:rgb(var(--t2));}
