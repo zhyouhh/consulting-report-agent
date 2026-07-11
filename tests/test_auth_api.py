@@ -378,3 +378,43 @@ class MeCostFieldsTests(AuthApiTestBase):
         self.assertAlmostEqual(body["today_cost_yuan"], 1.5, places=4)
         self.assertIn("daily_cap_yuan", body)
         self.assertGreater(body["daily_cap_yuan"], 0)
+
+
+class OnboardingTests(AuthApiTestBase):
+    """初次使用引导「终身一次」（2026-07-11）：/me 透出 onboarded、POST 回写幂等、
+    未登录 401、桌面 local 合成 true 永不弹。"""
+
+    def _register_and_login(self, username="tour-user"):
+        self.client.post("/api/auth/register",
+                         json={"username": username, "password": "pw-123456", "invite_code": "JOIN"})
+        self.client.post("/api/auth/login", json={"username": username, "password": "pw-123456"})
+
+    def test_me_reports_onboarded_false_for_fresh_user(self):
+        self._register_and_login()
+        body = self.client.get("/api/auth/me").json()
+        self.assertIs(body["onboarded"], False)
+
+    def test_mark_onboarded_flips_me_and_is_idempotent(self):
+        import backend.accounts as accounts
+        self._register_and_login()
+        resp = self.client.post("/api/auth/onboarded")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(self.client.get("/api/auth/me").json()["onboarded"], True)
+        uid = accounts.get_user_by_username("tour-user")["uid"]
+        first_at = accounts.get_user_by_uid(uid)["onboarded_at"]
+        self.assertTrue(first_at)
+        # 幂等：重复回写不覆盖首次时间
+        self.client.post("/api/auth/onboarded")
+        self.assertEqual(accounts.get_user_by_uid(uid)["onboarded_at"], first_at)
+
+    def test_mark_onboarded_requires_auth(self):
+        resp = self.client.post("/api/auth/onboarded")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_desktop_local_me_synthesizes_onboarded_true(self):
+        # 桌面 local：web-only 功能，合成 true 永不弹引导
+        self.m.app.state.auth_required = False
+        body = self.client.get("/api/auth/me").json()
+        self.assertIs(body["onboarded"], True)
+        # local 回写是 no-op 但不报错
+        self.assertEqual(self.client.post("/api/auth/onboarded").status_code, 200)

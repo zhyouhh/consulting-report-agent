@@ -371,3 +371,48 @@ class SearchUsageDailyTests(unittest.TestCase):
         accounts.add_search_usage("serper", "fp-new", "2026-07-07", calls=1, units=1.0)
         accounts.init_db()
         self.assertEqual(len(accounts.get_search_usage_totals()), 2)
+
+
+class OnboardedColumnTests(unittest.TestCase):
+    """users.onboarded_at（初次引导终身一次，2026-07-11）：新库建列、老库幂等迁移、
+    set_user_onboarded 幂等不覆盖首次时间。"""
+
+    def setUp(self):
+        self._tmp = Path(os.path.realpath(tempfile.mkdtemp()))
+        self._env = mock.patch.dict(os.environ, {"CRA_DATA_ROOT": str(self._tmp)})
+        self._env.start(); accounts.init_db()
+
+    def tearDown(self):
+        self._env.stop(); shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_fresh_user_has_null_onboarded_at(self):
+        uid = accounts.create_user("alice", "pw-strong-123")
+        rec = accounts.get_user_by_uid(uid)
+        self.assertIsNone(rec["onboarded_at"])
+
+    def test_set_user_onboarded_idempotent(self):
+        uid = accounts.create_user("alice", "pw-strong-123")
+        accounts.set_user_onboarded(uid)
+        first = accounts.get_user_by_uid(uid)["onboarded_at"]
+        self.assertTrue(first)
+        accounts.set_user_onboarded(uid)
+        self.assertEqual(accounts.get_user_by_uid(uid)["onboarded_at"], first)
+
+    def test_init_db_migrates_legacy_users_without_onboarded_column(self):
+        # 已部署库（无 onboarded_at 列）→ init_db 幂等 ALTER 补列、旧行 NULL（下次登录会弹一次引导）。
+        with accounts._db() as conn:
+            conn.execute("DROP TABLE users")
+            conn.execute(
+                "CREATE TABLE users(uid TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL,"
+                " password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0,"
+                " daily_cost_micro_yuan INTEGER, must_change_password INTEGER NOT NULL DEFAULT 0,"
+                " disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)")
+            conn.execute(
+                "INSERT INTO users(uid,username,password_hash,created_at)"
+                " VALUES('legacy-uid','legacy','x','2026-07-01T00:00:00')")
+        accounts.init_db()   # 迁移
+        rec = accounts.get_user_by_uid("legacy-uid")
+        self.assertIsNone(rec["onboarded_at"])
+        accounts.init_db()   # 幂等不炸
+        accounts.set_user_onboarded("legacy-uid")
+        self.assertTrue(accounts.get_user_by_uid("legacy-uid")["onboarded_at"])

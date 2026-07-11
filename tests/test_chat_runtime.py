@@ -11623,6 +11623,79 @@ class SystemTriggerStreamTests(ChatRuntimeTests):
 
         self.assertEqual(set(SYSTEM_TRIGGER_PROMPTS), set(get_args(SystemTriggerType)))
 
+    def _make_handler_with_typed_project(self, project_type):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        projects_dir = Path(tmpdir.name) / "projects"
+        engine = SkillEngine(projects_dir, self.repo_skill_dir)
+        project = engine.create_project(
+            name="typed-demo",
+            workspace_dir=str(Path(tmpdir.name) / "workspace"),
+            project_type=project_type,
+            theme="主数据管理办法",
+            target_audience="管理层",
+            deadline="2026-08-01",
+            expected_length="8000字",
+        )
+        handler = ChatHandler(
+            self._make_settings(mode="managed", projects_dir=projects_dir),
+            engine,
+        )
+        return handler, project["id"]
+
+    def test_trigger_prompt_builder_management_document_appends_three_params(self):
+        # 2026-07-11 颗粒度化：management-document 开场白追问 颗粒度/条款格式/组织分工，
+        # 且以静态基础文案开头（基础语义不变）。
+        from backend.chat import SYSTEM_TRIGGER_PROMPTS
+
+        handler, pid = self._make_handler_with_typed_project("management-document")
+        prompt = handler._build_system_trigger_prompt(pid, "project_created")
+        self.assertTrue(prompt.startswith(SYSTEM_TRIGGER_PROMPTS["project_created"]))
+        for keyword in ("文档颗粒度", "条款格式", "组织分工", "## 文档参数"):
+            self.assertIn(keyword, prompt)
+
+    def test_trigger_prompt_builder_other_types_verbatim_base(self):
+        # 其余 6 类逐字等于旧静态文案（零回归，spec §9）
+        from backend.chat import SYSTEM_TRIGGER_PROMPTS
+
+        for project_type in ("strategy-consulting", "implementation-plan", "technical-bid"):
+            with self.subTest(project_type=project_type):
+                handler, pid = self._make_handler_with_typed_project(project_type)
+                self.assertEqual(
+                    handler._build_system_trigger_prompt(pid, "project_created"),
+                    SYSTEM_TRIGGER_PROMPTS["project_created"],
+                )
+
+    def test_trigger_prompt_builder_review_done_never_gets_addendum(self):
+        from backend.chat import SYSTEM_TRIGGER_PROMPTS
+
+        handler, pid = self._make_handler_with_typed_project("management-document")
+        self.assertEqual(
+            handler._build_system_trigger_prompt(pid, "independent_review_done"),
+            SYSTEM_TRIGGER_PROMPTS["independent_review_done"],
+        )
+
+    def test_trigger_prompt_builder_unknown_trigger_none_without_project_query(self):
+        # 未知 trigger fail-fast 且不查项目（spec §6 语义保持）
+        handler = self._make_handler_with_project()
+        with mock.patch.object(handler.skill_engine, "get_project_type") as spy:
+            self.assertIsNone(handler._build_system_trigger_prompt(self.project_id, "bogus"))
+        spy.assert_not_called()
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_project_created_management_document_stream_injects_addendum(self, mock_openai):
+        # 端到端：management-document 项目的开场轮 system 消息带三参数追问
+        handler, pid = self._make_handler_with_typed_project("management-document")
+        mock_openai.return_value.chat.completions.create.return_value = iter([
+            self._make_chunk(content="我先确认：这份办法是顶层制度还是操作细则？"),
+        ])
+        list(handler.chat_stream(pid, "", system_trigger="project_created", max_iterations=1))
+        create_kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
+        self.assertTrue(any(
+            message.get("role") == "system" and "文档颗粒度" in str(message.get("content"))
+            for message in create_kwargs["messages"]
+        ))
+
     def test_chat_stream_invalid_system_trigger_returns_error(self):
         handler = self._make_handler_with_project()
 
@@ -15423,4 +15496,150 @@ class CreateVisualToolTests(ChatRuntimeTests):
 for _inh in dir(ChatRuntimeTests):
     if _inh.startswith("test_") and _inh not in CreateVisualToolTests.__dict__:
         setattr(CreateVisualToolTests, _inh, None)
+del _inh
+
+
+class CustomSearchKeyTests(ChatRuntimeTests):
+    """自定义搜索 key（2026-07-11）：配置了 provider+key → _web_search 绕过池子与全部
+    限额门禁、结果契约与池子一致、错误人话化；未配置 → 池子路径零变化。
+    与模型 API 配置相互独立（managed 模式也生效）。"""
+
+    def _custom_search_handler(self, **overrides):
+        settings = {
+            "custom_search_provider": "tavily",
+            "custom_search_api_key": "tvly-user-key",
+        }
+        settings.update(overrides)
+        return self._h(**settings)
+
+    def test_no_config_returns_none_and_pool_path_untouched(self):
+        handler = self._make_handler_with_project()
+        self.assertIsNone(handler._get_custom_search_provider())
+
+    def test_key_without_provider_returns_none(self):
+        handler = self._h(custom_search_api_key="tvly-user-key")
+        self.assertIsNone(handler._get_custom_search_provider())
+
+    def test_managed_mode_with_search_key_uses_custom_provider(self):
+        # 独立性：mode=managed（默认）也走自定义搜索
+        from backend.search_providers import TavilyProvider
+        handler = self._custom_search_handler()
+        provider = handler._get_custom_search_provider()
+        self.assertIsInstance(provider, TavilyProvider)
+        self.assertEqual(provider.api_key, "tvly-user-key")
+
+    def test_provider_instance_cached_until_settings_change(self):
+        handler = self._custom_search_handler()
+        first = handler._get_custom_search_provider()
+        self.assertIs(handler._get_custom_search_provider(), first)
+        handler.settings.custom_search_api_key = "tvly-rotated"
+        second = handler._get_custom_search_provider()
+        self.assertIsNot(second, first)
+        self.assertEqual(second.api_key, "tvly-rotated")
+
+    def test_web_search_bypasses_pool_router_and_quota(self):
+        from backend.search_providers import ProviderSearchResult, SearchItem
+        handler = self._custom_search_handler()
+        fake_result = ProviderSearchResult(
+            provider="tavily",
+            items=[SearchItem(title="T", snippet="S", url="https://x.example.com/a",
+                              domain="x.example.com", score=1.0)],
+        )
+        with mock.patch.object(
+            type(handler), "_get_search_router",
+            side_effect=AssertionError("自定义搜索不得触碰池子路由"),
+        ):
+            with mock.patch.object(
+                handler._get_custom_search_provider(), "search", return_value=fake_result
+            ):
+                # turn_search_count 远超池子 per_turn 上限：自定义路径不做该门禁
+                result = handler._web_search("query", project_id=self.project_id,
+                                             turn_search_count=999)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["provider"], "tavily")
+        self.assertIn("results", result)
+        self.assertIn("搜索结果", result["results"])
+        self.assertEqual(result["items"][0]["url"], "https://x.example.com/a")
+
+    def test_result_shape_matches_pool_contract(self):
+        from backend.search_pool import build_provider_success_payload
+        from backend.search_providers import ProviderSearchResult, SearchItem
+        provider_result = ProviderSearchResult(
+            provider="tavily",
+            items=[SearchItem(title="T", snippet="S", url="https://x.example.com/a",
+                              domain="x.example.com", score=1.0)],
+        )
+        payload = build_provider_success_payload(provider_result)
+        self.assertEqual(
+            set(payload),
+            {"status", "provider", "cached", "native_fallback_used",
+             "items", "result_type", "results"},
+        )
+
+    def test_auth_failed_maps_to_friendly_error_and_disables_turn(self):
+        from backend.search_providers import SearchProviderError
+        handler = self._custom_search_handler()
+        with mock.patch.object(
+            handler._get_custom_search_provider(), "search",
+            side_effect=SearchProviderError("tavily", "auth_failed", "401"),
+        ):
+            result = handler._web_search("query", project_id=self.project_id)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("鉴权失败", result["message"])
+        self.assertTrue(result["disable_for_turn"])
+
+    def test_quota_exhausted_maps_to_friendly_error(self):
+        from backend.search_providers import SearchProviderError
+        handler = self._custom_search_handler()
+        with mock.patch.object(
+            handler._get_custom_search_provider(), "search",
+            side_effect=SearchProviderError("tavily", "quota_exhausted", "402"),
+        ):
+            result = handler._web_search("query", project_id=self.project_id)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("额度已用尽", result["message"])
+
+    def test_custom_base_resolving_private_blocked_per_call(self):
+        # 保存后 DNS 换绑到内网 → 逐调用复验拦截（与 fetch_url 同等级）
+        handler = self._custom_search_handler(
+            custom_search_api_base="https://relay.example.com"
+        )
+        with mock.patch(
+            "backend.url_guard.socket.getaddrinfo",
+            return_value=[(2, 1, 6, "", ("10.0.0.9", 0))],
+        ):
+            result = handler._web_search("query", project_id=self.project_id)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("安全拦截", result["message"])
+        self.assertTrue(result["disable_for_turn"])
+
+    def test_api_base_passed_through_to_provider(self):
+        handler = self._custom_search_handler(
+            custom_search_api_base="https://relay.example.com"
+        )
+        provider = handler._get_custom_search_provider()
+        self.assertEqual(provider.endpoint, "https://relay.example.com/search")
+
+
+# 置空继承的 test_（repo 既有 pattern，避免 targeted class run 重跑整个父套件）
+for _inh in dir(CustomSearchKeyTests):
+    if _inh.startswith("test_") and _inh not in CustomSearchKeyTests.__dict__:
+        setattr(CustomSearchKeyTests, _inh, None)
+del _inh
+
+
+class CustomSearchSsrfHardeningTests(ChatRuntimeTests):
+    """Codex 红队 BLOCKER 修复锁：自定义搜索实例禁重定向 + 不吃环境代理。"""
+
+    def test_custom_provider_built_with_redirects_disabled_and_no_env_proxy(self):
+        handler = self._h(custom_search_provider="tavily",
+                          custom_search_api_key="tvly-user-key")
+        provider = handler._get_custom_search_provider()
+        self.assertIs(provider._follow_redirects, False)
+        self.assertIs(provider.session.trust_env, False)
+
+
+for _inh in dir(CustomSearchSsrfHardeningTests):
+    if _inh.startswith("test_") and _inh not in CustomSearchSsrfHardeningTests.__dict__:
+        setattr(CustomSearchSsrfHardeningTests, _inh, None)
 del _inh

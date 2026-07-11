@@ -11,7 +11,19 @@ const defaultForm = {
   custom_api_key: '',
   custom_model: '',
   custom_context_limit_override: null,
+  custom_search_provider: '',
+  custom_search_api_key: '',
+  custom_search_api_base: '',
 }
+
+// 自定义搜索渠道闭集（与后端 _CUSTOM_SEARCH_PROVIDERS 同步）
+const SEARCH_PROVIDER_OPTIONS = [
+  { value: '', label: '内置搜索（默认）' },
+  { value: 'tavily', label: 'Tavily' },
+  { value: 'serper', label: 'Serper' },
+  { value: 'brave', label: 'Brave' },
+  { value: 'exa', label: 'Exa' },
+]
 
 export default function SettingsModal({ onClose, onSaved }) {
   const [form, setForm] = useState(defaultForm)
@@ -19,6 +31,9 @@ export default function SettingsModal({ onClose, onSaved }) {
   const [loaded, setLoaded] = useState(false)
   const [models, setModels] = useState([])
   const [fetchingModels, setFetchingModels] = useState(false)
+  // 载入时的搜索渠道与掩码 key：切渠道时旧 key 属于旧渠道、掩码不能带过去（清空强制重填），
+  // 切回载入渠道则恢复掩码（保留服务端已存 key）。Codex 红队 BLOCKER 修复。
+  const [initialSearch, setInitialSearch] = useState({ provider: '', key: '' })
 
   useEffect(() => {
     axios.get('/api/settings').then(res => {
@@ -29,10 +44,26 @@ export default function SettingsModal({ onClose, onSaved }) {
         custom_api_key: res.data.custom_api_key || '',
         custom_model: res.data.custom_model || '',
         custom_context_limit_override: res.data.custom_context_limit_override ?? null,
+        custom_search_provider: res.data.custom_search_provider || '',
+        custom_search_api_key: res.data.custom_search_api_key || '',
+        custom_search_api_base: res.data.custom_search_api_base || '',
+      })
+      setInitialSearch({
+        provider: res.data.custom_search_provider || '',
+        key: res.data.custom_search_api_key || '',
       })
       setLoaded(true)
     }).catch(() => setLoaded(true))
   }, [])
+
+  const handleSearchProviderChange = (value) => {
+    setForm(prev => ({
+      ...prev,
+      custom_search_provider: value,
+      // 切到载入时的渠道 → 恢复原 key（含掩码）；切到其它渠道 → 清空强制重填
+      custom_search_api_key: value && value === initialSearch.provider ? initialSearch.key : '',
+    }))
+  }
 
   useEffect(() => {
     setModels([])
@@ -79,10 +110,20 @@ export default function SettingsModal({ onClose, onSaved }) {
         return
       }
     }
+    // 自定义搜索与模型 API 相互独立；只在选了渠道时要求 key。
+    // 选「内置搜索」即停用（无论 key 字段残留什么），提交掩码保留服务端已存 key，
+    // 用户以后切回该渠道不用重填——不会再被「已填写 Key 请选择渠道」困住（Codex BLOCKER）。
+    if (form.custom_search_provider && !form.custom_search_api_key.trim()) {
+      alert('已选择搜索渠道，请填写对应的搜索 API Key')
+      return
+    }
 
     setSaving(true)
     try {
-      await axios.post('/api/settings', form)
+      const payload = form.custom_search_provider
+        ? form
+        : { ...form, custom_search_api_key: '***' }
+      await axios.post('/api/settings', payload)
       if (onSaved) {
         await onSaved()
       }
@@ -205,6 +246,49 @@ export default function SettingsModal({ onClose, onSaved }) {
               />
               <p className="text-xs text-t3 mb-3">留空表示自动识别；填写后会覆盖客户端采用的有效上下文上限。</p>
               <p className="text-xs text-t3">支持 OpenAI 兼容接口。若 API Key 显示为 `***`，直接保存会保留原值。</p>
+            </>
+          )}
+        </div>
+
+        <div className="rounded-card border border-border bg-card2 p-4 mb-5">
+          <div className="text-sm font-semibold text-text mb-1">自定义搜索（可选）</div>
+          <p className="text-xs text-t3 mb-3">
+            与上方模型配置相互独立：任一通道下都可单独配置。配置后联网搜索走你自己的搜索账号，不再受内置搜索次数限制。
+          </p>
+
+          <label className="block text-sm text-t2 mb-1" htmlFor="custom-search-provider">搜索渠道</label>
+          <select
+            id="custom-search-provider"
+            value={form.custom_search_provider}
+            onChange={e => handleSearchProviderChange(e.target.value)}
+            className="w-full bg-field border border-border text-text rounded-btn px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-accent"
+          >
+            {SEARCH_PROVIDER_OPTIONS.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+
+          {form.custom_search_provider && (
+            <>
+              <label className="block text-sm text-t2 mb-1" htmlFor="custom-search-key">搜索 API Key</label>
+              <input
+                id="custom-search-key"
+                type="password"
+                placeholder="输入该渠道的 API Key"
+                value={form.custom_search_api_key}
+                onChange={e => setForm(prev => ({ ...prev, custom_search_api_key: e.target.value }))}
+                className="w-full bg-field border border-border text-text rounded-btn px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+
+              <label className="block text-sm text-t2 mb-1" htmlFor="custom-search-base">搜索 API 地址（可选）</label>
+              <input
+                id="custom-search-base"
+                placeholder="留空用官方地址；中转/自建服务填 https:// 地址"
+                value={form.custom_search_api_base}
+                onChange={e => setForm(prev => ({ ...prev, custom_search_api_base: e.target.value }))}
+                className="w-full bg-field border border-border text-text rounded-btn px-3 py-2 mb-2 focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+              <p className="text-xs text-t3">若 Key 显示为 `***`，直接保存会保留原值。</p>
             </>
           )}
         </div>

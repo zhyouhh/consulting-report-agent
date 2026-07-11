@@ -38,12 +38,13 @@ from . import metering  # 用模块限定访问 metering.QuotaExceededError 等�
 from . import provider_retry  # 瞬态错误分类 + 指数退避（与 independent_review 共享）
 from . import search_quota  # 搜索池用量记账（router 注入，best-effort）
 from .models import SystemNotice
-from .search_pool import SearchRouter
+from .search_pool import SearchRouter, build_provider_success_payload
 from .search_providers import (
     BraveProvider,
     ExaProvider,
     ProviderSearchResult,
     SearchItem,
+    SearchProviderError,
     SerperProvider,
     TavilyProvider,
 )
@@ -155,6 +156,19 @@ SYSTEM_TRIGGER_PROMPTS = {
         "本轮只做提问澄清：不要推进阶段、不要写正文，等用户回答后再继续。"
     ),
 }
+# 管理制度类专属追问（2026-07-11 颗粒度化，spec §4.4）：拼接在 project_created 基础
+# 开场白之后，只对 project_type==management-document 生效。首轮仍只提问（S0 首轮工具
+# 白名单本就禁写）；写槽发生在用户回答后的常规 S0 轮次，槽位自带填写说明保证指令持久。
+MANAGEMENT_DOC_KICKOFF_ADDENDUM = (
+    "本项目是管理制度类文件，访谈问题里必须额外确认三件事："
+    "①文档颗粒度——这份文件是顶层管理办法（重组织职责与制度框架、操作细节下沉配套细则）、"
+    "操作细则（步骤时限具体可执行），还是常规混合写法（默认）；"
+    "②条款格式——条款要不要带主题、主题要不要加【】（例：「第一条 正文」／"
+    "「第一条 制定目的 正文」／「第一条【制定目的】正文」），或沿用用户提供的旧版文件样式；"
+    "③组织分工——治理架构与各部门/岗位职责如何划分（用户没有现成答案时，可提出由你先草拟一版再确认）。"
+    "用户答复后，在后续轮次把①②的结论按槽位说明写入 plan/project-overview.md 的"
+    "「## 文档参数」槽位（先 read_file 再改写），组织分工写入该文件「关键利益相关方」等相应小节。"
+)
 S5_WELCOME_PROMPT = """[S5 阶段进入提醒]
 用户刚进入 S5 质量审查阶段。S5 的玩法跟以前不一样了：
 
@@ -2650,7 +2664,7 @@ class ChatHandler:
             self._turn_context["user_message_text"] = ""
             self._turn_context["checkpoint_event"] = None
 
-            trigger_prompt = SYSTEM_TRIGGER_PROMPTS.get(system_trigger)
+            trigger_prompt = self._build_system_trigger_prompt(project_id, system_trigger)
             if not trigger_prompt:
                 yield {"type": "error", "data": f"未知 system_trigger: {system_trigger}"}
                 return
@@ -5674,6 +5688,93 @@ class ChatHandler:
             result_type="success",
         )
 
+    def _get_custom_search_provider(self):
+        """自定义搜索 key（2026-07-11）：settings 配了 provider+key → 返回 per-handler
+        provider 实例（缓存键 = provider/key/base 三元组，改设置后新值即换新实例）；
+        未配返回 None（走内置搜索池）。**与模型 API 配置完全独立**——managed 模式也生效，
+        不要求同时配 custom 模型 key。"""
+        provider_name = (getattr(self.settings, "custom_search_provider", "") or "").strip()
+        api_key = (getattr(self.settings, "custom_search_api_key", "") or "").strip()
+        if not provider_name or not api_key:
+            return None
+        factory = {
+            "serper": SerperProvider,
+            "brave": BraveProvider,
+            "tavily": TavilyProvider,
+            "exa": ExaProvider,
+        }.get(provider_name)
+        if factory is None:
+            return None
+        api_base = (getattr(self.settings, "custom_search_api_base", "") or "").strip()
+        cache_key = (provider_name, api_key, api_base)
+        if getattr(self, "_custom_search_cache_key", None) != cache_key:
+            # SSRF 纵深（Codex 红队 BLOCKER）：用户可控端点 → 禁重定向（防 302 打内网/metadata）
+            # + trust_env=False（防经环境代理绕过公网校验）。与 url_guard 的 httpx 受控 client 同基线。
+            session = requests.Session()
+            session.trust_env = False
+            self._custom_search_provider = factory(
+                api_keys=[api_key],
+                api_base=api_base or None,
+                session=session,
+                follow_redirects=False,
+            )
+            self._custom_search_cache_key = cache_key
+        return self._custom_search_provider
+
+    def _custom_search(self, provider, query: str) -> Dict[str, object]:
+        """用户自配搜索 key 直连：绕过池子路由与全部限额门禁（单轮/分钟/全局——key 是
+        用户自己的、额度自理；每轮 max_iterations 是失控的天然兜底），也不入池子记账
+        （不污染 admin 搜索池额度面板）。自定义端点在设置保存时已过
+        validate_custom_search_api_base（https+公网+无白名单）；此处逐调用复验解析公网
+        （与 fetch_url 同等级，防保存后 DNS 换绑到内网）。"""
+        from backend import url_guard
+
+        api_base = (getattr(self.settings, "custom_search_api_base", "") or "").strip()
+        if api_base:
+            try:
+                host = urlparse(api_base).hostname or ""
+                url_guard.assert_resolves_public(host)
+            except url_guard.SsrfBlockedError as exc:
+                return {
+                    "status": "error",
+                    "error_type": "backend_error",
+                    "message": f"自定义搜索地址被安全拦截：{exc}",
+                    "cached": False,
+                    "native_fallback_used": False,
+                    "items": [],
+                    "disable_for_turn": True,
+                }
+        try:
+            provider_result = provider.search(query)
+        except SearchProviderError as exc:
+            friendly = {
+                "auth_failed": "自定义搜索 Key 鉴权失败，请到设置里检查搜索渠道与 Key。",
+                "quota_exhausted": "自定义搜索 Key 额度已用尽，请充值或更换 Key。",
+                "rate_limited": "自定义搜索被上游限流，请稍后再试。",
+                "timeout": "自定义搜索超时，请稍后再试。",
+            }.get(exc.error_type, "自定义搜索暂时不可用，请稍后再试或检查设置。")
+            return {
+                "status": "error",
+                "error_type": exc.error_type,
+                "message": friendly,
+                "cached": False,
+                "native_fallback_used": False,
+                "items": [],
+                "disable_for_turn": True,
+            }
+        except Exception:
+            logging.error("自定义搜索失败", exc_info=True)
+            return {
+                "status": "error",
+                "error_type": "backend_error",
+                "message": "自定义搜索暂时不可用，请稍后再试。",
+                "cached": False,
+                "native_fallback_used": False,
+                "items": [],
+                "disable_for_turn": True,
+            }
+        return build_provider_success_payload(provider_result)
+
     def _web_search(
         self,
         query: str,
@@ -5681,6 +5782,9 @@ class ChatHandler:
         project_id: str = "",
         turn_search_count: int = 0,
     ) -> Dict[str, object]:
+        custom_provider = self._get_custom_search_provider()
+        if custom_provider is not None:
+            return self._custom_search(custom_provider, query)
         try:
             router = self._get_search_router()
             result = router.search(
@@ -6721,6 +6825,25 @@ class ChatHandler:
         except Exception:
             return False
         return any(m.get("role") == "assistant" for m in conv)
+
+    def _build_system_trigger_prompt(self, project_id: str, system_trigger: str) -> str | None:
+        """system trigger 开场白：静态基础文案 + 按报告类型追加（2026-07-11 颗粒度化）。
+
+        未知 trigger 返 None（调用方 fail-fast、**不查项目**——保持改造前语义）；
+        目前仅 project_created + management-document 追加三参数访谈段，其余组合
+        逐字等于 SYSTEM_TRIGGER_PROMPTS 静态文案（零回归，守护测试锁）。"""
+        base = SYSTEM_TRIGGER_PROMPTS.get(system_trigger)
+        if base is None:
+            return None
+        if system_trigger != "project_created":
+            return base
+        try:
+            project_type = self.skill_engine.get_project_type(project_id)
+        except Exception:
+            return base
+        if project_type != "management-document":
+            return base
+        return f"{base}{MANAGEMENT_DOC_KICKOFF_ADDENDUM}"
 
     def _build_turn_context(self, project_id: str, user_message: str) -> Dict[str, object]:
         # 意图红线（N6 C4）：user_message 永远只是用户原始意图文本。附件派生文本绝不进此参数

@@ -189,6 +189,164 @@ class DiagramRenderTests(unittest.TestCase):
             render_diagram("sankey", {}, "标题", None)
 
 
+def _linear_flow(labels, shapes=None):
+    nodes = []
+    for i, label in enumerate(labels):
+        node = {"id": f"n{i}", "label": label}
+        if shapes and shapes.get(i):
+            node["shape"] = shapes[i]
+        nodes.append(node)
+    edges = [{"from": f"n{i}", "to": f"n{i + 1}"} for i in range(len(labels) - 1)]
+    return {"nodes": nodes, "edges": edges}
+
+
+# 陈燕 0710 反馈 #6 锚样例：12 节点近线性链、双段中文标签（proj-c051 sidecar 同形态）。
+CHENYAN_ANCHOR_LABELS = [
+    "开始", "规则需求收集 [业务部门]", "规则定义与转化 [领域数据架构师]",
+    "规则评审 [数据治理委员会]", "规则入库登记 [数据管理员]", "规则配置部署 [平台运维]",
+    "试运行验证 [质量专员]", "正式发布 [数据治理办公室]", "质量监测执行 [质量专员]",
+    "问题整改跟踪 [业务部门]", "规则优化迭代 [领域数据架构师]", "结束",
+]
+
+
+class FlowchartLayoutTests(unittest.TestCase):
+    """flowchart 布局修复（2026-07-11，0710 反馈 #6）：方向自适应 + 字随框走 + 友好失败。"""
+
+    def _layout(self, spec):
+        from backend.diagram_render import _flow_layers, _flow_layout, _parse_flow
+        nodes, edges = _parse_flow(spec)
+        layers = _flow_layers(nodes, edges)
+        return _flow_layout(nodes, layers)
+
+    def _assert_no_overlap(self, boxes):
+        entries = list(boxes.items())
+        for i in range(len(entries)):
+            for j in range(i + 1, len(entries)):
+                (na, a), (nb, b) = entries[i], entries[j]
+                overlap_x = abs(a["cx"] - b["cx"]) < (a["w"] + b["w"]) / 2
+                overlap_y = abs(a["cy"] - b["cy"]) < (a["h"] + b["h"]) / 2
+                self.assertFalse(overlap_x and overlap_y, f"节点框重叠: {na} vs {nb}")
+
+    def _assert_in_bounds(self, boxes):
+        for nid, box in boxes.items():
+            self.assertGreaterEqual(box["cx"] - box["w"] / 2, -1e-6, f"{nid} 左越界")
+            self.assertLessEqual(box["cx"] + box["w"] / 2, 1 + 1e-6, f"{nid} 右越界")
+            self.assertGreaterEqual(box["cy"] - box["h"] / 2, -1e-6, f"{nid} 下越界")
+            self.assertLessEqual(box["cy"] + box["h"] / 2, 1 + 1e-6, f"{nid} 上越界")
+
+    def test_anchor_case_12_node_linear_goes_vertical(self):
+        # 锚样例必须走纵向（n_layers≈12 ≥ FLOW_VERTICAL_MIN_LAYERS 且 max_rows≤2）。
+        spec = _linear_flow(CHENYAN_ANCHOR_LABELS, {0: "rounded", 6: "diamond", 11: "rounded"})
+        layout = self._layout(spec)
+        self.assertTrue(layout["vertical"])
+        self.assertLessEqual(layout["fig_h"], chart_limits.MAX_FIGURE_HEIGHT_IN + 1e-6)
+        self._assert_no_overlap(layout["boxes"])
+        self._assert_in_bounds(layout["boxes"])
+        png = render_diagram("flowchart", spec, "数据质量规则管理流程", "内部访谈整理")
+        self.assertTrue(png.startswith(PNG_MAGIC))
+        self.assertGreater(len(png), 5000)
+
+    def test_anchor_labels_fit_single_line_vertically(self):
+        # 纵向整行宽度下，锚样例的双段中文标签不应再被断行（修复前被挤成叠压碎行）。
+        spec = _linear_flow(CHENYAN_ANCHOR_LABELS)
+        layout = self._layout(spec)
+        for nid, box in layout["boxes"].items():
+            self.assertEqual(len(box["lines"]), 1, f"{nid} 标签被意外断行: {box['lines']}")
+
+    def test_6_layer_linear_goes_vertical(self):
+        # 横向 5 层起列宽已装不下中文标签（实测溢出）→ 判据下探到 5，6 层线性必走纵向。
+        spec = _linear_flow([
+            "数据标准制定 [数据治理委员会]", "标准发布与宣贯 [数据治理办公室]",
+            "标准落地实施 [各业务部门]", "执行情况检查 [质量专员]",
+            "考核与通报 [人力资源部]", "标准修订完善 [领域数据架构师]",
+        ])
+        layout = self._layout(spec)
+        self.assertTrue(layout["vertical"])
+        self._assert_no_overlap(layout["boxes"])
+
+    def test_4_layer_linear_stays_horizontal(self):
+        spec = _linear_flow(["受理申请", "资格审查", "领导审批", "归档发布"])
+        layout = self._layout(spec)
+        self.assertFalse(layout["vertical"])
+        self._assert_no_overlap(layout["boxes"])
+        self._assert_in_bounds(layout["boxes"])
+
+    def test_wide_shallow_multibranch_stays_horizontal(self):
+        # 宽而浅（3 层、中层 4 节点）不满足近线性判据 → 保持横向。
+        spec = {
+            "nodes": [{"id": "s", "label": "需求输入", "shape": "rounded"},
+                      {"id": "a", "label": "渠道A评估"}, {"id": "b", "label": "渠道B评估"},
+                      {"id": "c", "label": "渠道C评估"}, {"id": "d", "label": "渠道D评估"},
+                      {"id": "t", "label": "汇总决策", "shape": "diamond"}],
+            "edges": [{"from": "s", "to": x} for x in "abcd"]
+                     + [{"from": x, "to": "t"} for x in "abcd"],
+        }
+        layout = self._layout(spec)
+        self.assertFalse(layout["vertical"])
+        png = render_diagram("flowchart", spec, "多渠道并行评估", None)
+        self.assertTrue(png.startswith(PNG_MAGIC))
+
+    def test_vertical_layer_cap_friendly_fail(self):
+        # 13 层 > FLOW_MAX_VERTICAL_LAYERS(12) → 人话错误（拆分子流程），不产糊图。
+        spec = _linear_flow([f"步骤{i:02d}处理" for i in range(chart_limits.FLOW_MAX_VERTICAL_LAYERS + 1)])
+        with self.assertRaises(ChartRenderError) as ctx:
+            render_diagram("flowchart", spec, "超长流程", None)
+        self.assertIn("拆分", str(ctx.exception))
+        # process 模板上限 8 步，>12 层的流程它也装不下 → 失败文案不得再推荐 process
+        self.assertNotIn("process", str(ctx.exception))
+
+    def test_deep_multibranch_horizontal_unreadable_friendly_fail(self):
+        # 10+ 层且含 3 节点层：不满足纵向判据、横向列宽又低于可读下限 → 友好失败。
+        spec = _linear_flow([f"环节{i}审查处理" for i in range(10)])
+        spec["nodes"] += [{"id": "x1", "label": "并行会签A"}, {"id": "x2", "label": "并行会签B"}]
+        spec["edges"] += [{"from": "n3", "to": "x1"}, {"from": "n3", "to": "x2"},
+                          {"from": "x1", "to": "n5"}, {"from": "x2", "to": "n5"}]
+        with self.assertRaises(ChartRenderError) as ctx:
+            render_diagram("flowchart", spec, "深多分支", None)
+        self.assertIn("拆分", str(ctx.exception))
+
+    def test_max_flow_nodes_limit_still_enforced(self):
+        spec = _linear_flow([f"节点{i}" for i in range(chart_limits.MAX_FLOW_NODES + 1)])
+        with self.assertRaises(ChartRenderError) as ctx:
+            render_diagram("flowchart", spec, "标题", None)
+        self.assertIn("节点过多", str(ctx.exception))
+
+    def test_horizontal_labels_wrap_within_box_width(self):
+        # 字随框走（横向）：断行后每行字数不超过列宽反推的容量。
+        spec = _linear_flow(["受理申请与初审", "跨部门联合资格审查", "分管领导审批", "归档发布"])
+        layout = self._layout(spec)
+        self.assertFalse(layout["vertical"])
+        for nid, box in layout["boxes"].items():
+            box_w_in = box["w"] * chart_limits.MAX_FIGURE_WIDTH_IN * 0.96
+            char_in = box["fontsize"] / 72.0
+            for line in box["lines"]:
+                self.assertLessEqual(
+                    len(line) * char_in, box_w_in + 1e-6,
+                    f"{nid} 行「{line}」超出框宽",
+                )
+
+    def test_vertical_two_column_layer_no_overlap(self):
+        # 5 层含一个双节点层（max_rows=2 仍近线性）→ 纵向、双列互不重叠。
+        spec = _linear_flow(["项目立项 [项目办]", "需求分析 [业务部门]", "方案设计 [技术部]",
+                             "实施部署 [实施组]", "验收归档 [项目办]"])
+        spec["nodes"].append({"id": "p", "label": "风险评估 [风控部]"})
+        spec["edges"] += [{"from": "n0", "to": "p"}, {"from": "p", "to": "n2"}]
+        layout = self._layout(spec)
+        self.assertTrue(layout["vertical"])
+        self._assert_no_overlap(layout["boxes"])
+        self._assert_in_bounds(layout["boxes"])
+
+    def test_vertical_min_row_height_respected(self):
+        # 每层行高 ≥ FLOW_MIN_ROW_HEIGHT_IN：axes 高度 / 层数不小于最小行高。
+        spec = _linear_flow(CHENYAN_ANCHOR_LABELS)
+        layout = self._layout(spec)
+        axes_h_in = layout["fig_h"] * 0.8
+        n_layers = len(CHENYAN_ANCHOR_LABELS)
+        self.assertGreaterEqual(
+            axes_h_in / n_layers, chart_limits.FLOW_MIN_ROW_HEIGHT_IN - 1e-6
+        )
+
+
 class RendererSourceGuardTests(unittest.TestCase):
     def test_renderers_never_touch_pyplot(self):
         # spec §4.8 硬约束：pyplot 全局状态机非线程安全，渲染器只许 OO API。

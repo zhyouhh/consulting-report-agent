@@ -101,6 +101,30 @@ def validate_custom_api_base(url: str) -> str:
     return cleaned
 
 
+def validate_custom_search_api_base(url: str) -> str:
+    """校验用户自填 custom_search_api_base：https + 无 userinfo + 解析到公网。
+
+    与 validate_custom_api_base 的关键差异：**不做域名白名单**（2026-07-11 用户拍板）——
+    搜索 key 是用户自己的，想连哪家中转是其自由；安全边界只保「不许指向内网/loopback/
+    云 metadata/CGNAT」（assert_resolves_public），防多租户部署的后端被当 SSRF 探针。
+    返回去空白后的 URL；任何不合法抛 SsrfBlockedError。"""
+    cleaned = (url or "").strip()
+    parsed = urlparse(cleaned)
+    if parsed.scheme != "https":
+        raise SsrfBlockedError("自定义搜索 API 地址必须是 https。")
+    if parsed.username or parsed.password:
+        raise SsrfBlockedError("自定义搜索 API 地址不能包含用户名/密码")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise SsrfBlockedError("自定义搜索 API 地址端口非法") from exc
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise SsrfBlockedError("自定义搜索 API 地址缺少主机名。")
+    assert_resolves_public(host)
+    return cleaned
+
+
 class _GuardedHTTPTransport(httpx.HTTPTransport):
     """每次请求都重校验：https + 主机在白名单 + 解析到公网。
     安全边界 = 白名单（只有 admin 批准的主机能被连接）。public-IP 校验是第二道防线，

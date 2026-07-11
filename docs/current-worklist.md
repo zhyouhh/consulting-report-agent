@@ -9,6 +9,17 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
+最后更新：2026-07-11（**试用反馈 0710 批次（陈燕）✅ 四件套实施 + Codex 单轨审 2 轮 APPROVED（首轮挖出 2 BLOCKER 已修）+ commit 本地 main；⏳ 待部署 kr-web-01 + 真模型 GUI E2E**）：
+
+**来源**：`feedback/试用反馈汇总0710-咨询报告助手.xlsx` 陈燕（序号 5）8 条反馈；spec `docs/superpowers/specs/2026-07-11-mgmt-doc-granularity-and-flowchart-layout-design.md`（Opus 设计 + Fable 实施期修订 §11：clause_format S1→S1-S4 接线修正 / 双语枚举别名 / 槽位自带说明 / B 纵向判据 7→5 / 横向 fit-text+兜底 / 失败文案去 process 建议）。四件套：
+
+1. **流程图布局修复（B，#6）**：`diagram_render.py:_flow_layout` 纯布局函数——近线性多层流（`n_layers>=5 && max_rows<=2`）改纵向一层一行；字随框走双分支（断行宽度从框宽反推）；纵向 >12 层 / 横向过密 / 标签过长 → 友好失败不产糊图。`chart_limits.py` 加 4 常量。其余 19 图零改动。**存量糊图不自愈**（PNG 不可变），需项目里重新生成换引用。
+2. **管理办法颗粒度化（A，#2/#3/#4）**：management-document 开场访谈追问 颗粒度/条款格式/组织分工（`_build_system_trigger_prompt` builder）；`project-overview.md`「## 文档参数」槽位（自带填写说明保指令持久；非该类型 `_populate_v2_plan_files` 剥除）；`parse_management_doc_params` 双语闭枚举严格全等 + 只扫段内；`load_type_skeleton(granularity)` 选 `management-system.md` 新增「顶层办法结构/操作细则结构」段；条款样式指令 **S1–S4 全阶段**注入 + 非法槽位固定文案 advisory。其余 6 类逐字零回归（fixture 守护）。顺带回应曾超#4（职责分工确认）。
+3. **自定义搜索 key/URL**：per-uid settings 三字段（`custom_search_provider/api_key/api_base`）**与模型 mode 完全独立**；配置即绕过池子与全部限额、不入池子记账；`validate_custom_search_api_base` 无域名白名单但 https+公网；**自定义实例 `follow_redirects=False` + `trust_env=False`**（Codex BLOCKER：302 可打 metadata）；SettingsModal 独立段 + 掩码 key 三修复（Codex BLOCKER：切渠道清 key/切回恢复/停用保留）。**本地 `managed_search_pool.json` `per_turn_searches` 5→10——部署时服务器副本同改+重启**。兑现 0710 给郭红的书面回复。
+4. **初次使用引导（终身一次）**：`users.onboarded_at`（幂等 ALTER 迁移）+ `/me` `onboarded` + `POST /api/auth/onboarded`（幂等）；`OnboardingTour.jsx` 居中卡片 4 步（两壳通用），App 严格 `=== false` 门控、onDone 只翻 onboarded 字段（init effect 依赖雷区不动）；桌面 local 合成 true 不弹。兑现 0709/0710 反馈响应两次承诺的「加强初次使用引导」。
+
+**明确不做（陈燕 #1/#5/#7/#8）**：redline/diff 另立 spec（backlog）；导出格式预设超范围；引用防编造质量增强 backlog；#8 无崩溃证据（长耗时感知延迟，backlog）。**回归**：后端 1774 / 前端 582 / build 全绿。**部署清单（待执行）**：git push 后服务器 realign（或 file-push 后端 8 文件 + skill 模板 2 文件）+ dist swap + `managed_search_pool.json` per_turn 10 + 重启（DB 迁移启动自动）；部署后跑真模型 GUI E2E（流程图 + 管理办法访谈 + 图表 worklist 旧待办一并验）。
+
 最后更新：2026-07-10（**报告图表生成 ✅ 一次性实施 v2.0+v2.1 合并（spec 三处优化：砍 graphviz 换纯 Python 布局 / 无 cache-bust / 物理尺寸控图宽）+ ✅ 同日部署 kr-web-01（第九笔）**）：
 
 **交付**：20 种图（数据图 12 + 结构图 8）全流程「create_chart/create_diagram 工具 → content/assets/ 原子落盘（PNG+sidecar）→ 模型经 append/edit 插引用 → 预览 img 重写到 /assets 路由所见即所得 → 导出前缺图硬校验 + --resource-path 真嵌 docx → S5 条件性第 6 维图表审查」。新叶子 `chart_style/chart_limits/chart_render/diagram_render/chart_assets`；字体 `fonts/NotoSansCJKsc-*.otf` 进仓库（OFL）；requirements + PyInstaller spec 已收口。后端 1696 / 前端 577 / build / 真 pandoc 嵌图 E2E 全绿。硬约束记 CLAUDE.md「## 报告图表生成」段。

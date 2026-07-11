@@ -57,6 +57,7 @@ class SearchProviderError(RuntimeError):
 
 class BaseSearchProvider:
     provider_name = ""
+    endpoint = ""  # 子类覆写为官方端点；实例可被 api_base 构造参数覆盖
 
     def __init__(
         self,
@@ -65,6 +66,8 @@ class BaseSearchProvider:
         api_keys: list[str] | tuple[str, ...] | None = None,
         session: requests.Session | Any | None = None,
         timeout_seconds: int = DEFAULT_SEARCH_TIMEOUT_SECONDS,
+        api_base: str | None = None,
+        follow_redirects: bool = True,
     ) -> None:
         keys = [str(key) for key in (api_keys or []) if str(key)]
         if not keys and api_key:
@@ -75,6 +78,21 @@ class BaseSearchProvider:
         self._key_lock = threading.Lock()
         self.session = session or requests.Session()
         self.timeout_seconds = timeout_seconds
+        # SSRF 纵深（2026-07-11 自定义搜索 key）：用户可控端点的实例必须禁重定向——
+        # requests 默认跟随 302，恶意中转可把「保存/调用时都解析公网」的主机重定向到
+        # 云 metadata/内网（Codex 红队 BLOCKER）。池子官方端点保持默认 True（行为零变化）。
+        self._follow_redirects = bool(follow_redirects)
+        # 端点覆盖（2026-07-11 自定义搜索 key）：给中转/自建兼容服务用。
+        # 无路径（"" 或 "/"）→ 视为 base host，拼上该 provider 官方端点的默认路径；
+        # 带路径 → 当作完整端点原样使用。缺省（None/空）= 官方端点，池子路径零变化。
+        if api_base and str(api_base).strip():
+            cleaned = str(api_base).strip()
+            parsed = urlparse(cleaned)
+            if parsed.path in ("", "/"):
+                default_path = urlparse(type(self).endpoint).path
+                self.endpoint = cleaned.rstrip("/") + default_path
+            else:
+                self.endpoint = cleaned
         # 单次调用内传递响应观测数据（如 brave 响应头额度快照）。
         # provider 实例是跨线程共享的路由单例成员，必须 thread-local 才不会串调用。
         self._tls = threading.local()
@@ -129,6 +147,7 @@ class BaseSearchProvider:
             response = getattr(self.session, method)(
                 url,
                 timeout=self.timeout_seconds,
+                allow_redirects=self._follow_redirects,
                 **kwargs,
             )
         except requests.Timeout as exc:

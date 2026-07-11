@@ -73,7 +73,7 @@ def init_db() -> None:
                 uid TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0, daily_cost_micro_yuan INTEGER,
                 must_change_password INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL);
+                created_at TEXT NOT NULL, onboarded_at TEXT);
             CREATE TABLE IF NOT EXISTS sessions(
                 token_hash TEXT PRIMARY KEY, uid TEXT NOT NULL, created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL, created_ip TEXT, user_agent TEXT, last_seen TEXT);
@@ -100,6 +100,10 @@ def init_db() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(usage_daily)")}
         if "failclosed_tokens" not in cols:
             conn.execute("ALTER TABLE usage_daily ADD COLUMN failclosed_tokens INTEGER NOT NULL DEFAULT 0")
+        # 既有库迁移：onboarded_at（初次使用引导「终身一次」标记，2026-07-11）。ALTER 幂等。
+        user_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+        if "onboarded_at" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN onboarded_at TEXT")
         # 既有库迁移：search_usage_daily 的 key 身份从列表下标（key_index INTEGER，短命中间版）
         # 改为 sha256 指纹（key_id TEXT）。旧表存在时 CREATE IF NOT EXISTS 是 no-op，
         # 不迁移则新 INSERT/SELECT 直接失败（记账静默停摆 + 报告端点 500）。
@@ -177,6 +181,15 @@ def set_user_password(uid, new_password) -> None:
     with _db() as conn:
         conn.execute("UPDATE users SET password_hash=?, must_change_password=0 WHERE uid=?",
                      (_PH.hash(new_password), uid))
+
+
+def set_user_onboarded(uid) -> None:
+    """标记用户已看完/跳过初次使用引导（终身一次，2026-07-11）。幂等：已标记不覆盖首次时间。"""
+    with _db() as conn:
+        conn.execute(
+            "UPDATE users SET onboarded_at=? WHERE uid=? AND onboarded_at IS NULL",
+            (_now(), uid),
+        )
 
 
 def _hash_token(token: str) -> str:

@@ -18,6 +18,14 @@ MAX_TREE_NODES = 40               # org_chart / tree 总节点数
 MAX_TREE_DEPTH = 5                # org_chart / tree 最大层深
 MAX_FLOW_NODES = 20               # flowchart 节点数
 MAX_FLOW_EDGES = 40               # flowchart 边数
+# flowchart 布局修复（2026-07-11，0710 反馈 #6）：近线性多层流改纵向布局的判据与上限。
+# 实测横向布局 5 层起中文标签就装不下列宽（10 汉字 ≈1.08in > 5 层列宽 0.94in），
+# 判据取「层数 ≥5 且每层 ≤2 节点」；纵向单图上限 = axes 高度预算 / 最小行高
+# （7.5in × 0.8 / 0.5in = 12 层），超限友好失败（拆分子流程）而非产糊图。
+FLOW_VERTICAL_MIN_LAYERS = 5      # 层数 ≥ 此值且近线性 → 纵向布局
+FLOW_VERTICAL_MAX_ROWS = 2        # 「近线性」判据：每层节点数 ≤ 此值
+FLOW_MAX_VERTICAL_LAYERS = 12     # 纵向单图层数上限（超出抛 ChartRenderError）
+FLOW_MIN_ROW_HEIGHT_IN = 0.5      # 纵向每层最小行高（节点框 + 行间箭头）
 
 # ---- 文本 ----
 MAX_TITLE_CHARS = 80              # 结论式标题

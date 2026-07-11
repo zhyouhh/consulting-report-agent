@@ -82,10 +82,11 @@ def _box(ax, x, y, w, h, label, *, fill=NAVY, text_color="#FFFFFF", fontsize=8.5
     )
 
 
-def _arrow(ax, start, end, *, label=None):
+def _arrow(ax, start, end, *, label=None, connectionstyle=None):
+    extra = {"connectionstyle": connectionstyle} if connectionstyle else {}
     ax.add_patch(FancyArrowPatch(
         start, end, arrowstyle="-|>", mutation_scale=11,
-        color=MUTED, linewidth=1.1, shrinkA=2, shrinkB=2,
+        color=MUTED, linewidth=1.1, shrinkA=2, shrinkB=2, **extra,
     ))
     if label:
         mx, my = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
@@ -492,53 +493,192 @@ def _flow_layers(nodes: Dict[str, Dict], edges: List[Dict]) -> List[List[str]]:
     return layers
 
 
-def _render_flowchart(spec: Dict, options: Dict):
-    nodes, edges = _parse_flow(spec)
-    layers = _flow_layers(nodes, edges)
+# ---- flowchart 布局（2026-07-11 修复：方向自适应 + 字随框走，0710 反馈 #6）----
+
+_FLOW_FS_V = 8.5           # 纵向标签字号
+_FLOW_FS_H = 7.8           # 横向标签字号（沿用修复前取值）
+_FLOW_AXES_W_FRAC = 0.96   # _canvas 固定 axes 宽/高占比
+_FLOW_AXES_H_FRAC = 0.8
+
+
+def _flow_wrap_lines(label: str, max_w_in: float, fontsize: float) -> List[str]:
+    """按目标宽度（英寸）断行。以 CJK 全宽（1em/字）为保守换算单位——中文标签精确，
+    ASCII 实际更窄只会更宽松，误差由框内 padding 吸收。"""
+    chars = max(1, int(max_w_in / (fontsize / 72.0)))
+    return textwrap.wrap(label, chars) or [label]
+
+
+def _flow_layout(nodes: Dict[str, Dict], layers: List[List[str]]) -> Dict:
+    """flowchart 纯布局（可单测）：朝向判定 + 画布高度 + 逐节点几何。
+
+    近线性多层流（层数 ≥ FLOW_VERTICAL_MIN_LAYERS 且每层 ≤ FLOW_VERTICAL_MAX_ROWS）
+    走纵向：一层一行、节点占整行宽，长中文标签不再被 6.4in 页宽挤成叠压横带；
+    宽而浅的多分支流保持横向。两个朝向都做「字随框走」：断行宽度由实际框宽反推，
+    保证标签装得进框；确实装不下（层数超限 / 横向过密 / 标签过长）时抛
+    ChartRenderError 友好失败，绝不产出糊图。
+
+    返回 {"vertical": bool, "fig_h": 英寸, "boxes": {nid: box}}；
+    box = {cx, cy, w, h（axes 0..1 分数）, lines（断行后标签行）, fontsize}。
+    """
     n_layers = len(layers)
     max_rows = max(len(layer) for layer in layers)
-    fig, ax = _canvas(1.6 + 0.72 * max_rows)
+    axes_w_in = limits.MAX_FIGURE_WIDTH_IN * _FLOW_AXES_W_FRAC
+    boxes: Dict[str, Dict] = {}
 
+    vertical = (
+        n_layers >= limits.FLOW_VERTICAL_MIN_LAYERS
+        and max_rows <= limits.FLOW_VERTICAL_MAX_ROWS
+    )
+    if vertical:
+        if n_layers > limits.FLOW_MAX_VERTICAL_LAYERS:
+            _fail(
+                f"流程图层级过多（{n_layers} 层，单图纵向可读上限 "
+                f"{limits.FLOW_MAX_VERTICAL_LAYERS} 层）：请拆分为多张子流程图，或合并相邻步骤"
+            )
+        em = _FLOW_FS_V / 72.0
+        line_h_in = em * 1.5
+        rows = []  # 每层: (entries=[(nid, w_in, lines)], row_h_in, box_h_in)
+        for layer in layers:
+            cell_w_in = axes_w_in / len(layer)
+            entries = []
+            max_lines = 1
+            for nid in layer:
+                label = nodes[nid]["label"]
+                # 框宽随内容：最窄 1.3in（开始/结束不显小气），最宽吃满单元格；
+                # 钻石（严格画在分配框内，宽扁菱形）内接文本区 ~62% 宽 → 外框按比例放大再夹紧
+                is_diamond = nodes[nid]["shape"] == "diamond"
+                content_w_in = max(1.3, len(label) * em + 0.5)
+                if is_diamond:
+                    content_w_in = content_w_in / 0.62
+                w_in = min(cell_w_in * 0.84, content_w_in)
+                text_w_in = w_in * (0.62 if is_diamond else 1.0) - 0.28
+                lines = _flow_wrap_lines(label, text_w_in, _FLOW_FS_V)
+                entries.append((nid, w_in, lines))
+                max_lines = max(max_lines, len(lines))
+            # 单行标签行高恰为 FLOW_MIN_ROW_HEIGHT_IN（0.177 行高 + 0.14 框 pad + 0.16 行间箭头）
+            # ——12 层 × 0.5in 恰满 6.0in axes 预算，任何行加高都会顶爆上限，勿在此叠 pad
+            box_h_in = max_lines * line_h_in + 0.14
+            row_h_in = max(limits.FLOW_MIN_ROW_HEIGHT_IN, box_h_in + 0.16)
+            rows.append((entries, row_h_in, box_h_in))
+        axes_h_in = sum(row_h_in for _, row_h_in, _ in rows)
+        fig_h = axes_h_in / _FLOW_AXES_H_FRAC
+        if fig_h > limits.MAX_FIGURE_HEIGHT_IN + 1e-6:
+            _fail("流程图内容过多（标签换行后超出单图可读高度）：请精简节点文字，或拆分为多张子流程图")
+        cursor = 0.0
+        for entries, row_h_in, box_h_in in rows:
+            cy = 1 - (cursor + row_h_in / 2) / axes_h_in
+            cursor += row_h_in
+            k = len(entries)
+            for ri, (nid, w_in, lines) in enumerate(entries):
+                boxes[nid] = {
+                    "cx": (ri + 0.5) / k,
+                    "cy": cy,
+                    "w": w_in / axes_w_in,
+                    "h": box_h_in / axes_h_in,
+                    "lines": lines,
+                    "fontsize": _FLOW_FS_V,
+                }
+        return {"vertical": True, "fig_h": fig_h, "boxes": boxes}
+
+    # 横向：列宽公式沿用修复前，但断行宽度从实际框宽反推（尺寸自洽同样管横向）
+    em = _FLOW_FS_H / 72.0
+    line_h_in = em * 1.45
     box_w = min(0.19, 0.92 / n_layers * 0.8)
+    box_w_in = box_w * axes_w_in
+    text_w_in = box_w_in - 0.1
+    if int(text_w_in / em) < 4:
+        _fail("流程图层级过多且分支并行（横向布局下节点过密）：请拆分为多张子流程图，或减少并行分支")
+    node_lines: Dict[str, List[str]] = {}
+    max_lines = 1
+    for nid, node in nodes.items():
+        # 横向钻石沿用原视觉（画成 1.24×列宽的宽菱形），文本区 ≈ 画宽的 62% = 0.77×列宽
+        node_text_w = box_w_in * 0.77 if node["shape"] == "diamond" else text_w_in
+        lines = _flow_wrap_lines(node["label"], node_text_w, _FLOW_FS_H)
+        node_lines[nid] = lines
+        max_lines = max(max_lines, len(lines))
+    if max_lines > 3:
+        _fail("节点标签过长（横向布局最多容纳 3 行文字）：请精简节点文字，或减少并行分支让流程走纵向布局")
+    box_h_in_needed = max_lines * line_h_in + 0.12
     box_h = min(0.16, 0.75 / max_rows * 0.6)
+    # 框高装不下断行后的标签 → 撑高画布（max_lines ≤3 有界）；到 7.5in 仍装不下则失败
+    fig_h = min(
+        limits.MAX_FIGURE_HEIGHT_IN,
+        max(1.6 + 0.72 * max_rows, box_h_in_needed / (box_h * _FLOW_AXES_H_FRAC)),
+    )
+    if box_h * _FLOW_AXES_H_FRAC * fig_h < box_h_in_needed - 1e-6:
+        _fail("流程图并行分支过多且标签较长，单图无法容纳：请精简节点文字，或拆分为多张子流程图")
     for li, layer in enumerate(layers):
         x = 0.05 + (0.9 / max(n_layers - 1, 1)) * li if n_layers > 1 else 0.5
         for ri, nid in enumerate(layer):
             y = 0.85 - (0.78 / (len(layer) + 1)) * (ri + 1) + box_h / 2
-            nodes[nid]["cx"] = min(max(x, box_w / 2 + 0.02), 1 - box_w / 2 - 0.02)
-            nodes[nid]["cy"] = y
+            boxes[nid] = {
+                "cx": min(max(x, box_w / 2 + 0.02), 1 - box_w / 2 - 0.02),
+                "cy": y,
+                "w": box_w,
+                "h": box_h,
+                "lines": node_lines[nid],
+                "fontsize": _FLOW_FS_H,
+            }
+    return {"vertical": False, "fig_h": fig_h, "boxes": boxes}
+
+
+def _render_flowchart(spec: Dict, options: Dict):
+    nodes, edges = _parse_flow(spec)
+    layers = _flow_layers(nodes, edges)
+    layout = _flow_layout(nodes, layers)
+    boxes = layout["boxes"]
+    fig, ax = _canvas(layout["fig_h"])
+    layer_of = {nid: li for li, layer in enumerate(layers) for nid in layer}
 
     for edge in edges:
-        src, dst = nodes[edge["from"]], nodes[edge["to"]]
-        start = (src["cx"] + box_w / 2, src["cy"])
-        end = (dst["cx"] - box_w / 2, dst["cy"])
-        if dst["cx"] <= src["cx"]:  # 同层/回指：走底部
-            start = (src["cx"], src["cy"] - box_h / 2)
-            end = (dst["cx"], dst["cy"] - box_h / 2)
-        _arrow(ax, start, end, label=edge["label"])
+        src, dst = boxes[edge["from"]], boxes[edge["to"]]
+        if layout["vertical"]:
+            # DAG + 最长路径分层保证边只向更深层走 → 纵向恒为「下行」
+            start = (src["cx"], src["cy"] - src["h"] / 2)
+            end = (dst["cx"], dst["cy"] + dst["h"] / 2)
+            span = layer_of[edge["to"]] - layer_of[edge["from"]]
+            style = "arc3,rad=-0.4" if span > 1 else None  # 跨层直连会穿框 → 弧线绕右侧
+            _arrow(ax, start, end, connectionstyle=style)
+            if edge["label"]:
+                mx, my = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
+                ax.annotate(edge["label"], (mx, my), ha="left", va="center",
+                            textcoords="offset points", xytext=(24 if style else 5, 0),
+                            fontsize=7, color=MUTED, **_TXT)
+        else:
+            start = (src["cx"] + src["w"] / 2, src["cy"])
+            end = (dst["cx"] - dst["w"] / 2, dst["cy"])
+            if dst["cx"] <= src["cx"]:  # 同层/回指：走底部
+                start = (src["cx"], src["cy"] - src["h"] / 2)
+                end = (dst["cx"], dst["cy"] - dst["h"] / 2)
+            _arrow(ax, start, end, label=edge["label"])
 
-    for node in nodes.values():
-        cx_, cy = node["cx"], node["cy"]
+    for nid, node in nodes.items():
+        box = boxes[nid]
+        cx_, cy, bw, bh = box["cx"], box["cy"], box["w"], box["h"]
+        text = "\n".join(box["lines"])
         if node["shape"] == "diamond":
-            half_w, half_h = box_w * 0.62, box_h * 0.85
+            if layout["vertical"]:
+                half_w, half_h = bw / 2, bh / 2  # 严格画在分配框内（防双列重叠/压边标签）
+            else:
+                half_w, half_h = bw * 0.62, bh * 0.85  # 沿用修复前横向视觉
             ax.add_patch(Polygon(
                 [(cx_ - half_w, cy), (cx_, cy + half_h), (cx_ + half_w, cy), (cx_, cy - half_h)],
                 facecolor=_MID_FILL, edgecolor=NAVY, linewidth=1, zorder=3,
             ))
-            ax.annotate(_wrap(node["label"], 8), (cx_, cy), ha="center", va="center",
-                        fontsize=7.5, color=TEXT, zorder=4, **_TXT)
+            ax.annotate(text, (cx_, cy), ha="center", va="center",
+                        fontsize=box["fontsize"] * 0.96, color=TEXT, zorder=4, **_TXT)
         else:
             fill = NAVY if node["shape"] == "rounded" else _LIGHT_FILL
             text_color = "#FFFFFF" if node["shape"] == "rounded" else TEXT
             ax.add_patch(FancyBboxPatch(
-                (cx_ - box_w / 2, cy - box_h / 2), box_w, box_h,
+                (cx_ - bw / 2, cy - bh / 2), bw, bh,
                 boxstyle=("round,pad=0,rounding_size=0.02" if node["shape"] == "rounded"
                           else "square,pad=0"),
                 facecolor=fill, edgecolor=NAVY if node["shape"] != "rounded" else fill,
                 linewidth=1, zorder=3,
             ))
-            ax.annotate(_wrap(node["label"], 10), (cx_, cy), ha="center", va="center",
-                        fontsize=7.8, color=text_color, zorder=4, **_TXT)
+            ax.annotate(text, (cx_, cy), ha="center", va="center",
+                        fontsize=box["fontsize"], color=text_color, zorder=4, **_TXT)
     return fig
 
 

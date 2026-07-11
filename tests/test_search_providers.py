@@ -351,3 +351,67 @@ class SearchUsageAttributionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApiBaseOverrideTests(unittest.TestCase):
+    """自定义搜索端点覆盖（2026-07-11）：无路径 → 拼 provider 默认路径；带路径 → 原样用；
+    缺省 → 官方端点零变化（池子路径不受影响）。"""
+
+    def test_default_endpoints_unchanged_without_override(self):
+        self.assertEqual(TavilyProvider(api_keys=["k"]).endpoint, "https://api.tavily.com/search")
+        self.assertEqual(SerperProvider(api_keys=["k"]).endpoint, "https://google.serper.dev/search")
+        self.assertEqual(BraveProvider(api_keys=["k"]).endpoint,
+                         "https://api.search.brave.com/res/v1/web/search")
+        self.assertEqual(ExaProvider(api_keys=["k"]).endpoint, "https://api.exa.ai/search")
+
+    def test_bare_host_appends_provider_default_path(self):
+        provider = TavilyProvider(api_keys=["k"], api_base="https://relay.example.com")
+        self.assertEqual(provider.endpoint, "https://relay.example.com/search")
+        provider = BraveProvider(api_keys=["k"], api_base="https://relay.example.com/")
+        self.assertEqual(provider.endpoint, "https://relay.example.com/res/v1/web/search")
+
+    def test_full_endpoint_used_verbatim(self):
+        provider = SerperProvider(api_keys=["k"], api_base="https://relay.example.com/api/serper/search")
+        self.assertEqual(provider.endpoint, "https://relay.example.com/api/serper/search")
+
+    def test_override_is_instance_scoped_not_class_scoped(self):
+        # 实例属性覆盖，不得污染类属性（池子里的官方端点实例）
+        TavilyProvider(api_keys=["k"], api_base="https://relay.example.com")
+        self.assertEqual(TavilyProvider.endpoint, "https://api.tavily.com/search")
+        self.assertEqual(TavilyProvider(api_keys=["k"]).endpoint, "https://api.tavily.com/search")
+
+    def test_override_endpoint_receives_request(self):
+        session = mock.Mock()
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"results": [
+            {"title": "T", "content": "S", "url": "https://x.example.com/a"},
+        ]}
+        session.post.return_value = response
+        provider = TavilyProvider(api_keys=["k"], session=session,
+                                  api_base="https://relay.example.com")
+        result = provider.search("query")
+        self.assertEqual(result.result_type, "success")
+        called_url = session.post.call_args.args[0]
+        self.assertEqual(called_url, "https://relay.example.com/search")
+
+    def test_follow_redirects_false_passed_to_session(self):
+        # SSRF 纵深（Codex 红队 BLOCKER）：用户可控端点的实例必须禁重定向——
+        # 否则「保存/调用时解析公网」的主机可用 302 把请求送进内网/metadata。
+        session = mock.Mock()
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"results": []}
+        session.post.return_value = response
+        provider = TavilyProvider(api_keys=["k"], session=session,
+                                  api_base="https://relay.example.com",
+                                  follow_redirects=False)
+        provider.search("query")
+        self.assertIs(session.post.call_args.kwargs["allow_redirects"], False)
+
+    def test_pool_default_keeps_redirects_enabled(self):
+        # 池子官方端点行为零变化：默认仍跟随重定向
+        session = mock.Mock()
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"results": []}
+        session.post.return_value = response
+        TavilyProvider(api_keys=["k"], session=session).search("query")
+        self.assertIs(session.post.call_args.kwargs["allow_redirects"], True)

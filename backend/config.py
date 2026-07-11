@@ -332,6 +332,13 @@ class Settings(BaseSettings):
     custom_model: str = ""
     custom_context_limit_override: int | None = None
 
+    # 自定义搜索配置（2026-07-11）：与模型 API 配置**相互独立**——managed 模式也可配，
+    # 不强制绑定 custom 模型。配置了 provider+key → _web_search 绕过内置搜索池与全部
+    # 限额门禁（用户自己的 key，额度自理；max_iterations 是天然的失控兜底）。
+    custom_search_provider: str = ""   # ""=用内置搜索池；tavily/serper/brave/exa 四选一
+    custom_search_api_key: str = ""
+    custom_search_api_base: str = ""   # 可选端点覆盖（中转/自建兼容服务）；空=官方端点
+
     # 兼容旧代码的别名字段
     api_provider: str = "siliconflow"
     api_key: str = ""
@@ -389,6 +396,12 @@ def normalize_settings_payload(data: dict) -> dict:
     normalized.setdefault("custom_api_key", normalized.get("api_key", ""))
     normalized.setdefault("custom_model", normalized.get("model", ""))
     normalized.setdefault("custom_context_limit_override", None)
+    # 自定义搜索（与模型 mode 无关，独立持久化）：provider 闭集校验，越界归 ""（回内置池）
+    normalized.setdefault("custom_search_provider", "")
+    normalized.setdefault("custom_search_api_key", "")
+    normalized.setdefault("custom_search_api_base", "")
+    if normalized["custom_search_provider"] not in ("", "tavily", "serper", "brave", "exa"):
+        normalized["custom_search_provider"] = ""
     normalized["projects_dir"] = runtime_projects_dir
     normalized["skill_dir"] = runtime_skill_dir
 

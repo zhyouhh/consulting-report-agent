@@ -405,13 +405,24 @@ def auth_me(request: Request, uid: str = Depends(get_current_uid)):
     cost_fields = {"today_cost_yuan": round(used / 1_000_000, 4),
                    "daily_cap_yuan": round(cap / 1_000_000, 4)}
     if uid == "local" and not getattr(request.app.state, "auth_required", True):
+        # 桌面 local：初次引导是 web-only 功能，合成 onboarded=True 永不弹
         return {"uid": "local", "username": "本地用户", "is_admin": False,
-                "must_change_password": False, **cost_fields}
+                "must_change_password": False, "onboarded": True, **cost_fields}
     rec = accounts.get_user_by_uid(uid)
     if not rec:
         raise HTTPException(status_code=401, detail="未登录")
     return {"uid": uid, "username": rec["username"], "is_admin": rec["is_admin"],
-            "must_change_password": rec["must_change_password"], **cost_fields}
+            "must_change_password": rec["must_change_password"],
+            "onboarded": bool(rec.get("onboarded_at")), **cost_fields}
+
+
+@app.post("/api/auth/onboarded")
+def auth_mark_onboarded(request: Request, uid: str = Depends(get_current_uid)):
+    """初次使用引导「终身一次」回写（2026-07-11）：看完/跳过即标记，换设备不再弹。幂等。"""
+    if uid == "local" and not getattr(request.app.state, "auth_required", True):
+        return {"status": "ok"}   # 桌面 local 无账号行，天然不弹引导
+    accounts.set_user_onboarded(uid)
+    return {"status": "ok"}
 
 
 @app.post("/api/auth/change-password")
@@ -615,6 +626,7 @@ async def get_settings(uid: str = Depends(require_password_current)):
     data = load_settings(uid).model_dump(exclude={"managed_client_token"})
     data["api_key"] = "***" if data["api_key"] else ""
     data["custom_api_key"] = "***" if data.get("custom_api_key") else ""
+    data["custom_search_api_key"] = "***" if data.get("custom_search_api_key") else ""
     return data
 
 
@@ -630,6 +642,13 @@ class SettingsUpdate(BaseModel):
     custom_api_key: str = ""
     custom_model: str = ""
     custom_context_limit_override: int | None = None
+    # 自定义搜索（2026-07-11，与模型 mode 相互独立；Optional=旧客户端不提交则不动存量值）
+    custom_search_provider: Optional[str] = None
+    custom_search_api_key: Optional[str] = None
+    custom_search_api_base: Optional[str] = None
+
+
+_CUSTOM_SEARCH_PROVIDERS = ("", "tavily", "serper", "brave", "exa")
 
 
 @app.post("/api/settings")
@@ -639,6 +658,19 @@ async def update_settings(update: SettingsUpdate, uid: str = Depends(require_pas
         # 保存 custom 前即时校验 base：https + 白名单主机 + 解析到公网；不合法不落盘。
         try:
             url_guard.validate_custom_api_base(update.custom_api_base or "")
+        except url_guard.SsrfBlockedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    # 自定义搜索校验（独立于 mode）：provider 闭集；URL 无白名单但必须 https+公网（防 SSRF 探内网）
+    if "custom_search_provider" in update.model_fields_set and update.custom_search_provider is not None:
+        if update.custom_search_provider.strip() not in _CUSTOM_SEARCH_PROVIDERS:
+            raise HTTPException(status_code=400, detail="不支持的搜索渠道（可选：tavily/serper/brave/exa）")
+    if (
+        "custom_search_api_base" in update.model_fields_set
+        and update.custom_search_api_base is not None
+        and update.custom_search_api_base.strip()
+    ):
+        try:
+            url_guard.validate_custom_search_api_base(update.custom_search_api_base)
         except url_guard.SsrfBlockedError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
     with _settings_lock:
@@ -658,6 +690,16 @@ async def update_settings(update: SettingsUpdate, uid: str = Depends(require_pas
             s.custom_context_limit_override = clamp_custom_context_limit_override(
                 update.custom_context_limit_override
             )
+        if "custom_search_provider" in update.model_fields_set and update.custom_search_provider is not None:
+            s.custom_search_provider = update.custom_search_provider.strip()
+        if (
+            "custom_search_api_key" in update.model_fields_set
+            and update.custom_search_api_key is not None
+            and update.custom_search_api_key != "***"
+        ):
+            s.custom_search_api_key = update.custom_search_api_key.strip()
+        if "custom_search_api_base" in update.model_fields_set and update.custom_search_api_base is not None:
+            s.custom_search_api_base = update.custom_search_api_base.strip()
         save_settings(s, uid=uid)
         for k in [k for k in _chat_handlers if k[0] == uid]:
             _chat_handlers.pop(k, None)

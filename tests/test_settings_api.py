@@ -261,3 +261,115 @@ class SettingsApiTests(AuthApiTestBase):
         self.assertEqual(cb.post("/api/settings", json=body("B-BASE")).status_code, 200)
         self.assertEqual(ca.get("/api/settings").json()["custom_api_base"], "A-BASE")
         self.assertEqual(cb.get("/api/settings").json()["custom_api_base"], "B-BASE")
+
+
+class CustomSearchSettingsTests(AuthApiTestBase):
+    """自定义搜索 key/URL（2026-07-11）：与模型 mode 相互独立、闭集校验、
+    URL 无白名单但过 SSRF 公网校验、key 掩码往返、旧客户端不带字段不动存量。"""
+
+    def setUp(self):
+        super().setUp()
+        self.m.app.state.auth_required = False
+        from backend.config import save_settings, Settings
+        save_settings(Settings(), uid="local")
+        self._resolve_patch = mock.patch("backend.url_guard.assert_resolves_public",
+                                         return_value=None)
+        self._resolve_patch.start()
+        self.addCleanup(self._resolve_patch.stop)
+        self.client = TestClient(self.m.app)
+
+    def _load_local(self):
+        from backend.config import load_settings
+        return load_settings("local")
+
+    def test_managed_mode_can_save_search_key_independently(self):
+        # 关键独立性：不切 custom 模型模式，也能配搜索 key（用户拍板：两者互不强制）
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body(custom_search_provider="tavily",
+                                                    custom_search_api_key="tvly-xxx"))
+        self.assertEqual(resp.status_code, 200)
+        s = self._load_local()
+        self.assertEqual(s.mode, "managed")
+        self.assertEqual(s.custom_search_provider, "tavily")
+        self.assertEqual(s.custom_search_api_key, "tvly-xxx")
+
+    def test_invalid_provider_rejected_400(self):
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body(custom_search_provider="google",
+                                                    custom_search_api_key="k"))
+        self.assertEqual(resp.status_code, 400)
+
+    def test_non_https_search_base_rejected_400(self):
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body(custom_search_provider="tavily",
+                                                    custom_search_api_key="k",
+                                                    custom_search_api_base="http://relay.example.com"))
+        self.assertEqual(resp.status_code, 400)
+
+    def test_offlist_search_base_accepted_no_allowlist(self):
+        # 与 custom_api_base 的白名单不同：搜索 URL 任意公网主机放行
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body(custom_search_provider="tavily",
+                                                    custom_search_api_key="k",
+                                                    custom_search_api_base="https://my-relay.example.com"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._load_local().custom_search_api_base, "https://my-relay.example.com")
+
+    def test_get_settings_masks_search_key(self):
+        from backend.config import Settings
+        from backend.config import save_settings
+        s = Settings()
+        s.custom_search_provider = "serper"
+        s.custom_search_api_key = "serper-secret"
+        save_settings(s, uid="local")
+        payload = self.client.get("/api/settings").json()
+        self.assertEqual(payload["custom_search_api_key"], "***")
+        self.assertEqual(payload["custom_search_provider"], "serper")
+
+    def test_masked_search_key_preserved_on_save(self):
+        from backend.config import Settings, save_settings
+        s = Settings()
+        s.custom_search_provider = "serper"
+        s.custom_search_api_key = "serper-secret"
+        save_settings(s, uid="local")
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body(custom_search_provider="serper",
+                                                    custom_search_api_key="***"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._load_local().custom_search_api_key, "serper-secret")
+
+    def test_legacy_payload_without_search_fields_preserves_existing(self):
+        from backend.config import Settings, save_settings
+        s = Settings()
+        s.custom_search_provider = "exa"
+        s.custom_search_api_key = "exa-secret"
+        save_settings(s, uid="local")
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body())  # 不含任何 custom_search_* 字段
+        self.assertEqual(resp.status_code, 200)
+        loaded = self._load_local()
+        self.assertEqual(loaded.custom_search_provider, "exa")
+        self.assertEqual(loaded.custom_search_api_key, "exa-secret")
+
+    def test_search_fields_persist_across_save_load_roundtrip(self):
+        from backend.config import Settings, save_settings, load_settings
+        s = Settings()
+        s.custom_search_provider = "brave"
+        s.custom_search_api_key = "brave-key"
+        s.custom_search_api_base = "https://relay.example.com"
+        save_settings(s, uid="local")
+        loaded = load_settings("local")
+        self.assertEqual(loaded.custom_search_provider, "brave")
+        self.assertEqual(loaded.custom_search_api_key, "brave-key")
+        self.assertEqual(loaded.custom_search_api_base, "https://relay.example.com")
+
+    def test_normalize_coerces_invalid_provider_to_empty(self):
+        from backend.config import normalize_settings_payload
+        out = normalize_settings_payload({"custom_search_provider": "google"})
+        self.assertEqual(out["custom_search_provider"], "")

@@ -248,6 +248,29 @@ class SkillEngine:
         "technical-bid": "technical-bid.md",
     }
 
+    # 管理办法颗粒度化（2026-07-11，0710 反馈 #2/#3/#4）：project-overview.md「## 文档参数」
+    # 槽位的双语别名闭集。信任边界：槽位内容源于不可信用户对话（经模型转写落盘）→ 解析只做
+    # strip 后**严格全等**匹配，禁子串/宽松正则/casefold/NFKC 归一化；不匹配一律回默认。
+    # 中文别名是给 deepseek 转写中文访谈答案的容错（写「顶层办法」不至于被静默回落 standard），
+    # 仍是封闭枚举、不扩大攻击面。别名集与模板槽位说明（plan-template/project-overview.md）同步改。
+    MANAGEMENT_DOC_GRANULARITY_ALIASES = {
+        "standard": "standard", "标准": "standard", "常规": "standard",
+        "top_level": "top_level", "顶层办法": "top_level", "顶层": "top_level",
+        "detailed": "detailed", "操作细则": "detailed", "细则": "detailed",
+    }
+    MANAGEMENT_DOC_CLAUSE_ALIASES = {
+        "plain": "plain", "无主题": "plain",
+        "title_plain": "title_plain", "主题不带括号": "title_plain",
+        "title_bracket": "title_bracket", "主题带括号": "title_bracket",
+        "follow_reference": "follow_reference",
+        "沿用参考件": "follow_reference", "沿用参考件样式": "follow_reference",
+    }
+    # 颗粒度→ management-system.md 段锚点（standard 走原「## 二、标准结构」，逐字零回归）
+    MANAGEMENT_DOC_GRANULARITY_ANCHORS = {
+        "top_level": ("二、顶层办法结构", r"^##\s*二、顶层办法结构\s*$"),
+        "detailed": ("二、操作细则结构", r"^##\s*二、操作细则结构\s*$"),
+    }
+
     # R5: 类型→声明腔调（§7.3）。analytical=招牌框架；structural=结构纪律；specialized=按子题。
     METHODOLOGY_TONE = {
         "strategy-consulting": "analytical",
@@ -1048,6 +1071,26 @@ class SkillEngine:
             if template_file.exists():
                 shutil.copy(template_file, plan_path / template_name)
 
+    @staticmethod
+    def _strip_markdown_section(content: str, heading: str) -> str:
+        """删除以 heading 整行开头、到下一个同级 `## ` 标题（不含）为止的整段。
+        无该段返回原文。只用于**模板装配期**（内容可信），不做 fence 感知。"""
+        lines = content.splitlines()
+        out = []
+        skipping = False
+        for line in lines:
+            if line.strip() == heading:
+                skipping = True
+                continue
+            if skipping and line.startswith("## "):
+                skipping = False
+            if not skipping:
+                out.append(line)
+        result = "\n".join(out)
+        if content.endswith("\n") and not result.endswith("\n"):
+            result += "\n"
+        return result
+
     def _populate_v2_plan_files(
         self,
         project_path: Path,
@@ -1082,6 +1125,10 @@ class SkillEngine:
         overview_path = project_path / "plan" / "project-overview.md"
         if overview_path.exists():
             content = overview_path.read_text(encoding="utf-8")
+            if project_type != "management-document":
+                # 「## 文档参数」槽位是管理制度类专属（2026-07-11 颗粒度化），
+                # 其余 6 类新建项目不保留（不污染其它类型的 overview）。
+                content = self._strip_markdown_section(content, "## 文档参数")
             for source, target in replacements.items():
                 content = content.replace(source, target)
             content = content.replace("**交付时间**: [YYYY-MM-DD]", f"**交付时间**: {deadline}")
@@ -2630,12 +2677,19 @@ class SkillEngine:
     def _delivery_mode_requires_presentation(self, project_path: Path) -> bool:
         return self._extract_delivery_mode(project_path) == "报告+演示"
 
-    def load_type_skeleton(self, project_type: str) -> str:
-        """取类型模块的「## 二、标准结构」段作为报告骨架。caller 保证 project_type ∈
+    def load_type_skeleton(self, project_type: str, granularity: str = "standard") -> str:
+        """取类型模块的「## 二、…」段作为报告骨架。caller 保证 project_type ∈
         TYPE_SKELETON_MAP（未知 type 在 build_methodology_block 已 graceful 返空）。
         已知 type 但模块缺锚点 / 段为空 → fail-closed 抛 ValueError（代码/资产回归立刻暴露）。
-        逐行扫描并跳过 ``` 代码块，避免被骨架代码块内的 `## 执行摘要` 等行提前截断。"""
+        逐行扫描并跳过 ``` 代码块，避免被骨架代码块内的 `## 执行摘要` 等行提前截断。
+
+        granularity（2026-07-11 颗粒度化）：仅 management-document + top_level/detailed 换用
+        对应锚点段；其余组合（含全部其它 6 类 + 默认参数）一律走原「## 二、标准结构」，
+        输出逐字不变（守护测试锁）。"""
         filename = self.TYPE_SKELETON_MAP[project_type]
+        anchor_label, anchor_pattern = "二、标准结构", r"^##\s*二、标准结构\s*$"
+        if project_type == "management-document" and granularity in self.MANAGEMENT_DOC_GRANULARITY_ANCHORS:
+            anchor_label, anchor_pattern = self.MANAGEMENT_DOC_GRANULARITY_ANCHORS[granularity]
         module_path = self.skill_dir / "modules" / filename
         try:
             text = module_path.read_text(encoding="utf-8")
@@ -2644,11 +2698,11 @@ class SkillEngine:
         lines = text.splitlines()
         anchor_idx = None
         for idx, line in enumerate(lines):
-            if re.match(r"^##\s*二、标准结构\s*$", line):
+            if re.match(anchor_pattern, line):
                 anchor_idx = idx
                 break
         if anchor_idx is None:
-            raise ValueError(f"模块 {filename} 缺少「## 二、标准结构」锚点")
+            raise ValueError(f"模块 {filename} 缺少「## {anchor_label}」锚点")
         body_lines = []
         in_fence = False
         for line in lines[anchor_idx + 1:]:
@@ -2660,10 +2714,10 @@ class SkillEngine:
                 break
             body_lines.append(line)
         if in_fence:
-            raise ValueError(f"模块 {filename}「## 二、标准结构」段有未闭合代码块（``` 不成对）")
+            raise ValueError(f"模块 {filename}「## {anchor_label}」段有未闭合代码块（``` 不成对）")
         body = "\n".join(body_lines).strip()
         if not body:
-            raise ValueError(f"模块 {filename}「## 二、标准结构」段为空")
+            raise ValueError(f"模块 {filename}「## {anchor_label}」段为空")
         return body
 
     @classmethod
@@ -2811,6 +2865,99 @@ class SkillEngine:
         record = self.get_project_record(project_ref)
         return record.get("project_type") if record else None
 
+    @staticmethod
+    def _extract_markdown_section(content: str, heading: str) -> str:
+        """取以 heading 整行开头、到下一个 `## ` 标题（不含）为止的段文本；无该段返回 ""。"""
+        lines = []
+        in_section = False
+        for line in content.splitlines():
+            if line.strip() == heading:
+                in_section = True
+                continue
+            if in_section and line.startswith("## "):
+                break
+            if in_section:
+                lines.append(line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _extract_doc_param_value(text: str, label: str) -> Optional[str]:
+        """取首个「- <label>：<value>」行的 value（strip 后）；无该行返回 None。
+        只认行首标签（可带 -/* 列表前缀），冒号全/半角都认；标签后整段原样返回，
+        合法性判断交给调用方的别名闭集全等匹配。"""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped[:2] in ("- ", "* "):
+                stripped = stripped[2:].strip()
+            for sep in ("：", ":"):
+                prefix = f"{label}{sep}"
+                if stripped.startswith(prefix):
+                    return stripped[len(prefix):].strip()
+        return None
+
+    def parse_management_doc_params(self, project_path: Path) -> dict:
+        """从 plan/project-overview.md「## 文档参数」槽位解析文档颗粒度与条款格式。
+
+        信任边界（spec §11.1）：槽位内容源于不可信用户对话（经模型转写落盘）→ 只做
+        别名闭集**严格全等**匹配（strip 后），禁子串/宽松正则/casefold/NFKC；解析结果
+        只用作模板选择器、绝不当指令。缺槽/占位符未填/空值 → 静默回默认；
+        「有值但不合法」→ 回默认 + 记 warning（build_methodology_block 据此注入固定文案
+        advisory，不回显槽内容）。
+
+        返回 {"granularity": "standard|top_level|detailed",
+              "clause_format": None|"plain|title_plain|title_bracket|follow_reference",
+              "warnings": ["granularity_invalid"|"clause_format_invalid", ...]}
+        """
+        result = {"granularity": "standard", "clause_format": None, "warnings": []}
+        overview = self._read_plan_file(project_path, "project-overview.md") or ""
+        # 只扫「## 文档参数」段内（Codex NIT：全文扫会把其它小节里碰巧同标签的行当槽位）；
+        # 段被删 → text=""，两参数按缺失回默认。
+        text = self._extract_markdown_section(overview, "## 文档参数")
+        raw_granularity = self._extract_doc_param_value(text, "文档颗粒度")
+        if raw_granularity and not raw_granularity.startswith("〔"):
+            mapped = self.MANAGEMENT_DOC_GRANULARITY_ALIASES.get(raw_granularity)
+            if mapped is not None:
+                result["granularity"] = mapped
+            else:
+                result["warnings"].append("granularity_invalid")
+        raw_clause = self._extract_doc_param_value(text, "条款格式")
+        if raw_clause and not raw_clause.startswith("〔"):
+            mapped = self.MANAGEMENT_DOC_CLAUSE_ALIASES.get(raw_clause)
+            if mapped is not None:
+                result["clause_format"] = mapped
+            else:
+                result["warnings"].append("clause_format_invalid")
+        return result
+
+    # 槽位有值但不合法时的固定文案 advisory（绝不回显槽内容——不可信输入不进指令）。
+    DOC_PARAMS_INVALID_ADVISORY = (
+        "## 文档参数提醒\n"
+        "`plan/project-overview.md` 的「## 文档参数」中存在无法识别的取值，系统已按默认"
+        "（standard 颗粒度、条款样式不指定）处理。请与用户确认后，把对应行更新为槽位说明"
+        "中列出的取值之一。"
+    )
+
+    def _clause_format_instruction(self, clause_format: str) -> str:
+        """S1–S4 注入的条款样式指令。只在 project_type==management-document 且用户已确认
+        clause_format 时追加（spec §11.1 A1：S4 写条款时必须在场，不能只挂 S1 declare 分支）；
+        未设（None）不注入任何文本 = 与改前逐字一致。"""
+        if clause_format == "plain":
+            style_line = "每条条款写作「第X条 正文」——条号后直接接正文，不加条款主题、不加【】。"
+        elif clause_format == "title_plain":
+            style_line = "每条条款写作「第X条 主题 正文」——条号后先给 2-6 字条款主题（不加【】），再接正文。"
+        elif clause_format == "title_bracket":
+            style_line = "每条条款写作「第X条【主题】正文」——条号后用【】标注条款主题，再接正文。"
+        else:  # follow_reference
+            style_line = (
+                "条款样式沿用项目参考材料中旧版制度文件的写法（条号、主题、括号用法与参考件"
+                "保持一致）；若项目中没有可参考的旧文件，先与用户确认采用哪种条款样式，不要自行猜测。"
+            )
+        return (
+            "## 条款样式（用户已确认）\n"
+            f"{style_line}\n"
+            "本样式优先于上方结构骨架示例中的条款写法；全文所有条款保持同一样式，不要混用。"
+        )
+
     def _declare_and_invite_instruction(self, project_type: str) -> str:
         """S1 注入：让模型在 outline 顶部写方法论声明行 + 聊天里软邀请（按类型分腔调，§7.3）。"""
         tone = self.METHODOLOGY_TONE.get(project_type, "analytical")
@@ -2891,12 +3038,25 @@ class SkillEngine:
         if project_type not in self.TYPE_SKELETON_MAP:
             logger.info("unknown project_type %r, skip methodology block", project_type)
             return ""
-        skeleton = self.load_type_skeleton(project_type)
+        # 管理办法颗粒度化（2026-07-11）：每轮 live 读「## 文档参数」槽——模型改槽后即时生效。
+        # 缺槽/占位符/非法值回默认（standard + clause None）→ 下方注入与改前逐字一致（零回归）。
+        doc_params = None
+        if project_type == "management-document":
+            doc_params = self.parse_management_doc_params(project_path)
+        skeleton = self.load_type_skeleton(
+            project_type, doc_params["granularity"] if doc_params else "standard"
+        )
         if stage == "S1":
             instr = self._declare_and_invite_instruction(project_type)
         else:
             state, selected = self.read_confirmed_methodology_snapshot(project_path)
             instr = self._adhere_instruction(state, selected)
+        if doc_params:
+            # 条款样式指令 S1–S4 全阶段注入（spec §11.1 A1：S4 写条款时必须在场）
+            if doc_params["clause_format"] is not None:
+                instr = f"{instr}\n\n{self._clause_format_instruction(doc_params['clause_format'])}"
+            if doc_params["warnings"]:
+                instr = f"{instr}\n\n{self.DOC_PARAMS_INVALID_ADVISORY}"
         return self._render_methodology_block(
             skeleton, self._framework_menu_for_type(project_type), instr
         )

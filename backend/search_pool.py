@@ -234,16 +234,9 @@ class SearchRouter:
         cached: bool,
         native_fallback_used: bool,
     ) -> dict:
-        items = [self._item_to_dict(item) for item in provider_result.items]
-        return {
-            "status": "success",
-            "provider": provider_result.provider,
-            "cached": cached,
-            "native_fallback_used": native_fallback_used,
-            "items": items,
-            "result_type": provider_result.result_type,
-            "results": self._format_results(items, result_type=provider_result.result_type),
-        }
+        return build_provider_success_payload(
+            provider_result, cached=cached, native_fallback_used=native_fallback_used
+        )
 
     def _cache_result(self, query: str, project_id: str, payload: dict) -> None:
         self.state_store.put_cache(
@@ -294,12 +287,38 @@ class SearchRouter:
         return asdict(item)
 
     def _format_results(self, items: list[dict], *, result_type: str) -> str:
-        if result_type == "empty_result" or not items:
-            return "未找到相关信息"
-        lines = ["搜索结果："]
-        for index, item in enumerate(items[:5], start=1):
-            lines.append(f"{index}. {item['title']}")
-            lines.append(str(item.get("snippet", "")).strip() or "无摘要")
-            lines.append(f"链接: {item['url']}")
-            lines.append("")
-        return "\n".join(lines).strip()
+        return format_search_result_items(items, result_type=result_type)
+
+# ---- 模块级纯装配（自定义搜索 key 路径与池子路由共用，2026-07-11）----
+
+def format_search_result_items(items: list[dict], *, result_type: str) -> str:
+    if result_type == "empty_result" or not items:
+        return "未找到相关信息"
+    lines = ["搜索结果："]
+    for index, item in enumerate(items[:5], start=1):
+        lines.append(f"{index}. {item['title']}")
+        lines.append(str(item.get("snippet", "")).strip() or "无摘要")
+        lines.append(f"链接: {item['url']}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def build_provider_success_payload(
+    provider_result: ProviderSearchResult,
+    *,
+    cached: bool = False,
+    native_fallback_used: bool = False,
+) -> dict:
+    """把 ProviderSearchResult 装配成 web_search 工具结果契约（status/items/results…）。
+    池子路由（_build_success_result）与 chat.py 自定义搜索 key 直连路径共用，
+    保证两条路径对模型/前端的结果形状完全一致。"""
+    items = [asdict(item) for item in provider_result.items]
+    return {
+        "status": "success",
+        "provider": provider_result.provider,
+        "cached": cached,
+        "native_fallback_used": native_fallback_used,
+        "items": items,
+        "result_type": provider_result.result_type,
+        "results": format_search_result_items(items, result_type=provider_result.result_type),
+    }

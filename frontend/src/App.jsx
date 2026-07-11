@@ -15,6 +15,7 @@ import { clampWorkspaceWidth, computeWorkspaceWidth, parseStoredWorkspaceWidth }
 import { getInitialTheme, applyTheme, toggleTheme } from './utils/theme'
 import { isCoarsePointer } from './utils/deviceMode'
 import MobileShell from './components/MobileShell'
+import OnboardingTour from './components/OnboardingTour'
 
 const WORKSPACE_WIDTH_STORAGE_KEY = 'cra:workspaceWidth'
 
@@ -509,6 +510,12 @@ function App() {
           )}
         </div>
       </div>
+      )}
+      {/* 初次使用引导（终身一次）：严格 === false 才弹（老会话 /me 无该字段 → undefined 不弹，
+          fail-closed 不打扰）。onDone 用 {...prev} 更新 onboarded —— init effect 依赖仍是
+          [uid, must_change_password]，不会因此重挂主界面（黑屏雷区，见上方 effect 注释）。 */}
+      {authUser.onboarded === false && (
+        <OnboardingTour onDone={() => setAuthUser(prev => (prev ? { ...prev, onboarded: true } : prev))} />
       )}
     </ErrorBoundary>
   )

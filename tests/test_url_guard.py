@@ -123,3 +123,43 @@ class GuardedTransportTests(unittest.TestCase):
         self.addCleanup(client.close)
         with self.assertRaises(url_guard.SsrfBlockedError):
             client.get("http://api.openai.com/v1/models")
+
+
+class CustomSearchApiBaseTests(unittest.TestCase):
+    """自定义搜索 URL 校验（2026-07-11）：无域名白名单（用户拍板），
+    但保留 https + 无 userinfo + 解析公网（防多租户部署被当 SSRF 探针）。"""
+
+    def test_rejects_non_https(self):
+        with self.assertRaises(url_guard.SsrfBlockedError):
+            url_guard.validate_custom_search_api_base("http://search.example.com")
+
+    def test_rejects_userinfo(self):
+        with mock.patch("backend.url_guard.socket.getaddrinfo",
+                        return_value=[(2, 1, 6, "", ("1.2.3.4", 0))]):
+            with self.assertRaises(url_guard.SsrfBlockedError):
+                url_guard.validate_custom_search_api_base("https://u:p@search.example.com")
+
+    def test_rejects_bad_port(self):
+        with self.assertRaises(url_guard.SsrfBlockedError):
+            url_guard.validate_custom_search_api_base("https://search.example.com:bad")
+
+    def test_offlist_host_passes_no_allowlist(self):
+        # 与 validate_custom_api_base 的关键差异：任意公网主机放行（不查白名单）
+        with mock.patch("backend.url_guard.socket.getaddrinfo",
+                        return_value=[(2, 1, 6, "", ("1.2.3.4", 0))]):
+            self.assertEqual(
+                url_guard.validate_custom_search_api_base("https://my-relay.example.com "),
+                "https://my-relay.example.com",
+            )
+
+    def test_host_resolving_private_rejected(self):
+        for private_ip in ("10.0.0.9", "127.0.0.1", "169.254.169.254", "100.64.0.1"):
+            with self.subTest(ip=private_ip):
+                with mock.patch("backend.url_guard.socket.getaddrinfo",
+                                return_value=[(2, 1, 6, "", (private_ip, 0))]):
+                    with self.assertRaises(url_guard.SsrfBlockedError):
+                        url_guard.validate_custom_search_api_base("https://sneaky.example.com")
+
+    def test_missing_host_rejected(self):
+        with self.assertRaises(url_guard.SsrfBlockedError):
+            url_guard.validate_custom_search_api_base("https://")
