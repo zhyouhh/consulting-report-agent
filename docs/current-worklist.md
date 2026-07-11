@@ -9,7 +9,7 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
-最后更新：2026-07-11（**试用反馈 0710 批次（陈燕）✅ 四件套实施 + Codex 单轨审 2 轮 APPROVED（首轮挖出 2 BLOCKER 已修）+ commit 本地 main；⏳ 待部署 kr-web-01 + 真模型 GUI E2E**）：
+最后更新：2026-07-11（**试用反馈 0710 批次（陈燕）✅ 全收口：四件套实施 + Codex 单轨审 2 轮 APPROVED（首轮挖出 2 BLOCKER 已修）+ 部署 kr-web-01（第十笔）+ 真模型 GUI E2E 全过 + commit `9aacb82` + push origin + 服务器 git realign**）：
 
 **来源**：`feedback/试用反馈汇总0710-咨询报告助手.xlsx` 陈燕（序号 5）8 条反馈；spec `docs/superpowers/specs/2026-07-11-mgmt-doc-granularity-and-flowchart-layout-design.md`（Opus 设计 + Fable 实施期修订 §11：clause_format S1→S1-S4 接线修正 / 双语枚举别名 / 槽位自带说明 / B 纵向判据 7→5 / 横向 fit-text+兜底 / 失败文案去 process 建议）。四件套：
 
@@ -18,7 +18,9 @@
 3. **自定义搜索 key/URL**：per-uid settings 三字段（`custom_search_provider/api_key/api_base`）**与模型 mode 完全独立**；配置即绕过池子与全部限额、不入池子记账；`validate_custom_search_api_base` 无域名白名单但 https+公网；**自定义实例 `follow_redirects=False` + `trust_env=False`**（Codex BLOCKER：302 可打 metadata）；SettingsModal 独立段 + 掩码 key 三修复（Codex BLOCKER：切渠道清 key/切回恢复/停用保留）。**本地 `managed_search_pool.json` `per_turn_searches` 5→10——部署时服务器副本同改+重启**。兑现 0710 给郭红的书面回复。
 4. **初次使用引导（终身一次）**：`users.onboarded_at`（幂等 ALTER 迁移）+ `/me` `onboarded` + `POST /api/auth/onboarded`（幂等）；`OnboardingTour.jsx` 居中卡片 4 步（两壳通用），App 严格 `=== false` 门控、onDone 只翻 onboarded 字段（init effect 依赖雷区不动）；桌面 local 合成 true 不弹。兑现 0709/0710 反馈响应两次承诺的「加强初次使用引导」。
 
-**明确不做（陈燕 #1/#5/#7/#8）**：redline/diff 另立 spec（backlog）；导出格式预设超范围；引用防编造质量增强 backlog；#8 无崩溃证据（长耗时感知延迟，backlog）。**回归**：后端 1774 / 前端 582 / build 全绿。**部署清单（待执行）**：git push 后服务器 realign（或 file-push 后端 8 文件 + skill 模板 2 文件）+ dist swap + `managed_search_pool.json` per_turn 10 + 重启（DB 迁移启动自动）；部署后跑真模型 GUI E2E（流程图 + 管理办法访谈 + 图表 worklist 旧待办一并验）。
+**明确不做（陈燕 #1/#5/#7/#8）**：redline/diff 另立 spec（backlog）；导出格式预设超范围；引用防编造质量增强 backlog；#8 无崩溃证据（长耗时感知延迟，backlog）。**回归**：后端 1774 / 前端 582 / build 全绿。
+
+**部署（第十笔，2026-07-11 已完成）**：file-push 12 文件（sha256 全核验）+ dist swap bundle `index-BbWuMF6t.js` + **服务器 `managed_search_pool.json` per_turn_searches 5→10**（gitignored 配置，两侧手改）+ systemd 重启（`users.onboarded_at` 迁移启动自动）；回滚点 `/opt/cra-rollback-20260711/` + `dist.old`；公网 smoke 过。**真模型 GUI E2E 全过**（test 账号）：引导 4 步终身一次闭环 / management-document 开场真问三参数 / deepseek 把槽位写成精确枚举 `top_level`+`title_bracket` / 设置页自定义搜索段停用不困（Codex BLOCKER 修复生产验证）/ 服务器端流程图纵向真渲染 + 13 层友好失败。**存量糊图不管**（用户拍板，PNG 不可变、下次重画自然走新布局）；**存量 14 用户下次访问各弹一次引导**（可跳过、终身一次）。**仍挂**：S4 真模型 create_diagram/create_chart 全链（需完整跑到 S4，与 07-10 图表旧待办同项）。
 
 最后更新：2026-07-10（**报告图表生成 ✅ 一次性实施 v2.0+v2.1 合并（spec 三处优化：砍 graphviz 换纯 Python 布局 / 无 cache-bust / 物理尺寸控图宽）+ ✅ 同日部署 kr-web-01（第九笔）**）：
 
