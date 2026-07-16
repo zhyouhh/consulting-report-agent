@@ -437,36 +437,81 @@ class ExportReviewableDraftTests(unittest.TestCase):
         self.assertEqual([p.name for p in self.out.glob("*")], ["report_draft_v1.docx"])
 
 
-def _min_docx_bytes():
-    """最小合法 docx（供固化产物校验测试用）：ZIP + 关键 part + 可解析 document.xml。"""
+_TOC_PLACEHOLDER_PARA = "\n".join(report_tools._TOC_FIELD_OPENXML.splitlines()[1:-1])
+
+
+def _toc_docx_bytes(
+    headings=(("Heading2", "执行摘要"), ("Heading2", "1. 项目背景"), ("Heading3", "1.1 客户概况")),
+    *,
+    with_placeholder=True,
+):
+    """带目录占位域 + Heading2-4 段落的最小 docx（贴 pandoc 输出形状：裸 <w:p>、
+    pStyle 空格自闭合、占位段 = _TOC_FIELD_OPENXML 原样透传、每个标题外围有 pandoc
+    自动生成的具名书签对——名字=标题文本去重、id 可达数百，codex NIT2）。"""
     import io
+    body = ['<w:p><w:pPr><w:pStyle w:val="TOCTitle" /></w:pPr><w:r><w:t>目　录</w:t></w:r></w:p>']
+    if with_placeholder:
+        body.append(_TOC_PLACEHOLDER_PARA)
+    seen_names: dict = {}
+    for i, (style, text) in enumerate(headings):
+        n = seen_names.get(text, 0)
+        seen_names[text] = n + 1
+        bm_name = text if n == 0 else f"{text}-{n}"  # pandoc 对重名标题的 -N 去重
+        bm_id = 200 + i
+        body.append(f'<w:bookmarkStart w:id="{bm_id}" w:name="{bm_name}" />')
+        body.append(
+            f'<w:p><w:pPr><w:pStyle w:val="{style}" /></w:pPr>'
+            f'<w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>'
+        )
+        body.append(f'<w:bookmarkEnd w:id="{bm_id}" />')
+        body.append("<w:p><w:pPr></w:pPr><w:r><w:t>正文内容。</w:t></w:r></w:p>")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr(
             "[Content_Types].xml",
             '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
         )
-        z.writestr("word/document.xml", f"<w:document {_W_NS}><w:body/></w:document>")
+        z.writestr(
+            "word/document.xml",
+            f"<w:document {_W_NS}><w:body>{''.join(body)}</w:body></w:document>",
+        )
+        z.writestr("word/settings.xml", f'<w:settings {_W_NS}><w:updateFields w:val="true"/></w:settings>')
+        z.writestr("word/media/chart.png", b"\x89PNG-fake-bytes")
     return buf.getvalue()
 
 
+def _oracle_json(entries):
+    import json
+    return json.dumps({"entries": entries}, ensure_ascii=False).encode("utf-8")
+
+
 class TocFixationTests(unittest.TestCase):
-    """目录固化（LibreOffice）：尽力而为、失败静默降级、绝不让导出报错。"""
+    """目录固化（LO=页码 oracle + Python 写 Word 原生形态目录）：尽力而为、失败静默降级、
+    绝不让导出报错；docx 本体绝不经 LO 导出回写。"""
 
     def setUp(self):
         import tempfile
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.docx = Path(self._tmp.name) / "x.docx"
-        self.docx.write_text("ORIGINAL")  # 占位内容，验证是否被替换
+        self.docx.write_text("ORIGINAL")  # 依赖缺失类测试用；oracle 路径测试写 fixture zip
         report_tools._uno_python_cache.clear()
         self.addCleanup(report_tools._uno_python_cache.clear)
 
+    def _write_fixture(self, **kw):
+        data = _toc_docx_bytes(**kw)
+        self.docx.write_bytes(data)
+        return data
+
+    def _read_doc_xml(self):
+        with zipfile.ZipFile(self.docx) as z:
+            return z.read("word/document.xml").decode("utf-8")
+
     def _fake_popen(self, *, rc=0, out_bytes=None, stderr="", timeout=False):
-        """构造 mock Popen：communicate 写 out.docx（argv[-2]）并返回 rc。"""
+        """构造 mock Popen：communicate 写 oracle JSON（argv[-2]）并返回 rc。"""
         def factory(cmd, **kw):
             m = mock.Mock()
-            out_path = Path(cmd[-2])  # argv: [py, script, soffice, IN, OUT, PROFILE]
+            out_path = Path(cmd[-2])  # argv: [py, script, soffice, IN, OUT.json, PROFILE]
 
             def communicate(timeout=None):
                 if timeout is not False and factory._raise_timeout:
@@ -506,38 +551,198 @@ class TocFixationTests(unittest.TestCase):
 
     @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
     @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
-    def test_success_replaces_docx_with_valid_output(self, m_lo, m_uno):
-        # 固化助手 argv 形状 + soffice 路径透传 + 合法 docx 产物才替换
+    def test_no_placeholder_or_no_headings_skips_before_helper(self, m_lo, m_uno):
+        # 没有目录占位域 / 没有正文标题：连 oracle 都不起，直接降级
+        with mock.patch("backend.report_tools.subprocess.Popen") as m_popen:
+            self._write_fixture(with_placeholder=False)
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+            self._write_fixture(headings=())
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+            m_popen.assert_not_called()
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_success_builds_word_style_static_toc(self, m_lo, m_uno):
+        self._write_fixture()
+        entries = [
+            {"text": "执行摘要", "page": 2},
+            {"text": "1. 项目背景", "page": 3},
+            {"text": "1.1 客户概况", "page": 3},
+        ]
         seen = {}
-        factory = self._fake_popen(rc=0, out_bytes=_min_docx_bytes())
+        factory = self._fake_popen(rc=0, out_bytes=_oracle_json(entries))
+
         def spy(cmd, **kw):
             seen["cmd"] = list(cmd)
             seen["kw"] = kw
             return factory(cmd, **kw)
+
         with mock.patch("backend.report_tools.subprocess.Popen", side_effect=spy):
             self.assertTrue(report_tools._fixate_toc_fields(self.docx))
+        # helper argv 形状 + soffice 路径透传（B4）+ 自成进程组（B1）
         self.assertEqual(seen["cmd"][0], "/usr/bin/python3")
-        self.assertEqual(seen["cmd"][2], "/usr/bin/soffice")  # B4：soffice 路径真传给 helper
-        self.assertTrue(seen["kw"].get("start_new_session"))  # B1：自成进程组才能 killpg
-        with zipfile.ZipFile(self.docx) as z:  # 已被合法 docx 替换
-            self.assertIn("word/document.xml", z.namelist())
+        self.assertEqual(seen["cmd"][2], "/usr/bin/soffice")
+        self.assertTrue(str(seen["cmd"][4]).endswith("toc.json"))
+        self.assertTrue(seen["kw"].get("start_new_session"))
+
+        doc = self._read_doc_xml()
+        from xml.etree import ElementTree as ET
+        ET.fromstring(doc)  # 手术后仍是合法 XML
+        # 占位提示语没了，换成 Word 原生形态静态条目
+        self.assertNotIn("（目录将在打开文档时自动更新）", doc)
+        self.assertIn('<w:hyperlink w:anchor="_Toc900000001" w:history="1">', doc)
+        self.assertIn(" PAGEREF _Toc900000001 \\h ", doc)
+        self.assertIn("<w:r><w:t>2</w:t></w:r>", doc)  # 页码静态可见（WPS 直接显示）
+        # _Toc 书签注入在标题段 pPr 之后（Word 跳转目标），id 避让 pandoc 已有书签
+        import re as _re
+        self.assertRegex(
+            doc,
+            r'</w:pPr><w:bookmarkStart w:id="\d+" w:name="_Toc900000001"/><w:bookmarkEnd w:id="\d+"/>',
+        )
+        # 书签体系整体合法（旧实现（LO 导出）的事故类型，codex NIT2）：
+        # id 全局唯一、名字全局唯一、每个 start 都有配对 end
+        starts = _re.findall(r'<w:bookmarkStart w:id="(\d+)" w:name="([^"]+)"', doc)
+        ids = [i for i, _ in starts]
+        names = [n for _, n in starts]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        self.assertEqual(len(names), len(set(names)), names)
+        self.assertEqual(sorted(ids), sorted(_re.findall(r'<w:bookmarkEnd w:id="(\d+)"', doc)))
+        # 层级映射与 Word F9 一致：H2→TOC1、H3→TOC2
+        self.assertIn('<w:pStyle w:val="TOC1"/>', doc)
+        self.assertIn('<w:pStyle w:val="TOC2"/>', doc)
+        # TOC 域壳保留（begin/instr/separate…end），指令保持我们的规范形态
+        self.assertIn(report_tools._TOC_INSTR, doc)
+        # 只动 document.xml：settings 的 updateFields 原样在（Word 打开仍整体重算）
+        with zipfile.ZipFile(self.docx) as z:
+            self.assertIn(b"updateFields", z.read("word/settings.xml"))
 
     @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
     @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
-    def test_corrupt_output_rejected_keeps_original(self, m_lo, m_uno):
-        # codex B3：rc=0 但产物不是合法 docx（纯文本）→ 拒绝、保留原 docx
-        factory = self._fake_popen(rc=0, out_bytes=b"not-a-docx")
+    def test_entry_display_text_comes_from_docx_heading(self, m_lo, m_uno):
+        # oracle 只供页码：LO 文本的空白差异（对账键容忍）不得漂进目录显示文本（codex NIT1）
+        self._write_fixture(headings=(("Heading2", "执行摘要"),))
+        entries = [{"text": "执 行 摘 要", "page": 2}]  # 空白差异，对账键相同
+        factory = self._fake_popen(rc=0, out_bytes=_oracle_json(entries))
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
+            self.assertTrue(report_tools._fixate_toc_fields(self.docx))
+        doc = self._read_doc_xml()
+        self.assertIn('<w:t xml:space="preserve">执行摘要</w:t>', doc)
+        self.assertNotIn("执 行 摘 要", doc)
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_zip_rewrite_failure_keeps_original_and_cleans_temp(self, m_lo, m_uno):
+        # 写回环节 OSError（磁盘满/占用）→ 降级不动原 docx、不留 temp（codex NIT3）
+        original = self._write_fixture()
+        entries = [
+            {"text": "执行摘要", "page": 2},
+            {"text": "1. 项目背景", "page": 3},
+            {"text": "1.1 客户概况", "page": 3},
+        ]
+        factory = self._fake_popen(rc=0, out_bytes=_oracle_json(entries))
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory), \
+             mock.patch("backend.report_tools.os.replace", side_effect=OSError("disk full")):
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+        self.assertEqual(self.docx.read_bytes(), original)
+        self.assertEqual([p.name for p in self.docx.parent.iterdir()], ["x.docx"])
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_non_document_parts_preserved_byte_identical(self, m_lo, m_uno):
+        # 手术只动 document.xml：media/settings 等其它 part 字节级原样（codex NIT3）
+        self._write_fixture()
+        with zipfile.ZipFile(self.docx) as z:
+            before = {n: z.read(n) for n in z.namelist() if n != "word/document.xml"}
+        entries = [
+            {"text": "执行摘要", "page": 2},
+            {"text": "1. 项目背景", "page": 3},
+            {"text": "1.1 客户概况", "page": 3},
+        ]
+        factory = self._fake_popen(rc=0, out_bytes=_oracle_json(entries))
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
+            self.assertTrue(report_tools._fixate_toc_fields(self.docx))
+        with zipfile.ZipFile(self.docx) as z:
+            after = {n: z.read(n) for n in z.namelist() if n != "word/document.xml"}
+        self.assertEqual(before, after)
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_duplicate_heading_texts_pair_in_order(self, m_lo, m_uno):
+        # 重名标题（多章都叫"小结"）按文档顺序逐条配对，各自锚到自己的 _Toc 书签
+        self._write_fixture(headings=(
+            ("Heading2", "总论"), ("Heading3", "小结"),
+            ("Heading2", "分论"), ("Heading3", "小结"),
+        ))
+        entries = [
+            {"text": "总论", "page": 2}, {"text": "小结", "page": 2},
+            {"text": "分论", "page": 3}, {"text": "小结", "page": 4},
+        ]
+        factory = self._fake_popen(rc=0, out_bytes=_oracle_json(entries))
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
+            self.assertTrue(report_tools._fixate_toc_fields(self.docx))
+        doc = self._read_doc_xml()
+        for n in range(1, 5):
+            self.assertIn(f'w:name="_Toc90000000{n}"', doc)
+        self.assertIn(" PAGEREF _Toc900000004 \\h ", doc)
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_count_mismatch_keeps_original(self, m_lo, m_uno):
+        # oracle 条目数 ≠ 正文标题数（如正文混入违规 H1 被 LO 收进目录）→ 降级不动 docx
+        original = self._write_fixture()
+        entries = [{"text": "执行摘要", "page": 2}, {"text": "1. 项目背景", "page": 3}]
+        factory = self._fake_popen(rc=0, out_bytes=_oracle_json(entries))
         with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
             self.assertFalse(report_tools._fixate_toc_fields(self.docx))
-        self.assertEqual(self.docx.read_text(), "ORIGINAL")
+        self.assertEqual(self.docx.read_bytes(), original)
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_text_mismatch_keeps_original(self, m_lo, m_uno):
+        original = self._write_fixture()
+        entries = [
+            {"text": "执行摘要", "page": 2},
+            {"text": "完全不同的标题", "page": 3},
+            {"text": "1.1 客户概况", "page": 3},
+        ]
+        factory = self._fake_popen(rc=0, out_bytes=_oracle_json(entries))
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+        self.assertEqual(self.docx.read_bytes(), original)
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_malformed_oracle_json_keeps_original(self, m_lo, m_uno):
+        original = self._write_fixture()
+        factory = self._fake_popen(rc=0, out_bytes=b"not json at all")
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+        self.assertEqual(self.docx.read_bytes(), original)
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_bad_page_values_keep_original(self, m_lo, m_uno):
+        # 页码 0 / 字符串 / bool 都 fail-closed：宁可降级也不写可疑页码
+        for bad_page in (0, "3", True, 100000):
+            original = self._write_fixture()
+            entries = [
+                {"text": "执行摘要", "page": bad_page},
+                {"text": "1. 项目背景", "page": 3},
+                {"text": "1.1 客户概况", "page": 3},
+            ]
+            factory = self._fake_popen(rc=0, out_bytes=_oracle_json(entries))
+            with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
+                self.assertFalse(report_tools._fixate_toc_fields(self.docx), bad_page)
+            self.assertEqual(self.docx.read_bytes(), original, bad_page)
 
     @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
     @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
     def test_nonzero_rc_keeps_original_and_cleans_work(self, m_lo, m_uno):
-        factory = self._fake_popen(rc=5, out_bytes=_min_docx_bytes(), stderr="boom")
+        original = self._write_fixture()
+        factory = self._fake_popen(rc=5, out_bytes=_oracle_json([]), stderr="boom")
         with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
             self.assertFalse(report_tools._fixate_toc_fields(self.docx))
-        self.assertEqual(self.docx.read_text(), "ORIGINAL")
+        self.assertEqual(self.docx.read_bytes(), original)
         # work 目录（cra-fixate-*）已 rmtree，无残留
         self.assertEqual([p.name for p in self.docx.parent.iterdir()], ["x.docx"])
 
@@ -545,20 +750,37 @@ class TocFixationTests(unittest.TestCase):
     @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
     @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
     def test_timeout_killpg_and_keeps_original(self, m_lo, m_uno, m_kill):
-        factory = self._fake_popen(rc=0, out_bytes=_min_docx_bytes(), timeout=True)
+        original = self._write_fixture()
+        factory = self._fake_popen(rc=0, out_bytes=_oracle_json([]), timeout=True)
         with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
             self.assertFalse(report_tools._fixate_toc_fields(self.docx))
         m_kill.assert_called()  # B1：超时必 killpg 整组（含 soffice 孙进程）
-        self.assertEqual(self.docx.read_text(), "ORIGINAL")
+        self.assertEqual(self.docx.read_bytes(), original)
         self.assertEqual([p.name for p in self.docx.parent.iterdir()], ["x.docx"])
 
     @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
     @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
     def test_never_raises_on_unexpected_error(self, m_lo, m_uno):
         # 兜底：Popen 本身抛（非 OSError/Timeout）也必须吞成 False、不影响导出
+        self._write_fixture()
         with mock.patch("backend.report_tools.subprocess.Popen", side_effect=RuntimeError("boom")):
             self.assertFalse(report_tools._fixate_toc_fields(self.docx))
-        self.assertEqual(self.docx.read_text(), "ORIGINAL")
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_surgery_producing_invalid_xml_degrades(self, m_lo, m_uno):
+        # 手术产物必须过 well-formed 校验，否则保留原 docx（防坏 XML 顶掉正常产物）
+        original = self._write_fixture()
+        entries = [
+            {"text": "执行摘要", "page": 2},
+            {"text": "1. 项目背景", "page": 3},
+            {"text": "1.1 客户概况", "page": 3},
+        ]
+        factory = self._fake_popen(rc=0, out_bytes=_oracle_json(entries))
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory), \
+             mock.patch("backend.report_tools._build_static_toc_xml", return_value="<broken"):
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+        self.assertEqual(self.docx.read_bytes(), original)
 
     def test_resolve_uno_python_positive_cache_only(self):
         report_tools._uno_python_cache.clear()
@@ -595,14 +817,6 @@ class TocFixationTests(unittest.TestCase):
             first = n["probes"]
             self.assertIsNone(report_tools._resolve_uno_python())
             self.assertGreater(n["probes"], first)  # 第二次又探测了（没缓存 None）
-
-    def test_looks_like_docx(self):
-        good = Path(self._tmp.name) / "good.docx"
-        good.write_bytes(_min_docx_bytes())
-        self.assertTrue(report_tools._looks_like_docx(good))
-        bad = Path(self._tmp.name) / "bad.docx"
-        bad.write_text("not a zip")
-        self.assertFalse(report_tools._looks_like_docx(bad))
 
 
 class ExportChartAssetTests(unittest.TestCase):

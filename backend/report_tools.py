@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -9,6 +10,7 @@ import tempfile
 import threading
 import zipfile
 from datetime import datetime, timedelta, timezone
+from html import unescape as html_unescape
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
@@ -34,10 +36,11 @@ _COVER_SUBTITLE = "可审草稿"
 # ⚠️ 全文允许的 raw openxml 只有这里与封面段落（可信常量）——正文侧一律中和（见
 # _neutralize_raw_openxml），否则恶意正文可注入 DDEAUTO/INCLUDE* 活动域并被
 # updateFields 自动执行。
-_TOC_FIELD_OPENXML = """```{=openxml}
+_TOC_INSTR = ' TOC \\o "2-4" \\h \\z \\u '
+_TOC_FIELD_OPENXML = f"""```{{=openxml}}
 <w:p>
   <w:r><w:fldChar w:fldCharType="begin" w:dirty="true"/></w:r>
-  <w:r><w:instrText xml:space="preserve"> TOC \\o "2-4" \\h \\z \\u </w:instrText></w:r>
+  <w:r><w:instrText xml:space="preserve">{_TOC_INSTR}</w:instrText></w:r>
   <w:r><w:fldChar w:fldCharType="separate"/></w:r>
   <w:r><w:t>（目录将在打开文档时自动更新）</w:t></w:r>
   <w:r><w:fldChar w:fldCharType="end"/></w:r>
@@ -77,10 +80,13 @@ def _resolve_reference_doc() -> Path | None:
 
 
 # 目录固化（WPS 不认 updateFields、不会打开时自动更新 TOC 域——见 CLAUDE.md 导出段）：
-# 若本机有 LibreOffice + 能 import uno 的 python，导出时用 lo_fixate.py 把 TOC 更新成
-# 静态条目+页码，Word/WPS 打开都零操作。缺任一 / 任何失败 → 跳过、保留 TOC 域（Word 仍自动
-# 更新、WPS 手动），导出永不因固化失败而报错。仅 web/服务器态（有 LibreOffice）；打包/Windows
-# 桌面态无 LibreOffice、直接跳过。
+# LibreOffice 只当「页码 oracle」——lo_fixate.py 在内存里更新目录、输出「条目文本+页码」
+# JSON；目录条目由本模块按 Word 自身生成目录的形态写回原始 docx（标题段注入 _Toc 书签 +
+# 条目 hyperlink w:anchor + PAGEREF 域缓存页码）。**绝不让 LO 重新导出 docx**：其导出回写
+# 会产生未闭合/重名书签、__RefHeading__ 私有锚点（WPS 点目录报「无法打开指定的文件」）、
+# 显式分页符叠加样式分页（目录后空白页+页码整体偏 1）、丢 updateFields（2026-07-17 实测）。
+# 缺依赖 / 对账不匹配 / 任何失败 → 跳过、保留 TOC 域（Word 仍自动更新、WPS 手动），导出
+# 永不因固化失败而报错。仅 web/服务器态（有 LibreOffice）；打包/Windows 桌面态直接跳过。
 _LO_FIXATE_SCRIPT = Path(__file__).with_name("lo_fixate.py")
 _LO_FIXATE_TIMEOUT_SECONDS = 90
 _uno_python_lock = threading.Lock()
@@ -123,20 +129,166 @@ def _resolve_uno_python() -> str | None:
         return None
 
 
-def _looks_like_docx(path: Path) -> bool:
-    """固化产物必须是合法 docx 才允许覆盖已 postprocess 的正常产物（codex B3）：
-    ZIP 可开 + CRC 无错 + 关键 part 齐 + document.xml 可解析。"""
+# pandoc 输出的标题段：<w:pStyle w:val="Heading2" />（带或不带空格自闭合都容）。
+_HEADING_PSTYLE_RE = re.compile(r'<w:pStyle w:val="Heading([2-4])"\s*/>')
+# 标题级别 → 目录条目样式：\o "2-4" 下 H2 是目录第 1 级（Word F9 同映射，模板只定义 TOC1-3）。
+_TOC_STYLE_BY_HEADING_LEVEL = {2: "TOC1", 3: "TOC2", 4: "TOC3"}
+# 我们自己生成的目录域占位段（_TOC_FIELD_OPENXML 经 pandoc 原样透传）：结构定位、全文唯一。
+_TOC_PLACEHOLDER_P_RE = re.compile(
+    r'<w:p>\s*'
+    r'<w:r><w:fldChar w:fldCharType="begin"[^>]*/></w:r>\s*'
+    r'<w:r><w:instrText[^>]*> TOC [^<]*</w:instrText></w:r>'
+    r'(?:(?!</w:p>).)*?</w:p>',
+    re.S,
+)
+
+
+def _scan_docx_headings(doc_xml: str) -> list[dict] | None:
+    """扫描 document.xml 中 Heading2-4 段落（文档顺序），返回每项
+    {level, text, insert_at}（insert_at = 段内 </w:pPr> 之后，_Toc 书签注入点）。
+    任何形状不符（段边界混入其它段落开启 / 缺 pPr）返回 None → 调用方降级。
+    刻意只扫 H2-4：正文若混入违规 H1，oracle（LO 索引 Level 无下限、会收 H1）条目数会
+    多出来 → 对账失败降级，正好挡住畸形输入。"""
+    headings: list[dict] = []
+    for m in _HEADING_PSTYLE_RE.finditer(doc_xml):
+        p_start = doc_xml.rfind("<w:p>", 0, m.start())
+        p_close = doc_xml.find("</w:p>", m.end())
+        if p_start < 0 or p_close < 0:
+            return None
+        para = doc_xml[p_start:p_close]
+        if re.search(r"<w:p[ >/]", para[1:]):
+            return None  # span 内再现段落开启标记 = 边界解析错，fail-closed
+        ppr_close = para.find("</w:pPr>")
+        if ppr_close < 0:
+            return None
+        text = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", para))
+        headings.append({
+            "level": int(m.group(1)),
+            "text": html_unescape(text),
+            "insert_at": p_start + ppr_close + len("</w:pPr>"),
+        })
+    return headings
+
+
+def _toc_match_key(text: str) -> str:
+    """docx 标题文本 vs oracle 条目文本的对账键：去全部空白（含 tab/不间断空格）。"""
+    return re.sub(r"\s+", "", text)
+
+
+def _parse_oracle_entries(out_json: Path) -> list[dict] | None:
+    """解析 lo_fixate.py 输出的 {"entries": [{"text", "page"}, ...]}；任何形状/取值
+    异常返回 None（fail-closed：宁可降级也不写可疑页码进目录）。"""
     try:
-        with zipfile.ZipFile(path) as z:
-            if z.testzip() is not None:
-                return False
-            names = set(z.namelist())
-            if "[Content_Types].xml" not in names or "word/document.xml" not in names:
-                return False
-            ET.fromstring(z.read("word/document.xml"))
-        return True
-    except (zipfile.BadZipFile, OSError, ET.ParseError, KeyError):
-        return False
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list) or not entries:
+        return None
+    parsed: list[dict] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            return None
+        text, page = item.get("text"), item.get("page")
+        if not isinstance(text, str) or isinstance(page, bool) or not isinstance(page, int):
+            return None
+        if not 1 <= page <= 9999:
+            return None
+        parsed.append({"text": text, "page": page})
+    return parsed
+
+
+def _build_static_toc_xml(entries: list[dict]) -> str:
+    """按 Word 自身更新目录的形态生成静态条目段落序列：TOC 域 begin/instr/separate 在
+    首段、end 在末段（域跨段，Word F9 同构）；每条 = hyperlink（w:anchor → 标题处 _Toc
+    书签，w:history 与 Word 一致）+ 右制表点线（TOC1-3 样式自带）+ PAGEREF 域缓存页码。
+    页码静态可见（WPS 直接显示、点击可跳转），Word 打开经 updateFields/w:dirty 照常整体
+    重算。entries 每项 {level, text, page, bookmark}。"""
+    paras: list[str] = []
+    last = len(entries) - 1
+    for i, entry in enumerate(entries):
+        style = _TOC_STYLE_BY_HEADING_LEVEL[entry["level"]]
+        text_xml = xml_escape(_sanitize_xml_text(entry["text"]))
+        bookmark = entry["bookmark"]
+        parts = [f'<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr>']
+        if i == 0:
+            parts.append(
+                '<w:r><w:fldChar w:fldCharType="begin" w:dirty="true"/></w:r>'
+                f'<w:r><w:instrText xml:space="preserve">{_TOC_INSTR}</w:instrText></w:r>'
+                '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            )
+        parts.append(
+            f'<w:hyperlink w:anchor="{bookmark}" w:history="1">'
+            f'<w:r><w:t xml:space="preserve">{text_xml}</w:t></w:r>'
+            '<w:r><w:tab/></w:r>'
+            '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+            f'<w:r><w:instrText xml:space="preserve"> PAGEREF {bookmark} \\h </w:instrText></w:r>'
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            f'<w:r><w:t>{entry["page"]}</w:t></w:r>'
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+            '</w:hyperlink>'
+        )
+        if i == last:
+            parts.append('<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+        parts.append('</w:p>')
+        paras.append("".join(parts))
+    return "".join(paras)
+
+
+def _apply_static_toc(
+    doc_xml: str,
+    placeholder_span: tuple[int, int],
+    headings: list[dict],
+    entries: list[dict],
+) -> str | None:
+    """document.xml 手术（纯字符串拼接，不整树重序列化——避免 ElementTree 丢未用命名空间
+    声明产坏 docx）：每个标题段注入唯一 _Toc 书签 + 占位目录段替换为静态条目段落序列。
+    书签重名等防御性异常返回 None → 调用方降级。"""
+    existing_ids = [int(x) for x in re.findall(r'<w:bookmarkStart w:id="(\d+)"', doc_xml)]
+    next_id = max(existing_ids, default=0) + 1
+    edits: list[tuple[int, int, str]] = []
+    toc_entries: list[dict] = []
+    for i, (heading, entry) in enumerate(zip(headings, entries)):
+        name = f"_Toc9{i + 1:08d}"
+        if name in doc_xml:
+            return None  # 不许重名书签（正常报告不可能命中，防御性）
+        bid = next_id + i
+        edits.append((
+            heading["insert_at"],
+            heading["insert_at"],
+            f'<w:bookmarkStart w:id="{bid}" w:name="{name}"/><w:bookmarkEnd w:id="{bid}"/>',
+        ))
+        toc_entries.append({
+            "level": heading["level"],
+            # 显示文本以 docx 标题原文为准——oracle（LO）只供页码，不让它的文本
+            # 归一化差异（空白等）漂进目录（codex NIT1）。
+            "text": heading["text"],
+            "page": entry["page"],
+            "bookmark": name,
+        })
+    edits.append((placeholder_span[0], placeholder_span[1], _build_static_toc_xml(toc_entries)))
+    edits.sort(key=lambda e: e[0], reverse=True)
+    out = doc_xml
+    for start, end, repl in edits:
+        out = out[:start] + repl + out[end:]
+    return out
+
+
+def _replace_docx_document_xml(docx_path: Path, new_doc_xml: bytes) -> None:
+    """把 docx 内 word/document.xml 换成 new_doc_xml（其余 part 原样透传），temp +
+    os.replace 原子写回。调用方保证 new_doc_xml 已过 well-formed 校验。"""
+    with zipfile.ZipFile(docx_path) as src:
+        entries = [(item, src.read(item.filename)) for item in src.infolist()]
+    fd, tmp_name = tempfile.mkstemp(dir=str(docx_path.parent), suffix=".docx")
+    try:
+        os.close(fd)
+        with zipfile.ZipFile(tmp_name, "w", zipfile.ZIP_DEFLATED) as out:
+            for item, data in entries:
+                out.writestr(item, new_doc_xml if item.filename == "word/document.xml" else data)
+        os.replace(tmp_name, docx_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def _terminate_process_group(proc: "subprocess.Popen") -> None:
@@ -170,11 +322,15 @@ def _warn_lo_unavailable_once(reason: str) -> None:
 
 
 def _fixate_toc_fields(docx_path: Path) -> bool:
-    """尽力而为地把 docx 目录固化成静态内容（原地替换 docx_path）。成功 True、否则 False。
-    **绝不抛异常**（best-effort，整个函数体被兜底 try 包住）：任何缺失/失败/超时/坏产物都
-    静默降级——保留原 docx（已是合法 postprocess 产物）、记 warning 日志、返回 False。
+    """尽力而为地把 docx 目录固化成静态条目+页码（原地更新 docx_path）。成功 True、否则 False。
+
+    机制（2026-07-17 重做）：lo_fixate.py 只当页码 oracle（LO 内存更新目录 → JSON），
+    目录条目由本函数按 Word 原生形态写回原始 docx——LO 的 docx 导出回写会产生 WPS 点不动
+    的私有锚点、空白分页页等硬伤（见模块注释）。docx 标题清单与 oracle 条目对账（数量+
+    逐条文本），任何不匹配/失败/超时/坏 JSON 都静默降级——保留原 docx（TOC 域，Word 打开
+    自动更新、WPS 手动），**绝不抛异常**、绝不影响导出成功。
     进程所有权（codex B1）：helper 以 start_new_session 自成进程组、超时 killpg 整组；
-    PROFILE_DIR + 输出 temp 都在本函数创建的 work 目录内、finally 统一 rmtree（含硬杀路径）。"""
+    PROFILE_DIR + oracle JSON 都在本函数创建的 work 目录内、finally 统一 rmtree（含硬杀路径）。"""
     try:
         if getattr(sys, "frozen", False) or sys.platform == "win32":
             return False  # 打包/Windows 态无 LibreOffice，跳过（保留 TOC 域，Word 自动更新）
@@ -189,16 +345,25 @@ def _fixate_toc_fields(docx_path: Path) -> bool:
             _warn_lo_unavailable_once("未检测到可用于 UNO 的 python")
             return False
 
+        with zipfile.ZipFile(docx_path) as z:
+            doc_xml = z.read("word/document.xml").decode("utf-8")
+        placeholders = list(_TOC_PLACEHOLDER_P_RE.finditer(doc_xml))
+        if len(placeholders) != 1:
+            return False  # 没有（或不止一个）目录域占位段：无从固化
+        headings = _scan_docx_headings(doc_xml)
+        if not headings:
+            return False  # 无标题/形状不符：目录本来就是空的，不折腾
+
         work: Path | None = None
         proc = None
         try:
             work = Path(tempfile.mkdtemp(dir=str(docx_path.parent), prefix="cra-fixate-"))
             profile_dir = work / "profile"
             profile_dir.mkdir()
-            out_docx = work / "fixed.docx"
+            out_json = work / "toc.json"
             proc = subprocess.Popen(
                 [uno_python, str(_LO_FIXATE_SCRIPT), soffice_bin,
-                 str(docx_path), str(out_docx), str(profile_dir)],
+                 str(docx_path), str(out_json), str(profile_dir)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 start_new_session=True,  # 自成进程组：超时能 killpg 连带 soffice 孙进程
             )
@@ -208,19 +373,37 @@ def _fixate_toc_fields(docx_path: Path) -> bool:
                 _terminate_process_group(proc)  # killpg + 有界 reap
                 logger.warning("目录固化超时（%ss），降级保留原 docx", _LO_FIXATE_TIMEOUT_SECONDS)
                 return False
-            if proc.returncode == 0 and out_docx.is_file() and _looks_like_docx(out_docx):
-                os.replace(out_docx, docx_path)
-                return True
-            logger.warning(
-                "目录固化失败（rc=%s），降级保留原 docx：%s",
-                proc.returncode, (stderr or "").strip()[:500],
-            )
-            return False
+            if proc.returncode != 0 or not out_json.is_file():
+                logger.warning(
+                    "目录固化失败（rc=%s），降级保留原 docx：%s",
+                    proc.returncode, (stderr or "").strip()[:500],
+                )
+                return False
+            entries = _parse_oracle_entries(out_json)
+            if entries is None or len(entries) != len(headings):
+                logger.warning(
+                    "目录固化对账失败（oracle 条目=%s，正文标题=%s），降级保留 TOC 域",
+                    "无效" if entries is None else len(entries), len(headings),
+                )
+                return False
+            for heading, entry in zip(headings, entries):
+                if _toc_match_key(heading["text"]) != _toc_match_key(entry["text"]):
+                    logger.warning(
+                        "目录固化条目文本不匹配（%r vs %r），降级保留 TOC 域",
+                        heading["text"][:50], entry["text"][:50],
+                    )
+                    return False
+            new_doc_xml = _apply_static_toc(doc_xml, placeholders[0].span(), headings, entries)
+            if new_doc_xml is None:
+                return False
+            ET.fromstring(new_doc_xml)  # 手术后必须仍是合法 XML，否则降级保留原 docx
+            _replace_docx_document_xml(docx_path, new_doc_xml.encode("utf-8"))
+            return True
         finally:
             if proc is not None and proc.poll() is None:
                 _terminate_process_group(proc)  # 兜底：任何未收掉的 helper/soffice
             if work is not None:
-                shutil.rmtree(work, ignore_errors=True)  # PROFILE_DIR + out temp 一并删
+                shutil.rmtree(work, ignore_errors=True)  # PROFILE_DIR + oracle JSON 一并删
     except Exception as exc:  # noqa: BLE001 — 固化是增强项，绝不让它崩掉导出
         logger.warning("目录固化异常，降级保留原 docx：%s", exc)
         return False
