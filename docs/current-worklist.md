@@ -9,7 +9,9 @@
 - **决策**：用户决定**先不杀、也不启动**（保留待定）。若日后重启，聚焦真实缺口 + 密度/缓存取舍，**别再按「读完即弃」错误前提做、也别做已作废的「分级保留」**。
 - **调研旁证**：opencode（`sst/opencode`）+ codex（`openai/codex`）都是「整条 thread 全留 + 溢出（~90%/上限）才压缩、无按消息类型分级保留」；且**信任边界 CRA 比两家都严**（两家主循环不隔离工具输出，CRA 有 `ATTACHMENT_DATA_*` 包裹 + 中和器）——若重启**勿 regress** 这层。
 
-最后更新：2026-07-16（**docx 导出排版模板 ✅ 实施 + Codex 2 轮审 APPROVED（首轮 4 BLOCKER 已修）+ 部署 kr-web-01（第十二笔）；待用户 Word/WPS 实机验收**）：
+最后更新：2026-07-16（**docx 导出排版模板 ✅ 实施 + Codex 2 轮审 APPROVED（首轮 4 BLOCKER 已修）+ 部署 kr-web-01（第十二笔）；用户实测 Word/WPS 格式 OK → 反馈「WPS 目录不自动更新」→ 追加 LibreOffice 目录固化 ✅ Codex 2 轮审 APPROVED + 部署重启**）：
+
+**目录固化 follow-up（2026-07-16 晚）**：用户 Windows 实测——Word/WPS 排版都不错，但 **Word 目录能自动更新、WPS 不能**（WPS 不认 `updateFields`、不会打开时自动更新 Word TOC 域，固有行为非 bug）。解法=导出时用服务器 LibreOffice（N6 附件转换已在用、非新依赖）把目录**固化成静态条目+页码**，Word/WPS 打开都零操作。实测：图表 PNG 字节级不变、表格宽度/封面/黑体/海军蓝/页脚动态页码域全保、目录页码正确静态化、零 soffice/temp 泄漏。新 `backend/lo_fixate.py`（独立 UNO 脚本、跨解释器子进程跑，backend venv 无 uno）+ `report_tools._fixate_toc_fields`（尽力而为、绝不抛、失败降级保留 TOC 域）。**Codex 首轮 4 BLOCKER**（超时孤儿 soffice+profile 泄漏 / best-effort 不彻底 / 非空≠合法 docx 可能覆盖正常产物 / libreoffice fallback 硬编码 soffice）全修（start_new_session+killpg 进程组所有权、外层兜底 try、`_looks_like_docx` 校验、soffice 路径透传）→ 二轮 APPROVED。仅 web/服务器态；桌面打包态 frozen 直接跳过（保留 TOC 域、Word 自动更新、WPS 手动）。硬约束记 CLAUDE.md「## docx 导出排版模板」→「### 目录固化」段。后端 1813 passed。**部署**：file-push report_tools+lo_fixate（sha256 双侧核验）+ 重启（本次首次真重启服务，前面 file-push 只为测试）；回滚点 `/opt/cra-rollback-20260716/`（含 `report_tools.py.pre-fixate`）。**待办**：用户 Windows 实机复验固化后的目录（WPS 应无需手动更新即显示完整目录页码）。
 
 **动机**：导出 docx 一直是裸 pandoc 零样式（"可审草稿"观感糙）；用户想起的 skill 经调研确认为 `Achuan-2/pandoc_docx_template`（980★，pandoc `--reference-doc` + 中文模板）——**该仓库无 license 不能打包分发其模板文件，机制照搬、模板自制**。范围决策（用户拍板）：通用咨询风自制单套模板 + 完整报告壳（封面/目录/页眉页脚页码）+ Word/WPS 双兼容；多套预设（陈燕 #5 导出格式预设）留二期。
 

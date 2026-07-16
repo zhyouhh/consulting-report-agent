@@ -502,7 +502,16 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - **导出后处理**（`_postprocess_docx`，zip 重写、逐 `infolist()` 保留 ZipInfo、重复 part 名拒绝）：页眉 `{{REPORT_TITLE}}` 占位替换（与生成器 `HEADER_TITLE_PLACEHOLDER` 常量一致）+ settings `updateFields` 兜底（模板已带、pandoc 会透传，这是防 pandoc 版本回退的双保险）+ pandoc 写死的 `<w:tblW w:type="auto">` → `pct 5000` 表格拉满行宽（模板样式盖不动它；正则不命中=优雅退化 auto 宽）。
 - **降级路径**：模板缺失（部署遗漏）→ 不带 `--reference-doc` 导出 + 结果文案提示「基础样式」，不阻断。
 - **打包/部署**：spec datas `('templates/docx','templates/docx')`（`DocxTemplatePackagingTests` 锁死）；kr-web-01 已部署（服务器 pandoc 3.1.11，tblW 正则实测命中；回滚点 `/opt/cra-rollback-20260716/`）。多套模板预设（陈燕 #5 导出格式预设）留二期——加新模板=新 docx 进 `templates/docx/` + 导出参数化。
-- **回归**：`tests/test_report_tools.py`（预处理对抗/中和/净化/temp 清理/真 pandoc E2E 含恶意域断言）+ `test_packaging_spec.py::DocxTemplatePackagingTests`；模板完整性测试锁 CRC/全 XML well-formed/rels 断链。**待办**：用户 Windows 实机验收（Word + WPS，重点：表头底纹、目录域更新、封面 spacing、列表圆点）；Windows 打包烟测。
+- **回归**：`tests/test_report_tools.py`（预处理对抗/中和/净化/temp 清理/真 pandoc E2E 含恶意域断言）+ `test_packaging_spec.py::DocxTemplatePackagingTests`；模板完整性测试锁 CRC/全 XML well-formed/rels 断链。**待办**：用户 Windows 实机验收（Word + WPS，重点：表头底纹、封面 spacing、列表圆点）；Windows 打包烟测。
+
+### 目录固化（2026-07-16 follow-up，用户实测「WPS 目录不自动更新」→ 修 + Codex 2 轮审 APPROVED + 部署 kr-web-01）
+
+用户实测反馈：Word 打开目录自动更新、**WPS 不会**（WPS 不认 `updateFields` 标记、不会打开时自动更新 Word 的 TOC 域）。这是 WPS 固有行为、非 bug。解法=导出时用 LibreOffice 把目录**固化成静态条目+页码**，Word/WPS 打开都零操作。改导出固化 / LibreOffice 子进程前必读：
+
+- **`backend/lo_fixate.py`（独立脚本，跨解释器）**：`backend` venv 没装 `uno`，故走**子进程**用「能 import uno 的 python」（系统 python3 装了 python3-uno）跑：起 headless soffice（唯一 profile + 唯一空闲端口）→ UNO `getDocumentIndexes().update()` 更新所有 TOC 索引 → `storeToURL` 另存。**不 import backend 任何模块**。argv=`[SOFFICE_BIN, IN, OUT, PROFILE_DIR]`（soffice 路径由调用方传、**不硬编码 "soffice"**；PROFILE_DIR 由调用方建+删、脚本只用不删）。`cwd=PROFILE_DIR`（soffice 启动脚本会 cd 回启动 CWD，用可访问目录避免继承到不可访问 CWD 如 root 会话 `/root`）。
+- **`report_tools._fixate_toc_fields(docx_path)->bool`（尽力而为、绝不抛）**：`_postprocess_docx` 之后、`os.replace` 到终名之前调；成功与否只影响返回文案（固化成功=「目录页码已自动生成」；未固化=引导 WPS 用户「右键更新域 / F9」）。**硬约束（codex 首轮 4 BLOCKER，勿回退）**：① **进程所有权**——helper 以 `subprocess.Popen(..., start_new_session=True)` 自成进程组，`communicate(timeout=90)`；超时 `_terminate_process_group`（`os.killpg(proc.pid, SIGKILL)`，`start_new_session`→PGID==PID 免 getpgid 竞态 + 有界 `communicate` reap）连带杀 soffice 孙进程；PROFILE_DIR+输出 temp 都在本函数 `mkdtemp(prefix="cra-fixate-")` 的 work 目录内、`finally` 无条件 `rmtree`（含硬杀路径）。② **best-effort 彻底**——整个函数体外层 `try/except Exception→False`，绝不抛给导出主链路（`test_never_raises_on_unexpected_error` 锁）。③ **产物校验**——`_looks_like_docx`（ZipFile 可开+`testzip()` 无 CRC 错+含 `[Content_Types].xml`/`word/document.xml`+`document.xml` 可解析）通过才 `os.replace`，rc=0 但坏产物拒绝、保留原 docx（否则覆盖正常产物）。④ **soffice 路径透传**（B4）。`_resolve_uno_python` 加 `threading.Lock` single-flight + **只正缓存**（失败不缓存、下次重探，避免瞬态失败永久压住真实路径）；缺 LibreOffice/uno 去重 warning（`_warn_lo_unavailable_once`）。
+- **平台边界**：仅 web/服务器态生效（有 LibreOffice——N6 附件转换已在用，非新依赖）；**打包/Windows 桌面态 `_fixate_toc_fields` 首行 `sys.frozen or win32` 直接返 False**（无 LibreOffice，保留 TOC 域、Word 自动更新、WPS 手动）。`lo_fixate.py` 在 frozen 态永不执行故无需进 PyInstaller datas。实测保留：LibreOffice 固化保住封面/黑体/海军蓝/页脚**动态** PAGE 域/表格 pct 宽度，图表 PNG **字节级不变**（不重编码），目录条目+页码正确静态化；服务器端到端零 soffice/temp 泄漏。
+- **可调**：`CRA_LO_PYTHON`（指定 uno python）、`_LO_FIXATE_TIMEOUT_SECONDS=90`。**回归**：`tests/test_report_tools.py::TocFixationTests`（跳过条件/合法产物才替换/坏产物拒绝/rc!=0 保原+清 work/超时 killpg 保原/绝不抛/soffice 路径透传/正缓存命中+负不缓存/`_looks_like_docx`）+ 导出文案两分支。
 
 ## 试用反馈批次 0710（2026-07-11 实施 + Codex 单轨审 2 轮 APPROVED（首轮 2 BLOCKER 已修）+ 部署 kr-web-01 第十笔 + 真模型 GUI E2E 全过 + push origin）
 

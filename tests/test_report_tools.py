@@ -274,6 +274,10 @@ class ExportReviewableDraftTests(unittest.TestCase):
         self.out = Path(self._tmp.name) / "output"
         self.report = Path(self._tmp.name) / "report_draft_v1.md"
         self.report.write_text("# 测试报告\n\n正文。", encoding="utf-8")
+        # 默认禁用目录固化：让导出主链路测试与真实机器有无 LibreOffice 无关（固化单测另立）
+        p = mock.patch("backend.report_tools._resolve_libreoffice", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -323,6 +327,30 @@ class ExportReviewableDraftTests(unittest.TestCase):
         ref = Path(cmd[cmd.index("--reference-doc") + 1])
         self.assertEqual(ref.name, "consulting_v1.docx")
         self.assertIn("已套用标准咨询排版", res["output"])
+
+    @mock.patch("backend.report_tools._fixate_toc_fields", return_value=True)
+    @mock.patch("backend.report_tools._resolve_pandoc", return_value="/usr/bin/pandoc")
+    @mock.patch("backend.report_tools.subprocess.run")
+    def test_message_when_toc_fixated(self, m_run, m_pandoc, m_fix):
+        m_run.side_effect = lambda cmd, **kw: (
+            _write_min_docx(Path(cmd[cmd.index("-o") + 1])),
+            mock.Mock(returncode=0, stdout="", stderr=""))[1]
+        res = report_tools.export_reviewable_draft(str(self.report), str(self.out))
+        self.assertEqual(res["status"], "ok")
+        self.assertIn("目录页码已自动生成", res["output"])
+        self.assertNotIn("F9", res["output"])  # 固化成功不该再让用户手动更新
+
+    @mock.patch("backend.report_tools._resolve_pandoc", return_value="/usr/bin/pandoc")
+    @mock.patch("backend.report_tools.subprocess.run")
+    def test_message_when_not_fixated_guides_wps(self, m_run, m_pandoc):
+        # setUp 已禁 LibreOffice → 未固化分支：必须给 WPS 用户手动更新引导
+        m_run.side_effect = lambda cmd, **kw: (
+            _write_min_docx(Path(cmd[cmd.index("-o") + 1])),
+            mock.Mock(returncode=0, stdout="", stderr=""))[1]
+        res = report_tools.export_reviewable_draft(str(self.report), str(self.out))
+        self.assertEqual(res["status"], "ok")
+        self.assertIn("WPS", res["output"])
+        self.assertIn("更新域", res["output"])
 
     @mock.patch("backend.report_tools._resolve_reference_doc", return_value=None)
     @mock.patch("backend.report_tools._resolve_pandoc", return_value="/usr/bin/pandoc")
@@ -409,6 +437,174 @@ class ExportReviewableDraftTests(unittest.TestCase):
         self.assertEqual([p.name for p in self.out.glob("*")], ["report_draft_v1.docx"])
 
 
+def _min_docx_bytes():
+    """最小合法 docx（供固化产物校验测试用）：ZIP + 关键 part + 可解析 document.xml。"""
+    import io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        )
+        z.writestr("word/document.xml", f"<w:document {_W_NS}><w:body/></w:document>")
+    return buf.getvalue()
+
+
+class TocFixationTests(unittest.TestCase):
+    """目录固化（LibreOffice）：尽力而为、失败静默降级、绝不让导出报错。"""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.docx = Path(self._tmp.name) / "x.docx"
+        self.docx.write_text("ORIGINAL")  # 占位内容，验证是否被替换
+        report_tools._uno_python_cache.clear()
+        self.addCleanup(report_tools._uno_python_cache.clear)
+
+    def _fake_popen(self, *, rc=0, out_bytes=None, stderr="", timeout=False):
+        """构造 mock Popen：communicate 写 out.docx（argv[-2]）并返回 rc。"""
+        def factory(cmd, **kw):
+            m = mock.Mock()
+            out_path = Path(cmd[-2])  # argv: [py, script, soffice, IN, OUT, PROFILE]
+
+            def communicate(timeout=None):
+                if timeout is not False and factory._raise_timeout:
+                    factory._raise_timeout = False
+                    raise subprocess.TimeoutExpired(cmd, 90)
+                if out_bytes is not None:
+                    out_path.write_bytes(out_bytes)
+                return ("", stderr)
+
+            m.communicate.side_effect = communicate
+            m.returncode = rc
+            m.poll.return_value = rc  # 已结束
+            m.pid = 4242
+            return m
+        factory._raise_timeout = timeout
+        return factory
+
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value=None)
+    def test_skip_when_no_libreoffice(self, m_lo):
+        with mock.patch("backend.report_tools.subprocess.Popen") as m_popen:
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+            m_popen.assert_not_called()  # 无 LibreOffice：连 helper 都不起
+        self.assertEqual(self.docx.read_text(), "ORIGINAL")
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value=None)
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_skip_when_no_uno_python(self, m_lo, m_uno):
+        self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+        self.assertEqual(self.docx.read_text(), "ORIGINAL")
+
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_frozen_skips_fixation(self, m_lo):
+        with mock.patch("backend.report_tools.sys") as m_sys:
+            m_sys.frozen = True
+            m_sys.platform = "linux"
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_success_replaces_docx_with_valid_output(self, m_lo, m_uno):
+        # 固化助手 argv 形状 + soffice 路径透传 + 合法 docx 产物才替换
+        seen = {}
+        factory = self._fake_popen(rc=0, out_bytes=_min_docx_bytes())
+        def spy(cmd, **kw):
+            seen["cmd"] = list(cmd)
+            seen["kw"] = kw
+            return factory(cmd, **kw)
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=spy):
+            self.assertTrue(report_tools._fixate_toc_fields(self.docx))
+        self.assertEqual(seen["cmd"][0], "/usr/bin/python3")
+        self.assertEqual(seen["cmd"][2], "/usr/bin/soffice")  # B4：soffice 路径真传给 helper
+        self.assertTrue(seen["kw"].get("start_new_session"))  # B1：自成进程组才能 killpg
+        with zipfile.ZipFile(self.docx) as z:  # 已被合法 docx 替换
+            self.assertIn("word/document.xml", z.namelist())
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_corrupt_output_rejected_keeps_original(self, m_lo, m_uno):
+        # codex B3：rc=0 但产物不是合法 docx（纯文本）→ 拒绝、保留原 docx
+        factory = self._fake_popen(rc=0, out_bytes=b"not-a-docx")
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+        self.assertEqual(self.docx.read_text(), "ORIGINAL")
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_nonzero_rc_keeps_original_and_cleans_work(self, m_lo, m_uno):
+        factory = self._fake_popen(rc=5, out_bytes=_min_docx_bytes(), stderr="boom")
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+        self.assertEqual(self.docx.read_text(), "ORIGINAL")
+        # work 目录（cra-fixate-*）已 rmtree，无残留
+        self.assertEqual([p.name for p in self.docx.parent.iterdir()], ["x.docx"])
+
+    @mock.patch("backend.report_tools._terminate_process_group")
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_timeout_killpg_and_keeps_original(self, m_lo, m_uno, m_kill):
+        factory = self._fake_popen(rc=0, out_bytes=_min_docx_bytes(), timeout=True)
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=factory):
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+        m_kill.assert_called()  # B1：超时必 killpg 整组（含 soffice 孙进程）
+        self.assertEqual(self.docx.read_text(), "ORIGINAL")
+        self.assertEqual([p.name for p in self.docx.parent.iterdir()], ["x.docx"])
+
+    @mock.patch("backend.report_tools._resolve_uno_python", return_value="/usr/bin/python3")
+    @mock.patch("backend.report_tools._resolve_libreoffice", return_value="/usr/bin/soffice")
+    def test_never_raises_on_unexpected_error(self, m_lo, m_uno):
+        # 兜底：Popen 本身抛（非 OSError/Timeout）也必须吞成 False、不影响导出
+        with mock.patch("backend.report_tools.subprocess.Popen", side_effect=RuntimeError("boom")):
+            self.assertFalse(report_tools._fixate_toc_fields(self.docx))
+        self.assertEqual(self.docx.read_text(), "ORIGINAL")
+
+    def test_resolve_uno_python_positive_cache_only(self):
+        report_tools._uno_python_cache.clear()
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            ok = cmd[0] == "/usr/bin/python3"  # 第一个候选失败，第二个成功
+            return mock.Mock(returncode=0 if ok else 1)
+
+        with mock.patch("backend.report_tools.shutil.which", return_value="/opt/venv/python3"), \
+             mock.patch("backend.report_tools.os.environ", {}), \
+             mock.patch("pathlib.Path.is_file", return_value=True), \
+             mock.patch("backend.report_tools.subprocess.run", side_effect=fake_run):
+            self.assertEqual(report_tools._resolve_uno_python(), "/usr/bin/python3")
+            calls.clear()
+            self.assertEqual(report_tools._resolve_uno_python(), "/usr/bin/python3")
+            self.assertEqual(calls, [])  # 正缓存命中，不再探测
+
+    def test_resolve_uno_python_negative_not_cached(self):
+        # 失败不缓存：下次仍探测（避免瞬态失败永久压住真实可用路径，codex NIT）
+        report_tools._uno_python_cache.clear()
+        n = {"probes": 0}
+
+        def fake_run(cmd, **kw):
+            n["probes"] += 1
+            return mock.Mock(returncode=1)  # 全部 import uno 失败
+
+        with mock.patch("backend.report_tools.shutil.which", return_value="/usr/bin/python3"), \
+             mock.patch("backend.report_tools.os.environ", {}), \
+             mock.patch("pathlib.Path.is_file", return_value=True), \
+             mock.patch("backend.report_tools.subprocess.run", side_effect=fake_run):
+            self.assertIsNone(report_tools._resolve_uno_python())
+            first = n["probes"]
+            self.assertIsNone(report_tools._resolve_uno_python())
+            self.assertGreater(n["probes"], first)  # 第二次又探测了（没缓存 None）
+
+    def test_looks_like_docx(self):
+        good = Path(self._tmp.name) / "good.docx"
+        good.write_bytes(_min_docx_bytes())
+        self.assertTrue(report_tools._looks_like_docx(good))
+        bad = Path(self._tmp.name) / "bad.docx"
+        bad.write_text("not a zip")
+        self.assertFalse(report_tools._looks_like_docx(bad))
+
+
 class ExportChartAssetTests(unittest.TestCase):
     """图表 spec §4.6：导出前 asset 硬校验 + --resource-path 嵌图。"""
 
@@ -420,6 +616,9 @@ class ExportChartAssetTests(unittest.TestCase):
         (self.content / "assets").mkdir(parents=True)
         self.out = Path(self._tmp.name) / "output"
         self.report = self.content / "report_draft_v1.md"
+        p = mock.patch("backend.report_tools._resolve_libreoffice", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
 
     @mock.patch("backend.report_tools._resolve_pandoc", return_value="/usr/bin/pandoc")
     @mock.patch("backend.report_tools.subprocess.run")
