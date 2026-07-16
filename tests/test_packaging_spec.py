@@ -89,3 +89,16 @@ class ChartPackagingTests(unittest.TestCase):
     def test_requirements_pin_matplotlib(self):
         content = (ROOT / "requirements.txt").read_text(encoding="utf-8")
         self.assertIn("matplotlib==", content)
+
+
+class DocxTemplatePackagingTests(unittest.TestCase):
+    def test_spec_bundles_docx_reference_template(self):
+        # 导出排版：reference-doc 模板必须进 datas，缺则打包态回落基础样式（观感回退）。
+        content = (ROOT / "consulting_report.spec").read_text(encoding="utf-8")
+        self.assertIn("('templates/docx', 'templates/docx')", content)
+
+    def test_repo_ships_docx_reference_template(self):
+        self.assertTrue(
+            (ROOT / "templates" / "docx" / "consulting_v1.docx").is_file(),
+            "templates/docx/consulting_v1.docx 缺失（用 scripts/build_docx_reference.py 生成）",
+        )

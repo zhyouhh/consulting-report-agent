@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目定位
 
-Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI 的同事，交付形态是 `dist\咨询报告助手\` 整个文件夹（不是裸 exe）。当前只承诺 Windows 分发和 `可审草稿` 导出，不承诺 macOS 正式支持和最终排版稿。
+Windows 优先的咨询报告写作桌面客户端。目标用户是不太懂 AI 的同事，交付形态是 `dist\咨询报告助手\` 整个文件夹（不是裸 exe）。当前只承诺 Windows 分发和 `可审草稿` 导出（2026-07-16 起可审草稿自带标准咨询排版壳——封面/目录/页眉页码，见「## docx 导出排版模板」段），不承诺 macOS 正式支持和最终排版稿。
 
 ## 运行时结构
 
@@ -491,6 +491,18 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - **前端**：`utils/assetUrl.js:resolveAssetSrc`（纯函数：仅 `assets/<name>.png` 相对引用重写到 `/api/projects/<pid>/assets/`，绝对/data:/根相对/子目录不动，防双重编码）；`FilePreviewPanel` `buildMarkdownComponents(projectId)` 工厂 + `useMemo`（勿退回模块级常量直连 `components=`，source-guard 锁）；`WorkspacePanel` 传 `projectId`。聊天气泡不渲染图（已知边界，spec 非目标）。
 - **字体是仓库资产**：`fonts/NotoSansCJKsc-{Regular,Bold}.otf` + OFL LICENSE（各 16MB）；PyInstaller `datas` 加 `('fonts','fonts')` + `collect_data_files('matplotlib')` + hiddenimport `matplotlib.backends.backend_agg`；`requirements.txt` 加 `matplotlib==3.11.0`。**部署 kr-web-01（2026-07-10 第九笔已完成）**：⚠️ 服务器 venv 是 uv 建的**没有 pip**——装依赖用 `/root/.local/bin/uv pip install --python /opt/consulting-report-agent/.venv/bin/python matplotlib==3.11.0`；fonts/ 随 git 走；matplotlib 字体缓存要以服务用户 `consulting` 预热一次（`sudo -u consulting … render_chart`，否则首次出图多付几秒建缓存）；无需装系统字体/graphviz。回滚点 `/opt/cra-rollback-20260710/backend/`（5 个旧后端文件；新增文件回滚时直接删）+ `frontend/dist.old`。
 - **回归**：`tests/test_chart_render.py`（全 kind/字体/超限/并发/source-guard）、`test_chart_assets.py`（扫描契约/清扫/原子写）、`test_main_api.py::ChartAssetApiTests`、`test_report_tools.py::ExportChartAssetTests`（含真 pandoc 嵌图 E2E，无 pandoc 自动跳过）、`test_chat_runtime.py::CreateVisualToolTests`（preflight/生成不计 mutation/token 预算/S0 拦截）、`test_independent_review.py`（第 6 维条件启用/无图逐字不变/锚点 5 个）、`test_packaging_spec.py::ChartPackagingTests`、前端 `assetUrl.test.mjs` + `filePreviewPanel.source` 追加。后端 1696 / 前端 577 / build 全绿。
+
+## docx 导出排版模板（2026-07-16 实施 + Codex 2 轮审 APPROVED（首轮 4 BLOCKER 已修）+ 部署 kr-web-01 第十二笔；待用户 Word/WPS 实机验收）
+
+可审草稿导出从裸 pandoc 升级为「reference-doc 模板 + 封面/目录/页眉页码」完整报告壳。**改导出链 / 模板 / 预处理 / 后处理前必读**：
+
+- **模板即代码**：`templates/docx/consulting_v1.docx` 由 `scripts/build_docx_reference.py` 生成入库（以 `pandoc --print-default-data-file reference.docx` 为底打 XML 补丁；需 pandoc ≥3，固定 zip 时间戳、同环境字节级可复现）。**调样式改脚本重新生成，勿手改产物**。样式：正文宋体小四 1.5 倍距首行缩进两字符（`firstLineChars` 挂 BodyText/FirstParagraph）、标题黑体分级海军蓝（Heading1/2 与 TOC Title 带 `pageBreakBefore`——**分页全靠样式，预处理不插分页符**，插会产生空白页）、三线表风表格 + 表头底纹（`tblStylePr firstRow`，依赖 pandoc 输出 `tblLook firstRow="1"`）、A4 左右 2.3cm（文字区 6.46in ≥ 6.4in 图表不溢出）、`titlePg` 封面无页眉页脚、`pgNumType start=0`（目录页=第 1 页）。**docDefaults 承载正文字体字号**（Normal 不设 sz）——表格样式的五号字才能生效，别把 sz 挪回 Normal。**不做标题自动编号**（骨架让模型手写 `## 1.` 编号，自动编号=双重编号）。
+- **导出预处理**（`report_tools.build_export_markdown` 纯函数）：`_split_leading_title` **只认首个非空行的 H1** 作封面标题（正文/代码块里的 `# ` 行绝不剥）；封面三段（标题/「可审草稿」/日期）走 **raw openxml 段落直引 styleId**（`_cover_paragraph_xml`）——**标题是不可信文本，绝不进 markdown 解析**（`:::`/`- `/`1. ` 行首结构会破 fenced div，codex 红队实证），只做 XML 转义一条规则；目录 = `TOC Title` div + 手工 TOC 域 `\o "2-4"`（不用 `--toc`，顺序才能是封面→目录→正文）。
+- **防注入三道（codex 首轮 4 BLOCKER，勿回退）**：① 正文过 `_neutralize_raw_openxml`（`{=openxml}` 属性含大小写/空白变体 → `{-openxml-}` 惰性化）——否则恶意正文可注入 `DDEAUTO`/`INCLUDE*` 活动域并被 updateFields 自动执行；**全文允许的 raw openxml 只有封面+TOC 两个可信常量块**；② `_sanitize_xml_text` 剥 XML 1.0 非法字符（NUL/控制符/孤立代理），在标题提取与 `_postprocess_docx` 双收口，改过的 part 先 `ET.fromstring` 校验再写回（坏 XML 不许顶掉旧终名）；③ temp 清理集中 `finally`（两个 mkstemp 都在 try 内、路径先记再 close；发布成功 `tmp_path=None`），**意外异常也先清 temp 再上抛**。
+- **导出后处理**（`_postprocess_docx`，zip 重写、逐 `infolist()` 保留 ZipInfo、重复 part 名拒绝）：页眉 `{{REPORT_TITLE}}` 占位替换（与生成器 `HEADER_TITLE_PLACEHOLDER` 常量一致）+ settings `updateFields` 兜底（模板已带、pandoc 会透传，这是防 pandoc 版本回退的双保险）+ pandoc 写死的 `<w:tblW w:type="auto">` → `pct 5000` 表格拉满行宽（模板样式盖不动它；正则不命中=优雅退化 auto 宽）。
+- **降级路径**：模板缺失（部署遗漏）→ 不带 `--reference-doc` 导出 + 结果文案提示「基础样式」，不阻断。
+- **打包/部署**：spec datas `('templates/docx','templates/docx')`（`DocxTemplatePackagingTests` 锁死）；kr-web-01 已部署（服务器 pandoc 3.1.11，tblW 正则实测命中；回滚点 `/opt/cra-rollback-20260716/`）。多套模板预设（陈燕 #5 导出格式预设）留二期——加新模板=新 docx 进 `templates/docx/` + 导出参数化。
+- **回归**：`tests/test_report_tools.py`（预处理对抗/中和/净化/temp 清理/真 pandoc E2E 含恶意域断言）+ `test_packaging_spec.py::DocxTemplatePackagingTests`；模板完整性测试锁 CRC/全 XML well-formed/rels 断链。**待办**：用户 Windows 实机验收（Word + WPS，重点：表头底纹、目录域更新、封面 spacing、列表圆点）；Windows 打包烟测。
 
 ## 试用反馈批次 0710（2026-07-11 实施 + Codex 单轨审 2 轮 APPROVED（首轮 2 BLOCKER 已修）+ 部署 kr-web-01 第十笔 + 真模型 GUI E2E 全过 + push origin）
 

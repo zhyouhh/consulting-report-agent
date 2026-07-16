@@ -18,6 +18,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 > ⚠️ **2026-07-09 试用反馈批次也未反映**：下方「S4 写正文工具」的 Turn-end 对账段已过时——**意图分类驱动的 canonical_obligation 整套（硬强制/权限解锁/义务快照/流缓冲）已删**，轮末只剩「声称 vs 实际」对账；system_trigger 现有 `independent_review_done`（禁工具）与 `project_created`（**带工具**的新建项目自动需求确认轮）两种；聊天区新增文件内链（pill/正文反引号文件名 → 文件 tab）。以 `CLAUDE.md`「## 试用反馈批次（2026-07-09）」段为准。
 >
 > ⚠️ **2026-07-10 报告图表生成也未反映**：新增 `create_chart`/`create_diagram` 工具（20 种图，matplotlib 渲染、纯 Python 布局零 graphviz 依赖）+ `content/assets/` 资产层 + `/api/projects/{id}/assets/{name}` 路由 + 导出前缺图硬校验 + S5 条件性第 6 审查维度 + 仓库 `fonts/` CJK 字体资产；新叶子模块 `chart_style/chart_limits/chart_render/diagram_render/chart_assets`。以 `CLAUDE.md`「## 报告图表生成」段为准。
+>
+> ⚠️ **2026-07-16 docx 导出排版模板也未反映**：可审草稿导出升级为 reference-doc 模板 + 封面/目录/页眉页码完整报告壳（`templates/docx/consulting_v1.docx` 由 `scripts/build_docx_reference.py` 生成入库；`report_tools.py` 预处理剥 H1 做封面 + 正文 raw openxml 中和防活动域注入 + 产物 zip 后处理）。以 `CLAUDE.md`「## docx 导出排版模板」段为准。
 
 ## 项目定位
 
