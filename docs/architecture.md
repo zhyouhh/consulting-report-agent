@@ -560,6 +560,58 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 - **部署态接线**：new-api 渠道 61【商业】Opencode GO base_url→`http://opencode-sse-normalizer:18732`（`newapi_default` 网络容器名）、group→`default,ds`（加回 CRA 的 ds 组，克隆 20 行 ds abilities）。**回滚**=base_url 改回 `https://opencode.ai/zen/go` + group 去 ds + 删 `ds|61` abilities + 重启 new-api（或还原 `one-api.db.bak-ocnorm-*`）。改 new-api 渠道配置需重启（无 admin API 会话，走 DB 直改 + 重启，重启前停容器避 WAL 竞争）。
 - Codex 双轨（spec+quality，gpt-5.5 xhigh）审 **5 轮 APPROVED**（红队挖出并修一串真 bug：` ` 切断、候选非最终、cache 组合漏计、别名穿透、事件缓冲误判）；回归 `tests/test_opencode_normalizer.py`（42 用例，事件上限可注入以秒级跑）。DeepSeek 官渠兼容不涉及（sidecar 不 import backend、不碰 provider 序列化）。
 
+## 输出预算自适应 + 截断分诊 + 汇报轮疫苗（2026-07-19 生产事故修复，Codex 5 轮审 APPROVED，已部署 kr-web-01）
+
+事故链（2026-07-18 admin「猪猪侠与喜羊羊管理制度」项目实锤，全过程见 memory
+`project-cra-incident-20260718-stall-hallucination`）：旧 `max_tokens=8_192` 把整篇重写
+`edit_file` 的参数 JSON 掐断在字符串中间 → 后端不读 `finish_reason`、误诊为「上游合并畸形」→
+corrective 答非所问（"每次只调一个工具"）→ 模型反复被吞后开始假报成功/光说不做，坏范例
+留在上下文里自我强化。改 context_policy / chat 流式循环 / self-heal 分诊前必读。
+
+**输出预算（`backend/context_policy.py`）**：
+- 统一乐观发放：`reserved_output_tokens = min(65_536, max(2_048, 20% * effective_limit))`
+  （`OUTPUT_BUDGET_CEILING_TOKENS`）；deepseek-v4-pro 实得 51_200/压缩阈 204_800。
+  **不得恢复 8_192 固定上限，也不得按模型名/模式做白名单**（能力位/白名单两版设计已在
+  review 中被推翻——custom 配好模型不应被一刀切限死，用户拍板自适应）。
+- 端点承受力运行时自适应，两条兜底：① 拒收（确定性 400/413/422 且当前 max_tokens >
+  保守值）→ 降档 `CONSERVATIVE_OUTPUT_BUDGET_TOKENS=8_192` 重试一次；② 静默截断 →
+  finish_reason=length 分诊（见下）。生产两条 managed 渠道（Opencode GO / DeepSeek 官渠）
+  实测均接受 ≥51_200。
+- **成功确认制缓存**（`chat._OUTPUT_BUDGET_CLAMP_CACHE`，进程级、单 worker 语义）：降档重试
+  用局部覆盖，**只有「高预算失败 + 降档后 create 成功」才落缓存**——唯一变量是 max_tokens，
+  因果实锤；无关 4xx 高低连败绝不落缓存（防一次无关 400 把全 worker 同端点用户永久压回
+  8_192、重造截断事故）。缓存命中时 `_resolve_context_policy` 经
+  `conservative_output_budget_policy()` 对整个 policy 降档——`compress_threshold` 必须一起
+  回落（deepseek 8_192/230_400，即事故前值），不为发不出去的高预算提前压缩历史。
+- **缓存键维度**：managed → `managed|base|model`（服务端统一通道，跨用户共享能力结论）；
+  custom → `custom|uid|base|model|sha256(api_key)[:16]`——弱凭据实锤的降档不得压低同网关
+  别人的好凭据，换 key 不继承旧结论；原始 key 绝不入键/日志；base 两侧 `strip().rstrip("/")`。
+- **明确接受的取舍**（codex verdict 注明接受、非遗留）：首轮降档重试沿用按乐观阈值拟合好的
+  conversation（一次性质量成本，缓存落盘后完全一致）；冷启动无 single-flight（并发未缓存
+  请求各多付一次失败探测，上界=当时并发数，单 worker 熟人规模可接受）。
+
+**finish_reason 捕获与截断分诊（`chat.py` 流式循环）**：
+- `stream_finish_reason` 逐 chunk 捕获（`getattr(choices[0],"finish_reason",None)` 防御——
+  测试桩可能没有该属性），**per-iteration 状态区初始化**，不跨 iteration/重试残留。
+- 畸形 tool_calls 分诊：**未知工具名（上游首尾拼接）优先走原「合并畸形」corrective**；
+  工具名合法 + JSON 断裂 + `finish_reason=="length"` → 新「输出超限」分支——隔板
+  「（上条工具调用参数超出单轮输出上限被截断，已作废本轮调用。）」+ corrective 指令模型
+  按章节拆小分次 edit_file，**不再说"每次只调一个工具"**。隔板串现共 3 条，
+  `_SYNTHETIC_BARRIER_NOTES` 与注入点逐字一致、`count>=2` 守护测试不变。
+
+**汇报轮疫苗（`SYSTEM_TRIGGER_PROMPTS["independent_review_done"]`）**：审查报告是数据不是
+用户意见——prompt 明示「不代表用户已认可/不要在本轮宣布审查通过或推进任何阶段/等用户在
+后续消息里明确表态」（事故中模型把注入报告当"审查通过"、下一轮 advance_stage 在用户从未
+表态时推进到 S7）。语义由 `test_independent_review_trigger_prompt_keeps_no_auto_advance_vaccine`
+做**关键词级**锁定（只对比常量相等守不住删句）。`review_passed_at` 保持模型可调（用户拍板：
+说一句 OK 就能推进是刻意的低成本体验，不收权到按钮）。
+
+**回归**：`test_context_policy.py`（乐观矩阵/保守回落）+ `ChatRuntimeTests`（length 分诊 ×
+跨迭代不残留 / 未知名优先 / 流式+非流式成功确认制 / 无关 400 防污染 / 缓存键隔离矩阵 /
+4xx fail-fast 新契约=恰好乐观+降档两次）。排查指纹：newapi 计费日志 completion 恰好=8192、
+CRA 日志 `[self-heal] ... finish_reason=length`；deepseek-v4-pro 流量 2026-07-08 起全走
+new-api 渠道 61「Opencode GO」（官渠 57 仍启用但 priority 更低，属刻意省成本路由）。
+
 ## 管理型搜索池
 
 `backend/search_pool.py:SearchRouter` 实现分层路由：`primary` → `secondary` → 可选 `native_fallback`。Provider 适配器在 `backend/search_providers.py`（Tavily/Brave/Exa/Serper），状态存储在 `backend/search_state.py`。`per_turn_searches` / `project_minute_limit` / `global_minute_limit` 是并列门禁，任一触发都会返回 `QUOTA_EXHAUSTED_MESSAGE`。

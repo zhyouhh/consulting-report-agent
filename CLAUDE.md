@@ -10,7 +10,8 @@
 - 当前待办只看 `docs/current-worklist.md`；已归档过程不要重新当成待办。
 - 改具体子系统前读 `docs/architecture.md` 对应章节；重大改动先在
   `docs/superpowers/specs/` / `plans/` 建 spec 与 plan。
-- 最新多项目并发批次见
+- 最新批次见 `docs/superpowers/cutover_report_2026-07-19_adaptive-output-budget.md`；
+  多项目并发批次见
   `docs/superpowers/cutover_report_2026-07-18_multi-project-concurrency-and-citation-hygiene.md`。
 
 ## 运行与数据边界
@@ -38,6 +39,12 @@
 - `system_notice` 只给用户可行动信息；模型自愈旁白写后台日志。硬错误才走用户可见 error。
 - provider 瞬态重试由 `backend/provider_retry.py` 管理；已有可见输出后禁止整轮重发，
   计费 response 必须 settle/close 恰好一次。
+- 输出预算统一乐观（`context_policy` 封顶 65_536、保守值 8_192），端点拒收走「降档重试+
+  成功确认制缓存」，custom 缓存键必须含 uid+凭据指纹；不得恢复 8_192 固定上限或按模型名/
+  模式建白名单。`finish_reason=length` 截断 ≠ 上游合并畸形：corrective 是「拆小修改」，
+  未知工具名优先走合并畸形分支。详见 `docs/architecture.md`「输出预算自适应」。
+- 审查汇报轮 prompt 必须保留「报告≠用户确认、本轮禁宣布通过/推进阶段」疫苗
+  （关键词级测试锁定）；`review_passed_at` 保持模型可调，不收权到按钮。
 
 ## S0–S7 工作流
 

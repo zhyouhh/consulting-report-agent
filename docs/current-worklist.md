@@ -3,7 +3,7 @@
 本文件只维护仍需行动的事项；完成记录归 `docs/worklist-history.md` 与
 `docs/superpowers/cutover_report_*.md`。新增条目必须写清优先级或触发条件，完成后移出本文件。
 
-最后核对：2026-07-18。
+最后核对：2026-07-19。
 
 ## 优先处理
 
@@ -29,6 +29,9 @@
   五维发现聚合，不提前做 map-reduce。
 - **ChatPanel 池淘汰**：当前会话内常驻。只有单会话项目数增长造成可观测内存问题时，再设计 LRU。
 - **计费 in-flight 预扣**：日额度当前是软帽；只有出现可观测并发超额时再引入 reserve。
+- **输出预算探测 single-flight**：降档缓存是成功确认制、进程级（见 architecture
+  「输出预算自适应」）；冷启动时并发进入的未缓存请求各多付一次高预算失败探测。仅当同一
+  弱端点冷启动并发探测成为可观测问题时，再加 per-key 协调。
 - **多 worker**：生产保持单进程单 worker。扩 worker 前必须先完成跨进程锁/共享状态，覆盖
   registry、materials、conversion refs、review store、登录限流、runtime host 与 quota 状态。
 - **上下文保留/压缩改造**：保留待定、未启动。现有 `conversation_state.json` 已把成功的

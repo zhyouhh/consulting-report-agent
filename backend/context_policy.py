@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 TIER_LIMITS = {
@@ -27,6 +27,16 @@ FAMILY_MODEL_TIERS = {
 UNKNOWN_FALLBACK_TIER = "tier_128k"
 MIN_EFFECTIVE_CONTEXT_LIMIT = 4_096
 
+# 输出预算：整篇重写类 tool_call（含 reasoning tokens）需要远超 8_192 的
+# max_tokens，8_192 会把参数 JSON 掐断在字符串中间（2026-07-18 生产事故）。
+# 策略层统一按 20% 规则乐观发放（封顶 65_536，生产两条 managed 渠道均实测接受
+# >=51_200）；端点实际承受力自适应处理，不在这里按模型名/模式做白名单：
+# - 端点拒收高 max_tokens（确定性 4xx）→ chat.py 降档到 CONSERVATIVE_OUTPUT_
+#   BUDGET_TOKENS 重试一次并按端点缓存，之后不再多付失败请求；
+# - 端点静默截断 → finish_reason=length 的「拆小修改」corrective 兜底。
+OUTPUT_BUDGET_CEILING_TOKENS = 65_536
+CONSERVATIVE_OUTPUT_BUDGET_TOKENS = 8_192
+
 
 @dataclass(frozen=True)
 class ResolvedContextPolicy:
@@ -46,12 +56,33 @@ def normalize_model_name(model_name: str) -> str:
 
 
 def calculate_context_thresholds(effective_context_limit: int) -> tuple[int, int]:
-    reserved_output_tokens = min(8_192, max(2_048, int(effective_context_limit * 0.2)))
+    reserved_output_tokens = min(
+        OUTPUT_BUDGET_CEILING_TOKENS,
+        max(2_048, int(effective_context_limit * 0.2)),
+    )
     compress_threshold = min(
         int(effective_context_limit * 0.9),
         effective_context_limit - reserved_output_tokens,
     )
     return reserved_output_tokens, compress_threshold
+
+
+def conservative_output_budget_policy(policy: ResolvedContextPolicy) -> ResolvedContextPolicy:
+    """已实锤拒收高输出预算的端点：预算与压缩阈值一起回到保守值。
+
+    compress_threshold 必须同步重算——继续用乐观预算算出的阈值会让长会话
+    为一个发不出去的高预算提前压缩历史。"""
+    if policy.reserved_output_tokens <= CONSERVATIVE_OUTPUT_BUDGET_TOKENS:
+        return policy
+    compress_threshold = min(
+        int(policy.effective_context_limit * 0.9),
+        policy.effective_context_limit - CONSERVATIVE_OUTPUT_BUDGET_TOKENS,
+    )
+    return replace(
+        policy,
+        reserved_output_tokens=CONSERVATIVE_OUTPUT_BUDGET_TOKENS,
+        compress_threshold=compress_threshold,
+    )
 
 
 def clamp_custom_context_limit_override(
@@ -73,7 +104,9 @@ def build_context_policy(
     effective_context_limit: int,
     resolution_source: str,
 ) -> ResolvedContextPolicy:
-    reserved_output_tokens, compress_threshold = calculate_context_thresholds(effective_context_limit)
+    reserved_output_tokens, compress_threshold = calculate_context_thresholds(
+        effective_context_limit,
+    )
     return ResolvedContextPolicy(
         normalized_model=normalized_model,
         provider_context_limit=provider_context_limit,

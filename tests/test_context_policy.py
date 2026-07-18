@@ -99,8 +99,52 @@ class ContextPolicyTests(unittest.TestCase):
     def test_threshold_helper_centralizes_reserved_and_compress_math(self):
         reserved_output_tokens, compress_threshold = calculate_context_thresholds(500_000)
 
-        self.assertEqual(reserved_output_tokens, 8_192)
-        self.assertEqual(compress_threshold, 450_000)
+        self.assertEqual(reserved_output_tokens, 65_536)
+        self.assertEqual(compress_threshold, 434_464)
+
+    def test_managed_deepseek_output_budget_covers_whole_doc_rewrites(self):
+        # 2026-07-18 生产事故回归：8_192 的输出预算会把整篇重写 tool_call 的参数
+        # JSON 掐断在字符串中间。默认 managed 模型必须拿到 20% 规则的完整预算，
+        # vendor 前缀归一化路径同样命中。
+        policy = resolve_context_policy("deepseek-v4-pro")
+
+        self.assertEqual(policy.reserved_output_tokens, 51_200)
+        self.assertEqual(policy.compress_threshold, 204_800)
+
+        prefixed = resolve_context_policy("deepseek/deepseek-v4-pro")
+        self.assertEqual(prefixed.reserved_output_tokens, 51_200)
+
+    def test_output_budget_is_uniformly_optimistic_with_runtime_clamp_fallback(self):
+        # 输出预算策略层不做模型/模式白名单——统一乐观发放（20% 规则、封顶
+        # 65_536），端点承受力由 chat.py 的降档重试自适应（拒收 4xx → 降到
+        # CONSERVATIVE_OUTPUT_BUDGET_TOKENS 并缓存端点）。这里锁两件事：
+        # 未知模型同样拿 20% 预算；保守降档常量保持 8_192 旧上限。
+        from backend.context_policy import (
+            CONSERVATIVE_OUTPUT_BUDGET_TOKENS,
+            OUTPUT_BUDGET_CEILING_TOKENS,
+        )
+
+        unknown = resolve_context_policy("totally-unknown-model")
+        self.assertEqual(unknown.reserved_output_tokens, 22_000)
+
+        self.assertEqual(CONSERVATIVE_OUTPUT_BUDGET_TOKENS, 8_192)
+        self.assertEqual(OUTPUT_BUDGET_CEILING_TOKENS, 65_536)
+
+    def test_conservative_output_budget_policy_restores_compress_threshold(self):
+        # 端点实锤降档后，compress_threshold 必须一起回保守值——不能沿用乐观
+        # 预算算出的更早压缩点（codex review NIT）。
+        from backend.context_policy import conservative_output_budget_policy
+
+        clamped = conservative_output_budget_policy(
+            resolve_context_policy("deepseek-v4-pro")
+        )
+        self.assertEqual(clamped.reserved_output_tokens, 8_192)
+        self.assertEqual(clamped.compress_threshold, 230_400)
+
+        already_low = resolve_context_policy("gpt-5.2", custom_effective_limit=4_096)
+        self.assertIs(
+            conservative_output_budget_policy(already_low), already_low
+        )
 
 
 if __name__ == "__main__":
