@@ -11,7 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from backend.skill import SkillEngine, UserWriteForbiddenError
+from backend.skill import (
+    SkillEngine,
+    StaleFileError,
+    UserWriteForbiddenError,
+    UserWriteStageError,
+)
 
 
 class SkillEngineTests(unittest.TestCase):
@@ -2385,14 +2390,55 @@ class SkillEngineTests(unittest.TestCase):
         self.assertEqual(engine.get_file_semantics("notes/random.md"),
                          {"group": "other", "stage": None, "editable": False})
 
+    def test_formal_content_write_gate_and_user_editability_share_stage_matrix(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+
+        for stage_code in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "done"):
+            expected_editable = stage_code in {"S4", "S5", "S6", "S7"}
+            with self.subTest(stage=stage_code), mock.patch.object(
+                engine, "_infer_stage_state", return_value={"stage_code": stage_code}
+            ):
+                guidance = engine.formal_content_write_block_guidance(pid)
+                self.assertEqual(guidance is None, expected_editable)
+                self.assertEqual(
+                    engine.is_user_editable(engine.REPORT_DRAFT_PATH, project_ref=pid),
+                    expected_editable,
+                )
+                self.assertEqual(
+                    engine.get_file_semantics(
+                        engine.REPORT_DRAFT_PATH, project_ref=pid
+                    )["editable"],
+                    expected_editable,
+                )
+                if expected_editable:
+                    self.assertEqual(
+                        engine.validate_user_write(pid, engine.REPORT_DRAFT_PATH),
+                        engine.REPORT_DRAFT_PATH,
+                    )
+                else:
+                    with self.assertRaises(UserWriteStageError):
+                        engine.validate_user_write(pid, engine.REPORT_DRAFT_PATH)
+
+        with mock.patch.object(
+            engine, "_infer_stage_state", return_value={"stage_code": "done"}
+        ):
+            self.assertIn("撤销交付归档", engine.formal_content_write_block_guidance(pid))
+            self.assertIn("S7", engine.formal_content_write_block_guidance(pid))
+
     def test_validate_user_write_allow_deny_traversal(self):
         self._make_project()
         engine = self.engine
         pid = engine.list_projects()[0]["id"]
         # allow：返回白名单 canonical（第一参数是 project_ref，会解析真实项目）
         self.assertEqual(engine.validate_user_write(pid, "plan/outline.md"), "plan/outline.md")
-        self.assertEqual(engine.validate_user_write(pid, "content/report_draft_v1.md"),
-                         "content/report_draft_v1.md")
+        with mock.patch.object(
+            engine, "formal_content_write_block_guidance", return_value=None
+        ):
+            self.assertEqual(engine.validate_user_write(pid, "content/report_draft_v1.md"),
+                             "content/report_draft_v1.md")
         # deny：非白名单 → UserWriteForbiddenError（审查报告 / 后端追踪 / 退役 / checkpoint / 未知）
         # 用专属异常而非内建 PermissionError，免与 os.replace 的文件占用 PermissionError 混淆。
         for path in [
@@ -2426,11 +2472,11 @@ class SkillEngineTests(unittest.TestCase):
         self.assertNotIn("plan/project-info.md", by_path)
         self.assertNotIn("materials/imported/outline.md", by_path)
 
-        # 正文：draft/S4/可编辑/mtime 是 str
+        # 项目仍在 S0：正文语义属于 S4，但当前阶段只读；mtime 是 str。
         draft = by_path["content/report_draft_v1.md"]
         self.assertEqual(draft["group"], "draft")
         self.assertEqual(draft["stage"], "S4")
-        self.assertTrue(draft["editable"])
+        self.assertFalse(draft["editable"])
         self.assertIsInstance(draft["mtime_ns"], str)
 
         # 重点阶段映射（create_project 已 scaffold 这些 plan 文件）
@@ -2467,6 +2513,215 @@ class SkillEngineTests(unittest.TestCase):
         self.assertEqual((project_dir / "plan" / "notes.md").read_text(encoding="utf-8"),
                          "原子写入的内容")
         self.assertEqual(list((project_dir / "plan").glob("*.tmp")), [])
+
+    def test_report_draft_first_write_has_no_snapshot_then_second_write_is_byte_exact(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        old_bytes = b"# Draft\r\n\r\n## One\nMixed newline\r\n"
+
+        engine.write_file(pid, engine.REPORT_DRAFT_PATH, old_bytes)
+        history_dir = project_dir / engine.REPORT_DRAFT_HISTORY_DIR
+        self.assertFalse(history_dir.exists())
+
+        engine.write_file(pid, engine.REPORT_DRAFT_PATH, b"# New draft\n")
+        snapshots = engine._enumerate_report_draft_snapshots(project_dir)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["path"].read_bytes(), old_bytes)
+
+    def test_report_draft_casefold_input_writes_only_canonical_path(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        canonical = project_dir / engine.REPORT_DRAFT_PATH
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_text("old", encoding="utf-8")
+
+        engine.write_file(pid, "content/Report_Draft_V1.MD", "new")
+
+        self.assertEqual(canonical.read_text(encoding="utf-8"), "new")
+        matching_names = [
+            path.name
+            for path in canonical.parent.iterdir()
+            if path.name.casefold() == "report_draft_v1.md"
+        ]
+        self.assertEqual(matching_names, ["report_draft_v1.md"])
+
+    def test_report_draft_snapshot_failure_is_fail_closed(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        draft = project_dir / engine.REPORT_DRAFT_PATH
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_bytes(b"old")
+
+        with mock.patch.object(
+            engine, "_snapshot_report_draft", side_effect=OSError("snapshot sentinel")
+        ):
+            with self.assertRaisesRegex(OSError, "snapshot sentinel"):
+                engine.write_file(pid, engine.REPORT_DRAFT_PATH, b"new")
+
+        self.assertEqual(draft.read_bytes(), b"old")
+
+    def test_report_draft_main_write_failure_removes_only_new_snapshot(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        draft = project_dir / engine.REPORT_DRAFT_PATH
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_bytes(b"current")
+        history = project_dir / engine.REPORT_DRAFT_HISTORY_DIR
+        history.mkdir(parents=True, exist_ok=True)
+        old = history / "report_draft_v1.20260718T010101000001.md"
+        old.write_bytes(b"real history")
+        before = {path.name: path.read_bytes() for path in history.iterdir()}
+        real_replace = os.replace
+
+        def fail_main_replace(src, dst):
+            if Path(dst) == draft:
+                raise OSError("main write sentinel")
+            return real_replace(src, dst)
+
+        with mock.patch("backend.skill.os.replace", side_effect=fail_main_replace):
+            with self.assertRaisesRegex(OSError, "main write sentinel"):
+                engine.write_file(pid, engine.REPORT_DRAFT_PATH, b"new")
+
+        after = {path.name: path.read_bytes() for path in history.iterdir()}
+        self.assertEqual(after, before)
+        self.assertEqual(draft.read_bytes(), b"current")
+
+    def test_report_draft_main_failure_preserves_original_error_when_snapshot_unlink_fails(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        draft = project_dir / engine.REPORT_DRAFT_PATH
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_bytes(b"current")
+        history = project_dir / engine.REPORT_DRAFT_HISTORY_DIR
+        history.mkdir(parents=True, exist_ok=True)
+        for index in range(40):
+            (history / f"report_draft_v1.20260718T010101{index:06d}.md").write_bytes(
+                f"history-{index}".encode()
+            )
+        old_names = {path.name for path in history.iterdir()}
+        real_replace = os.replace
+        real_unlink = Path.unlink
+
+        def fail_main_replace(src, dst):
+            if Path(dst) == draft:
+                raise OSError("main write sentinel")
+            return real_replace(src, dst)
+
+        def fail_new_snapshot_unlink(path, *args, **kwargs):
+            if path.parent == history and path.name not in old_names:
+                raise OSError("rollback unlink sentinel")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch("backend.skill.os.replace", side_effect=fail_main_replace), mock.patch(
+            "pathlib.Path.unlink", autospec=True, side_effect=fail_new_snapshot_unlink
+        ):
+            with self.assertRaisesRegex(OSError, "main write sentinel"):
+                engine.write_file(pid, engine.REPORT_DRAFT_PATH, b"new")
+
+        after_names = {path.name for path in history.iterdir()}
+        self.assertTrue(old_names.issubset(after_names))
+        self.assertEqual(len(after_names), 41)
+        self.assertEqual(draft.read_bytes(), b"current")
+
+    def test_report_draft_prunes_to_40_and_collision_ids_sort_numerically(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        draft = project_dir / engine.REPORT_DRAFT_PATH
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_bytes(b"v0")
+
+        with mock.patch.object(
+            engine, "_draft_snapshot_timestamp_token", return_value="20260718T010101000001"
+        ):
+            for index in range(11):
+                engine.write_file(pid, engine.REPORT_DRAFT_PATH, f"v{index + 1}".encode())
+        versions = engine._enumerate_report_draft_snapshots(project_dir)
+        self.assertEqual(versions[0]["id"], "20260718T010101000001-10")
+        self.assertEqual(versions[-1]["id"], "20260718T010101000001")
+
+        for index in range(40):
+            engine.write_file(pid, engine.REPORT_DRAFT_PATH, f"later-{index}".encode())
+        self.assertEqual(len(engine._enumerate_report_draft_snapshots(project_dir)), 40)
+
+    def test_report_draft_snapshot_parser_rejects_noncanonical_zero_sequence(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        history = project_dir / engine.REPORT_DRAFT_HISTORY_DIR
+        history.mkdir(parents=True, exist_ok=True)
+        (history / "report_draft_v1.20260718T010101000001.md").write_bytes(b"base")
+        (history / "report_draft_v1.20260718T010101000001-00.md").write_bytes(b"bad")
+
+        versions = engine._enumerate_report_draft_snapshots(project_dir)
+
+        self.assertEqual([item["id"] for item in versions], ["20260718T010101000001"])
+
+    def test_report_draft_prune_failure_does_not_reverse_successful_write(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        draft = project_dir / engine.REPORT_DRAFT_PATH
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_bytes(b"current")
+        history = project_dir / engine.REPORT_DRAFT_HISTORY_DIR
+        history.mkdir(parents=True, exist_ok=True)
+        for index in range(40):
+            (history / f"report_draft_v1.20260718T010101{index:06d}.md").write_bytes(
+                f"history-{index}".encode()
+            )
+        real_unlink = Path.unlink
+
+        def fail_history_unlink(path, *args, **kwargs):
+            if path.parent == history:
+                raise OSError("prune sentinel")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch(
+            "pathlib.Path.unlink", autospec=True, side_effect=fail_history_unlink
+        ), self.assertLogs("backend.skill", level="WARNING"):
+            engine.write_file(pid, engine.REPORT_DRAFT_PATH, b"new content")
+
+        self.assertEqual(draft.read_bytes(), b"new content")
+        self.assertEqual(len(engine._enumerate_report_draft_snapshots(project_dir)), 41)
+
+    def test_user_report_draft_snapshot_happens_only_after_mtime_cas(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        draft = project_dir / engine.REPORT_DRAFT_PATH
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_text("old", encoding="utf-8")
+        history = project_dir / engine.REPORT_DRAFT_HISTORY_DIR
+
+        with mock.patch.object(
+            engine, "formal_content_write_block_guidance", return_value=None
+        ):
+            with self.assertRaises(StaleFileError):
+                engine.user_write_file(pid, engine.REPORT_DRAFT_PATH, "stale", "0")
+            self.assertFalse(history.exists())
+
+            base = str(draft.stat().st_mtime_ns)
+            engine.user_write_file(pid, "content/Report_Draft_V1.MD", "saved", base)
+        self.assertEqual(draft.read_text(encoding="utf-8"), "saved")
+        self.assertEqual(len(engine._enumerate_report_draft_snapshots(project_dir)), 1)
+
+    def test_workspace_file_list_hides_draft_history(self):
+        project_dir = self._make_project()
+        engine = self.engine
+        pid = engine.list_projects()[0]["id"]
+        history = project_dir / engine.REPORT_DRAFT_HISTORY_DIR
+        history.mkdir(parents=True, exist_ok=True)
+        (history / "report_draft_v1.20260718T010101000001.md").write_text(
+            "secret old draft", encoding="utf-8"
+        )
+
+        paths = {item["path"] for item in engine.list_workspace_files(pid)}
+        self.assertFalse(any(".draft_history" in path for path in paths))
 
     def test_canonical_draft_edit_no_direct_write_text_in_chat(self):
         # R2 BLOCKER：canonical draft edit_file 不得再绕过原子 write_file 直接 draft_path.write_text。

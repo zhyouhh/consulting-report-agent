@@ -48,10 +48,6 @@ from .search_providers import (
     SerperProvider,
     TavilyProvider,
 )
-from .report_writing import (
-    detect_user_message_intent,
-    user_message_requests_full_rewrite,
-)
 from .search_state import SearchStateStore
 from .skill import SkillEngine
 from .tenant import tenant_project_key
@@ -459,7 +455,6 @@ class ChatHandler:
         "web_search": ("query",),
         "fetch_url": ("url",),
     }
-    NON_PLAN_WRITE_ALLOWED_STAGE_CODES = {"S4", "S5", "S6", "S7", "done"}
     QUALITY_HINT_TARGET_FILES = frozenset({"plan/data-log.md", "plan/analysis-notes.md"})
     QUALITY_HINT_STAGES = frozenset({"S2", "S3"})
     BACKEND_GENERATED_PLAN_PATHS = frozenset(
@@ -477,38 +472,10 @@ class ChatHandler:
         "output/final-report.md",
     })
     APPEND_REPORT_DRAFT_MIN_SUBSTANTIVE_CHARS = 80
-    REPORT_BODY_INSPECT_WORD_COUNT_KEYWORDS = (
-        "现在多少字",
-        "字数多少",
-        "当前多少字",
-        "看看字数",
-        "看看现在多少字",
-    )
-    REPORT_BODY_INSPECT_FILE_KEYWORDS = ("看看文件",)
-    CANONICAL_DRAFT_STAGE_GATE_MESSAGE = (
-        "当前轮次还不能开始写正文，请先确认大纲或明确说“继续写正文”。"
-    )
-    NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS = [
-        "继续",
-        "补充",
-        "完善",
-        "修改",
-        "调整",
-        "接着",
-        "扩写",
-        "续写",
-        "润色",
-        "改写",
-        "补写",
-        "丰富",
-    ]
     _S0_BLOCKED_PLAN_FILES = frozenset({
         "plan/outline.md",
         "plan/research-plan.md",
     })
-    _NEGATION_RE = re.compile(r"(不要|别|没|不是|不想|不|并非|非要|非得)[^。！？!?\n]{0,9}$")
-    _NEGATION_WINDOW_CHARS = 10
-
     def __init__(self, settings: Settings, skill_engine: SkillEngine, uid: str = "local"):
         self.uid = uid
         self.settings = settings
@@ -2164,6 +2131,17 @@ class ChatHandler:
                 "arguments": {},
                 "raw_arguments": arguments,
             }
+        if (
+            func_name == "restore_report_draft"
+            and result.get("status") == "success"
+            and result.get("mutated") is True
+        ):
+            return {
+                "path": self.skill_engine.REPORT_DRAFT_PATH,
+                "tool": "restore_report_draft",
+                "arguments": {},
+                "raw_arguments": arguments,
+            }
         if func_name not in {"write_file", "edit_file"} or result.get("status") != "success":
             return None
         try:
@@ -2523,29 +2501,6 @@ class ChatHandler:
         self._mutate_conversation_state(
             project_id,
             lambda state: {**state, "draft_followup_state": payload},
-        )
-
-    def _secondary_action_families_in_message(self, user_message: str) -> list[str]:
-        families: list[str] = []
-        mappings = (
-            ("export", ("导出",)),
-            ("inspect_file", self.REPORT_BODY_INSPECT_FILE_KEYWORDS),
-            ("inspect_word_count", self.REPORT_BODY_INSPECT_WORD_COUNT_KEYWORDS),
-        )
-        for family, keywords in mappings:
-            if self._phrase_hits(user_message, list(keywords)):
-                families.append(family)
-        return families
-
-    def _message_matches_priority7_inspect(self, user_message: str) -> bool:
-        return self._phrase_hits(
-            user_message,
-            [
-                *self.REPORT_BODY_INSPECT_WORD_COUNT_KEYWORDS,
-                "现在写到哪了",
-                "写到哪了",
-                *self.REPORT_BODY_INSPECT_FILE_KEYWORDS,
-            ],
         )
 
     def _extract_markdown_heading_nodes(self, draft_text: str) -> list[dict]:
@@ -3926,6 +3881,9 @@ class ChatHandler:
             if func_name == "append_report_draft":
                 source_keys.add(f"file:{self.skill_engine.REPORT_DRAFT_PATH}")
                 continue
+            if func_name == "restore_report_draft" and result.get("mutated") is True:
+                source_keys.add(f"file:{self.skill_engine.REPORT_DRAFT_PATH}")
+                continue
 
             extra = None
             metadata_func_name = func_name
@@ -4435,6 +4393,8 @@ class ChatHandler:
                     "description": (
                         "对已存在文件做精确字符串替换。已有文件先 `read_file`。"
                         "正文草稿的局部修改用 `edit_file`，不要用 `write_file` 覆盖。"
+                        "整篇重写时，`old_string` 只放草稿第一行 `# 标题`，"
+                        "`new_string` 放完整新稿。"
                     ),
                     "parameters": {
                         "type": "object",
@@ -4454,7 +4414,6 @@ class ChatHandler:
                     "description": (
                         "用于正文首次成稿或续写：`content/report_draft_v1.md` 不存在就创建，存在就追加到末尾。"
                         "正文已有文字要修改时改用 `read_file` + `edit_file`。"
-                        "混合意图里的导出、质量检查、看文件、看字数本轮只给下一步提示。"
                     ),
                     "parameters": {
                         "type": "object",
@@ -4465,6 +4424,26 @@ class ChatHandler:
                             },
                         },
                         "required": ["content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "restore_report_draft",
+                    "description": (
+                        "仅在用户要求恢复或撤销正文改动时使用。"
+                        "不带 version_id 调用可先获取近期可恢复版本列表。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "version_id": {
+                                "type": "string",
+                                "description": "要恢复的历史版本 id（不带参数调用可先获取版本列表）",
+                            },
+                        },
+                        "required": [],
                     },
                 },
             },
@@ -4797,7 +4776,6 @@ class ChatHandler:
 
         from backend.report_writing import (
             check_no_fetch_url_pending,
-            check_no_mixed_intent_in_turn,
             check_no_prior_canonical_mutation_in_turn,
             check_outline_confirmed,
             check_read_before_write_canonical_draft,
@@ -4835,15 +4813,6 @@ class ChatHandler:
                 and old_string.strip() == first_line
             )
             if is_full_rewrite_anchor or is_full_draft_anchor:
-                user_message = str(turn_context.get("user_message_text") or "")
-                if not user_message_requests_full_rewrite(user_message):
-                    return {
-                        "status": "error",
-                        "message": (
-                            "整篇重写需要明确用户说“整篇重写/全文重写/全部改写/推倒重来”。"
-                            "局部修改请用 ## 章节锚点；新增内容请用 append_report_draft。"
-                        ),
-                    }
                 canonical_action = "full_rewrite"
                 actual_old = draft_text
                 target_label = "<full draft>"
@@ -4851,9 +4820,9 @@ class ChatHandler:
                 return {
                     "status": "error",
                     "message": (
-                        "old_string 覆盖了从 # 标题开始的结构性范围。"
-                        "整篇重写请明确说“整篇/推倒/全文重写/重写整”；"
-                        "局部修改请用 ## 章节锚点或唯一文字片段。"
+                        "old_string 覆盖了从 # 标题开始的多章节范围，无法安全匹配。"
+                        "整篇重写：把 old_string 只设为草稿第一行 `# 标题`（单独一行），"
+                        "new_string 放完整新稿。局部修改：用 `## 章节标题` 锚点或唯一文字片段。"
                     ),
                 }
             else:
@@ -4861,18 +4830,18 @@ class ChatHandler:
                 if count != 1:
                     return {
                         "status": "error",
-                        "message": "old_string 必须在 draft 中唯一出现。",
+                        "message": (
+                            "old_string 必须在 draft 中唯一出现。"
+                            "可先 read_file 获取当前精确原文。"
+                        ),
                     }
                 canonical_action = "text_replace" if new_string else "text_delete"
                 actual_old = old_string
                 target_label = old_string.splitlines()[0][:50]
 
-        user_message = str(turn_context.get("user_message_text") or "")
-
         for err in (
             check_report_writing_stage(self.skill_engine, project_id),
             check_outline_confirmed(self.skill_engine, project_id),
-            check_no_mixed_intent_in_turn(self, user_message),
             check_no_prior_canonical_mutation_in_turn(turn_context),
             check_no_fetch_url_pending(turn_context),
         ):
@@ -4887,15 +4856,6 @@ class ChatHandler:
         )
         if err:
             return self._canonical_draft_tool_error_result(project_id, err)
-
-        if detect_user_message_intent(user_message) == "generative":
-            return {
-                "status": "error",
-                "message": (
-                    "用户消息看起来是想新增内容（起草/续写/写下一章），"
-                    "请用 append_report_draft；edit_file 只用于修改已有内容。"
-                ),
-            }
 
         if canonical_action == "full_rewrite":
             if not new_string.startswith("# "):
@@ -5056,6 +5016,10 @@ class ChatHandler:
                 return self._tool_append_report_draft(
                     project_id, content=args.get("content", ""),
                 )
+            if func_name == "restore_report_draft":
+                return self._tool_restore_report_draft(
+                    project_id, version_id=args.get("version_id"),
+                )
             if func_name == "read_file":
                 normalized_path = self.skill_engine.normalize_file_path(project_id, args["file_path"])
                 content = self.skill_engine.read_file(project_id, normalized_path)
@@ -5124,7 +5088,9 @@ class ChatHandler:
             return {"status": "error", "message": f"参数解析失败: {str(e)}"}
         except ValueError as e:
             logging.error(f"工具参数验证失败: {func_name}, 错误: {str(e)}")
-            if func_name in {"write_file", "edit_file"}:
+            if func_name in {
+                "write_file", "edit_file", "append_report_draft", "restore_report_draft",
+            }:
                 self._emit_system_notice_once(
                     category="write_blocked",
                     path=None,
@@ -5135,7 +5101,9 @@ class ChatHandler:
             return {"status": "error", "message": str(e)}
         except Exception as e:
             logging.error(f"工具执行异常: {func_name}, 错误: {str(e)}")
-            if func_name in {"write_file", "edit_file"}:
+            if func_name in {
+                "write_file", "edit_file", "append_report_draft", "restore_report_draft",
+            }:
                 self._emit_system_notice_once(
                     category="write_blocked",
                     path=None,
@@ -5143,6 +5111,13 @@ class ChatHandler:
                     user_action="请检查写入条件是否满足，然后重试。",
                     surface_to_user=False,
                 )
+            if func_name in {
+                "write_file", "edit_file", "append_report_draft", "restore_report_draft",
+            }:
+                return {
+                    "status": "error",
+                    "message": "正文写入失败，请检查项目文件是否可写并根据提示重试。",
+                }
             return {"status": "error", "message": f"工具执行失败: {str(e)}"}
 
     def _tool_advance_stage(
@@ -5283,21 +5258,158 @@ class ChatHandler:
         )
         return result
 
+    def _report_draft_version_list(self, project_path) -> list[dict]:
+        versions = []
+        for snapshot in self.skill_engine._enumerate_report_draft_snapshots(project_path):
+            item = {
+                "id": snapshot["id"],
+                "utc_ts": snapshot["utc_ts"],
+            }
+            try:
+                text = snapshot["path"].read_bytes().decode("utf-8", errors="strict")
+            except (OSError, UnicodeDecodeError):
+                item["readable"] = False
+            else:
+                first_line = text.splitlines()[0] if text.splitlines() else ""
+                item.update(
+                    {
+                        "readable": True,
+                        "word_count": self.skill_engine._count_words(text),
+                        "first_line": first_line[:120],
+                    }
+                )
+            versions.append(item)
+        return versions
+
+    def _tool_restore_report_draft(
+        self, project_id: str, version_id: object = None,
+    ) -> Dict:
+        project_path = self.skill_engine.get_project_path(project_id)
+        if not project_path:
+            return {"status": "error", "message": f"项目 {project_id} 不存在"}
+
+        if version_id is None or version_id == "":
+            return {
+                "status": "success",
+                "action": "list",
+                "mutated": False,
+                "versions": self._report_draft_version_list(project_path),
+            }
+        if not isinstance(version_id, str):
+            return {"status": "error", "message": "version_id 必须是字符串。"}
+
+        from backend.report_writing import (
+            check_no_prior_canonical_mutation_in_turn,
+            check_report_writing_stage,
+        )
+
+        for err in (
+            check_report_writing_stage(self.skill_engine, project_id),
+            check_no_prior_canonical_mutation_in_turn(self._turn_context),
+        ):
+            if err:
+                return self._canonical_draft_tool_error_result(project_id, err)
+
+        snapshots = self.skill_engine._enumerate_report_draft_snapshots(project_path)
+        by_id = {item["id"]: item for item in snapshots}
+        selected = by_id.get(version_id)
+        if selected is None:
+            available_ids = [item["id"] for item in snapshots]
+            available = "、".join(available_ids) if available_ids else "暂无可用版本"
+            return {
+                "status": "error",
+                "message": f"未找到该恢复版本。可用版本：{available}",
+                "versions": self._report_draft_version_list(project_path),
+            }
+
+        try:
+            restored_bytes = selected["path"].read_bytes()
+        except OSError:
+            return {
+                "status": "error",
+                "message": "该历史版本当前无法读取，请重新获取版本列表后选择其他版本。",
+            }
+        try:
+            restored_text = restored_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return {
+                "status": "error",
+                "message": "该历史版本内容已损坏，无法安全恢复；请选择其他版本。",
+            }
+
+        draft_path = project_path / self.skill_engine.REPORT_DRAFT_PATH
+        try:
+            old_bytes = draft_path.read_bytes() if draft_path.exists() else b""
+            old_text = old_bytes.decode("utf-8", errors="replace")
+            # Bytes are mandatory here: text writes can alter CRLF on Windows.
+            self.skill_engine.write_file(
+                project_id,
+                self.skill_engine.REPORT_DRAFT_PATH,
+                restored_bytes,
+            )
+        except OSError:
+            logging.exception("正文历史版本恢复写入失败: project_id=%s", project_id)
+            return {
+                "status": "error",
+                "message": "正文恢复写入失败，请检查项目文件是否可写后重试。",
+            }
+
+        mutation = {
+            "tool": "restore_report_draft",
+            "path": self.skill_engine.REPORT_DRAFT_PATH,
+            "canonical_action": "restore",
+            "target_label": version_id,
+            "old_len": len(old_text),
+            "new_len": len(restored_text),
+            "mtime_after": draft_path.stat().st_mtime,
+            "ts": time.time(),
+        }
+        mutations = self._turn_context.setdefault("canonical_draft_mutations", [])
+        if not isinstance(mutations, list):
+            mutations = []
+            self._turn_context["canonical_draft_mutations"] = mutations
+        mutations.append(mutation)
+
+        result = {
+            "status": "success",
+            "action": "restore",
+            "mutated": True,
+            "path": self.skill_engine.REPORT_DRAFT_PATH,
+            "version_id": version_id,
+            "word_count": self.skill_engine._count_words(restored_text),
+            "message": f"已恢复正文历史版本 {version_id}。",
+        }
+        progress_snapshot = self._canonical_draft_progress_snapshot(project_id)
+        result.update(self._canonical_draft_progress_response_payload(progress_snapshot))
+        self._persist_successful_tool_result(
+            project_id,
+            "restore_report_draft",
+            {"version_id": version_id},
+            result,
+            {
+                "normalized_path": self.skill_engine.REPORT_DRAFT_PATH,
+                "metadata_func_name": "write_file",
+                "metadata_args": {
+                    "file_path": self.skill_engine.REPORT_DRAFT_PATH,
+                    "content": restored_text,
+                },
+            },
+        )
+        return result
+
     def _tool_append_report_draft(
         self, project_id: str, content: str,
     ) -> Dict:
         """spec §2.1: append_report_draft 重构 — 校验从分散迁移到 inline."""
         from backend.report_writing import (
             check_report_writing_stage, check_outline_confirmed,
-            check_no_mixed_intent_in_turn, check_no_prior_canonical_mutation_in_turn,
+            check_no_prior_canonical_mutation_in_turn,
             check_no_fetch_url_pending, check_read_before_write_canonical_draft,
         )
-        user_message = self._turn_context.get("user_message_text") or ""
 
         for err in (
             check_report_writing_stage(self.skill_engine, project_id),
             check_outline_confirmed(self.skill_engine, project_id),
-            check_no_mixed_intent_in_turn(self, user_message),
             check_no_prior_canonical_mutation_in_turn(self._turn_context),
             check_no_fetch_url_pending(self._turn_context),
         ):
@@ -5316,18 +5428,6 @@ class ChatHandler:
         )
         if err:
             return {"status": "error", "message": err}
-
-        user_msg = self._turn_context.get("user_message_text", "") or ""
-        # 工具路由互拦仅在草稿已存在时有意义：没有草稿就让模型去 edit_file 一个不存在的
-        # 文件是死路（试用反馈截图实锤：S0 长需求含「优化」二字即被误判 modify）。
-        if draft_exists and detect_user_message_intent(user_msg) == "modify":
-            return {
-                "status": "error",
-                "message": (
-                    "用户消息看起来是想改已有内容；"
-                    "请用 edit_file 修改已有正文，append_report_draft 只用于起草或续写。"
-                ),
-            }
 
         result = self._do_append_report_draft(project_id, content)
         if result.get("status") == "success":
@@ -5368,7 +5468,7 @@ class ChatHandler:
         插入正文由模型经 append_report_draft / edit_file 完成（吃 R3 写门禁全套）；
         生成不算 canonical draft mutation、不预扣 mutation 名额。preflight 复用
         草稿写门禁里适用于生成的三道 pure helper（阶段 / 大纲 / fetch_url 证据门），
-        mixed-intent / mutation 限额 / read-before-write 是草稿写入的机械门禁，不套用。
+        mutation 限额 / read-before-write 是草稿写入的机械门禁，不套用。
         """
         from backend.report_writing import (
             check_report_writing_stage, check_outline_confirmed, check_no_fetch_url_pending,
@@ -5511,6 +5611,19 @@ class ChatHandler:
                 surface_to_user=False,
             )
             return {"status": "error", "message": reason}
+        if self.skill_engine.is_protected_stage_checkpoints_path(normalized_preview):
+            reason = (
+                "stage_checkpoints.json 是用户确认真值源，模型不能直接写入。"
+                "推进阶段必须调用 advance_stage，或由用户点击右侧工作区对应按钮。"
+            )
+            self._emit_system_notice_once(
+                category="checkpoint_forge_blocked",
+                path=normalized_preview,
+                reason=reason,
+                user_action="请调用 advance_stage 推进阶段；不要尝试直接写这个文件。",
+                surface_to_user=False,
+            )
+            return {"status": "error", "message": reason}
         if project_path and normalized_early in self._S0_BLOCKED_PLAN_FILES:
             stage_state = self.skill_engine._infer_stage_state(project_path)
             if stage_state.get("stage_code") == "S0":
@@ -5536,7 +5649,7 @@ class ChatHandler:
                 category="non_plan_write_blocked",
                 path=None,
                 reason=reason,
-                user_action="请先让用户确认大纲或明确要求继续正文后，再尝试写正式内容。",
+                user_action=reason,
                 surface_to_user=False,
             )
             return {"status": "error", "message": reason}
@@ -5593,19 +5706,6 @@ class ChatHandler:
                 surface_to_user=False,
             )
             return self._canonical_draft_tool_error_result(project_id, mutation_limit_error)
-        if self.skill_engine.is_protected_stage_checkpoints_path(normalized_path):
-            reason = (
-                "stage_checkpoints.json 是用户确认真值源，模型不能直接写入。"
-                "推进阶段必须调用 advance_stage，或由用户点击右侧工作区对应按钮。"
-            )
-            self._emit_system_notice_once(
-                category="checkpoint_forge_blocked",
-                path=normalized_path,
-                reason=reason,
-                user_action="请调用 advance_stage 推进阶段；不要尝试直接写这个文件。",
-                surface_to_user=False,
-            )
-            return {"status": "error", "message": reason}
         read_before_write_error = self._validate_existing_file_read_before_write(
             project_id,
             normalized_path,
@@ -6911,17 +7011,16 @@ class ChatHandler:
         skill_prompt = self.skill_engine.get_skill_prompt()
         methodology_block = self.skill_engine.build_methodology_block(project_id)
         project_context = self.skill_engine.build_project_context(project_id)
-        if self._turn_context.get("can_write_non_plan", True):
+        non_plan_write_guidance = self._non_plan_write_block_guidance(project_id)
+        if non_plan_write_guidance is None:
             turn_rule = (
-                "本轮如用户明确要求正文，可在更新 plan 后处理正文草稿。"
+                "当前阶段允许按用户目标处理正文草稿。"
                 f"正文草稿统一写入 `{self.skill_engine.REPORT_DRAFT_PATH}`。"
             )
         else:
             turn_rule = (
-                "本轮只能做两类事：1）继续问清关键信息；2）更新 `plan/` 内文件。"
-                "在用户明确确认大纲或明确要求继续正文前，禁止写正文、章节草稿、report_draft 或最终报告。"
-                f"允许写正文后，报告正文草稿也只能写入 `{self.skill_engine.REPORT_DRAFT_PATH}`。"
-                "如果信息不足，提出问题后就停止本轮，不要擅自继续。"
+                "当前状态不允许写正文、章节草稿、report_draft 或最终报告。"
+                f"{non_plan_write_guidance}"
             )
         draft_rule_block = (
             "正文草稿规则：\n"
@@ -6929,11 +7028,13 @@ class ChatHandler:
             "- 正文首次成稿或续写 -> `append_report_draft`\n"
             "- 正文局部修改 -> `edit_file`\n"
             f"- 不要对 `{self.skill_engine.REPORT_DRAFT_PATH}` 使用 `write_file`\n"
-            "- mixed-intent 的导出 / 质量检查 / 看文件 / 看字数只给下一步提示，不要同轮执行"
         )
         evidence_rule = (
             "如果本轮调用了 `web_search` 并准备把外部网页信息写进正式文件，"
             "必须先对候选链接调用 `fetch_url` 阅读正文；搜索结果摘要不能直接当作正式依据。"
+        )
+        pause_rule = (
+            "用户要求暂停、先不要写入或先讨论时，本轮不要调用任何写工具。"
         )
         # 管理型通道（newapi → Gemini）流式 tool_call chunk 偶发会把并行调用的 index 合并到 0，
         # 导致 name/arguments 被首尾拼接成 `web_searchweb_search` 等畸形条目，后端只能作废本轮并请模型重发。
@@ -6965,7 +7066,7 @@ class ChatHandler:
         return (
             f"{skill_prompt}{methodology_section}\n\n## 当前轮次约束\n{turn_rule}\n{draft_rule_block}\n"
             f"{chart_rule}\n"
-            f"{evidence_rule}\n{concurrency_rule}\n{attachment_data_rule}\n\n{project_context}"
+            f"{evidence_rule}\n{pause_rule}\n{concurrency_rule}\n{attachment_data_rule}\n\n{project_context}"
         )
 
     def _inject_synthetic_user_correction(
@@ -6979,6 +7080,7 @@ class ChatHandler:
         return {
             "can_write_non_plan": can_write_non_plan,
             "generic_non_plan_write_allowed": can_write_non_plan,
+            "non_plan_write_block_guidance": None,
             "web_search_disabled": False,
             "web_search_performed": False,
             "fetch_url_performed": False,
@@ -6995,19 +7097,6 @@ class ChatHandler:
             "user_message_text": "",                  # spec §3.3 NEW
             "read_file_snapshots": {},                # spec §3.7 NEW
         }
-
-    def _phrase_hits(self, text: str, phrases: list[str]) -> bool:
-        """Substring match with negation suppression. If any occurrence of the phrase
-        has a clean (negation-free) preceding window of 10 chars, the phrase counts as
-        a hit. Otherwise the match is suppressed."""
-        for phrase in phrases:
-            idx = text.find(phrase)
-            while idx != -1:
-                preceding = text[max(0, idx - self._NEGATION_WINDOW_CHARS): idx]
-                if not self._NEGATION_RE.search(preceding):
-                    return True
-                idx = text.find(phrase, idx + 1)
-        return False
 
     def _has_prior_s0_assistant_turn(self, project_id: str) -> bool:
         """Return True if the project's conversation history contains at
@@ -7063,12 +7152,11 @@ class ChatHandler:
         self._turn_context["user_message_text"] = self._extract_user_message_text(
             {"role": "user", "content": user_message}
         )
-        # 2026-07-09 义务机制手术：意图分类不再武装「必须写正文」义务，也不再解锁写权限。
-        # 裸关键词（优化/修改/调整…）扫长消息误伤率高：S0-S3 会绕开阶段门禁 + 轮末打出
-        # 「更新正文没有成功」误导文案（试用反馈截图实锤）。权限单一来源 = generic
-        # （阶段分支在 S4+ 无条件放行，直写关键词/历史授权兜住 S2/S3 的显式请求）。
-        # 意图分类仅保留工具路由（edit_file↔append 互拦）与全篇重写解锁两个窄消费方。
-        generic_non_plan_write_allowed = self._should_allow_generic_non_plan_write(project_id, user_message)
+        # canonical obligation 已退役；正文写权限和阻塞文案只由当前项目状态计算。
+        # 用户消息保留供模型上下文使用，但不参与权限判断。
+        non_plan_write_guidance = self._non_plan_write_block_guidance(project_id)
+        generic_non_plan_write_allowed = non_plan_write_guidance is None
+        self._turn_context["non_plan_write_block_guidance"] = non_plan_write_guidance
         self._turn_context["generic_non_plan_write_allowed"] = generic_non_plan_write_allowed
         self._turn_context["can_write_non_plan"] = generic_non_plan_write_allowed
         return self._turn_context
@@ -7423,146 +7511,16 @@ class ChatHandler:
         ]
 
     def _should_allow_non_plan_write(self, project_id: str, user_message: str) -> bool:
-        # 2026-07-09 义务机制手术后：意图分类不再解锁写权限（S0-S3 会绕开阶段门禁），
-        # 权限单一来源 = generic（阶段/直写关键词/历史授权）。保留此 facade 供测试与语义锚点。
+        """Compatibility facade; permission is derived only from project state."""
         return self._should_allow_generic_non_plan_write(project_id, user_message)
 
     def _should_allow_generic_non_plan_write(self, project_id: str, user_message: str) -> bool:
-        normalized = (user_message or "").strip()
-        if not normalized:
-            return False
+        """Return state permission; user message text deliberately has no authority."""
+        return self._non_plan_write_block_guidance(project_id) is None
 
-        if self._is_non_plan_write_blocking_message(normalized):
-            return False
-
-        project_path = self.skill_engine.get_project_path(project_id)
-        if project_path:
-            checkpoints = self.skill_engine._load_stage_checkpoints(project_path)
-            if "outline_confirmed_at" in checkpoints:
-                stage_state = self.skill_engine._infer_stage_state(project_path)
-                if stage_state.get("stage_code") in self.NON_PLAN_WRITE_ALLOWED_STAGE_CODES:
-                    return True
-
-        direct_write_keywords = (
-            "确认大纲",
-            "按这个大纲",
-            "就按这个",
-            "开始写",
-            "开始写吧",
-            "你开始写吧",
-            "你开始写",
-            "开始写报告",
-            "开始起草",
-            "继续写",
-            "继续下一章",
-            "开始正文",
-            "开始写正文",
-            "开始写正文吧",
-            "写第一章",
-            "写第二章",
-            "写执行摘要",
-            "继续完善",
-            "继续撰写",
-        )
-        if any(keyword in normalized for keyword in direct_write_keywords):
-            # §7 patch: S0/S1 without outline_confirmed_at must not bypass via
-            # generic "开始写" allow-keyword; otherwise user's innocuous
-            # "开始写" would both set s0 and open non-plan writes, skipping
-            # outline confirmation entirely.
-            if project_path:
-                stage_state = self.skill_engine._infer_stage_state(project_path)
-                stage_code = stage_state.get("stage_code")
-                if stage_code in {"S0", "S1"}:
-                    checkpoints = self.skill_engine._load_stage_checkpoints(project_path)
-                    if "outline_confirmed_at" not in checkpoints:
-                        return False
-            return True
-
-        if self._looks_like_follow_up_non_plan_request(normalized):
-            history_permission = self._recent_history_allows_non_plan_write(project_id)
-            if history_permission is not None:
-                return history_permission
-
-        if self._has_existing_report_draft(project_id) and any(
-            keyword in normalized for keyword in self.NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS
-        ):
-            return True
-
-        return False
-
-    def _looks_like_follow_up_non_plan_request(self, user_message: str) -> bool:
-        normalized = (user_message or "").strip()
-        return any(keyword in normalized for keyword in self.NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS)
-
-    def _has_existing_report_draft(self, project_id: str) -> bool:
-        try:
-            self.skill_engine.get_primary_report_path(project_id)
-            return True
-        except ValueError:
-            return False
-
-    def _recent_history_allows_non_plan_write(self, project_id: str) -> bool | None:
-        history = self._load_conversation(project_id)
-        for message in reversed(history):
-            if message.get("role") != "user":
-                continue
-            content = self._extract_message_text(message.get("content", "")).strip()
-            if not content:
-                continue
-            if self._is_non_plan_write_blocking_message(content):
-                return False
-            if self._is_non_plan_write_approval_message(content):
-                return True
-        return None
-
-    def _is_non_plan_write_approval_message(self, user_message: str) -> bool:
-        normalized = (user_message or "").strip()
-        approval_keywords = (
-            "确认大纲",
-            "按这个大纲",
-            "就按这个",
-            "开始写",
-            "开始写吧",
-            "你开始写吧",
-            "你开始写",
-            "开始写报告",
-            "开始起草",
-            "继续写",
-            "继续下一章",
-            "开始正文",
-            "开始写正文",
-            "开始写正文吧",
-            "写第一章",
-            "写第二章",
-            "写执行摘要",
-            "继续完善",
-            "继续撰写",
-            *self.NON_PLAN_WRITE_FOLLOW_UP_KEYWORDS,
-            "继续吧",
-            "继续哈",
-            "继续写正文",
-            "继续写报告",
-            "继续正文",
-            "大纲没问题",
-            "扩写",
-            "续写",
-            "润色",
-            "改写",
-        )
-        return any(keyword in normalized for keyword in approval_keywords)
-
-    def _is_non_plan_write_blocking_message(self, user_message: str) -> bool:
-        normalized = (user_message or "").strip()
-        blocking_keywords = [
-            "先别写正文",
-            "不要写正文",
-            "先不写正文",
-            "别写正文",
-            "先补计划",
-            "先补大纲",
-            "先别继续正文",
-        ]
-        return any(keyword in normalized for keyword in blocking_keywords)
+    def _non_plan_write_block_guidance(self, project_id: str) -> str | None:
+        """Compatibility facade over the engine's shared AI/user state gate."""
+        return self.skill_engine.formal_content_write_block_guidance(project_id)
 
     def _should_block_non_plan_write(self, project_id: str, file_path: str) -> bool:
         return self._non_plan_write_block_reason(project_id, file_path) is not None
@@ -7571,18 +7529,10 @@ class ChatHandler:
         try:
             normalized = self.skill_engine.normalize_file_path(project_id, file_path)
         except ValueError:
+            return self._non_plan_write_block_guidance(project_id)
+        if normalized.startswith("plan/"):
             return None
-        if self._is_canonical_report_draft_path(normalized):
-            if not self._turn_context.get("can_write_non_plan", True):
-                return self.CANONICAL_DRAFT_STAGE_GATE_MESSAGE
-            return None
-        generic_allowed = self._turn_context.get(
-            "generic_non_plan_write_allowed",
-            self._turn_context.get("can_write_non_plan", True),
-        )
-        if not normalized.startswith("plan/") and not generic_allowed:
-            return self.CANONICAL_DRAFT_STAGE_GATE_MESSAGE
-        return None
+        return self._non_plan_write_block_guidance(project_id)
 
     def _should_require_fetch_url_before_write(self, project_id: str, file_path: str) -> bool:
         if not self._turn_context.get("web_search_performed"):

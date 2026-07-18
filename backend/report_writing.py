@@ -5,7 +5,6 @@ Pure functions only. No ChatHandler dependency. Tests in tests/test_report_writi
 
 from __future__ import annotations
 
-import re
 from typing import Dict, Optional
 
 
@@ -46,15 +45,8 @@ def resolve_section_anchor(anchor: str, draft: str) -> Optional[str]:
 def check_report_writing_stage(
     skill_engine, project_id: str,
 ) -> Optional[str]:
-    """阶段必须 S4-S7 才能写正文。返回 None=ok，str=error message."""
-    project_path = skill_engine.get_project_path(project_id)
-    if not project_path:
-        return "项目不存在"
-    stage_state = skill_engine._infer_stage_state(project_path)
-    stage_code = stage_state.get("stage_code", "S0")
-    if stage_code not in {"S4", "S5", "S6", "S7"}:
-        return f"本工具仅在 S4 阶段及之后可用。当前阶段：{stage_code}"
-    return None
+    """Thin canonical-tool facade over the shared AI/user formal-content state gate."""
+    return skill_engine.formal_content_write_block_guidance(project_id)
 
 
 def check_outline_confirmed(
@@ -67,22 +59,6 @@ def check_outline_confirmed(
     checkpoints = skill_engine._load_stage_checkpoints(project_path)
     if "outline_confirmed_at" not in checkpoints:
         return "请先在工作区确认大纲，再发起正文写作"
-    return None
-
-
-def check_no_mixed_intent_in_turn(
-    handler, user_message: str,
-) -> Optional[str]:
-    """复用现有 _secondary_action_families_in_message 逻辑：本轮 secondary
-    action 数 ≤ 1（即只能含一个写正文 family + 至多一个 secondary action）。
-
-    `handler` 注入 ChatHandler 实例避免循环 import。
-    """
-    secondary = handler._secondary_action_families_in_message(user_message)
-    if len(secondary) > 1:
-        return (
-            "请把多个动作拆成多个回合分别处理（如先重写章节，再单独发起导出/质量检查/查看字数）"
-        )
     return None
 
 
@@ -187,139 +163,3 @@ def check_no_fetch_url_pending(
     ):
         return "请先 fetch_url 读取候选网页正文，再写正文"
     return None
-
-
-# ---- User message intent detection (spec §3.5) ----
-
-_GENERATIVE_PATTERNS = [
-    re.compile(r"起草"),
-    re.compile(r"续写"),
-    re.compile(r"开始写.{0,8}(?:报告|正文)"),
-    re.compile(r"开始起草"),
-    re.compile(r"写下一[章节段]"),
-    re.compile(r"继续写"),
-    re.compile(r"帮我写(?!得)"),
-    re.compile(r"写完(第|下一)"),
-]
-
-_SECTION_MENTION_PATTERN = r"第[一二三四五六七八九十百千万0-9]+(?:章|节|部分)"
-
-_FULL_REWRITE_PATTERNS = [
-    re.compile(r"(?:全文|整篇|全部).{0,12}(?:重写|改写)"),
-    re.compile(r"(?:重写|改写).{0,12}(?:全文|整篇|全部|这份报告|报告正文|正文)"),
-    re.compile(r"推倒(?:重来|重写)"),
-]
-
-_MODIFY_PATTERNS = [
-    re.compile(r"把.+改(成|为)"),
-    re.compile(
-        rf"(?:{_SECTION_MENTION_PATTERN}.{{0,40}}(?:重写|改写|重做)|"
-        rf"(?:重写|改写|重做).{{0,20}}{_SECTION_MENTION_PATTERN})"
-    ),
-    *_FULL_REWRITE_PATTERNS,
-    re.compile(
-        rf"{_SECTION_MENTION_PATTERN}.{{0,40}}"
-        r"(?:改强|补强|加强|改好|改弱)"
-    ),
-    re.compile(r"替换"),
-    re.compile(r"修改"),
-    re.compile(r"删[掉除]"),
-    re.compile(r"调整"),
-    re.compile(r"(?:润色|优化)"),
-    re.compile(r"(?:请|帮我).{0,20}写得.{0,20}(?:顺|好|自然|清楚|清晰|简洁|通顺|顺畅)"),
-    re.compile(
-        r"写得.{0,20}(?:"
-        r"更(?:顺|好|自然|清楚|清晰|简洁|通顺|顺畅)|"
-        r"(?:顺|好|自然|清楚|清晰|简洁|通顺|顺畅).{0,6}(?:一点|一些|些|一下)"
-        r")"
-    ),
-]
-
-_DRAFT_ACTION_PATTERN = (
-    r"(?:继续写|写下一[章节段]|写完(?:第|下一)?[章节段]?|帮我写(?!得)|"
-    r"起草|续写|修改|调整|润色|优化|替换|推倒重来|推倒重写|重写|改写|"
-    r"重做|改强|补强|加强|删[掉除]?|改)"
-)
-
-_NEGATION_CORE_PATTERN = r"(?:不用|不要|不必|不需要|无需|别|不是|不想|并非)"
-_NEGATION_PREFIX_PATTERN = rf"(?:先{_NEGATION_CORE_PATTERN}|先不|不再|{_NEGATION_CORE_PATTERN})"
-_NEGATION_SUFFIX_PATTERN = rf"(?:就)?{_NEGATION_PREFIX_PATTERN}"
-_SAME_CLAUSE_TEXT = r"[^，,。！？!?；;\n]{0,8}"
-_NEGATION_TO_ACTION_TEXT = r"[^，,。！？!?；;\n]{0,80}"
-_REPLACE_VERB_PATTERN = r"(?:改成|改为|替换成|替换为|换成)"
-_REPLACEMENT_CLAUSE_TEXT = r"[^，,。！？!?；;\n]{1,80}"
-
-_NEGATED_ACTION_PATTERNS = [
-    re.compile(
-        rf"{_NEGATION_PREFIX_PATTERN}"
-        rf"(?:再)?"
-        rf"把{_REPLACEMENT_CLAUSE_TEXT}?{_REPLACE_VERB_PATTERN}"
-        rf"{_REPLACEMENT_CLAUSE_TEXT}"
-    ),
-    re.compile(
-        rf"把{_REPLACEMENT_CLAUSE_TEXT}?{_REPLACE_VERB_PATTERN}"
-        rf"{_REPLACEMENT_CLAUSE_TEXT}?"
-        rf"{_NEGATION_SUFFIX_PATTERN}了?"
-    ),
-    re.compile(
-        rf"{_NEGATION_PREFIX_PATTERN}"
-        rf"{_NEGATION_TO_ACTION_TEXT}"
-        rf"{_DRAFT_ACTION_PATTERN}"
-    ),
-    re.compile(
-        rf"{_DRAFT_ACTION_PATTERN}"
-        rf"{_SAME_CLAUSE_TEXT}"
-        rf"{_NEGATION_SUFFIX_PATTERN}了?"
-    ),
-]
-
-
-def _remove_negated_action_clauses(user_message: str) -> tuple[str, bool]:
-    negated_remaining = user_message
-    negated_found = False
-    for p in _NEGATED_ACTION_PATTERNS:
-        negated_remaining, count = p.subn("", negated_remaining)
-        negated_found = negated_found or count > 0
-    return negated_remaining, negated_found
-
-
-def detect_user_message_intent(user_message: str) -> str:
-    """Lightweight keyword-based intent classifier for canonical draft writes.
-
-    Returns:
-        "generative" — 起草 / 续写 / 写下一章 / 继续写 / 帮我写 等新增类语义
-        "modify"     — 把.改成 / 重写第N章 / 替换 / 修改 / 删掉 / 调整 等修改类语义
-        "ambiguous"  — 其他（不阻拦工具调用，仅 turn-end retry 不触发）
-
-    Generative 比 modify 优先（同时含 "续写第二章并替换..." 罕见，按 generative 处理）。
-    """
-    if not user_message:
-        return "ambiguous"
-
-    negated_remaining, negated_found = _remove_negated_action_clauses(user_message)
-    if negated_found:
-        for p in _GENERATIVE_PATTERNS:
-            if p.search(negated_remaining):
-                return "generative"
-        for p in _MODIFY_PATTERNS:
-            if p.search(negated_remaining):
-                return "modify"
-        return "ambiguous"
-
-    for p in _GENERATIVE_PATTERNS:
-        if p.search(user_message):
-            return "generative"
-    for p in _MODIFY_PATTERNS:
-        if p.search(user_message):
-            return "modify"
-    return "ambiguous"
-
-
-def user_message_requests_full_rewrite(user_message: str) -> bool:
-    """Return whether the user explicitly requested a full draft rewrite."""
-    if not user_message:
-        return False
-    remaining, _ = _remove_negated_action_clauses(user_message)
-    if not any(p.search(remaining) for p in _FULL_REWRITE_PATTERNS):
-        return False
-    return detect_user_message_intent(user_message) == "modify"

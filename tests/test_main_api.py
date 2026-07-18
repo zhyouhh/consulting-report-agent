@@ -2302,7 +2302,7 @@ class R3FileApiTests(unittest.TestCase):
         files = r.json()["files"]
         self.assertTrue(all({"path", "group", "stage", "editable", "mtime_ns"} <= set(f) for f in files))
         draft = next(f for f in files if f["path"] == "content/report_draft_v1.md")
-        self.assertTrue(draft["editable"])
+        self.assertFalse(draft["editable"])
         self.assertIsInstance(draft["mtime_ns"], str)
 
     def test_read_file_returns_content_mtime_editable(self):
@@ -2310,7 +2310,7 @@ class R3FileApiTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         body = r.json()
         self.assertEqual(body["content"], "初稿")
-        self.assertTrue(body["editable"])
+        self.assertFalse(body["editable"])
         self.assertIsInstance(body["mtime_ns"], str)
 
     def test_read_readonly_file_editable_false(self):
@@ -2323,11 +2323,15 @@ class R3FileApiTests(unittest.TestCase):
         return str((self.project_dir / rel).stat().st_mtime_ns)
 
     def test_post_write_success_returns_new_mtime(self):
+        self.engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
         base = self._mtime("content/report_draft_v1.md")
-        r = self.client.post(
-            f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
-            json={"content": "改过的正文", "base_mtime_ns": base},
-        )
+        with mock.patch.object(
+            self.engine, "_infer_stage_state", return_value={"stage_code": "S4"}
+        ):
+            r = self.client.post(
+                f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+                json={"content": "改过的正文", "base_mtime_ns": base},
+            )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["status"], "ok")
         self.assertIsInstance(r.json()["mtime_ns"], str)
@@ -2368,11 +2372,59 @@ class R3FileApiTests(unittest.TestCase):
         self.assertEqual(r.status_code, 404)
 
     def test_post_write_stale_mtime_409(self):
-        r = self.client.post(
-            f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
-            json={"content": "x", "base_mtime_ns": "999999999999999999"},
-        )
+        self.engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        with mock.patch.object(
+            self.engine, "_infer_stage_state", return_value={"stage_code": "S4"}
+        ):
+            r = self.client.post(
+                f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+                json={"content": "x", "base_mtime_ns": "999999999999999999"},
+            )
         self.assertEqual(r.status_code, 409)
+
+    def test_report_draft_manual_edit_stage_matrix_updates_api_and_write_gate(self):
+        self.engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
+        allowed_stages = {"S4", "S5", "S6", "S7"}
+
+        for stage_code in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "done"):
+            expected_editable = stage_code in allowed_stages
+            draft_path = self.project_dir / "content" / "report_draft_v1.md"
+            before = draft_path.read_text(encoding="utf-8")
+            base = str(draft_path.stat().st_mtime_ns)
+            with self.subTest(stage=stage_code), mock.patch.object(
+                self.engine, "_infer_stage_state", return_value={"stage_code": stage_code}
+            ):
+                listed = self.client.get(f"/api/projects/{self.pid}/files").json()["files"]
+                draft_meta = next(
+                    item for item in listed
+                    if item["path"] == "content/report_draft_v1.md"
+                )
+                self.assertEqual(draft_meta["editable"], expected_editable)
+
+                read_body = self.client.get(
+                    f"/api/projects/{self.pid}/files/content/report_draft_v1.md"
+                ).json()
+                self.assertEqual(read_body["editable"], expected_editable)
+
+                response = self.client.post(
+                    f"/api/projects/{self.pid}/files/content/report_draft_v1.md",
+                    json={
+                        "content": f"{stage_code} saved",
+                        "base_mtime_ns": base,
+                    },
+                )
+                if expected_editable:
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(
+                        draft_path.read_text(encoding="utf-8"), f"{stage_code} saved"
+                    )
+                else:
+                    self.assertEqual(response.status_code, 403)
+                    self.assertEqual(draft_path.read_text(encoding="utf-8"), before)
+                    self.assertIsInstance(response.json()["detail"], str)
+                    if stage_code == "done":
+                        self.assertIn("撤销交付归档", response.json()["detail"])
+                        self.assertIn("S7", response.json()["detail"])
 
     def test_post_write_rejects_numeric_base_mtime(self):
         base_int = int(self._mtime("content/report_draft_v1.md"))
@@ -2394,6 +2446,7 @@ class R3FileApiTests(unittest.TestCase):
         import backend.chat as chat_mod
         import threading as _t
         from backend.tenant import tenant_project_key
+        self.engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
         # W2-B 多租户：文件写端点经 handler._get_project_request_lock 取复合键 (uid, project_id) 锁，
         # 模拟「持同一把锁」须用同样的复合键（uid 默认 "local"），否则锁错把、测不到串行化。
         lock = chat_mod._get_project_request_lock(tenant_project_key("local", self.pid))
@@ -2407,16 +2460,19 @@ class R3FileApiTests(unittest.TestCase):
             )
             done["status"] = r.status_code
 
-        lock.acquire()
-        try:
-            t = _t.Thread(target=_save)
-            t.start()
-            t.join(timeout=1.0)
-            # 锁未释放：请求应仍在等待，未完成
-            self.assertIsNone(done["status"], "POST 不应在锁被持有时完成")
-        finally:
-            lock.release()
-        t.join(timeout=5.0)
+        with mock.patch.object(
+            self.engine, "_infer_stage_state", return_value={"stage_code": "S4"}
+        ):
+            lock.acquire()
+            try:
+                t = _t.Thread(target=_save)
+                t.start()
+                t.join(timeout=1.0)
+                # 锁未释放：请求应仍在等待，未完成
+                self.assertIsNone(done["status"], "POST 不应在锁被持有时完成")
+            finally:
+                lock.release()
+            t.join(timeout=5.0)
         self.assertEqual(done["status"], 200)
         self.assertEqual(
             (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8"),
@@ -2429,6 +2485,7 @@ class R3FileApiTests(unittest.TestCase):
         import backend.chat as chat_mod
         import threading as _t
         from backend.tenant import tenant_project_key
+        self.engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
         rel = "content/report_draft_v1.md"
         full = self.project_dir / "content" / "report_draft_v1.md"
         base = self._mtime(rel)
@@ -2443,19 +2500,22 @@ class R3FileApiTests(unittest.TestCase):
             )
             done["status"] = r.status_code
 
-        lock.acquire()
-        try:
-            t = _t.Thread(target=_save)
-            t.start()
-            t.join(timeout=1.0)
-            self.assertIsNone(done["status"], "POST 不应在锁被持有时完成")
-            # 持锁期间另一路写入同文件并前移 mtime（模拟 AI 在用户保存排队时落盘）
-            full.write_text("AI 在用户保存排队期间写入的新内容", encoding="utf-8")
-            newer = int(base) + 10_000
-            os.utime(full, ns=(newer, newer))
-        finally:
-            lock.release()
-        t.join(timeout=5.0)
+        with mock.patch.object(
+            self.engine, "_infer_stage_state", return_value={"stage_code": "S4"}
+        ):
+            lock.acquire()
+            try:
+                t = _t.Thread(target=_save)
+                t.start()
+                t.join(timeout=1.0)
+                self.assertIsNone(done["status"], "POST 不应在锁被持有时完成")
+                # 持锁期间另一路写入同文件并前移 mtime（模拟 AI 在用户保存排队时落盘）
+                full.write_text("AI 在用户保存排队期间写入的新内容", encoding="utf-8")
+                newer = int(base) + 10_000
+                os.utime(full, ns=(newer, newer))
+            finally:
+                lock.release()
+            t.join(timeout=5.0)
         self.assertEqual(done["status"], 409)
         # 用户的旧内容没有覆盖 AI 的写入
         self.assertEqual(full.read_text(encoding="utf-8"), "AI 在用户保存排队期间写入的新内容")

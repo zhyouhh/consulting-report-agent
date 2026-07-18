@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import logging
@@ -31,6 +31,10 @@ class UserWriteForbiddenError(Exception):
     raise PermissionError when the target is locked by an external program (Word/OneDrive/AV
     on Windows); the endpoint must tell that retryable OS failure (→ 500) apart from
     'this file is not user-editable' (→ 403). (codex backend review BLOCKER)"""
+
+
+class UserWriteStageError(UserWriteForbiddenError):
+    """Raised when an otherwise editable formal-content file is read-only in this stage."""
 
 
 class SkillEngine:
@@ -92,6 +96,7 @@ class SkillEngine:
         "plan/analysis-notes.md",
         "plan/presentation-plan.md",
     }
+    FORMAL_CONTENT_WRITE_ALLOWED_STAGE_CODES = {"S4", "S5", "S6", "S7"}
 
     # R3: GET /files 跳过的退役文件（不显示）。
     RETIRED_WORKSPACE_FILES = {
@@ -378,6 +383,12 @@ class SkillEngine:
 
     REPORT_DRAFT_PATH = "content/report_draft_v1.md"
     REPORT_DRAFT_CANDIDATES = (REPORT_DRAFT_PATH,)
+    REPORT_DRAFT_HISTORY_DIR = "content/.draft_history"
+    REPORT_DRAFT_HISTORY_LIMIT = 40
+    _REPORT_DRAFT_SNAPSHOT_RE = re.compile(
+        r"^report_draft_v1\.(?P<timestamp>\d{8}T\d{12})"
+        r"(?:-(?P<sequence>\d{2,}))?\.md$"
+    )
     INDEPENDENT_REVIEW_ANCHORS = (
         "## 1. 结论-证据一致性",
         "## 2. 关键假设与逻辑链",
@@ -1451,19 +1462,79 @@ class SkillEngine:
 
         return full_path.read_text(encoding="utf-8")
 
-    def write_file(self, project_ref: str, file_path: str, content: str):
-        """写入项目文件（原子：同目录 temp + os.replace，避免并发读到写入中间态）"""
-        project_path = self.get_project_path(project_ref)
-        if not project_path:
-            raise ValueError(f"项目 {project_ref} 不存在")
+    def _draft_snapshot_timestamp_token(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
 
-        normalized_path = self.validate_plan_write(project_ref, file_path)
-        full_path = self._resolve_project_path(project_path.resolve(), normalized_path)
+    def _parse_report_draft_snapshot(self, path: Path) -> dict | None:
+        """Parse one legal draft-history filename into the shared version contract."""
+        match = self._REPORT_DRAFT_SNAPSHOT_RE.fullmatch(path.name)
+        if match is None:
+            return None
+        timestamp_token = match.group("timestamp")
+        try:
+            utc_datetime = datetime.strptime(
+                timestamp_token, "%Y%m%dT%H%M%S%f"
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        sequence_token = match.group("sequence")
+        sequence = int(sequence_token or 0)
+        if sequence_token is not None and (
+            sequence <= 0 or sequence_token != f"{sequence:02d}"
+        ):
+            return None
+        version_id = timestamp_token + (f"-{sequence_token}" if sequence_token else "")
+        return {
+            "id": version_id,
+            "timestamp": timestamp_token,
+            "sequence": sequence,
+            "utc_datetime": utc_datetime,
+            "utc_ts": utc_datetime.isoformat().replace("+00:00", "Z"),
+            "path": path,
+        }
+
+    def _enumerate_report_draft_snapshots(self, project_path: Path) -> list[dict]:
+        """Return safe, legal snapshot files ordered newest to oldest."""
+        history_dir = project_path / self.REPORT_DRAFT_HISTORY_DIR
+        try:
+            if history_dir.is_symlink():
+                return []
+            history_root = history_dir.resolve()
+            history_root.relative_to(project_path.resolve())
+            entries = list(history_dir.iterdir())
+        except (OSError, ValueError):
+            return []
+
+        snapshots = []
+        for entry in entries:
+            parsed = self._parse_report_draft_snapshot(entry)
+            if parsed is None:
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_file():
+                    continue
+                resolved = entry.resolve(strict=True)
+            except OSError:
+                continue
+            if resolved.parent != history_root:
+                continue
+            parsed["path"] = resolved
+            snapshots.append(parsed)
+        snapshots.sort(
+            key=lambda item: (item["timestamp"], item["sequence"]),
+            reverse=True,
+        )
+        return snapshots
+
+    def _replace_file_atomically(self, full_path: Path, content: str | bytes) -> None:
         full_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_fd, tmp_name = tempfile.mkstemp(dir=str(full_path.parent), suffix=".tmp")
         os.close(tmp_fd)
         try:
-            Path(tmp_name).write_text(content, encoding="utf-8")  # 与原 write_text 同 newline 行为
+            if isinstance(content, bytes):
+                Path(tmp_name).write_bytes(content)
+            else:
+                Path(tmp_name).write_text(content, encoding="utf-8")
             os.replace(tmp_name, full_path)
         except BaseException:
             try:
@@ -1471,6 +1542,86 @@ class SkillEngine:
             except OSError:
                 pass
             raise
+
+    def _snapshot_report_draft(self, project_path: Path) -> Path | None:
+        """Create a byte-exact pre-write snapshot; failures deliberately block the write."""
+        draft_path = project_path / self.REPORT_DRAFT_PATH
+        if not draft_path.exists():
+            return None
+
+        draft_bytes = draft_path.read_bytes()
+        history_dir = project_path / self.REPORT_DRAFT_HISTORY_DIR
+        history_dir.mkdir(parents=True, exist_ok=True)
+        if history_dir.is_symlink():
+            raise OSError("draft history directory must not be a symlink")
+        try:
+            history_dir.resolve().relative_to(project_path.resolve())
+        except ValueError as exc:
+            raise OSError("draft history directory escapes the project") from exc
+        timestamp_token = self._draft_snapshot_timestamp_token()
+        sequence = 0
+        while True:
+            version_id = timestamp_token + (f"-{sequence:02d}" if sequence else "")
+            snapshot_path = history_dir / f"report_draft_v1.{version_id}.md"
+            if not snapshot_path.exists():
+                break
+            sequence += 1
+        self._replace_file_atomically(snapshot_path, draft_bytes)
+        return snapshot_path
+
+    def _prune_report_draft_snapshots(self, project_path: Path) -> None:
+        """Best-effort history rotation after a successful canonical draft write."""
+        try:
+            stale = self._enumerate_report_draft_snapshots(project_path)[
+                self.REPORT_DRAFT_HISTORY_LIMIT:
+            ]
+            for item in stale:
+                try:
+                    item["path"].unlink()
+                except OSError:
+                    logger.warning(
+                        "草稿历史版本清理失败: %s", item["path"], exc_info=True
+                    )
+        except Exception:  # noqa: BLE001 prune must never turn a successful write into failure
+            logger.warning("草稿历史版本轮转失败", exc_info=True)
+
+    def _write_with_report_draft_snapshot(
+        self, project_path: Path, full_path: Path, content: str | bytes
+    ) -> None:
+        snapshot_path = self._snapshot_report_draft(project_path)
+        try:
+            self._replace_file_atomically(full_path, content)
+        except BaseException:
+            if snapshot_path is not None:
+                try:
+                    snapshot_path.unlink()
+                except OSError:
+                    logger.warning(
+                        "正文主写失败后的新快照清理失败: %s",
+                        snapshot_path,
+                        exc_info=True,
+                    )
+            raise
+        self._prune_report_draft_snapshots(project_path)
+
+    def write_file(self, project_ref: str, file_path: str, content: str | bytes):
+        """写入项目文件（原子：同目录 temp + os.replace，避免并发读到写入中间态）"""
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            raise ValueError(f"项目 {project_ref} 不存在")
+
+        normalized_path = self.validate_plan_write(project_ref, file_path)
+        is_report_draft = (
+            self._canonical_user_path(normalized_path)
+            == self._canonical_user_path(self.REPORT_DRAFT_PATH)
+        )
+        if is_report_draft:
+            normalized_path = self.REPORT_DRAFT_PATH
+        full_path = self._resolve_project_path(project_path.resolve(), normalized_path)
+        if is_report_draft:
+            self._write_with_report_draft_snapshot(project_path, full_path, content)
+        else:
+            self._replace_file_atomically(full_path, content)
 
     def list_workspace_files(self, project_ref: str) -> list[dict]:
         """R3: structured workspace file list for the front-end file tree.
@@ -1488,13 +1639,15 @@ class SkillEngine:
                 continue
             if rel_path.startswith("materials/"):
                 continue
+            if rel_path.startswith(f"{self.REPORT_DRAFT_HISTORY_DIR}/"):
+                continue
             try:
                 mtime_ns = str(md_file.stat().st_mtime_ns)
             except OSError:
                 # 文件在 rglob 枚举后、stat 前被并发删除/改名（AI 改写期间）——跳过，
                 # 不让整个列表 500；刷新自愈。
                 continue
-            semantics = self.get_file_semantics(rel_path)
+            semantics = self.get_file_semantics(rel_path, project_ref=project_ref)
             files.append({
                 "path": rel_path,
                 "group": semantics["group"],
@@ -1538,24 +1691,19 @@ class SkillEngine:
         if not project_path:
             raise ValueError(f"项目 {project_ref} 不存在")
         canonical = self.validate_user_write(project_ref, file_path)  # UserWriteForbiddenError / ValueError
+        if canonical == self._canonical_user_path(self.REPORT_DRAFT_PATH):
+            canonical = self.REPORT_DRAFT_PATH
         full_path = self._resolve_project_path(project_path.resolve(), canonical)
         if not full_path.exists():
             raise FileNotFoundError(f"文件 {canonical} 不存在")
         current_mtime_ns = str(full_path.stat().st_mtime_ns)
         if current_mtime_ns != base_mtime_ns:
             raise StaleFileError(current_mtime_ns)
-        # 原子写：同目录 temp + os.replace（与 write_file 同款，newline 行为一致）
-        tmp_fd, tmp_name = tempfile.mkstemp(dir=str(full_path.parent), suffix=".tmp")
-        os.close(tmp_fd)
-        try:
-            Path(tmp_name).write_text(content, encoding="utf-8")
-            os.replace(tmp_name, full_path)
-        except BaseException:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
+        # CAS 已通过才建快照；stale 409 不得污染历史。
+        if canonical == self.REPORT_DRAFT_PATH:
+            self._write_with_report_draft_snapshot(project_path, full_path, content)
+        else:
+            self._replace_file_atomically(full_path, content)
         return str(full_path.stat().st_mtime_ns)
 
     def normalize_file_path(self, project_ref: str, file_path: str) -> str:
@@ -1609,10 +1757,45 @@ class SkillEngine:
         # content/Report_Draft_V1.MD 必须与 content/report_draft_v1.md 判为同一文件。
         return self._to_posix(normalized_path).lstrip("/").casefold()
 
-    def is_user_editable(self, normalized_path: str) -> bool:
-        return self._canonical_user_path(normalized_path) in self.USER_EDITABLE_FILES
+    def formal_content_write_block_guidance(self, project_ref: str) -> str | None:
+        """Single state-only truth for AI and user formal-content write permission."""
+        project_path = self.get_project_path(project_ref)
+        if not project_path:
+            return "项目不存在，无法写入正式内容。"
 
-    def get_file_semantics(self, normalized_path: str) -> dict:
+        stage_state = self._infer_stage_state(project_path)
+        stage_code = str(stage_state.get("stage_code") or "S0")
+        checkpoints = self._load_stage_checkpoints(project_path)
+
+        if stage_code == "done":
+            return (
+                "项目已归档。需要修改正文时，请先撤销交付归档，"
+                "回到 S7 后再修改。"
+            )
+        if stage_code == "S0":
+            return "请先完成需求访谈和当前澄清，再进入后续阶段。"
+        if stage_code == "S1" or "outline_confirmed_at" not in checkpoints:
+            return "请先形成大纲；大纲就绪后在右侧工作区确认。"
+        if stage_code in {"S2", "S3"}:
+            return (
+                "正文与正式内容仅在 S4–S7 可写。"
+                "请先完成当前研究或分析阶段的要求，推进到 S4 后再写。"
+            )
+        if stage_code in self.FORMAL_CONTENT_WRITE_ALLOWED_STAGE_CODES:
+            return None
+        return f"当前阶段 {stage_code} 不允许写正文或其他正式内容。"
+
+    def is_user_editable(self, normalized_path: str, *, project_ref: str | None = None) -> bool:
+        canonical = self._canonical_user_path(normalized_path)
+        if canonical not in self.USER_EDITABLE_FILES:
+            return False
+        if canonical == self._canonical_user_path(self.REPORT_DRAFT_PATH) and project_ref:
+            return self.formal_content_write_block_guidance(project_ref) is None
+        return True
+
+    def get_file_semantics(
+        self, normalized_path: str, *, project_ref: str | None = None
+    ) -> dict:
         """Map a normalized relative path to {group, stage, editable}.
         Unknown .md → group='other', stage=None, editable=False."""
         canonical = self._canonical_user_path(normalized_path)
@@ -1620,7 +1803,7 @@ class SkillEngine:
         return {
             "group": semantics["group"],
             "stage": semantics["stage"],
-            "editable": canonical in self.USER_EDITABLE_FILES,
+            "editable": self.is_user_editable(normalized_path, project_ref=project_ref),
         }
 
     def validate_user_write(self, project_ref: str, file_path: str) -> str:
@@ -1636,6 +1819,10 @@ class SkillEngine:
         canonical = self._canonical_user_path(normalized)
         if canonical not in self.USER_EDITABLE_FILES:
             raise UserWriteForbiddenError(f"`{normalized}` 不可由用户手动编辑")
+        if canonical == self._canonical_user_path(self.REPORT_DRAFT_PATH):
+            guidance = self.formal_content_write_block_guidance(project_ref)
+            if guidance is not None:
+                raise UserWriteStageError(guidance)
         return canonical
 
     def _delivery_log_has_placeholder_feedback(self, content: str) -> bool:

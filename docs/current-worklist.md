@@ -50,9 +50,3 @@
   多 worker 后把 `_LOGIN_FAILS` / `_RUNTIME_ALLOWED_HOSTS` 等进程状态迁到共享存储。
 - **导出/资产二期**：多套排版模板、签名版式、图表原地编辑、assets 进文件树，均需真实用户需求再立项。
 - **draw.io skill 评估**：只有现有 `create_diagram` 无法覆盖明确场景时再评估，不单独为技术选型立项。
-
-## 2026-07-18 已完成基线
-
-多项目并发、删除/共享状态加固、工具参数与 DSML 自愈、DL 引用卫生、研究类 S4 写作纪律已
-全量测试、独立红队 `APPROVE` 并部署 `kr-web-01`。详见
-`docs/superpowers/cutover_report_2026-07-18_multi-project-concurrency-and-citation-hygiene.md`。

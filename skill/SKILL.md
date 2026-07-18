@@ -27,7 +27,7 @@ description: Use when writing consulting reports, strategy analysis, market rese
 
 在开始任何实质性写作前，按下面顺序执行：
 
-1. 用 2-5 句话复述目标、交付物、时间线和目标读者。
+1. 用 2-5 句话概括目标、交付物、时间线和目标读者。
 2. 读取 `plan/project-overview.md`、`plan/stage-gates.md`、`plan/progress.md`、`plan/notes.md`。
 3. 如果项目仍处于 S0 或 S1，不要直接写正文。
 4. 在写 `outline.md` / `research-plan.md` 之前，必须先完成一轮初步搜集，并把结果写入 `notes.md` 与 `references.md`。
@@ -42,7 +42,7 @@ description: Use when writing consulting reports, strategy analysis, market rese
 2. 第一轮**禁止**：
    - 调用 `write_file` 写入 `plan/outline.md`、`plan/research-plan.md`、`plan/data-log.md`、`plan/analysis-notes.md`
    - 调用 `advance_stage(checkpoint_key="s0_interview_done_at", action="set", reason="...")`
-3. 用户回答问题后，或用户明确说"跳过访谈 / 不用问了 / 直接开始"后，先必要时更新 `plan/project-overview.md`；用户跳过就沿用 seed 不改。
+3. 用户回答问题后，或表达跳过访谈、停止追问并直接开始的意思后，先必要时更新 `plan/project-overview.md`；用户跳过就沿用 seed 不改。
 4. 完成上述处理后，调用 `advance_stage(checkpoint_key="s0_interview_done_at", action="set", reason="用户已回答或明确跳过 S0 预访谈")`。
 5. 只有工具返回 `status: success` 后，才能说明 S0 已完成并进入 S1；否则说明当前仍停留在 S0。
 
@@ -53,7 +53,7 @@ description: Use when writing consulting reports, strategy analysis, market rese
 1. 你可以先用 `web_search` / `fetch_url` 搜主题相关内容、用 `read_file` 读 seed 和已上传材料；
 2. 然后必须以纯文本输出 3-5 个针对 seed（项目主题 / 受众 / 范围 / 边界）的确认 / 补充问题；
 3. 不允许调用任何写工具（`write_file` / `edit_file` / `append_report_draft`）；
-4. 即便用户首条说"直接推进 / 不用每步都问"，第一轮仍要发问——但格式可以轻：复述你的理解 + 1-2 个真正需要拍板的点。
+4. 即便用户首条表示直接推进或不用每步都问，第一轮仍要发问——但格式可以轻：简要说明你的理解 + 1-2 个真正需要拍板的点。
 
 ### S0 追问维度建议清单
 
@@ -181,11 +181,12 @@ description: Use when writing consulting reports, strategy analysis, market rese
 | 工具 | 用途 |
 |---|---|
 | `append_report_draft(content)` | 起草 / 续写 / 写下一章 |
-| `edit_file(file_path, old_string, new_string)` | 章节重写（`old_string` 用 `## 锚点`）/ 文字替换（`old_string` 在 draft 中唯一）/ 整篇重写（`old_string` 等于 draft 第一行 h1 + 用户明确要求"整篇/推倒/全文重写"）|
+| `edit_file(file_path, old_string, new_string)` | 章节重写（`old_string` 用 `## 锚点`）/ 文字替换（`old_string` 在 draft 中唯一）/ 整篇重写（`old_string` 只放 draft 第一行 h1，`new_string` 放完整新稿）|
+| `restore_report_draft(version_id?)` | 仅在用户要求恢复或撤销正文改动时使用；无参数先列出可恢复版本 |
 
 约束：
 - 不要对 `content/report_draft_v1.md` 用 `write_file`——首次起草请用 `append_report_draft`
-- 一轮内 ≤ 3 次 canonical write
+- 一轮内 canonical write 不超过后端上限（当前 10 次）
 - 章节重写时 `old_string` 仅取首行 h2 标题做匹配；后端用 draft 中实际 snapshot 替换
 
 ### S5 质量审查
@@ -221,25 +222,27 @@ S5 阶段由用户主动触发的"独立审查"按钮完成，你不再自己写
 
 **推进到 done：** 用户明确确认交付归档完成时，调用 `advance_stage(checkpoint_key="delivery_archived_at", action="set", reason="用户确认项目已交付归档")`。用户明确回退时，调用同一 checkpoint 且 `action="clear"`。工具 success 后才能说项目已归档完成。
 
+done 是已归档只读态。需要修改正文或其他正式内容时，先通过 `advance_stage` 清除 `delivery_archived_at`，回到 S7 后再修改。
+
 ## 文件工具选择
 
 - 已有文件要改，先 `read_file`，再用 `write_file` / `edit_file`
 - 正文首次成稿或续写 -> `append_report_draft(content)`
 - 正文已有文字修改 -> `read_file` + `edit_file(file_path, old_string, new_string)`
+- 用户要求恢复或撤销正文改动 -> `restore_report_draft()` 查看版本，再用 `restore_report_draft(version_id)` 恢复
 - 不要对 `content/report_draft_v1.md` 使用 `write_file`
-- 同一条消息如果还带 `导出` / `质量检查` / `看看文件` / `看看现在多少字`，本轮只完成正文写入并给下一步提示，下一轮再单独处理
 - `write_file(file_path, content)`：**整文件覆盖**写入，适合新建文件或明确的整份重写
 - `edit_file(file_path, old_string, new_string)`：**精确字符串替换**，`old_string` 必须在文件里唯一存在；如果报 `old_string 不唯一` 或 `未找到`，先 `read_file` 核对原文
 - 只有同一轮真实文件工具返回 `status: success` 后，才能说报告内容已保存、已写入或已同步；否则必须说明未落盘，并给出下一步。
 
 ## 工具错误处理
 
-当你调用 `append_report_draft` / `write_file` / `edit_file` / `web_search` / `fetch_url` 拿到 `status: error` 时：
+当你调用 `append_report_draft` / `restore_report_draft` / `write_file` / `edit_file` / `web_search` / `fetch_url` 拿到 `status: error` 时：
 
 1. 必须在本轮的可见回复里告诉用户：
    - 哪个工具调用失败了（写哪个文件 / 搜什么 / 抓哪个 URL）
    - 失败的原因（error message 摘要，去掉技术细节）
-   - 用户需要做什么才能让你继续（例如「请在工作区点『确认大纲』」「请说『开始审查』再继续」「换个搜索关键词」）
+   - 用户需要做什么才能让你继续（例如「请在工作区点『确认大纲』」「请确认开始审查」「换个搜索关键词」）
 2. **严禁**在工具被挡时把本来要写入文件的内容直接贴进聊天框作为替代输出——这会让用户以为内容已经落盘，是对用户的误导。
 3. 错误处理回复要简洁、可操作，不解释 `outline_confirmed_at` / `_should_allow_non_plan_write` 等内部字段名。
 

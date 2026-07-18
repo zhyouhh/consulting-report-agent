@@ -50,6 +50,13 @@
   不得加入 checkpoint key/cascade 集合。
 - S4 正文唯一文件是 `content/report_draft_v1.md`：首次/续写用
   `append_report_draft`，修改用 `read_file` 后 `edit_file`；不要恢复三个旧专用 rewrite 工具。
+- 已有正文的所有 AI/用户覆盖写都必须经 `SkillEngine.write_file` / `user_write_file` 的同一
+  choke point：写前字节级快照 fail-closed，主写成功后 best-effort 轮转 40 份；
+  `.draft_history` 不进 workspace，`restore_report_draft` 必须接入 mutation、写入对账、
+  当前轮 source 去重和跨轮 memory 四条账本，恢复必须走 bytes 通道。
+- 正文与正式内容只允许 S4–S7 写，`done` 保持只读；AI 写入、HTTP 手动保存与 workspace
+  `editable` 必须共用同一个纯状态判定；禁止重建基于用户消息关键词或固定
+  话术的意图分类、工具互斥或授权门，gate/system prompt/SKILL 不得要求用户复述特定词语。
 - 正文、标题、附录不得出现 `[DL-...]` 内部标记。写正式引用；审查会点名，导出层仍会
   用共享 `INTERNAL_CITATION_RE` 做确定性剥除，正则只吃水平空白，不能跨行。
 - analytical/specialized 四类报告只在 S4 注入研究写作纪律；S1–S3、结构型报告和

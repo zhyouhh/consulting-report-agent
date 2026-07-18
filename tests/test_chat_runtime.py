@@ -5130,7 +5130,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("backend-generated", result["message"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_allow_non_plan_write_uses_recent_conversation_history_after_outline_confirmation(self, mock_openai):
+    def test_conversation_history_cannot_override_s0_write_state(self, mock_openai):
         del mock_openai
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -5154,10 +5154,10 @@ class ChatRuntimeTests(unittest.TestCase):
                 ],
             )
 
-            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "继续"))
+            self.assertFalse(handler._should_allow_non_plan_write(project["id"], "继续"))
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_allow_non_plan_write_respects_newer_blocking_instruction(self, mock_openai):
+    def test_newer_blocking_instruction_does_not_change_s0_state_gate(self, mock_openai):
         del mock_openai
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -5185,7 +5185,7 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertFalse(handler._should_allow_non_plan_write(project["id"], "继续"))
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_block_non_plan_write_when_user_says_start_writing_plainly_in_s0(self, mock_openai):
+    def test_s0_state_blocks_non_plan_write_independent_of_start_wording(self, mock_openai):
         del mock_openai
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -5205,7 +5205,7 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertFalse(handler._should_allow_non_plan_write(project["id"], "你开始写吧"))
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_block_non_plan_write_when_content_final_report_exists_and_user_asks_to_continue_in_s0(self, mock_openai):
+    def test_existing_legacy_report_cannot_override_s0_write_state(self, mock_openai):
         del mock_openai
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -5231,7 +5231,7 @@ class ChatRuntimeTests(unittest.TestCase):
             self.assertFalse(handler._should_allow_non_plan_write(project["id"], "继续完善"))
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_allow_non_plan_write_when_existing_report_exists_and_user_asks_to_expand(self, mock_openai):
+    def test_existing_canonical_report_cannot_override_s0_write_state(self, mock_openai):
         del mock_openai
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -5254,8 +5254,8 @@ class ChatRuntimeTests(unittest.TestCase):
             )
             handler = ChatHandler(self._make_settings(projects_dir=projects_dir), engine)
 
-            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "请扩写到5000字"))
-            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "帮我润色一下现有正文"))
+            self.assertFalse(handler._should_allow_non_plan_write(project["id"], "请扩写到5000字"))
+            self.assertFalse(handler._should_allow_non_plan_write(project["id"], "帮我润色一下现有正文"))
 
     @mock.patch("backend.chat.OpenAI")
     def test_write_file_rejects_legacy_report_draft_paths_with_canonical_hint(self, mock_openai):
@@ -5640,6 +5640,28 @@ class ChatRuntimeTests(unittest.TestCase):
         stage_patcher.start()
         self.addCleanup(stage_patcher.stop)
         handler._turn_context = handler._build_turn_context(self.project_id, user_message)
+
+    def _start_non_plan_write_turn(
+        self,
+        handler: ChatHandler,
+        project_id: str,
+        project_dir: Path,
+    ) -> None:
+        """Put a test project in the real state that permits non-plan writes."""
+        handler.skill_engine._save_stage_checkpoint(project_dir, "outline_confirmed_at")
+        original_infer = handler.skill_engine._infer_stage_state
+
+        def infer_s4(path):
+            return {**original_infer(path), "stage_code": "S4"}
+
+        stage_patcher = mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            side_effect=infer_s4,
+        )
+        stage_patcher.start()
+        self.addCleanup(stage_patcher.stop)
+        handler._build_turn_context(project_id, "写入项目文件")
 
 
     def _save_draft_followup_state(
@@ -6489,7 +6511,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertLessEqual(len(payload["error"]["message"]), 240)
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_allow_non_plan_write_uses_expand_request_as_history_approval(self, mock_openai):
+    def test_expand_request_in_history_cannot_override_s0_write_state(self, mock_openai):
         del mock_openai
         with tempfile.TemporaryDirectory() as tmpdir:
             projects_dir = Path(tmpdir) / "projects"
@@ -6513,7 +6535,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 ],
             )
 
-            self.assertTrue(handler._should_allow_non_plan_write(project["id"], "继续"))
+            self.assertFalse(handler._should_allow_non_plan_write(project["id"], "继续"))
 
     @mock.patch("backend.chat.OpenAI")
     def test_handler_write_file_requires_fetch_url_after_web_search_before_formal_external_write(self, mock_openai):
@@ -7059,7 +7081,7 @@ class ChatRuntimeTests(unittest.TestCase):
         # 改走 [internal-notice] 后台日志留痕。
         self.assertEqual(notices, [])
         self.assertTrue(
-            any("[internal-notice] non_plan_write_blocked" in line for line in captured.output)
+            any("[internal-notice] checkpoint_forge_blocked" in line for line in captured.output)
         )
 
     @mock.patch("backend.chat.OpenAI")
@@ -7513,7 +7535,7 @@ class ChatRuntimeTests(unittest.TestCase):
             sum("stage_write_blocked" in line for line in internal_lines), 1
         )
         self.assertEqual(
-            sum("non_plan_write_blocked" in line for line in internal_lines), 1
+            sum("checkpoint_forge_blocked" in line for line in internal_lines), 1
         )
 
     @mock.patch("backend.chat.OpenAI")
@@ -7607,7 +7629,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIn("system_notices", result)
         self.assertFalse(result["system_notices"])
         self.assertTrue(
-            any("[internal-notice] non_plan_write_blocked" in line for line in captured.output)
+            any("[internal-notice] checkpoint_forge_blocked" in line for line in captured.output)
         )
 
     @mock.patch("backend.chat.OpenAI")
@@ -8106,6 +8128,12 @@ class ChatRuntimeTests(unittest.TestCase):
                 ),
                 engine,
             )
+            project_dir = Path(project["project_dir"])
+            self._start_non_plan_write_turn(
+                handler,
+                project["id"],
+                project_dir,
+            )
 
             first = handler._execute_tool(
                 project["id"],
@@ -8128,8 +8156,7 @@ class ChatRuntimeTests(unittest.TestCase):
                     ),
                 ),
             )
-
-            state_path = Path(project["project_dir"]) / "conversation_state.json"
+            state_path = project_dir / "conversation_state.json"
             persisted = json.loads(state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(first["status"], "success")
@@ -8172,6 +8199,11 @@ class ChatRuntimeTests(unittest.TestCase):
                 engine,
             )
             project_dir = Path(project["project_dir"])
+            self._start_non_plan_write_turn(
+                handler,
+                project["id"],
+                project_dir,
+            )
             target_path = project_dir / "notes" / "draft.md"
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_text("第一版内容", encoding="utf-8")
@@ -8361,7 +8393,13 @@ class ChatRuntimeTests(unittest.TestCase):
                 ),
                 engine,
             )
-            target_path = Path(project["project_dir"]) / "notes" / "draft.md"
+            project_dir = Path(project["project_dir"])
+            self._start_non_plan_write_turn(
+                handler,
+                project["id"],
+                project_dir,
+            )
+            target_path = project_dir / "notes" / "draft.md"
 
             with mock.patch.object(
                 handler,
@@ -9602,13 +9640,18 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIsNone(handler._turn_context["checkpoint_event"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_should_allow_non_plan_write_blocking_message_beats_outline_blanket_pass(self, mock_openai):
+    def test_pause_wording_does_not_change_s4_state_permission(self, mock_openai):
         del mock_openai
         handler = self._make_handler_with_project()
         self._write_stage_one_prerequisites(self.project_dir)
         handler.skill_engine._save_stage_checkpoint(self.project_dir, "outline_confirmed_at")
 
-        self.assertFalse(handler._should_allow_non_plan_write(self.project_id, "先别写正文"))
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value={"stage_code": "S4"},
+        ):
+            self.assertTrue(handler._should_allow_non_plan_write(self.project_id, "先别写正文"))
         self.assertIn(
             "outline_confirmed_at",
             handler.skill_engine._load_stage_checkpoints(self.project_dir),
@@ -10152,58 +10195,245 @@ for _inherited_test_name in dir(ChatRuntimeTests):
 del _inherited_test_name
 
 
-class NonPlanWriteS0S1PatchTests(ChatRuntimeTests):
-    def _set_checkpoints(self, checkpoints):
-        import json
-        (self.project_dir / "stage_checkpoints.json").write_text(
-            json.dumps(checkpoints), encoding="utf-8"
-        )
+class NonPlanWriteStateGateTests(ChatRuntimeTests):
+    OUTLINE_CHECKPOINT = {"outline_confirmed_at": "2026-04-21T11:00:00"}
 
-    def test_s0_stage_direct_start_keyword_blocked(self):
+    def test_state_guidance_matrix_covers_s0_s1_s2_s3_s4_to_s7_and_done(self):
         handler = self._make_handler_with_project()
-        # project is fresh — stage should be S0 (no s0_interview_done_at yet)
-        self.assertFalse(
-            handler._should_allow_non_plan_write(self.project_id, "开始写")
-        )
+        original_infer = handler.skill_engine._infer_stage_state
+        cases = [
+            ("S0", {}, "需求访谈"),
+            ("S1", {}, "形成大纲"),
+            ("S2", self.OUTLINE_CHECKPOINT, "推进到 S4"),
+            ("S3", self.OUTLINE_CHECKPOINT, "推进到 S4"),
+            ("S4", self.OUTLINE_CHECKPOINT, None),
+            ("S5", self.OUTLINE_CHECKPOINT, None),
+            ("S6", self.OUTLINE_CHECKPOINT, None),
+            ("S7", self.OUTLINE_CHECKPOINT, None),
+            ("done", self.OUTLINE_CHECKPOINT, "撤销交付归档"),
+        ]
+        for stage_code, checkpoints, expected in cases:
+            with self.subTest(stage_code=stage_code), mock.patch.object(
+                handler.skill_engine,
+                "_infer_stage_state",
+                side_effect=lambda project_path, code=stage_code: {
+                    **original_infer(project_path),
+                    "stage_code": code,
+                },
+            ), mock.patch.object(
+                handler.skill_engine,
+                "_load_stage_checkpoints",
+                return_value=checkpoints,
+            ):
+                guidance = handler._non_plan_write_block_guidance(self.project_id)
+                prompt = handler._build_system_prompt(self.project_id)
+                if expected is None:
+                    self.assertIsNone(guidance)
+                    self.assertIn("当前阶段允许按用户目标处理正文草稿", prompt)
+                else:
+                    self.assertIn(expected, guidance)
+                    self.assertIn(guidance, prompt)
 
-    def test_s1_without_outline_confirmed_blocked(self):
-        handler = self._make_handler_with_project()
-        self._set_checkpoints({"s0_interview_done_at": "2026-04-21T10:00:00"})
-        # S1 (s0 done, no outline yet) should still block generic start keywords.
-        self.assertFalse(
-            handler._should_allow_non_plan_write(self.project_id, "开始写")
-        )
+    def test_canonical_stage_facade_matches_shared_guidance_for_every_state(self):
+        from backend.report_writing import check_report_writing_stage
 
-    def test_s4_with_outline_confirmed_allows_direct_start(self):
         handler = self._make_handler_with_project()
-        # Advance to S4 by setting the relevant checkpoints
-        self._set_checkpoints({
-            "s0_interview_done_at": "2026-04-21T10:00:00",
-            "outline_confirmed_at": "2026-04-21T11:00:00",
-        })
-        # Also create the effective outline / research-plan etc. to pass
-        # _infer_stage_state — or just assert the S0/S1 patch: the patch
-        # checks `stage_code in {S0, S1}` — so any stage outside that
-        # set passes the patch. We need to set up enough fixture to reach
-        # S4 in _infer_stage_state. The simplest way is to set outline
-        # confirmed AND enough downstream flags. For this unit test we
-        # test the PATCH, not _infer_stage_state itself: mock it.
-        from unittest import mock
-        with mock.patch.object(
-            handler.skill_engine, "_infer_stage_state",
-            return_value={"stage_code": "S4"},
-        ):
-            self.assertTrue(
-                handler._should_allow_non_plan_write(self.project_id, "开始写正文")
+        original_infer = handler.skill_engine._infer_stage_state
+        for stage_code in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "done"):
+            checkpoints = (
+                self.OUTLINE_CHECKPOINT
+                if stage_code not in {"S0", "S1"}
+                else {}
             )
+            with self.subTest(stage=stage_code), mock.patch.object(
+                handler.skill_engine,
+                "_infer_stage_state",
+                side_effect=lambda project_path, code=stage_code: {
+                    **original_infer(project_path),
+                    "stage_code": code,
+                },
+            ), mock.patch.object(
+                handler.skill_engine,
+                "_load_stage_checkpoints",
+                return_value=checkpoints,
+            ):
+                shared = handler._non_plan_write_block_guidance(self.project_id)
+                canonical = check_report_writing_stage(
+                    handler.skill_engine, self.project_id
+                )
+                self.assertEqual(canonical, shared)
+
+    def test_s4_without_outline_checkpoint_fails_closed(self):
+        handler = self._make_handler_with_project()
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            return_value={"stage_code": "S4"},
+        ), mock.patch.object(
+            handler.skill_engine,
+            "_load_stage_checkpoints",
+            return_value={},
+        ):
+            guidance = handler._non_plan_write_block_guidance(self.project_id)
+            self.assertIn("形成大纲", guidance)
+            self.assertFalse(handler._should_allow_non_plan_write(self.project_id, "开始写"))
+
+    def test_canonical_append_edit_restore_share_gate_and_block_before_snapshot(self):
+        handler = self._make_handler_with_project()
+        draft_path = self.project_dir / handler.skill_engine.REPORT_DRAFT_PATH
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text("# Report\n\n## One\nold text\n", encoding="utf-8")
+        version_id = "20260718T010101000001"
+        history = self.project_dir / handler.skill_engine.REPORT_DRAFT_HISTORY_DIR
+        history.mkdir(parents=True, exist_ok=True)
+        (history / f"report_draft_v1.{version_id}.md").write_text(
+            "# Old\n\n## One\nrestored\n", encoding="utf-8"
+        )
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        sentinel = "shared-state-sentinel"
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "formal_content_write_block_guidance",
+            return_value=sentinel,
+        ), mock.patch.object(
+            handler.skill_engine,
+            "write_file",
+            wraps=handler.skill_engine.write_file,
+        ) as write_file, mock.patch.object(
+            handler.skill_engine,
+            "_snapshot_report_draft",
+            wraps=handler.skill_engine._snapshot_report_draft,
+        ) as snapshot:
+            appended = handler._tool_append_report_draft(
+                self.project_id, "## Two\nnew content"
+            )
+            edited = handler._dispatch_edit_file(
+                self.project_id,
+                handler.skill_engine.REPORT_DRAFT_PATH,
+                "old text",
+                "new text",
+                handler._turn_context,
+            )
+            restored = handler._tool_restore_report_draft(
+                self.project_id, version_id
+            )
+
+        for result in (appended, edited, restored):
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["message"], sentinel)
+        write_file.assert_not_called()
+        snapshot.assert_not_called()
+        self.assertEqual(
+            draft_path.read_text(encoding="utf-8"),
+            "# Report\n\n## One\nold text\n",
+        )
+
+    def test_message_text_never_changes_state_permission(self):
+        handler = self._make_handler_with_project()
+        messages = ("", "开始写正文", "先别写正文", "继续", "只讨论一下")
+        for stage_code, expected in (("S2", False), ("S4", True)):
+            with mock.patch.object(
+                handler.skill_engine,
+                "_infer_stage_state",
+                return_value={"stage_code": stage_code},
+            ), mock.patch.object(
+                handler.skill_engine,
+                "_load_stage_checkpoints",
+                return_value=self.OUTLINE_CHECKPOINT,
+            ):
+                for message in messages:
+                    with self.subTest(stage_code=stage_code, message=message):
+                        self.assertIs(
+                            handler._should_allow_non_plan_write(self.project_id, message),
+                            expected,
+                        )
+
+    def test_helper_turn_prompt_gate_and_notice_share_one_s2_guidance(self):
+        handler = self._make_handler_with_project()
+        original_infer = handler.skill_engine._infer_stage_state
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            side_effect=lambda project_path: {
+                **original_infer(project_path),
+                "stage_code": "S2",
+            },
+        ), mock.patch.object(
+            handler.skill_engine,
+            "_load_stage_checkpoints",
+            return_value=self.OUTLINE_CHECKPOINT,
+        ):
+            guidance = handler._non_plan_write_block_guidance(self.project_id)
+            turn_context = handler._build_turn_context(self.project_id, "开始写正文")
+            prompt = handler._build_system_prompt(self.project_id)
+            gate_reason = handler._non_plan_write_block_reason(
+                self.project_id,
+                "content/other.md",
+            )
+            result = handler._execute_plan_write(
+                self.project_id,
+                file_path="content/other.md",
+                content="formal content",
+                source_tool_name="write_file",
+                source_tool_args={
+                    "file_path": "content/other.md",
+                    "content": "formal content",
+                },
+                persist_func_name="write_file",
+                persist_args={
+                    "file_path": "content/other.md",
+                    "content": "formal content",
+                },
+            )
+
+        self.assertFalse(turn_context["can_write_non_plan"])
+        self.assertEqual(turn_context["non_plan_write_block_guidance"], guidance)
+        self.assertIn(guidance, prompt)
+        self.assertEqual(gate_reason, guidance)
+        self.assertEqual(result["status"], "error")
+        notice = turn_context["pending_system_notices"][-1]
+        self.assertEqual(notice["reason"], guidance)
+        self.assertEqual(notice["user_action"], guidance)
+
+    def test_prompt_has_pause_discipline_done_guidance_and_no_spell_phrases(self):
+        handler = self._make_handler_with_project()
+        original_infer = handler.skill_engine._infer_stage_state
+        with mock.patch.object(
+            handler.skill_engine,
+            "_infer_stage_state",
+            side_effect=lambda project_path: {
+                **original_infer(project_path),
+                "stage_code": "done",
+            },
+        ), mock.patch.object(
+            handler.skill_engine,
+            "_load_stage_checkpoints",
+            return_value=self.OUTLINE_CHECKPOINT,
+        ):
+            prompt = handler._build_system_prompt(self.project_id)
+            guidance = handler._non_plan_write_block_guidance(self.project_id)
+            gate_reason = handler._non_plan_write_block_reason(
+                self.project_id,
+                "content/other.md",
+            )
+
+        self.assertIn("先不要写入或先讨论", prompt)
+        self.assertIn("撤销交付归档", prompt)
+        self.assertIn("delivery_archived_at", prompt)
+        self.assertIn("回到 S7", prompt)
+        self.assertEqual(gate_reason, guidance)
+        for forbidden in ("明确说", "请说一句", "明确要求继续正文", "再说一次", "复述"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, prompt)
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):
     if (
         _inherited_test_name.startswith("test_")
-        and _inherited_test_name not in NonPlanWriteS0S1PatchTests.__dict__
+        and _inherited_test_name not in NonPlanWriteStateGateTests.__dict__
     ):
-        setattr(NonPlanWriteS0S1PatchTests, _inherited_test_name, None)
+        setattr(NonPlanWriteStateGateTests, _inherited_test_name, None)
 del _inherited_test_name
 
 
@@ -13070,7 +13300,7 @@ class S0FirstTurnGateTests(ChatRuntimeTests):
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["message"], "需要先完成一轮 S0 澄清提问，才能完成需求访谈。")
 
-    def test_writer_tool_passes_s0_gate_when_s0_confirmation_true(self):
+    def test_writer_bypasses_first_turn_gate_but_stays_state_blocked_in_s0(self):
         handler = self._make_handler_with_project()
         self._set_s0_confirmation_completed(handler, True)
         target = self.project_dir / "notes" / "s0-first-turn-gate.md"
@@ -13089,9 +13319,10 @@ class S0FirstTurnGateTests(ChatRuntimeTests):
             ),
         )
 
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "error")
         self.assertNotIn("首轮", result.get("message", ""))
-        self.assertEqual(target.read_text(encoding="utf-8"), "# Allowed after S0\n")
+        self.assertIn("需求访谈", result.get("message", ""))
+        self.assertFalse(target.exists())
 
     def test_reject_message_mentions_first_turn_clarification_questions(self):
         handler = self._make_handler_with_project()
@@ -13481,11 +13712,7 @@ del _inherited_test_name
 
 
 class TurnContextPermissionTests(ChatRuntimeTests):
-    """2026-07-09 义务机制手术：意图分类不再武装义务、不再解锁写权限。
-
-    锁死新行为——canonical_obligation 字段整体退役；can_write_non_plan 单一来源 =
-    _should_allow_generic_non_plan_write（阶段/直写关键词/历史授权）。
-    """
+    """canonical_obligation 已退役；权限由 generic non-plan gate 单一提供。"""
 
     def test_new_turn_context_has_no_canonical_obligation_key(self):
         handler = self._make_handler_with_project()
@@ -13493,15 +13720,13 @@ class TurnContextPermissionTests(ChatRuntimeTests):
 
         self.assertNotIn("canonical_obligation", ctx)
 
-    def test_generative_keyword_no_longer_unlocks_non_plan_write_pre_outline(self):
-        # 旧行为：「续写下一章」意图=generative → can_write_non_plan=True，S0-S3 绕开阶段门禁。
+    def test_s0_continuation_wording_does_not_unlock_non_plan_write(self):
         handler = self._make_handler_with_project()
         ctx = handler._build_turn_context(self.project_id, "续写下一章")
 
         self.assertFalse(ctx.get("can_write_non_plan"))
 
-    def test_incidental_modify_keyword_does_not_unlock_pre_outline(self):
-        # 试用反馈截图实锤：S0 长需求含「迭代优化等阶段」被误判 modify，曾解锁 S0 写权限。
+    def test_s0_long_requirement_text_does_not_unlock_non_plan_write(self):
         handler = self._make_handler_with_project()
         ctx = handler._build_turn_context(
             self.project_id,
@@ -13598,6 +13823,17 @@ class ToolSchemaRegistrationTests(ChatRuntimeTests):
         self.assertEqual(set(params["properties"].keys()), {"content"})
         self.assertEqual(params["required"], ["content"])
 
+    def test_restore_report_draft_schema_has_optional_version_id(self):
+        handler = self._make_handler_with_project()
+        restore = next(
+            tool
+            for tool in handler._get_tools()
+            if tool.get("function", {}).get("name") == "restore_report_draft"
+        )
+        params = restore["function"]["parameters"]
+        self.assertEqual(set(params["properties"]), {"version_id"})
+        self.assertEqual(params["required"], [])
+
     def test_edit_file_schema_path_old_new(self):
         handler = self._make_handler_with_project()
         tools = handler._get_tools()
@@ -13605,6 +13841,31 @@ class ToolSchemaRegistrationTests(ChatRuntimeTests):
         params = edit["function"]["parameters"]
         self.assertEqual(set(params["properties"].keys()), {"file_path", "old_string", "new_string"})
         self.assertEqual(set(params["required"]), {"file_path", "old_string", "new_string"})
+
+    def test_draft_tool_descriptions_and_skill_are_spell_free(self):
+        handler = self._make_handler_with_project()
+        functions = {
+            tool["function"]["name"]: tool["function"]
+            for tool in handler._build_tools()
+        }
+        edit_description = functions["edit_file"]["description"]
+        append_description = functions["append_report_draft"]["description"]
+        restore_description = functions["restore_report_draft"]["description"]
+
+        self.assertIn("第一行 `# 标题`", edit_description)
+        self.assertNotIn("混合意图", append_description)
+        self.assertIn("仅在用户要求恢复", restore_description)
+
+        skill_text = (self.repo_skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        runtime_text = "\n".join(
+            [
+                *(function["description"] for function in functions.values()),
+                skill_text,
+            ]
+        )
+        for forbidden in ("明确说", "请说一句", "明确要求继续正文", "再说一次", "复述"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, runtime_text)
 
     def test_build_tools_includes_advance_stage_schema(self):
         handler = self._make_handler_with_project()
@@ -13633,6 +13894,399 @@ for _inherited_test_name in dir(ChatRuntimeTests):
         and _inherited_test_name not in ToolSchemaRegistrationTests.__dict__
     ):
         setattr(ToolSchemaRegistrationTests, _inherited_test_name, None)
+del _inherited_test_name
+
+
+class RestoreReportDraftToolTests(ChatRuntimeTests):
+    VERSION_ID = "20260718T010101000001"
+
+    def _setup_outline_confirmed_s4(self, handler):
+        handler.skill_engine._save_stage_checkpoint(
+            self.project_dir, "outline_confirmed_at",
+        )
+        original_infer = handler.skill_engine._infer_stage_state
+
+        def infer_s4(project_path):
+            return {**original_infer(project_path), "stage_code": "S4"}
+
+        handler.skill_engine._infer_stage_state = infer_s4
+
+    def _history_path(self, handler, version_id=None):
+        version_id = version_id or self.VERSION_ID
+        history = self.project_dir / handler.skill_engine.REPORT_DRAFT_HISTORY_DIR
+        history.mkdir(parents=True, exist_ok=True)
+        return history / f"report_draft_v1.{version_id}.md"
+
+    def _prepare_restore(self, handler, *, current=b"current", restored=b"restored"):
+        self._setup_outline_confirmed_s4(handler)
+        draft = self.project_dir / handler.skill_engine.REPORT_DRAFT_PATH
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_bytes(current)
+        self._history_path(handler).write_bytes(restored)
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+        return draft
+
+    def test_list_is_successful_non_mutation_and_isolated_from_bad_snapshot(self):
+        handler = self._make_handler_with_project()
+        good = self._history_path(handler)
+        good.write_text("# Good\nbody", encoding="utf-8")
+        bad = self._history_path(handler, "20260718T010102000001")
+        bad.write_bytes(b"\xff\xfe")
+
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call("restore_report_draft", "{}"),
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["action"], "list")
+        self.assertIs(result["mutated"], False)
+        by_id = {item["id"]: item for item in result["versions"]}
+        self.assertTrue(by_id[self.VERSION_ID]["readable"])
+        self.assertEqual(by_id[self.VERSION_ID]["first_line"], "# Good")
+        self.assertFalse(by_id["20260718T010102000001"]["readable"])
+        self.assertNotIn("first_line", by_id["20260718T010102000001"])
+        events = handler._build_tool_events(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-list",
+                        "function": {"name": "restore_report_draft", "arguments": "{}"},
+                    }],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-list",
+                    "content": json.dumps(result, ensure_ascii=False),
+                },
+            ]
+        )
+        self.assertEqual(events[0]["status"], "success")
+
+    def test_list_orders_ids_newest_first_and_truncates_first_line(self):
+        handler = self._make_handler_with_project()
+        self._history_path(handler, "20260718T010101000001").write_text(
+            "x" * 200, encoding="utf-8"
+        )
+        self._history_path(handler, "20260718T010101000001-01").write_text(
+            "collision", encoding="utf-8"
+        )
+        self._history_path(handler, "20260718T010102000001").write_text(
+            "newest", encoding="utf-8"
+        )
+
+        result = handler._tool_restore_report_draft(self.project_id)
+
+        self.assertEqual(
+            [item["id"] for item in result["versions"]],
+            [
+                "20260718T010102000001",
+                "20260718T010101000001-01",
+                "20260718T010101000001",
+            ],
+        )
+        self.assertEqual(len(result["versions"][-1]["first_line"]), 120)
+        self.assertRegex(result["versions"][0]["utc_ts"], r"^2026-07-18T01:01:02")
+
+    def test_restore_is_byte_exact_uses_bytes_writer_and_snapshots_current(self):
+        handler = self._make_handler_with_project()
+        restored = b"# Old\r\n\r\n## Mixed\nbody\r\n"
+        draft = self._prepare_restore(handler, current=b"# Current\nbody\n", restored=restored)
+        writes = []
+        real_replace = handler.skill_engine._replace_file_atomically
+
+        def record_replace(path, content):
+            writes.append((Path(path), content))
+            return real_replace(path, content)
+
+        with mock.patch.object(
+            handler.skill_engine, "_replace_file_atomically", side_effect=record_replace
+        ):
+            result = handler._tool_restore_report_draft(self.project_id, self.VERSION_ID)
+
+        self.assertEqual(result["status"], "success", msg=result)
+        self.assertEqual(result["action"], "restore")
+        self.assertIs(result["mutated"], True)
+        self.assertEqual(draft.read_bytes(), restored)
+        canonical_writes = [content for path, content in writes if path == draft]
+        self.assertEqual(canonical_writes, [restored])
+        self.assertIsInstance(canonical_writes[0], bytes)
+        history_bytes = {
+            item["path"].read_bytes()
+            for item in handler.skill_engine._enumerate_report_draft_snapshots(self.project_dir)
+        }
+        self.assertIn(b"# Current\nbody\n", history_bytes)
+
+        mutation = handler._turn_context["canonical_draft_mutations"][-1]
+        self.assertEqual(mutation["tool"], "restore_report_draft")
+        self.assertEqual(mutation["canonical_action"], "restore")
+        self.assertEqual(mutation["target_label"], self.VERSION_ID)
+        self.assertEqual(mutation["old_len"], len("# Current\nbody\n"))
+        self.assertEqual(mutation["new_len"], len(restored.decode("utf-8")))
+        self.assertIn("mtime_after", mutation)
+        self.assertIn("ts", mutation)
+
+    def test_restore_file_write_path_never_calls_path_write_text(self):
+        handler = self._make_handler_with_project()
+        restored = b"# Old\r\n\r\n## One\nbody\r\n"
+        draft = self._prepare_restore(handler, restored=restored)
+
+        with mock.patch.object(handler, "_persist_successful_tool_result"), mock.patch(
+            "pathlib.Path.write_text", side_effect=AssertionError("text writer used")
+        ) as write_text:
+            result = handler._tool_restore_report_draft(self.project_id, self.VERSION_ID)
+
+        self.assertEqual(result["status"], "success", msg=result)
+        self.assertEqual(draft.read_bytes(), restored)
+        write_text.assert_not_called()
+
+    def test_restore_persists_restored_text_as_canonical_workspace_memory(self):
+        handler = self._make_handler_with_project()
+        restored_text = "# Recovered\n\n## One\nRecovered body"
+        self._prepare_restore(handler, restored=restored_text.encode("utf-8"))
+
+        result = handler._tool_restore_report_draft(self.project_id, self.VERSION_ID)
+
+        self.assertEqual(result["status"], "success", msg=result)
+        state = handler._load_conversation_state(self.project_id)
+        source_key = f"file:{handler.skill_engine.REPORT_DRAFT_PATH}"
+        entry = next(item for item in state["memory_entries"] if item["source_key"] == source_key)
+        self.assertEqual(entry["content"], restored_text)
+        event = state["events"][-1]
+        self.assertEqual(event["tool_name"], "restore_report_draft")
+        self.assertEqual(event["source_key"], source_key)
+
+    def test_restore_event_counts_as_write_and_current_turn_source(self):
+        handler = self._make_handler_with_project()
+        result = {
+            "status": "success",
+            "action": "restore",
+            "mutated": True,
+            "path": handler.skill_engine.REPORT_DRAFT_PATH,
+        }
+        event = handler._extract_successful_write_event(
+            "restore_report_draft",
+            json.dumps({"version_id": self.VERSION_ID}),
+            result,
+            project_id=self.project_id,
+        )
+        self.assertEqual(event["path"], handler.skill_engine.REPORT_DRAFT_PATH)
+        self.assertEqual(event["tool"], "restore_report_draft")
+        self.assertIsNone(
+            handler._extract_successful_write_event(
+                "restore_report_draft", "{}", {"status": "success", "mutated": False}
+            )
+        )
+
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call-restore",
+                    "function": {
+                        "name": "restore_report_draft",
+                        "arguments": json.dumps({"version_id": self.VERSION_ID}),
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-restore",
+                "content": json.dumps(result),
+            },
+        ]
+        self.assertEqual(
+            handler._current_turn_successful_tool_source_keys(self.project_id, messages),
+            {f"file:{handler.skill_engine.REPORT_DRAFT_PATH}"},
+        )
+
+    def test_invalid_utf8_version_is_rejected_before_write_or_mutation(self):
+        handler = self._make_handler_with_project()
+        draft = self._prepare_restore(handler, current=b"current", restored=b"\xff\xfe")
+
+        result = handler._tool_restore_report_draft(self.project_id, self.VERSION_ID)
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("损坏", result["message"])
+        self.assertEqual(draft.read_bytes(), b"current")
+        self.assertEqual(handler._turn_context["canonical_draft_mutations"], [])
+
+    def test_restore_write_error_is_actionable_and_hides_os_details(self):
+        handler = self._make_handler_with_project()
+        draft = self._prepare_restore(handler)
+
+        with mock.patch.object(
+            handler.skill_engine,
+            "write_file",
+            side_effect=OSError("SECRET filesystem detail"),
+        ):
+            result = handler._execute_tool(
+                self.project_id,
+                self._make_tool_call(
+                    "restore_report_draft",
+                    json.dumps({"version_id": self.VERSION_ID}),
+                ),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("检查项目文件", result["message"])
+        self.assertNotIn("SECRET", result["message"])
+        self.assertEqual(draft.read_bytes(), b"current")
+        self.assertEqual(handler._turn_context["canonical_draft_mutations"], [])
+
+    def test_untrusted_version_ids_and_symlink_are_never_resolved_as_paths(self):
+        handler = self._make_handler_with_project()
+        draft = self._prepare_restore(handler)
+        outside = self.project_dir / "outside.md"
+        outside.write_text("outside", encoding="utf-8")
+        symlink_id = "20260718T010103000001"
+        symlink = self._history_path(handler, symlink_id)
+        try:
+            symlink.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+
+        attacks = [
+            "../x", str(outside.resolve()), "..\\x", f"{self.VERSION_ID}.md",
+            "unknown", symlink_id,
+        ]
+        for attack in attacks:
+            with self.subTest(version_id=attack):
+                result = handler._tool_restore_report_draft(self.project_id, attack)
+                self.assertEqual(result["status"], "error")
+        self.assertEqual(draft.read_bytes(), b"current")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+        self.assertEqual(handler._turn_context["canonical_draft_mutations"], [])
+
+    def test_restore_is_stage_gated_and_counts_toward_mutation_cap(self):
+        handler = self._make_handler_with_project()
+        draft = self.project_dir / handler.skill_engine.REPORT_DRAFT_PATH
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_bytes(b"current")
+        self._history_path(handler).write_bytes(b"restored")
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
+
+        pre_s4 = handler._tool_restore_report_draft(self.project_id, self.VERSION_ID)
+        self.assertEqual(pre_s4["status"], "error")
+        self.assertIn("需求访谈", pre_s4["message"])
+
+        self._setup_outline_confirmed_s4(handler)
+        handler._turn_context["canonical_draft_mutations"] = [
+            {
+                "canonical_action": "text_replace",
+                "target_label": f"m{index}",
+                "old_len": 1,
+                "new_len": 1,
+            }
+            for index in range(MAX_CANONICAL_MUTATIONS_PER_TURN)
+        ]
+        capped = handler._tool_restore_report_draft(self.project_id, self.VERSION_ID)
+        self.assertEqual(capped["status"], "error")
+        self.assertIn("上限", capped["message"])
+        self.assertEqual(draft.read_bytes(), b"current")
+
+    def test_restore_rejects_done_archived_stage(self):
+        handler = self._make_handler_with_project()
+        self._prepare_restore(handler)
+        handler.skill_engine._infer_stage_state = lambda _path: {"stage_code": "done"}
+
+        result = handler._tool_restore_report_draft(self.project_id, self.VERSION_ID)
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("项目已归档", result["message"])
+        self.assertIn("撤销交付归档", result["message"])
+        self.assertIn("S7", result["message"])
+
+    def test_restore_mtime_ledger_allows_same_turn_edit_without_reread(self):
+        handler = self._make_handler_with_project()
+        self._prepare_restore(handler, restored=b"# Draft\n## One\nold text\n")
+
+        restored = handler._tool_restore_report_draft(self.project_id, self.VERSION_ID)
+        edited = handler._dispatch_edit_file(
+            self.project_id,
+            handler.skill_engine.REPORT_DRAFT_PATH,
+            "old text",
+            "new text",
+            handler._turn_context,
+        )
+
+        self.assertEqual(restored["status"], "success", msg=restored)
+        self.assertEqual(edited["status"], "success", msg=edited)
+        self.assertEqual(
+            [item["tool"] for item in handler._turn_context["canonical_draft_mutations"]],
+            ["restore_report_draft", "edit_file"],
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_stream_restore_write_event_does_not_trigger_missing_write_retry(self, mock_openai):
+        handler = self._make_handler_with_project()
+        tool_result = {
+            "status": "success",
+            "action": "restore",
+            "mutated": True,
+            "path": handler.skill_engine.REPORT_DRAFT_PATH,
+        }
+        restore_stream = [
+            self._make_chunk(
+                tool_calls=[
+                    self._make_stream_tool_call_chunk(
+                        0,
+                        id="call-restore",
+                        name="restore_report_draft",
+                        arguments=json.dumps({"version_id": self.VERSION_ID}),
+                    )
+                ]
+            )
+        ]
+        final_stream = [
+            self._make_chunk(content="已恢复 `content/report_draft_v1.md`。")
+        ]
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            iter(restore_stream), iter(final_stream),
+        ]
+
+        with mock.patch.object(handler, "_execute_tool", return_value=tool_result):
+            events = list(handler.chat_stream(self.project_id, "恢复上一版", max_iterations=3))
+
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
+        visible = "".join(event.get("data", "") for event in events if event["type"] == "content")
+        self.assertIn("已恢复", visible)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_non_stream_restore_write_event_does_not_trigger_missing_write_retry(self, mock_openai):
+        handler = self._make_handler_with_project()
+        tool_call = SimpleNamespace(
+            id="call-restore",
+            function=SimpleNamespace(
+                name="restore_report_draft",
+                arguments=json.dumps({"version_id": self.VERSION_ID}),
+            ),
+        )
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._make_non_stream_tool_response(tool_call),
+            self._make_non_stream_response("已恢复 `content/report_draft_v1.md`。"),
+        ]
+        tool_result = {
+            "status": "success",
+            "action": "restore",
+            "mutated": True,
+            "path": handler.skill_engine.REPORT_DRAFT_PATH,
+        }
+
+        with mock.patch.object(handler, "_execute_tool", return_value=tool_result):
+            result = handler.chat(self.project_id, "恢复上一版", max_iterations=3)
+
+        self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 2)
+        self.assertIn("已恢复", result["content"])
+
+
+for _inherited_test_name in dir(ChatRuntimeTests):
+    if (
+        _inherited_test_name.startswith("test_")
+        and _inherited_test_name not in RestoreReportDraftToolTests.__dict__
+    ):
+        setattr(RestoreReportDraftToolTests, _inherited_test_name, None)
 del _inherited_test_name
 
 
@@ -13813,7 +14467,7 @@ class AppendReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
             self.project_id, content=self._VALID_APPEND_CONTENT,
         )
         self.assertEqual(result.get("status"), "error")
-        self.assertIn("S4", result.get("message", ""))
+        self.assertIn("需求访谈", result.get("message", ""))
 
     def test_outline_unconfirmed_rejects(self):
         handler = self._make_handler_with_project()
@@ -13829,7 +14483,24 @@ class AppendReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
             self.project_id, content=self._VALID_APPEND_CONTENT,
         )
         self.assertEqual(result.get("status"), "error")
-        self.assertIn("确认大纲", result.get("message", ""))
+        self.assertIn("形成大纲", result.get("message", ""))
+        self.assertIn("工作区确认", result.get("message", ""))
+
+    def test_done_archived_stage_rejects_with_actionable_s7_guidance(self):
+        handler = self._make_handler_with_project()
+        self._setup_outline_confirmed_s4(handler)
+        handler.skill_engine._infer_stage_state = lambda _path: {"stage_code": "done"}
+        handler._turn_context = handler._new_turn_context(can_write_non_plan=False)
+
+        result = handler._tool_append_report_draft(
+            self.project_id,
+            content=self._VALID_APPEND_CONTENT,
+        )
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("项目已归档", result.get("message", ""))
+        self.assertIn("撤销交付归档", result.get("message", ""))
+        self.assertIn("S7", result.get("message", ""))
 
     def test_mutation_limit_blocks_second_call(self):
         handler = self._make_handler_with_project()
@@ -13864,19 +14535,14 @@ class AppendReportDraftToolTests(_WriteToolTestMixin, ChatRuntimeTests):
         self.assertEqual(result.get("status"), "error")
         self.assertIn("fetch_url", result.get("message", ""))
 
-    def test_mixed_intent_rejects(self):
+    def test_secondary_actions_do_not_block_append(self):
         handler = self._make_handler_with_project()
         self._setup_outline_confirmed_s4(handler)
-        # 设置多个 secondary action families（bypass 实现细节，直接 patch）
-        original = handler._secondary_action_families_in_message
-        handler._secondary_action_families_in_message = lambda msg: ["export", "inspect_file"]
         handler._build_turn_context(self.project_id, "写完之后导出并查看文件")
-        handler._secondary_action_families_in_message = lambda msg: ["export", "inspect_file"]
         result = handler._tool_append_report_draft(
             self.project_id, content=self._VALID_APPEND_CONTENT,
         )
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("多个动作", result.get("message", ""))
+        self.assertEqual(result.get("status"), "success", msg=result)
 
     def test_no_read_before_write_rejects_when_draft_exists(self):
         handler = self._make_handler_with_project()
@@ -13970,7 +14636,7 @@ class AppendReportDraftMutationsListTests(_WriteToolTestMixin, ChatRuntimeTests)
         self.assertIn("mtime_after", mutation)
         self.assertIn("ts", mutation)
 
-    def test_post_hoc_modify_intent_blocks_append(self):
+    def test_existing_draft_append_does_not_depend_on_message_intent(self):
         handler = self._make_handler_with_project()
         old_draft = "# 报告\n## 第一章 引言\n引言段\n"
         self._put_draft(old_draft)
@@ -13982,18 +14648,17 @@ class AppendReportDraftMutationsListTests(_WriteToolTestMixin, ChatRuntimeTests)
             content=self._VALID_APPEND_CONTENT,
         )
 
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("改已有内容", result.get("message", ""))
-        self.assertIn("edit_file", result.get("message", ""))
-        self.assertEqual(
-            (self.project_dir / "content" / "report_draft_v1.md").read_text(encoding="utf-8"),
-            old_draft,
+        self.assertEqual(result.get("status"), "success", msg=result)
+        self.assertTrue(
+            (self.project_dir / "content" / "report_draft_v1.md")
+            .read_text(encoding="utf-8")
+            .endswith(self._VALID_APPEND_CONTENT)
         )
-        self.assertEqual(turn_context["canonical_draft_mutations"], [])
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
 
-    def test_post_hoc_generative_intent_passes_append(self):
+    def test_neutral_user_message_does_not_block_append(self):
         handler = self._make_handler_with_project()
-        turn_context = self._prepare_s4_turn(handler, "续写下一章")
+        turn_context = self._prepare_s4_turn(handler, "融进去吧？双层好像很奇怪。")
 
         result = handler._tool_append_report_draft(
             self.project_id,
@@ -14004,8 +14669,8 @@ class AppendReportDraftMutationsListTests(_WriteToolTestMixin, ChatRuntimeTests)
         self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
 
     def test_technical_bid_two_tables_append_records_append_action(self):
-        # spec §3.5 落点锁：技术标后置两表用 append_report_draft 追加在草稿末尾，generative
-        # 意图（"继续写技术标…"）下不被 modify-intent 拦，记 canonical_action=append（非 edit_file）。
+        # 技术标后置两表用 append_report_draft 追加在草稿末尾，
+        # 记 canonical_action=append（非 edit_file）。
         # 注：append 路径不按 project_type 分支，此处用默认 strategy-consulting 项目行为与
         # technical-bid 完全一致——测试名锁的是「两表 append 落点」这条 spec 决策，非 type 路由。
         handler = self._make_handler_with_project()
@@ -14245,11 +14910,10 @@ del _inherited_test_name
 class ObligationRemovalRegressionTests(_WriteToolTestMixin, ChatRuntimeTests):
     """2026-07-09 义务机制手术回归锁。
 
-    ① 轮末不再有「必须真实更新正文」硬强制：意图关键词命中 + 无正文写入的轮次，
+    ① 轮末不再有「必须真实更新正文」硬强制：自然语言请求 + 无正文写入的轮次，
        模型的真实回复原样返回，绝不被「抱歉，这一轮尝试更新报告正文没有成功」兜底文案替换。
-    ② S0 长需求含「优化」等裸关键词误判 modify 的轮次同样不受影响（试用反馈截图场景）。
-    ③ append_report_draft 的 modify 互拦只在草稿已存在时生效——没有草稿时把模型
-       推向 edit_file 一个不存在的文件是死路。
+    ② S0 长需求同样不受影响（试用反馈截图场景）。
+    ③ append_report_draft 的执行只服从工具参数和机械门禁，不解析用户消息关键词。
     """
 
     USER_MESSAGE = "帮我写一段正文"
@@ -14285,9 +14949,9 @@ class ObligationRemovalRegressionTests(_WriteToolTestMixin, ChatRuntimeTests):
         self.assertNotIn("尝试更新报告正文没有成功", result["content"])
 
     @mock.patch("backend.chat.OpenAI")
-    def test_stream_s0_incidental_modify_keyword_keeps_model_reply(self, mock_openai):
-        # 截图场景：S0 用户甩长需求（含「迭代优化等阶段」→ 误判 modify），模型正常回复
-        # 提问/计划文本。旧机制会重试 2 次后把整轮替换成误导性失败文案且全程吞掉流式输出。
+    def test_stream_s0_natural_request_keeps_model_reply(self, mock_openai):
+        # 截图场景：S0 用户甩长需求，模型正常回复提问/计划文本。
+        # 旧机制会重试 2 次后把整轮替换成误导性失败文案且全程吞掉流式输出。
         handler = self._make_handler_with_project()
         reply = "收到，我先确认几个关键问题：报告的目标读者是谁？"
         mock_openai.return_value.chat.completions.create.side_effect = [
@@ -14311,8 +14975,8 @@ class ObligationRemovalRegressionTests(_WriteToolTestMixin, ChatRuntimeTests):
         self.assertIn(reply, streamed)
         self.assertNotIn("尝试更新报告正文没有成功", streamed)
 
-    def test_append_allowed_without_draft_when_message_has_incidental_modify_keyword(self):
-        # S4 + 无草稿 + 消息含「优化」（误判 modify）→ append 必须放行（首稿唯一路径）。
+    def test_append_allowed_without_draft_for_natural_request(self):
+        # S4 + 无草稿时，append 是首稿落盘路径，不解析用户消息关键词。
         handler = self._make_handler_with_project()
         self._setup_outline_confirmed_s4(handler)
         handler._turn_context = handler._build_turn_context(
@@ -14332,8 +14996,8 @@ class ObligationRemovalRegressionTests(_WriteToolTestMixin, ChatRuntimeTests):
 
         self.assertEqual(result.get("status"), "success", msg=result)
 
-    def test_append_still_rejected_for_modify_intent_when_draft_exists(self):
-        # 草稿已存在时，modify 意图仍互拦到 edit_file（防重复追加同章）。
+    def test_append_allowed_with_existing_draft_after_read(self):
+        # 草稿已存在时，只要 read-before-write 等机械门禁满足，append 仍执行。
         handler = self._make_handler_with_project()
         self._setup_outline_confirmed_s4(handler)
         self._put_draft("# 报告标题\n## 第一章\n" + ("既有正文" * 60))
@@ -14351,8 +15015,13 @@ class ObligationRemovalRegressionTests(_WriteToolTestMixin, ChatRuntimeTests):
             ),
         )
 
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("edit_file", result.get("message", ""))
+        self.assertEqual(result.get("status"), "success", msg=result)
+        self.assertIn(
+            "## 追加章",
+            (self.project_dir / "content" / "report_draft_v1.md").read_text(
+                encoding="utf-8"
+            ),
+        )
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):
@@ -14433,9 +15102,8 @@ class _EditFileDispatcherTestMixin(_WriteToolTestMixin):
 
     def _prepare_generic_edit(self, handler, *, file_path="some/other.md", content="alpha old beta\n"):
         self._put_project_file(file_path, content)
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-        handler._turn_context["generic_non_plan_write_allowed"] = True
-        handler._turn_context.setdefault("canonical_draft_mutations", [])
+        self._setup_outline_confirmed_s4(handler)
+        handler._build_turn_context(self.project_id, "修改项目文件")
         handler._execute_tool(
             self.project_id,
             self._make_tool_call(
@@ -14529,44 +15197,52 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
         self.assertIn("超过预期范围", result.get("message", ""))
         self.assertEqual(self._draft_text(), original)
 
-    def test_full_rewrite_requires_user_keyword(self):
+    def test_full_rewrite_h1_anchor_needs_no_user_keyword(self):
         handler = self._make_handler_with_project()
-        self._prepare_canonical_edit(handler, user_message="把报告标题改一下")
+        turn_context = self._prepare_canonical_edit(
+            handler,
+            user_message="融进去吧？双层好像很奇怪。",
+        )
+        new_draft = "# 新报告\n## 第一章\n新内容\n"
 
         result = self._call_edit_file(
             handler,
             self.CANONICAL,
             "# 报告标题",
-            "# 新报告\n## 第一章\n新内容\n",
+            new_draft,
         )
 
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("整篇重写需要明确", result.get("message", ""))
+        self.assertEqual(result.get("status"), "success", msg=result)
+        self.assertEqual(result.get("canonical_action"), "full_rewrite")
+        self.assertEqual(self._draft_text(), new_draft)
+        self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
 
-    def test_full_rewrite_rejects_negated_user_keyword(self):
+    def test_structural_h1_range_returns_executable_anchor_guidance(self):
         handler = self._make_handler_with_project()
         self._prepare_canonical_edit(
             handler,
-            user_message="不是全文重写，只把标题改一下",
+            user_message="全文重写。",
         )
         draft_before = self._draft_text()
+        stale_range = draft_before + "\n## 幻觉章节\n旧上下文\n"
 
         result = self._call_edit_file(
             handler,
             self.CANONICAL,
-            draft_before,
+            stale_range,
             "# 新报告\n## 第一章\n新内容\n",
         )
 
         self.assertEqual(result.get("status"), "error")
-        self.assertIn("整篇重写需要明确", result.get("message", ""))
+        self.assertIn("第一行 `# 标题`", result.get("message", ""))
+        self.assertIn("`## 章节标题`", result.get("message", ""))
         self.assertEqual(self._draft_text(), draft_before)
 
-    def test_full_rewrite_with_keyword_passes(self):
+    def test_full_rewrite_h1_anchor_passes_structural_checks(self):
         handler = self._make_handler_with_project()
         turn_context = self._prepare_canonical_edit(
             handler,
-            user_message="整篇重写这份报告",
+            user_message="要。",
         )
         new_draft = "# 新报告\n## 第一章\n新内容\n## 第二章\n更多内容\n"
 
@@ -14582,11 +15258,11 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
         self.assertEqual(self._draft_text(), new_draft)
         self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
 
-    def test_full_rewrite_with_all_rewrite_keyword_passes(self):
+    def test_full_draft_snapshot_anchor_passes_structural_checks(self):
         handler = self._make_handler_with_project()
         turn_context = self._prepare_canonical_edit(
             handler,
-            user_message="全部改写",
+            user_message="按刚才讨论的处理。",
         )
         new_draft = "# 新报告\n## 第一章\n新内容\n"
 
@@ -14602,7 +15278,7 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
         self.assertEqual(self._draft_text(), new_draft)
         self.assertEqual(len(turn_context["canonical_draft_mutations"]), 1)
 
-    def test_full_draft_old_string_without_keyword_is_not_text_replace(self):
+    def test_full_draft_anchor_without_keyword_uses_report_shape_validation(self):
         handler = self._make_handler_with_project()
         self._prepare_canonical_edit(handler, user_message="把报告标题改一下")
         original = self._draft_text()
@@ -14615,12 +15291,12 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
         )
 
         self.assertEqual(result.get("status"), "error")
-        self.assertIn("整篇重写需要明确", result.get("message", ""))
+        self.assertIn("章节标题", result.get("message", ""))
         self.assertEqual(self._draft_text(), original)
 
     def test_full_rewrite_requires_report_shape(self):
         handler = self._make_handler_with_project()
-        self._prepare_canonical_edit(handler, user_message="整篇重写这份报告")
+        self._prepare_canonical_edit(handler, user_message="按刚才讨论的处理。")
         original = self._draft_text()
 
         result = self._call_edit_file(
@@ -14657,6 +15333,7 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
 
         self.assertEqual(result.get("status"), "error")
         self.assertIn("唯一", result.get("message", ""))
+        self.assertIn("read_file", result.get("message", ""))
 
     def test_section_delete(self):
         handler = self._make_handler_with_project()
@@ -14729,15 +15406,14 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
         self.assertEqual(result.get("canonical_action"), "text_replace")
         self.assertTrue(self._draft_text().startswith("# 新报告标题\n"))
 
-    def test_begin_obligation_blocks_canonical_edit(self):
+    def test_edit_executes_without_message_intent_gate(self):
         handler = self._make_handler_with_project()
         self._prepare_canonical_edit(handler, user_message="开始写报告")
 
         result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
 
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("append_report_draft", result.get("message", ""))
-        self.assertIn("引言段", self._draft_text())
+        self.assertEqual(result.get("status"), "success", msg=result)
+        self.assertIn("新引言", self._draft_text())
 
     def test_successful_canonical_edit_persists_workspace_memory(self):
         handler = self._make_handler_with_project()
@@ -14780,15 +15456,14 @@ class EditFileCanonicalDispatcherTests(_EditFileDispatcherTestMixin, ChatRuntime
         )
         self.assertEqual(turn_context.get("canonical_draft_mutations"), [])
 
-    def test_post_hoc_generative_intent_blocks_edit(self):
+    def test_continuation_wording_does_not_block_edit(self):
         handler = self._make_handler_with_project()
         self._prepare_canonical_edit(handler, user_message="续写下一章")
 
         result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
 
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("新增内容", result.get("message", ""))
-        self.assertIn("append_report_draft", result.get("message", ""))
+        self.assertEqual(result.get("status"), "success", msg=result)
+        self.assertIn("新引言", self._draft_text())
 
 
 for _inherited_test_name in dir(ChatRuntimeTests):
@@ -14829,19 +15504,26 @@ class EditFileCanonicalInvariantRejectTests(_EditFileDispatcherTestMixin, ChatRu
         self.assertEqual(result.get("status"), "error")
         self.assertIn("大纲", result.get("message", ""))
 
-    def test_mixed_intent_rejected(self):
+    def test_done_archived_stage_rejects_with_actionable_s7_guidance(self):
+        handler = self._make_handler_with_project()
+        self._prepare_canonical_edit(handler)
+        handler.skill_engine._infer_stage_state = lambda _path: {"stage_code": "done"}
+
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("项目已归档", result.get("message", ""))
+        self.assertIn("撤销交付归档", result.get("message", ""))
+        self.assertIn("S7", result.get("message", ""))
+
+    def test_secondary_actions_do_not_block_edit(self):
         handler = self._make_handler_with_project()
         self._prepare_canonical_edit(handler, user_message="把引言段改成新引言并导出")
 
-        with mock.patch.object(
-            handler,
-            "_secondary_action_families_in_message",
-            return_value=["export", "inspect_file"],
-        ):
-            result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
+        result = self._call_edit_file(handler, self.CANONICAL, "引言段", "新引言")
 
-        self.assertEqual(result.get("status"), "error")
-        self.assertIn("多个动作", result.get("message", ""))
+        self.assertEqual(result.get("status"), "success", msg=result)
+        self.assertIn("新引言", self._draft_text())
 
     def test_mutation_limit_full_rejected(self):
         handler = self._make_handler_with_project()
@@ -14983,10 +15665,8 @@ class _WriteFileDispatcherTestMixin(_WriteToolTestMixin):
     )
 
     def _prepare_write_turn(self, handler):
-        handler._turn_context = handler._new_turn_context(can_write_non_plan=True)
-        handler._turn_context["generic_non_plan_write_allowed"] = True
-        handler._turn_context.setdefault("canonical_draft_mutations", [])
-        return handler._turn_context
+        self._setup_outline_confirmed_s4(handler)
+        return handler._build_turn_context(self.project_id, "写入项目文件")
 
     def _call_write_file(self, handler, file_path, content):
         return handler._execute_tool(

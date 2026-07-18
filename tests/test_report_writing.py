@@ -2,11 +2,11 @@
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 from backend.report_writing import (
     MAX_CANONICAL_MUTATIONS_PER_TURN,
     check_no_fetch_url_pending,
-    check_no_mixed_intent_in_turn,
     check_no_prior_canonical_mutation_in_turn,
     check_outline_confirmed,
     check_read_before_write_canonical_draft,
@@ -169,13 +169,14 @@ class _FakeSkillEngine:
     def _load_stage_checkpoints(self, project_path):
         return self._checkpoints
 
-
-class _FakeHandler:
-    def __init__(self, families):
-        self._families = list(families)
-
-    def _secondary_action_families_in_message(self, user_message):
-        return self._families
+    def formal_content_write_block_guidance(self, project_id):
+        if not self._project_path:
+            return "项目不存在，无法写入正式内容。"
+        if self._stage_code == "done":
+            return "项目已归档。需要修改正文时，请先撤销交付归档，回到 S7 后再修改。"
+        if self._stage_code not in {"S4", "S5", "S6", "S7"}:
+            return f"本工具仅在 S4–S7 可用。当前阶段：{self._stage_code}"
+        return None
 
 
 class CheckReportWritingStageTests(unittest.TestCase):
@@ -197,6 +198,25 @@ class CheckReportWritingStageTests(unittest.TestCase):
         engine = _FakeSkillEngine(project_path=pathlib.Path("/tmp/x"), stage_code="S7")
         self.assertIsNone(check_report_writing_stage(engine, "p1"))
 
+    def test_done_archived_stage_rejected_with_actionable_s7_guidance(self):
+        engine = _FakeSkillEngine(project_path=pathlib.Path("/tmp/x"), stage_code="done")
+        msg = check_report_writing_stage(engine, "p1")
+        self.assertIsNotNone(msg)
+        self.assertIn("项目已归档", msg)
+        self.assertIn("撤销交付归档", msg)
+        self.assertIn("S7", msg)
+
+    def test_delegates_to_shared_formal_content_gate_verbatim(self):
+        engine = _FakeSkillEngine(project_path=pathlib.Path("/tmp/x"), stage_code="S4")
+        engine.formal_content_write_block_guidance = mock.Mock(
+            return_value="shared-state-sentinel"
+        )
+
+        result = check_report_writing_stage(engine, "p1")
+
+        self.assertEqual(result, "shared-state-sentinel")
+        engine.formal_content_write_block_guidance.assert_called_once_with("p1")
+
 
 class CheckOutlineConfirmedTests(unittest.TestCase):
     def test_project_missing_returns_error(self):
@@ -215,22 +235,6 @@ class CheckOutlineConfirmedTests(unittest.TestCase):
             checkpoints={"outline_confirmed_at": "2026-05-06T00:00:00"},
         )
         self.assertIsNone(check_outline_confirmed(engine, "p1"))
-
-
-class CheckNoMixedIntentInTurnTests(unittest.TestCase):
-    def test_zero_secondary_actions_pass(self):
-        handler = _FakeHandler([])
-        self.assertIsNone(check_no_mixed_intent_in_turn(handler, "重写第二章"))
-
-    def test_one_secondary_action_pass(self):
-        handler = _FakeHandler(["export"])
-        self.assertIsNone(check_no_mixed_intent_in_turn(handler, "重写第二章并导出"))
-
-    def test_two_secondary_actions_reject(self):
-        handler = _FakeHandler(["export", "inspect_file"])
-        msg = check_no_mixed_intent_in_turn(handler, "重写并导出并查看文件")
-        self.assertIsNotNone(msg)
-        self.assertIn("拆", msg)
 
 
 class CheckReadBeforeWriteCanonicalDraftTests(unittest.TestCase):
@@ -390,211 +394,6 @@ class ReadBeforeWriteSelfRefreshTests(unittest.TestCase):
         )
         self.assertIsNotNone(result)
         self.assertIn("read_file", result)
-
-
-class DetectUserMessageIntentTests(unittest.TestCase):
-    def test_generative_keywords_match(self):
-        from backend.report_writing import detect_user_message_intent
-        cases = [
-            "帮我起草第一章",
-            "续写下一章",
-            "写下一段",
-            "继续写",
-            "帮我写完第二章",
-        ]
-        for msg in cases:
-            self.assertEqual(detect_user_message_intent(msg), "generative",
-                             f"expected generative for: {msg}")
-
-    def test_modify_keywords_match(self):
-        from backend.report_writing import detect_user_message_intent
-        cases = [
-            "把'增长'改成'增速'",
-            "把第二章里的渠道效率改成渠道质量",
-            "把第二章里的渠道效率替换为渠道质量",
-            "把正文中的2025年预测改为2026年预测",
-            "重写第二章",
-            "请把第二章重写一下",
-            "全文重写这份报告正文",
-            "整篇重写",
-            "推倒重来",
-            "全部改写",
-            "第二章太弱了，改强一点",
-            "替换第一段",
-            "修改结论部分",
-            "删掉最后一节",
-            "调整第三章的措辞",
-            "对第二章的结构和措辞进行调整",
-            "帮我写得更顺一点",
-            "写得更清楚一点",
-            "请润色这一段",
-        ]
-        for msg in cases:
-            self.assertEqual(detect_user_message_intent(msg), "modify",
-                             f"expected modify for: {msg}")
-
-    def test_positive_suggestion_forms_are_not_negated(self):
-        from backend.report_writing import detect_user_message_intent
-        cases = [
-            ("不如继续写下一章", "generative"),
-            ("要不继续写下一章", "generative"),
-            ("不妨继续写", "generative"),
-            ("不如润色一下这一段", "modify"),
-        ]
-        for msg, expected in cases:
-            self.assertEqual(detect_user_message_intent(msg), expected,
-                             f"expected {expected} for: {msg}")
-
-    def test_preservation_constrained_polish_is_modify(self):
-        from backend.report_writing import detect_user_message_intent
-        for msg in [
-            "不用改原意，帮我写得更顺一点",
-            "不用改内容，请润色这一段",
-            "请润色这一段，不用改结构",
-        ]:
-            self.assertEqual(detect_user_message_intent(msg), "modify",
-                             f"expected modify for: {msg}")
-
-    def test_pure_noop_edit_feedback_is_ambiguous(self):
-        from backend.report_writing import detect_user_message_intent
-        for msg in [
-            "不用修改",
-            "不用润色",
-            "不需要优化",
-            "这段不用调整",
-            "不要修改",
-            "不要润色",
-            "先不要调整",
-            "先不修改了",
-            "不再润色",
-            "别修改了",
-            "修改就不用了",
-            "润色先不用了",
-        ]:
-            self.assertEqual(detect_user_message_intent(msg), "ambiguous",
-                             f"expected ambiguous for: {msg}")
-
-    def test_negated_replacement_requests_are_ambiguous(self):
-        from backend.report_writing import detect_user_message_intent
-        for msg in [
-            "不用把第二章里的渠道效率改成渠道质量",
-            "不用再把第二章里的渠道效率改成渠道质量",
-            "不要把正文中的2025年预测改为2026年预测",
-            "不要再把第二章里的渠道效率改成渠道质量",
-            "不用把第二章里的渠道效率替换为渠道质量",
-            "别把第二章里的渠道效率改成渠道质量",
-            "别再把第二章里的渠道效率改成渠道质量",
-            "先不要再把第二章里的渠道效率改成渠道质量",
-            "先不把第二章里的渠道效率改成渠道质量了",
-            "不再把正文中的2025年预测改为2026年预测",
-            "把第二章里的渠道效率改成渠道质量就不用了",
-            "把正文中的2025年预测改为2026年预测先不用了",
-        ]:
-            self.assertEqual(detect_user_message_intent(msg), "ambiguous",
-                             f"expected ambiguous for: {msg}")
-
-    def test_long_same_clause_negated_edit_requests_are_ambiguous(self):
-        from backend.report_writing import detect_user_message_intent
-        for msg in [
-            "不要对第二章的结构和措辞进行调整",
-            "不用对第二章的结构和措辞做修改",
-            "别对最后一节的表述进行润色",
-        ]:
-            self.assertEqual(detect_user_message_intent(msg), "ambiguous",
-                             f"expected ambiguous for: {msg}")
-
-    def test_negated_write_requests_are_ambiguous(self):
-        from backend.report_writing import detect_user_message_intent
-        for msg in [
-            "不用继续写",
-            "先不用起草",
-            "不用写下一章",
-            "别继续写了",
-            "先别继续写",
-            "先不继续写了",
-            "不再继续写",
-            "别写下一章",
-            "继续写就不用了",
-            "写下一章不用了",
-        ]:
-            self.assertEqual(detect_user_message_intent(msg), "ambiguous",
-                             f"expected ambiguous for: {msg}")
-
-    def test_negated_rewrite_requests_are_ambiguous(self):
-        from backend.report_writing import detect_user_message_intent
-        for msg in [
-            "不是全文重写",
-            "不想全文重写",
-            "并非全文重写",
-            "不是整篇重写",
-            "不想整篇重写",
-            "并非整篇重写",
-            "不是全部改写",
-            "不想全部改写",
-            "并非全部改写",
-            "不是重写第二章",
-            "不想重写第二章",
-            "并非重写第二章",
-        ]:
-            self.assertEqual(detect_user_message_intent(msg), "ambiguous",
-                             f"expected ambiguous for: {msg}")
-
-    def test_ambiguous_returns_ambiguous(self):
-        from backend.report_writing import detect_user_message_intent
-        for msg in [
-            "",
-            "看一下背景",
-            "你好",
-            "ok 继续",
-            "上一段写得不错",
-            "这段写得很好，不用改",
-            "这段写得很清楚，不用改",
-            "上一段写得自然",
-            "上一段写得很通顺，不用改",
-        ]:
-            self.assertEqual(detect_user_message_intent(msg), "ambiguous",
-                             f"expected ambiguous for: {msg}")
-
-    def test_chinese_punctuation_does_not_break(self):
-        from backend.report_writing import detect_user_message_intent
-        self.assertEqual(
-            detect_user_message_intent("把第二章里的'30%'改成'三成'，谢谢。"),
-            "modify",
-        )
-
-
-class UserMessageRequestsFullRewriteTests(unittest.TestCase):
-    def test_positive_full_rewrite_requests_match(self):
-        from backend.report_writing import user_message_requests_full_rewrite
-
-        for msg in [
-            "整篇重写这份报告",
-            "全文重写这份报告正文",
-            "推倒重来",
-            "全部改写",
-        ]:
-            self.assertTrue(
-                user_message_requests_full_rewrite(msg),
-                f"expected full rewrite request for: {msg}",
-            )
-
-    def test_negated_full_rewrite_requests_do_not_match(self):
-        from backend.report_writing import user_message_requests_full_rewrite
-
-        for msg in [
-            "不是全文重写，只把标题改一下",
-            "不想全文重写",
-            "并非整篇重写",
-        ]:
-            self.assertFalse(
-                user_message_requests_full_rewrite(msg),
-                f"expected no full rewrite request for: {msg}",
-            )
-
-    def test_generic_modify_request_does_not_match(self):
-        from backend.report_writing import user_message_requests_full_rewrite
-
-        self.assertFalse(user_message_requests_full_rewrite("把标题改一下"))
 
 
 class MutationLimitTests(unittest.TestCase):

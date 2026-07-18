@@ -78,28 +78,38 @@
 
 ## S4 写正文工具（2026-05-09 DeepSeek migration）
 
-S4 阶段（大纲已确认）报告正文唯一规范路径是 `content/report_draft_v1.md`。DeepSeek migration 后正文工具集从 4 个专用工具收敛为 **1 个生成工具 + 通用 edit dispatcher**：
+S4–S7（大纲已确认）报告正文唯一规范路径是 `content/report_draft_v1.md`。`done` 是已归档只读态；需要修改时必须先清除 `delivery_archived_at` 回到 S7。正文工具集为 **1 个生成工具 + 通用 edit dispatcher + 版本恢复工具**：
 
 | 工具 | 用途 | 关键约束 |
 |---|---|---|
 | `append_report_draft(content)` | 起草 / 续写 / 写下一章 | 首次起草 draft 不存在时跳过 read-before-write check |
 | `edit_file(file_path, old_string, new_string)` | 修改已有正文 | `file_path` 为 `content/report_draft_v1.md` 时走 canonical draft dispatcher；先 `read_file`，`old_string` 必须是章节锚点 / H1 整篇锚点 / 唯一文本 |
+| `restore_report_draft(version_id?)` | 列出或恢复近期正文版本 | 无参数只列版本；有参数执行字节级恢复并记为一次 canonical mutation |
 
 `edit_file` 对 canonical draft 的分派规则：
 
 - `old_string` 以 `## ` 开头：`resolve_section_anchor()` 只用首行 h2 label 定位整章 snapshot，可用于章节重写 / 删除。
-- `old_string` 等于 draft 第一行 H1 且用户明确说"整篇/全文/推倒重来"：整篇重写。
+- `old_string` 等于 draft 第一行 H1，或与当前全文逐字/strip 相等：整篇重写；不解析用户消息关键词。
 - 其他情况：`old_string` 必须在 draft 中唯一出现，用于文字替换 / 删除。
 - `write_file` **不接受** `content/report_draft_v1.md`；首次起草或续写必须用 `append_report_draft`。
 
-正文写入入口 inline 调 6 个 invariant check helpers（stage / outline / mixed-intent / mutation-limit / read-before-write+mtime / fetch_url-pending），全部定义在 `backend/report_writing.py`（pure functions，无 `chat.py` 反向 import）。
+正文写入入口 inline 调机械 invariant helpers（stage / outline / mutation-limit / read-before-write+mtime / fetch_url-pending），全部定义在 `backend/report_writing.py`（pure functions，无 `chat.py` 反向 import）。append/edit 的选择由工具描述指导，不再由用户消息关键词互拦。
+
+### 草稿版本快照与恢复
+
+- `SkillEngine.write_file` 与 `user_write_file` 是正文写入 choke point。路径先经全路径 casefold 识别并归一为 canonical 小写路径；用户写先通过白名单、同源阶段门、文件存在与 `base_mtime_ns` CAS，再创建快照。
+- 已有正文覆盖前以 bytes 复制到 `content/.draft_history/report_draft_v1.<version_id>.md`。`version_id` 是 UTC `YYYYMMDDTHHMMSSffffff`，碰撞追加 `-NN`；枚举、排序、prune 与 restore 共用同一解析器。
+- 快照失败 fail-closed，主写不发生；主写失败 best-effort 删除本次新快照并保留原异常；主写成功后 best-effort 保留最新 40 份。prune 失败不把成功写入伪装成失败，后续成功写入会再次收敛。
+- 恢复前严格 UTF-8 解码，落盘走 bytes 通道，保证 CRLF/混合换行字节级保真。版本只从合法普通文件枚举映射中精确命中，拒绝 symlink、目录逃逸和拼接路径。
+- `list_workspace_files` 隐藏 `.draft_history`；审查、导出、字数统计只读 canonical 正文。restore 成功必须同时进入 `canonical_draft_mutations`、turn-end successful write、当前轮 source 去重和 conversation memory 四条账本。
 
 **关键约束**：
 - 旧专用工具 `rewrite_report_section` / `replace_report_text` / `rewrite_report_draft` 已删除；不要新建、注册或引用。
 - `canonical_draft_mutations` 是 list；每轮最多 `MAX_CANONICAL_MUTATIONS_PER_TURN`（现 10）次 canonical draft mutation，超限错误必须带 mutations 摘要和真实进度。
 - read-before-write：先 `read_file` 才能改（首次起草除外）；mtime 变了要重读
+- non-plan 正式内容权限由 `SkillEngine.formal_content_write_block_guidance()` 只按 stage + checkpoint 计算，`ChatHandler._non_plan_write_block_guidance()` 与 `report_writing.check_report_writing_stage()` 都只是兼容 facade：S0/S1/S2/S3/done 分别返回真实下一步，只有带 `outline_confirmed_at` 的 S4–S7 放行；用户消息和历史对话不参与授权。append/edit/restore、通用 AI dispatcher、HTTP 手动保存及 workspace list/read 的 `editable` 共用此结果，确保后端拒写与界面只读一致。
 
-**Turn-end 对账（⚠️ 2026-07-09 义务机制手术后）**：只剩「声称 vs 实际」一条——`_get_missing_expected_writes`（解析 assistant 文本里声称写过的文件，对比 `successful_writes`）→ `_build_missing_write_feedback` 纠偏重试。**意图分类驱动的 canonical_obligation 整套已删**（`_required_writes_satisfied` 硬强制 / 「更新报告正文没有成功」兜底文案 / `_maybe_inject_obligation_retry` / 义务→`can_write_non_plan` 权限解锁 / 义务快照与流式缓冲 flag），不要恢复——裸关键词（优化/修改…）扫长消息误伤率高，S0-S3 会绕开阶段门禁 + 轮末误导文案（试用反馈截图实锤）。`detect_user_message_intent` 仅存 3 个窄消费方：edit_file↔append 工具路由互拦（append 侧 modify 拦截**必须带 `draft_exists` 条件**）+ 全篇重写解锁。已接受的空隙：无路径口头声称（"正文已写完"，无反引号路径）+ 实际没写 → 不再兜（用户 2026-07-09 拍板）。见「## 试用反馈批次（2026-07-09）」。
+**Turn-end 对账（⚠️ 2026-07-09 义务机制手术后）**：只剩「声称 vs 实际」一条——`_get_missing_expected_writes`（解析 assistant 文本里声称写过的文件，对比 `successful_writes`）→ `_build_missing_write_feedback` 纠偏重试。**意图分类驱动的 canonical_obligation、正文关键词分类器、append/edit 互拦与整篇重写关键词解锁均已删除，禁止恢复**。原因是裸关键词会误扫长消息、绕开阶段边界并诱发错误重试；意图判断交给拥有完整对话上下文的模型，安全由状态门、read-before-write、结构/长度 cap、单轮 mutation cap 和可恢复快照承担。已接受的空隙：无路径口头声称（"正文已写完"，无反引号路径）+ 实际没写 → 不再兜（用户 2026-07-09 拍板）。
 
 **历史背景**：原 `<draft-action>` tag system + classifier + gate + scope enforcement 整套（含 fix4 v5 amendment）已于 2026-05-06 删除；4 专用工具中的 3 个旧工具与 gemini 时代 obligation / family-lock 控制层已于 2026-05-09 DeepSeek migration 删除。详见 `docs/superpowers/cutover_report_2026-05-08_deepseek-migration.md`。
 
@@ -486,7 +496,7 @@ S5 阶段审查由**唯一一个用户主动触发按钮**驱动（N7：原"AI �
 
 - **对 spec 的三处实施期优化**：① **graphviz 整支砍掉**——flowchart/org_chart/tree 用纯 Python 布局（树=叶子均分+父居中；DAG=最长路径分层+重心排序，有环友好报错）+ matplotlib 图元，零新二进制依赖，v2.0/v2.1 分期理由消失故一次做完；② **无 cache-bust**——chart_id 每次铸新（`chart-<12hex>`）、PNG 不可变，`/assets` 路由发 `immutable` 长缓存，「改图」=新生成+换引用；③ **图宽=渲染期物理尺寸**（6.4in ≤ A4 文字区 6.5in，dpi 200），markdown 引用不带 `{width=}`。
 - **新叶子模块 4+1**（**全部禁 import chat/skill/main，禁用 matplotlib 全局状态机接口（只许 Agg+OO：Figure+FigureCanvasAgg）——`test_chart_render.py::RendererSourceGuardTests` 连 docstring 都扫**）：`chart_style.py`（字体注册[幂等+锁]/海军蓝配色/Figure 工厂/`ChartRenderError`，依赖 config.get_base_path 定位 fonts/）、`chart_limits.py`（输入/输出 caps=唯一防线，线程级 timeout 杀不掉 C 层渲染）、`chart_render.py`/`diagram_render.py`（`render_*(kind,payload,title,source,options)->PNG bytes`，任何失败归一 `ChartRenderError` 人话）、`chart_assets.py`（只依赖 stdlib：原子写 PNG+sidecar json 对、引用扫描契约[md 图片/raw img/query/URL 编码/`./`与`content/`前缀/去重/绝对 URL 与穿越名不算]、`sweep_orphan_assets` grace 10min、`list_missing_assets`、`load_referenced_sidecars`）。
-- **工具接线（chat.py）**：`create_chart`/`create_diagram` 注册 `_build_tools` + dispatch `_tool_create_visual`。**preflight 只复用三道 pure helper**（`check_report_writing_stage`+`check_outline_confirmed`+`check_no_fetch_url_pending`）——mixed-intent/mutation 限额/read-before-write 是草稿写入的机械门禁**不套用**；**生成≠插入**：生成不计 canonical mutation，插入走现成 append/edit（吃 R3 全套门禁）；渲染栈**延迟导入**（缺 matplotlib 只图表功能友好失败不拖垮 chat）；S0 首轮白名单天然拦截。alt 净化剥 `[]()`反引号换行（完整 title 进图脚+sidecar）。**两 schema token 成本钉死 ≤1200**（实测 ~937，`test_schemas_registered_and_within_token_budget`）。system prompt 加「插图规则」纪律块（一图一结论/不装饰/source 可溯/生成后必须随即插入）。
+- **工具接线（chat.py）**：`create_chart`/`create_diagram` 注册 `_build_tools` + dispatch `_tool_create_visual`。**preflight 只复用三道 pure helper**（`check_report_writing_stage`+`check_outline_confirmed`+`check_no_fetch_url_pending`）——mutation 限额/read-before-write 是草稿写入的机械门禁**不套用**；**生成≠插入**：生成不计 canonical mutation，插入走现成 append/edit（吃 R3 全套门禁）；渲染栈**延迟导入**（缺 matplotlib 只图表功能友好失败不拖垮 chat）；S0 首轮白名单天然拦截。alt 净化剥 `[]()`反引号换行（完整 title 进图脚+sidecar）。**两 schema token 成本钉死 ≤1200**（实测 ~937，`test_schemas_registered_and_within_token_budget`）。system prompt 加「插图规则」纪律块（一图一结论/不装饰/source 可溯/生成后必须随即插入）。
 - **清扫时机**：只在下次生成图表前机会性 sweep（+grace 保护在途图）；**导出路径绝不 sweep**（`report_tools` 只读 assets——竞态规约，spec §4.3）。
 - **`/assets` 路由（main.py）**：`GET /api/projects/{id}/assets/{name}`，`require_project` 租户隔离 + resolve/parents 越界守卫 + 只服务 `.png` + immutable Cache-Control。sidecar json 不经 HTTP 暴露。
 - **导出（report_tools.py）**：pandoc 前 `list_missing_assets` **硬校验**（缺图带清单失败、不进 pandoc——pandoc 缺图 rc=0 只告警会产静默丢图 docx）+ `--resource-path <content/>`。无图报告零回归。

@@ -3,6 +3,23 @@
 本文件是 2026-03 至 2026-07 的计划、实施与部署流水账归档，不再作为当前待办来源。
 现行待办只看 `docs/current-worklist.md`；系统机制只看 `docs/architecture.md`。
 
+## 2026-07-18 拆除关键词意图门槛 + 草稿版本快照（✅ 已上线）
+
+**完成**：正文与正式内容写入改为 S4–S7 纯阶段状态授权，S0–S3 与归档态保持只读；
+AI 工具、HTTP 手动保存和工作区 `editable` 共用 `SkillEngine` 单一判定源。移除关键词意图
+分类、混合意图门、历史/短确认解锁与误导性念咒文案；整篇重写改用结构锚点。正文覆盖写入
+前自动创建字节级快照，最多保留近期 40 份，并新增 `restore_report_draft` 列表与恢复能力。
+
+**质量门**：后端全量 `1876 passed, 1 skipped, 4 deselected, 238 subtests passed`；前端全量
+`606 passed`；生产 build 通过。独立红队两轮发现并修复 HTTP 手动保存绕过阶段门、正文写入
+判定源分叉，第三轮给出 `APPROVE`，无剩余 BLOCKER/MAJOR/MINOR。
+
+**部署**：已部署 `kr-web-01`；五个运行文件与本地 SHA-256 一致，service active、
+`NRestarts=0`，公网 health 200、SPA shell no-cache、hash asset immutable、未登录鉴权 401，
+真实浏览器登录页正常且 console error 为 0。回滚点：
+`/opt/cra-rollback-20260718-182342-draft-versioning`。详见
+`docs/superpowers/cutover_report_2026-07-18_remove-keyword-intent-gates-and-draft-versioning.md`。
+
 ## 2026-07-18 多项目并发 + 停顿自愈 + 引用卫生批次（✅ 已上线）
 
 **完成**：ChatPanel 会话内常驻池（切项目不中断、每项目单流、全标签页最多 3 流、FIFO

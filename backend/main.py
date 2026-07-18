@@ -47,7 +47,12 @@ from .independent_review import (
 from .models import ChatRequest, ChatResponse, ProjectInfo
 from .report_tools import export_reviewable_draft
 from .material_limits import MAX_HEAVY_MATERIAL_BYTES
-from .skill import SkillEngine, StaleFileError, UserWriteForbiddenError
+from .skill import (
+    SkillEngine,
+    StaleFileError,
+    UserWriteForbiddenError,
+    UserWriteStageError,
+)
 from .tenant import user_projects_dir, ensure_user_dirs, tenant_project_key
 from . import accounts
 from . import url_guard
@@ -927,7 +932,9 @@ async def read_file(file_path: str, scope: ProjectScope = Depends(require_projec
     try:
         normalized = scope.engine.normalize_file_path(scope.project_id, file_path)
         data = scope.engine.read_file_with_mtime(scope.project_id, file_path)
-        data["editable"] = scope.engine.is_user_editable(normalized)
+        data["editable"] = scope.engine.is_user_editable(
+            normalized, project_ref=scope.project_id
+        )
         return data
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1047,6 +1054,8 @@ async def write_user_file(
         return await asyncio.get_running_loop().run_in_executor(
             _USER_WRITE_EXECUTOR, _write_under_lock
         )
+    except UserWriteStageError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     except UserWriteForbiddenError:
         raise HTTPException(status_code=403, detail="该文件不可编辑")
     except StaleFileError:
