@@ -42,21 +42,30 @@ test('App: 额度刷新 wiring（轮结束 + 聚焦都刷新 /me）', () => {
   assert.match(refreshBlock[0], /seq\s*!==\s*quotaRefreshSeqRef\.current[\s\S]{0,40}?return prev/, '非最新序号的回包应丢弃')
   // codex BLOCKER②：合并前校验回包 uid 与当前 prev.uid 一致，防在途 /me 跨用户串号。
   assert.match(refreshBlock[0], /r\.data\??\.uid\s*!==\s*prev\.uid[\s\S]{0,40}?return prev/, 'uid 不符则原样返回 prev')
-  // 统一回调 handleProjectMutated（刷 workspace + 刷额度），ChatPanel 与 WorkspacePanel 共用——
-  // 任一计费路径（聊天轮 / 独立审查后系统轮 / 文件保存）完成都即时刷额度。
+  // 活动视图回调刷 workspace + 额度；Pool 的 pid 版另行守卫后台项目，双契约不能混用。
   assert.match(
     src,
-    /const handleProjectMutated\s*=\s*\(\)\s*=>\s*\{[\s\S]{0,160}?refreshAuthQuota\(\)/,
-    'handleProjectMutated 应同时刷 workspace 与额度',
+    /const handleActiveProjectMutated\s*=\s*\(\)\s*=>\s*\{[\s\S]{0,160}?refreshAuthQuota\(\)/,
+    'handleActiveProjectMutated 应同时刷 workspace 与额度',
   )
-  const panelMutatedWirings = src.match(/onProjectMutated=\{handleProjectMutated\}/g) || []
-  assert.ok(panelMutatedWirings.length >= 2, 'ChatPanel 与 WorkspacePanel 都应 onProjectMutated={handleProjectMutated}')
+  assert.match(src, /const handlePanelProjectMutated = \(projectId\)/)
+  assert.match(src, /projectId === currentProjectIdRef\.current/)
+  assert.match(src, /onPanelProjectMutated=\{handlePanelProjectMutated\}/)
   // 窗口重新聚焦也刷新（兜独立审查等非聊天计费路径 + 跨标签页）。
   assert.match(
     src,
     /onFocus[\s\S]{0,120}?refreshAuthQuota\(\)[\s\S]{0,120}?addEventListener\(['"]focus['"]/,
     'focus effect 应在聚焦时刷新额度',
   )
+})
+
+test('App: 静默项目刷新不触碰顶层 loading，且有 seq + uid 双守卫', () => {
+  const block = src.match(/const refreshProjectsSilently[\s\S]*?\n  \}/)?.[0] || ''
+  assert.match(block, /\+\+projectsRefreshSeqRef\.current/)
+  assert.match(block, /requestUid = authUserRef\.current\?\.uid/)
+  assert.match(block, /seq !== projectsRefreshSeqRef\.current/)
+  assert.match(block, /authUserRef\.current\?\.uid !== requestUid/)
+  assert.doesNotMatch(block, /setLoading\(/)
 })
 
 // 回归守卫：initializeApp effect 必须只依赖稳定身份字段（uid + must_change_password），

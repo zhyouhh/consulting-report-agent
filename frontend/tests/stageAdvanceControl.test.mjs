@@ -125,11 +125,11 @@ test("ChatPanel 暴露 sendUserMessage 且忙时返回 false（source guard）",
     new URL("../src/components/ChatPanel.jsx", import.meta.url),
     "utf8",
   );
-  assert.match(src, /useImperativeHandle\(ref, \(\) => \(\{ triggerSystemTurn, dropPendingReviewTriggers, sendUserMessage \}\)/);
-  // 忙态守卫：loading/uploading 时不发、返回 false
-  assert.match(src, /if \(!trimmed \|\| loading \|\| uploading\) return false/);
+  assert.match(src, /triggerSystemTurn,[\s\S]*dropPendingReviewTriggers,[\s\S]*sendUserMessage,/);
+  // 忙态守卫走同步 refs，不把 React 展示 state 当互斥锁
+  assert.match(src, /if \(!trimmed \|\| streamInFlightRef\.current \|\| uploadInFlightRef\.current\) return false/);
   // 代发渲染用户气泡（与打字确认同路径）
-  assert.match(src, /startStream\(\{ messageText: trimmed, renderUserBubble: true \}\)/);
+  assert.match(src, /tryStartStream\(\{ messageText: trimmed, renderUserBubble: true \}\)/);
 });
 
 test("App/MobileShell 把 onSendPrompt 接到 ChatPanel.sendUserMessage（source guard）", () => {
@@ -138,5 +138,5 @@ test("App/MobileShell 把 onSendPrompt 接到 ChatPanel.sendUserMessage（source
   const mobileSrc = readFileSync(new URL("../src/components/MobileShell.jsx", import.meta.url), "utf8");
   assert.match(mobileSrc, /onSendPrompt=\{handleSendPrompt\}/);
   // 移动端代发成功后关右抽屉（动作后关抽屉铁律）
-  assert.match(mobileSrc, /const ok = chatPanelRef\.current\?\.sendUserMessage\(text\) \?\? false\s*\n\s*if \(ok\) closeAll\(\)/);
+  assert.match(mobileSrc, /const ok = chatPanelPoolRef\.current\?\.sendUserMessage\(text\) \?\? false\s*\n\s*if \(ok\) closeAll\(\)/);
 });

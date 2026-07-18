@@ -1,3 +1,4 @@
+import threading
 import unittest
 from pathlib import Path
 from backend.material_conversion import MaterialConverter
@@ -133,6 +134,128 @@ class CacheGCTests(unittest.TestCase):
             self.assertTrue(md_path.exists())   # 还有 mat2 引用
             conv.release(key, "mat2")
             self.assertFalse(md_path.exists())  # 无引用才删
+
+    def test_process_wide_key_lock_serializes_converter_instances_and_preserves_refs(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            cache_dir.mkdir()
+            relative_alias = cache_dir / ".." / cache_dir.name
+            first = MaterialConverter(
+                cache_dir=cache_dir,
+                vision_adapter=lambda *a: "V",
+                ocr_adapter=lambda p: "O",
+                capability_resolver=lambda: False,
+            )
+            second = MaterialConverter(
+                cache_dir=relative_alias,
+                vision_adapter=lambda *a: "V",
+                ocr_adapter=lambda p: "O",
+                capability_resolver=lambda: False,
+            )
+            key = "same-content-n6-v1"
+
+            first_read_done = threading.Event()
+            release_first_read = threading.Event()
+            second_entered_read = threading.Event()
+            state_lock = threading.Lock()
+            active = 0
+            max_concurrent = 0
+            original_first_read = first._read_refs
+            original_second_read = second._read_refs
+
+            def instrumented_read(original, *, block=False):
+                def read(ref_key):
+                    nonlocal active, max_concurrent
+                    with state_lock:
+                        active += 1
+                        max_concurrent = max(max_concurrent, active)
+                    try:
+                        refs = original(ref_key)
+                        if block:
+                            first_read_done.set()
+                            if not release_first_read.wait(timeout=3):
+                                raise AssertionError("timed out releasing first retain")
+                        else:
+                            second_entered_read.set()
+                        return refs
+                    finally:
+                        with state_lock:
+                            active -= 1
+
+                return read
+
+            first._read_refs = instrumented_read(original_first_read, block=True)
+            second._read_refs = instrumented_read(original_second_read)
+            second_done = threading.Event()
+
+            first_thread = threading.Thread(target=first.retain, args=(key, "mat-a"))
+
+            def retain_second():
+                try:
+                    second.retain(key, "mat-b")
+                finally:
+                    second_done.set()
+
+            second_thread = threading.Thread(target=retain_second)
+            first_thread.start()
+            self.assertTrue(first_read_done.wait(timeout=3))
+            second_thread.start()
+            # A converter-instance lock would let the second read/write overlap here and lose
+            # mat-b when the first stale read resumes. The process-level canonical-path lock
+            # keeps it outside the critical section.
+            self.assertFalse(second_entered_read.wait(timeout=0.15))
+            self.assertFalse(second_done.is_set())
+            release_first_read.set()
+            first_thread.join(timeout=3)
+            second_thread.join(timeout=3)
+
+            self.assertFalse(first_thread.is_alive())
+            self.assertFalse(second_thread.is_alive())
+            self.assertEqual(max_concurrent, 1)
+            self.assertEqual(first._read_refs(key), {"mat-a", "mat-b"})
+
+    def test_different_cache_keys_do_not_share_one_global_lock(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            converter = MaterialConverter(
+                cache_dir=Path(tmp),
+                vision_adapter=lambda *a: "V",
+                ocr_adapter=lambda p: "O",
+                capability_resolver=lambda: False,
+            )
+            inside_read = threading.Barrier(2)
+            original_read = converter._read_refs
+            state_lock = threading.Lock()
+            active = 0
+            max_concurrent = 0
+
+            def observed_read(key):
+                nonlocal active, max_concurrent
+                with state_lock:
+                    active += 1
+                    max_concurrent = max(max_concurrent, active)
+                try:
+                    inside_read.wait(timeout=3)
+                    return original_read(key)
+                finally:
+                    with state_lock:
+                        active -= 1
+
+            converter._read_refs = observed_read
+            threads = [
+                threading.Thread(target=converter.retain, args=(f"key-{index}", f"mat-{index}"))
+                for index in range(2)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=3)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(max_concurrent, 2)
 
 
 class LegacyConvertTests(unittest.TestCase):

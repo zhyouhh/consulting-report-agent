@@ -178,9 +178,12 @@ test("WorkspacePanel drops stale pending review triggers when starting a new run
 test("ChatPanel exposes dropPendingReviewTriggers and prunes via dropPendingTriggersByType (B2)", () => {
   const src = chatPanelSrc();
   assert.match(src, /dropPendingTriggersByType\(/);
-  // exposed on the imperative handle so WorkspacePanel can prune at run-start.
-  // （2026-07-06 反馈①后 handle 还带 sendUserMessage——阶段按钮代发入口。）
-  assert.match(src, /\{ triggerSystemTurn, dropPendingReviewTriggers, sendUserMessage \}/);
+  // 旧三项与池生命周期新增五项都必须暴露，不能只模糊匹配 useImperativeHandle。
+  for (const name of [
+    'triggerSystemTurn', 'dropPendingReviewTriggers', 'sendUserMessage',
+    'abortActiveStream', 'flushPendingTriggers', 'cancelActiveUpload',
+    'cancelPendingWork', 'stopAcceptingWork',
+  ]) assert.match(src, new RegExp(`\\b${name}\\b`));
 });
 
 test("ReviewChatWindow isMobile (default false): portal fullscreen, no drag, stop-label", () => {

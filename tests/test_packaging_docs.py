@@ -114,6 +114,13 @@ class SkillMdS0InterviewLockTests(unittest.TestCase):
         self.assertIn("read_file", self.skill_md)
         self.assertNotIn("draft-action 标签规范", self.skill_md)
 
+    def test_s4_forbids_internal_dl_markers_and_gives_reader_facing_alternative(self):
+        s4 = self.skill_md.split("### S4 报告撰写", 1)[1].split("### S4 写正文工具", 1)[0]
+        self.assertIn("正文与附录**禁止出现** `[DL-...]` 内部编号标记", s4)
+        self.assertIn("`analysis-notes.md` 专用", s4)
+        self.assertIn("据国家数据局 2024 年 12 月发布的指导意见", s4)
+        self.assertIn("文末「参考资料」章节集中列出", s4)
+
     def test_skill_md_s5_section_uses_new_workflow(self):
         self.assertIn("独立审查", self.skill_md)
         self.assertIn("plan/independent-review.md", self.skill_md)

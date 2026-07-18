@@ -3,7 +3,10 @@ import os
 import re
 import shutil
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
@@ -2727,6 +2730,42 @@ class SkillEngineTests(unittest.TestCase):
             instr = engine._declare_and_invite_instruction("specialized-research")
         self.assertIn("根因", instr)
 
+    def test_research_writing_discipline_only_applies_to_research_types_in_s4(self):
+        self._make_project()
+
+        def set_type(slug):
+            registry = self.engine._load_registry()
+            registry["projects"][0]["project_type"] = slug
+            self.engine._save_registry(registry)
+
+        research_types = (
+            "strategy-consulting",
+            "market-research",
+            "due-diligence",
+            "specialized-research",
+        )
+        for slug in research_types:
+            set_type(slug)
+            for stage in ("S1", "S2", "S3"):
+                with self.subTest(project_type=slug, stage=stage), mock.patch.object(
+                    self.engine, "_infer_stage_state", return_value={"stage_code": stage}
+                ):
+                    self.assertNotIn("研究类写作纪律", self.engine.build_methodology_block("demo"))
+            with self.subTest(project_type=slug, stage="S4"), mock.patch.object(
+                self.engine, "_infer_stage_state", return_value={"stage_code": "S4"}
+            ):
+                block = self.engine.build_methodology_block("demo")
+                self.assertIn("研究类写作纪律", block)
+                self.assertIn("So-What", block)
+
+        for slug in ("management-document", "implementation-plan", "technical-bid"):
+            set_type(slug)
+            for stage in ("S1", "S2", "S3", "S4"):
+                with self.subTest(project_type=slug, stage=stage), mock.patch.object(
+                    self.engine, "_infer_stage_state", return_value={"stage_code": stage}
+                ):
+                    self.assertNotIn("研究类写作纪律", self.engine.build_methodology_block("demo"))
+
     def test_build_methodology_block_token_budget(self):
         try:
             import tiktoken
@@ -2737,11 +2776,24 @@ class SkillEngineTests(unittest.TestCase):
             engine = self._bare_engine(tmp)
             worst = 0
             for slug in SkillEngine.TYPE_SKELETON_MAP:
-                skeleton = engine.load_type_skeleton(slug)
-                instr = engine._declare_and_invite_instruction(slug)  # S1 块（含菜单，最大）
-                menu = engine._framework_menu_for_type(slug)
-                block = engine._render_methodology_block(skeleton, menu, instr)
-                worst = max(worst, len(enc.encode(block)))
+                for stage in ("S1", "S2", "S3", "S4"):
+                    granularity = "detailed" if slug == "management-document" else "standard"
+                    skeleton = engine.load_type_skeleton(slug, granularity)
+                    instr = (
+                        engine._declare_and_invite_instruction(slug)
+                        if stage == "S1"
+                        else engine._adhere_instruction("missing", [])
+                    )
+                    if stage == "S4" and SkillEngine.METHODOLOGY_TONE[slug] in {"analytical", "specialized"}:
+                        instr = f"{instr}\n\n{SkillEngine.RESEARCH_WRITING_DISCIPLINE}"
+                    if slug == "management-document":
+                        instr = (
+                            f"{instr}\n\n{engine._clause_format_instruction('follow_reference')}"
+                            f"\n\n{engine.DOC_PARAMS_INVALID_ADVISORY}"
+                        )
+                    menu = engine._framework_menu_for_type(slug)
+                    block = engine._render_methodology_block(skeleton, menu, instr)
+                    worst = max(worst, len(enc.encode(block)))
             self.assertLessEqual(worst, 2000, f"方法论注入块 token={worst} 超 2k 预算（spec §4.3）")
 
     def test_load_type_skeleton_extracts_nonempty_structure_for_all_types(self):
@@ -3379,6 +3431,345 @@ class SkillEngineTests(unittest.TestCase):
         # 已确认状态重新 set → 不被方法论门重卡
         again = self.engine.record_stage_checkpoint("demo", "outline_confirmed_at", "set")
         self.assertEqual(again["status"], "ok")
+
+
+class SharedStateConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
+
+    def _payload(self, workspace: Path, name: str) -> dict:
+        return {
+            "name": name,
+            "workspace_dir": str(workspace),
+            "project_type": "strategy-consulting",
+            "theme": f"theme-{name}",
+            "target_audience": "executive",
+            "deadline": "2026-12-31",
+            "expected_length": "3000 words",
+            "notes": "",
+        }
+
+    def test_registry_touch_transactions_are_serial_and_lose_no_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = SkillEngine(root / "projects", self.repo_skill_dir)
+            projects = [
+                engine.create_project(self._payload(root / f"workspace-{i}", f"p-{i}"))
+                for i in range(8)
+            ]
+            registry = engine._load_registry()
+            for project in registry["projects"]:
+                project["updated_at"] = "never-touched"
+            engine._save_registry(registry)
+
+            original_atomic_write = engine._atomic_write_json
+            active = 0
+            max_concurrent = 0
+            counter_lock = threading.Lock()
+
+            def observed_atomic_write(target, payload):
+                nonlocal active, max_concurrent
+                with counter_lock:
+                    active += 1
+                    max_concurrent = max(max_concurrent, active)
+                try:
+                    time.sleep(0.01)
+                    return original_atomic_write(target, payload)
+                finally:
+                    with counter_lock:
+                        active -= 1
+
+            start = threading.Barrier(len(projects) + 1)
+
+            def touch(project_id):
+                start.wait(timeout=2)
+                engine._touch_project(project_id)
+
+            with mock.patch.object(engine, "_atomic_write_json", side_effect=observed_atomic_write):
+                with ThreadPoolExecutor(max_workers=len(projects)) as pool:
+                    futures = [pool.submit(touch, item["id"]) for item in projects]
+                    start.wait(timeout=2)
+                    for future in futures:
+                        future.result(timeout=5)
+
+            final = engine._load_registry()
+            self.assertEqual(max_concurrent, 1)
+            self.assertTrue(
+                all(item["updated_at"] != "never-touched" for item in final["projects"])
+            )
+
+    def test_concurrent_create_and_delete_leave_registry_consistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = SkillEngine(root / "projects", self.repo_skill_dir)
+            start = threading.Barrier(7)
+
+            def create(index):
+                start.wait(timeout=3)
+                return engine.create_project(
+                    self._payload(root / f"workspace-{index}", f"p-{index}")
+                )
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                futures = [pool.submit(create, i) for i in range(6)]
+                start.wait(timeout=3)
+                created = [future.result(timeout=10) for future in futures]
+
+            self.assertEqual(
+                {item["id"] for item in engine._load_registry()["projects"]},
+                {item["id"] for item in created},
+            )
+
+            start = threading.Barrier(7)
+
+            def delete(project_id):
+                start.wait(timeout=3)
+                engine.delete_project(project_id)
+
+            def create_more(index):
+                start.wait(timeout=3)
+                return engine.create_project(
+                    self._payload(root / f"workspace-new-{index}", f"new-{index}")
+                )
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                deletes = [pool.submit(delete, item["id"]) for item in created[:3]]
+                additions = [pool.submit(create_more, i) for i in range(3)]
+                start.wait(timeout=3)
+                for future in deletes:
+                    future.result(timeout=10)
+                added = [future.result(timeout=10) for future in additions]
+
+            expected_ids = {item["id"] for item in created[3:] + added}
+            registry = engine._load_registry()
+            self.assertEqual({item["id"] for item in registry["projects"]}, expected_ids)
+            self.assertEqual(len(registry["projects"]), len(expected_ids))
+
+    def test_registry_atomic_replace_keeps_continuous_reader_on_valid_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = SkillEngine(root / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._payload(root / "workspace", "p"))
+            errors = []
+            stop = threading.Event()
+
+            def read_continuously():
+                while not stop.is_set():
+                    try:
+                        parsed = json.loads(engine.registry_path.read_text(encoding="utf-8"))
+                        if not isinstance(parsed.get("projects"), list):
+                            errors.append("invalid registry shape")
+                    except Exception as exc:  # noqa: BLE001 -- captured for assertion
+                        errors.append(repr(exc))
+
+            reader = threading.Thread(target=read_continuously)
+            reader.start()
+            try:
+                for index in range(80):
+                    registry = engine._load_registry()
+                    registry["projects"][0]["notes"] = f"{index}:" + ("x" * 100_000)
+                    engine._save_registry(registry)
+            finally:
+                stop.set()
+                reader.join(timeout=3)
+
+            self.assertFalse(reader.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(engine.get_project_record(project["id"])["notes"].split(":", 1)[0], "79")
+            self.assertEqual(list(engine.projects_dir.glob(".registry.json.*.tmp")), [])
+
+    def test_same_project_material_adds_are_serial_and_lose_no_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = SkillEngine(root / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._payload(root / "workspace", "p"))
+            sources = [root / "a.txt", root / "b.txt"]
+            for index, source in enumerate(sources):
+                source.write_text(f"material-{index}", encoding="utf-8")
+
+            original_hash = engine._content_sha256
+            first_entered = threading.Event()
+            second_entered = threading.Event()
+            release_first = threading.Event()
+            counter_lock = threading.Lock()
+            active = 0
+            max_concurrent = 0
+            calls = 0
+
+            def observed_hash(path):
+                nonlocal active, max_concurrent, calls
+                with counter_lock:
+                    calls += 1
+                    call_number = calls
+                    active += 1
+                    max_concurrent = max(max_concurrent, active)
+                if call_number == 1:
+                    first_entered.set()
+                    self.assertTrue(release_first.wait(timeout=3))
+                else:
+                    second_entered.set()
+                try:
+                    return original_hash(path)
+                finally:
+                    with counter_lock:
+                        active -= 1
+
+            with mock.patch.object(engine, "_content_sha256", side_effect=observed_hash):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    first = pool.submit(
+                        engine.add_materials,
+                        project["id"],
+                        [str(sources[0])],
+                        "chat_upload",
+                    )
+                    self.assertTrue(first_entered.wait(timeout=3))
+                    second = pool.submit(
+                        engine.add_materials,
+                        project["id"],
+                        [str(sources[1])],
+                        "workspace_upload",
+                    )
+                    self.assertFalse(
+                        second_entered.wait(timeout=0.15),
+                        "same-project material transaction overlapped",
+                    )
+                    release_first.set()
+                    first.result(timeout=5)
+                    second.result(timeout=5)
+
+            self.assertEqual(max_concurrent, 1)
+            self.assertEqual(
+                {item["display_name"] for item in engine.list_materials(project["id"])},
+                {"a.txt", "b.txt"},
+            )
+
+    def test_different_projects_material_adds_run_in_parallel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = SkillEngine(root / "projects", self.repo_skill_dir)
+            projects = [
+                engine.create_project(self._payload(root / f"workspace-{i}", f"p-{i}"))
+                for i in range(2)
+            ]
+            sources = [root / "a.txt", root / "b.txt"]
+            for index, source in enumerate(sources):
+                source.write_text(f"material-{index}", encoding="utf-8")
+
+            original_hash = engine._content_sha256
+            inside_hash = threading.Barrier(2)
+            counter_lock = threading.Lock()
+            active = 0
+            max_concurrent = 0
+
+            def observed_hash(path):
+                nonlocal active, max_concurrent
+                with counter_lock:
+                    active += 1
+                    max_concurrent = max(max_concurrent, active)
+                try:
+                    inside_hash.wait(timeout=3)
+                    return original_hash(path)
+                finally:
+                    with counter_lock:
+                        active -= 1
+
+            with mock.patch.object(engine, "_content_sha256", side_effect=observed_hash):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures = [
+                        pool.submit(
+                            engine.add_materials,
+                            projects[index]["id"],
+                            [str(sources[index])],
+                            "chat_upload",
+                        )
+                        for index in range(2)
+                    ]
+                    for future in futures:
+                        future.result(timeout=5)
+
+            self.assertEqual(max_concurrent, 2)
+
+    def test_same_project_add_and_remove_share_one_rmw_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = SkillEngine(root / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._payload(root / "workspace", "p"))
+            old_source = root / "old.txt"
+            old_source.write_text("old", encoding="utf-8")
+            old_material = engine.add_materials(
+                project["id"], [str(old_source)], "chat_upload"
+            )[0]
+            new_source = root / "new.txt"
+            new_source.write_text("new", encoding="utf-8")
+
+            original_hash = engine._content_sha256
+            add_in_transaction = threading.Event()
+            release_add = threading.Event()
+            remove_done = threading.Event()
+
+            def blocking_hash(path):
+                add_in_transaction.set()
+                self.assertTrue(release_add.wait(timeout=3))
+                return original_hash(path)
+
+            def remove_old():
+                engine.remove_material(project["id"], old_material["id"])
+                remove_done.set()
+
+            with mock.patch.object(engine, "_content_sha256", side_effect=blocking_hash):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    add_future = pool.submit(
+                        engine.add_materials,
+                        project["id"],
+                        [str(new_source)],
+                        "workspace_upload",
+                    )
+                    self.assertTrue(add_in_transaction.wait(timeout=3))
+                    remove_future = pool.submit(remove_old)
+                    self.assertFalse(remove_done.wait(timeout=0.15))
+                    release_add.set()
+                    add_future.result(timeout=5)
+                    remove_future.result(timeout=5)
+
+            self.assertEqual(
+                [item["display_name"] for item in engine.list_materials(project["id"])],
+                ["new.txt"],
+            )
+
+    def test_materials_atomic_replace_keeps_continuous_reader_on_valid_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = SkillEngine(root / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._payload(root / "workspace", "p"))
+            record = engine.get_project_record(project["id"])
+            materials_path = engine._materials_path(record)
+            errors = []
+            stop = threading.Event()
+
+            def read_continuously():
+                while not stop.is_set():
+                    try:
+                        if not isinstance(json.loads(materials_path.read_text(encoding="utf-8")), list):
+                            errors.append("invalid materials shape")
+                    except Exception as exc:  # noqa: BLE001 -- captured for assertion
+                        errors.append(repr(exc))
+
+            reader = threading.Thread(target=read_continuously)
+            reader.start()
+            try:
+                for index in range(80):
+                    engine._save_materials(
+                        record,
+                        [{"id": f"mat-{index}", "payload": "x" * 100_000}],
+                    )
+            finally:
+                stop.set()
+                reader.join(timeout=3)
+
+            self.assertFalse(reader.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(engine._load_materials(record)[0]["id"], "mat-79")
+            self.assertEqual(list(materials_path.parent.glob(".materials.json.*.tmp")), [])
 
 
 class S0CheckpointInfrastructureTests(unittest.TestCase):

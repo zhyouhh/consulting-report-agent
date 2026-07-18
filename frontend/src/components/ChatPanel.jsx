@@ -14,10 +14,8 @@ import {
 } from '../utils/messageParts'
 import {
   createPendingTriggerItem,
-  dequeuePendingTrigger,
   dropPendingTriggersByType,
   enqueuePendingTrigger,
-  scopePendingQueueToProject,
 } from '../utils/pendingTriggerQueue'
 import {
   appendThinkingEventContent,
@@ -44,6 +42,7 @@ import {
 } from '../utils/pendingAttachments'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
 import { summarizeWorkspace } from '../utils/workspaceSummary'
+import { shouldContinueAfterUpload } from '../utils/chatPanelPoolCore'
 import ToolCallList from './ToolCallList'
 // 时间线穿插：parts 有则按序穿插渲染（MessageParts），否则回落到「ToolCallList 堆顶 + renderAssistantText 正文」。
 import MessageParts from './MessageParts'
@@ -65,6 +64,13 @@ const ChatPanel = forwardRef(function ChatPanel({
   autoStartProjectId,
   onAutoStartConsumed,
   onOpenWorkspaceFile,
+  visible = true,
+  acquireStreamLease = () => ({ status: 'started', token: 'standalone-stream' }),
+  releaseStreamLease = () => {},
+  enqueuePermitWaiter = () => {},
+  cancelPermitWaiter = () => {},
+  beginUpload = () => 'standalone-upload',
+  endUpload = () => {},
 }, ref) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
@@ -80,8 +86,14 @@ const ChatPanel = forwardRef(function ChatPanel({
   const uploadInputRef = useRef(null)
   const composerInputRef = useRef(null)
   const activeProjectIdRef = useRef(projectId)
-  const previousProjectIdRef = useRef(projectId)
   const abortControllerRef = useRef(null)
+  const streamInFlightRef = useRef(false)
+  const uploadInFlightRef = useRef(null)
+  const uploadAbortControllerRef = useRef(null)
+  const acceptingWorkRef = useRef(true)
+  const mountedRef = useRef(false)
+  const conversationRequestRef = useRef(null)
+  const pendingTriggerFlushTimerRef = useRef(null)
   const pendingAttachmentsRef = useRef([])
   const pendingContentRef = useRef(new Map())
   const contentFlushTimersRef = useRef(new Map())
@@ -119,39 +131,16 @@ const ChatPanel = forwardRef(function ChatPanel({
   }
 
   useEffect(() => {
-    const previousProjectId = previousProjectIdRef.current
-    if (previousProjectId && previousProjectId !== projectId) {
-      abortControllerRef.current?.abort()
-      abortControllerRef.current = null
-      clearAllStreamingQueues()
-      setLoading(false)
-      setAbortController(null)
-      // Drop pending triggers that belong to the project we just left — re-issuing them under
-      // the new project would be run-bound-rejected by the backend and surface a spurious error
-      // while the old project's review stays unreported.
-      pendingTriggerQueueRef.current = scopePendingQueueToProject(pendingTriggerQueueRef.current, projectId)
-    }
-    previousProjectIdRef.current = projectId
-
-    pendingAttachments.forEach(attachment => {
-      if (attachment.previewUrl) {
-        URL.revokeObjectURL(attachment.previewUrl)
-      }
-    })
-    setPendingAttachments([])
-    setSelectedMaterialIds([])
-
+    mountedRef.current = true
+    acceptingWorkRef.current = true
+    const requestController = new AbortController()
+    conversationRequestRef.current = requestController
     if (projectId) {
       const requestProjectId = projectId
       // 加载历史对话
-      axios.get(`/api/projects/${encodeURIComponent(projectId)}/conversation`)
+      axios.get(`/api/projects/${encodeURIComponent(projectId)}/conversation`, { signal: requestController.signal })
         .then(res => {
-          if (!shouldApplyProjectResponse({
-            requestProject: requestProjectId,
-            activeProject: activeProjectIdRef.current,
-          })) {
-            return
-          }
+          if (!mountedRef.current || conversationRequestRef.current !== requestController) return
           const history = res.data.messages || []
           if (history.length > 0) {
             // 过滤掉 system/tool 消息，只显示 user/assistant
@@ -175,6 +164,7 @@ const ChatPanel = forwardRef(function ChatPanel({
                 historyTranscripts: historyTranscriptIndicators(m),
               }))
             setMessages(displayMessages)
+            onAutoStartConsumed?.(requestProjectId)
           } else {
             // 没有历史，显示欢迎消息
             setMessages([{
@@ -188,13 +178,9 @@ const ChatPanel = forwardRef(function ChatPanel({
             maybeAutoStartRef.current?.(requestProjectId)
           }
         })
-        .catch(() => {
-          if (!shouldApplyProjectResponse({
-            requestProject: requestProjectId,
-            activeProject: activeProjectIdRef.current,
-          })) {
-            return
-          }
+        .catch((error) => {
+          if (!mountedRef.current || conversationRequestRef.current !== requestController) return
+          if (axios.isCancel?.(error) || error?.name === 'CanceledError' || error?.name === 'AbortError') return
           // 加载失败，显示欢迎消息
           setMessages([{
             id: `${Date.now()}-${Math.random()}`,
@@ -208,14 +194,33 @@ const ChatPanel = forwardRef(function ChatPanel({
       setTokenUsage(null)
       setLoading(false)
     }
-  }, [projectId])
+    return () => {
+      mountedRef.current = false
+      acceptingWorkRef.current = false
+      if (conversationRequestRef.current === requestController) {
+        conversationRequestRef.current = null
+        requestController.abort()
+      }
+      abortControllerRef.current?.abort()
+      const uploadRecord = uploadInFlightRef.current
+      uploadRecord?.controller?.abort()
+      finishUploadRecord(uploadRecord)
+      if (pendingTriggerFlushTimerRef.current) clearTimeout(pendingTriggerFlushTimerRef.current)
+      pendingTriggerFlushTimerRef.current = null
+      cancelPermitWaiter(projectId)
+      clearAllStreamingQueues()
+    }
+  }, [projectId]) // 每个池实例的 projectId 终身固定；仅挂载/卸载执行
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  useEffect(() => {
+    if (visible) messagesEndRef.current?.scrollIntoView({ behavior: 'auto' })
+  }, [visible])
+
   useEffect(() => () => {
-    clearAllStreamingQueues()
     pendingAttachmentsRef.current.forEach(attachment => {
       if (attachment.previewUrl) {
         URL.revokeObjectURL(attachment.previewUrl)
@@ -383,7 +388,7 @@ const ChatPanel = forwardRef(function ChatPanel({
     setPendingAttachments(prev => mergePendingAttachments(prev, nextPendingAttachments))
   }
 
-  const uploadDocumentFiles = async (files) => {
+  const uploadDocumentFiles = async (files, signal = undefined) => {
     if (!files.length || !projectId) {
       return []
     }
@@ -394,6 +399,7 @@ const ChatPanel = forwardRef(function ChatPanel({
     const res = await axios.post(
       `/api/projects/${encodeURIComponent(projectId)}/materials/upload`,
       formData,
+      { signal },
     )
     const uploadedMaterials = res.data.materials || []
     if (uploadedMaterials.length > 0) {
@@ -401,6 +407,15 @@ const ChatPanel = forwardRef(function ChatPanel({
       onProjectMutated?.()
     }
     return uploadedMaterials
+  }
+
+  const finishUploadRecord = (record) => {
+    if (!record || record.ended) return false
+    record.ended = true
+    if (uploadInFlightRef.current === record) uploadInFlightRef.current = null
+    if (uploadAbortControllerRef.current === record.controller) uploadAbortControllerRef.current = null
+    endUpload(record.token)
+    return true
   }
 
   const mergeMaterialIds = (existingIds = [], newMaterials = []) => {
@@ -443,7 +458,7 @@ const ChatPanel = forwardRef(function ChatPanel({
     transientAttachments = [],
     renderUserBubble = true,
   }) => {
-    if (!projectId || loading || uploading) return false
+    if (!projectId || !mountedRef.current || !acceptingWorkRef.current) return false
 
     const requestProjectId = projectId
     const requestMessageText = systemTrigger
@@ -694,13 +709,15 @@ const ChatPanel = forwardRef(function ChatPanel({
       // C5: the chat is free again — flush the next queued system trigger (if any) for the
       // active project, re-issuing it with its ORIGINAL run-bound metadata. setTimeout lets the
       // setLoading(false) above settle so the flushed startStream isn't blocked by stale loading.
-      setTimeout(() => flushNextPendingTriggerRef.current?.(), 0)
+      if (pendingTriggerFlushTimerRef.current) clearTimeout(pendingTriggerFlushTimerRef.current)
+      pendingTriggerFlushTimerRef.current = setTimeout(() => {
+        pendingTriggerFlushTimerRef.current = null
+        flushPendingTriggersRef.current?.()
+      }, 0)
     }
     return !streamFailed
   }, [
     projectId,
-    loading,
-    uploading,
     clearStreamingQueue,
     flushStreamingQueueImmediately,
     isActiveProjectRequest,
@@ -709,60 +726,100 @@ const ChatPanel = forwardRef(function ChatPanel({
     onProjectMutated,
   ])
 
-  // Keep a ref to the freshest startStream so deferred flushes always use a non-stale closure
-  // (post-stream loading=false), avoiding the loading-guard early-return.
-  const startStreamRef = useRef(startStream)
-  startStreamRef.current = startStream
+  // Admission is synchronous and ref-backed: React state is display state, not a mutex.
+  // acquireStreamLease is also the sole deletion gate. A rendered `deleting` prop would be an
+  // asynchronous snapshot and could stay true in the same stack where finishDelete resumes work.
+  // The lease spans the whole async stream and is released only after the local CAS is cleared.
+  const tryStartStream = useCallback((options) => {
+    if (!projectId || !mountedRef.current || !acceptingWorkRef.current) return { status: 'missing' }
+    if (streamInFlightRef.current || uploadInFlightRef.current) return { status: 'local_busy' }
+    const admission = acquireStreamLease(projectId)
+    if (admission.status === 'same_pid') return { status: 'local_busy' }
+    if (admission.status !== 'started') return admission
+
+    streamInFlightRef.current = true
+    const promise = Promise.resolve(startStream(options)).finally(() => {
+      // Ordering is deliberate: a global waiter awakened by release must observe this panel idle.
+      streamInFlightRef.current = false
+      releaseStreamLease(admission.token)
+    })
+    void promise.catch(error => console.error('聊天流异常:', error))
+    return { status: 'started', promise }
+  }, [projectId, acquireStreamLease, releaseStreamLease, startStream])
+
+  const tryStartStreamRef = useRef(tryStartStream)
+  tryStartStreamRef.current = tryStartStream
 
   // triggerSystemTurn(triggerType, metadata): if the chat is busy, queue the trigger (FIFO,
   // scoped to this project) so a finished independent review is never silently dropped; otherwise fire
   // it now. metadata = { run_id, report_mtime_ns } (opaque strings, threaded verbatim).
   const triggerSystemTurn = useCallback((triggerType, metadata = null) => {
-    if (loading || uploading) {
-      pendingTriggerQueueRef.current = enqueuePendingTrigger(
-        pendingTriggerQueueRef.current,
-        createPendingTriggerItem({
-          triggerType,
-          runId: metadata?.run_id ?? null,
-          reportMtimeNs: metadata?.report_mtime_ns ?? null,
-          projectId,
-        }),
-      )
-      return
-    }
-    startStream({
+    const item = createPendingTriggerItem({
+      triggerType,
+      runId: metadata?.run_id ?? null,
+      reportMtimeNs: metadata?.report_mtime_ns ?? null,
+      projectId,
+    })
+    const result = tryStartStream({
       messageText: '',
       systemTrigger: triggerType,
       triggerMetadata: metadata,
       renderUserBubble: false,
     })
-  }, [startStream, loading, uploading, projectId])
+    if (result.status !== 'started') {
+      pendingTriggerQueueRef.current = enqueuePendingTrigger(pendingTriggerQueueRef.current, item)
+      if (result.status === 'cap_full') enqueuePermitWaiter(projectId)
+    }
+    return result
+  }, [tryStartStream, enqueuePermitWaiter, projectId])
 
-  const flushNextPendingTrigger = useCallback(() => {
-    const { item, queue } = dequeuePendingTrigger(pendingTriggerQueueRef.current, activeProjectIdRef.current)
-    pendingTriggerQueueRef.current = queue
-    if (!item) return
-    startStreamRef.current?.({
+  const flushPendingTriggers = useCallback(() => {
+    const item = pendingTriggerQueueRef.current[0]
+    if (!item) {
+      cancelPermitWaiter(projectId)
+      return { status: 'empty' }
+    }
+    const result = tryStartStreamRef.current?.({
       messageText: '',
       systemTrigger: item.triggerType,
       triggerMetadata: { run_id: item.run_id, report_mtime_ns: item.report_mtime_ns },
       renderUserBubble: false,
     })
-  }, [])
+    if (result?.status === 'started') {
+      pendingTriggerQueueRef.current = pendingTriggerQueueRef.current.slice(1)
+      cancelPermitWaiter(projectId)
+      if (item.triggerType === 'project_created') {
+        autoStartQueuedRef.current = null
+        autoStartFiredRef.current = projectId
+        onAutoStartConsumed?.(projectId)
+      }
+    } else if (result?.status === 'cap_full') {
+      enqueuePermitWaiter(projectId)
+    } else if (result?.status === 'deleting') {
+      cancelPermitWaiter(projectId)
+    }
+    return result || { status: 'missing' }
+  }, [cancelPermitWaiter, enqueuePermitWaiter, onAutoStartConsumed, projectId])
 
-  const flushNextPendingTriggerRef = useRef(flushNextPendingTrigger)
-  flushNextPendingTriggerRef.current = flushNextPendingTrigger
+  const flushPendingTriggersRef = useRef(flushPendingTriggers)
+  flushPendingTriggersRef.current = flushPendingTriggers
 
   // 新建项目自动开场（2026-07-09 试用反馈）：会话确认为空 + autoStartProjectId 命中当前项目
   // → 触发一次 project_created 系统轮。firedRef 同步置位防重复（StrictMode 双执行 / 竞态），
   // onAutoStartConsumed 让 App 清掉标记（切回项目不再触发）。
   const autoStartFiredRef = useRef(null)
+  const autoStartQueuedRef = useRef(null)
   const maybeAutoStart = (loadedProjectId) => {
     if (!autoStartProjectId || autoStartProjectId !== loadedProjectId) return
     if (autoStartFiredRef.current === loadedProjectId) return
-    autoStartFiredRef.current = loadedProjectId
-    onAutoStartConsumed?.()
-    triggerSystemTurn('project_created')
+    if (autoStartQueuedRef.current === loadedProjectId) return
+    autoStartQueuedRef.current = loadedProjectId
+    const result = triggerSystemTurn('project_created')
+    if (result?.status === 'started') {
+      autoStartQueuedRef.current = null
+      autoStartFiredRef.current = loadedProjectId
+      onAutoStartConsumed?.(loadedProjectId)
+    }
   }
   const maybeAutoStartRef = useRef(maybeAutoStart)
   maybeAutoStartRef.current = maybeAutoStart
@@ -773,10 +830,9 @@ const ChatPanel = forwardRef(function ChatPanel({
   // 不静默排队（用户在场，排队会让按钮看起来没反应）。
   const sendUserMessage = useCallback((text) => {
     const trimmed = typeof text === 'string' ? text.trim() : ''
-    if (!trimmed || loading || uploading) return false
-    startStream({ messageText: trimmed, renderUserBubble: true })
-    return true
-  }, [startStream, loading, uploading])
+    if (!trimmed || streamInFlightRef.current || uploadInFlightRef.current) return false
+    return tryStartStream({ messageText: trimmed, renderUserBubble: true }).status === 'started'
+  }, [tryStartStream])
 
   // Drop pending same-type triggers for the active project when the user STARTS a new run (called
   // from WorkspacePanel). The new run overwrites the store tombstone, so a stale pending flush
@@ -787,13 +843,65 @@ const ChatPanel = forwardRef(function ChatPanel({
       triggerType,
       activeProjectIdRef.current,
     )
-  }, [])
+    if (pendingTriggerQueueRef.current.length === 0) cancelPermitWaiter(projectId)
+  }, [cancelPermitWaiter, projectId])
 
-  useImperativeHandle(ref, () => ({ triggerSystemTurn, dropPendingReviewTriggers, sendUserMessage }), [triggerSystemTurn, dropPendingReviewTriggers, sendUserMessage])
+  const abortActiveStream = useCallback(() => abortControllerRef.current?.abort(), [])
+  const cancelActiveUpload = useCallback(() => {
+    const record = uploadInFlightRef.current
+    if (!record) return
+    record.controller?.abort()
+    finishUploadRecord(record)
+  }, [])
+  const cancelPendingWork = useCallback(() => {
+    pendingTriggerQueueRef.current = []
+    autoStartQueuedRef.current = null
+    cancelPermitWaiter(projectId)
+    if (pendingTriggerFlushTimerRef.current) clearTimeout(pendingTriggerFlushTimerRef.current)
+    pendingTriggerFlushTimerRef.current = null
+  }, [cancelPermitWaiter, projectId])
+  const stopAcceptingWork = useCallback(() => { acceptingWorkRef.current = false }, [])
+
+  // Keep the object assigned to the parent's callback ref stable for this panel's lifetime.
+  // React clears/reassigns callback refs when useImperativeHandle produces a new handle; the
+  // pool treats a real `null` as unmount and removes this project's global-cap waiter. A render
+  // while queued must therefore update method delegates without rebinding the callback ref.
+  const imperativeMethodsRef = useRef(null)
+  imperativeMethodsRef.current = {
+    triggerSystemTurn,
+    dropPendingReviewTriggers,
+    sendUserMessage,
+    abortActiveStream,
+    flushPendingTriggers,
+    cancelActiveUpload,
+    cancelPendingWork,
+    stopAcceptingWork,
+  }
+  const stableImperativeHandleRef = useRef(null)
+  if (!stableImperativeHandleRef.current) {
+    stableImperativeHandleRef.current = {
+      triggerSystemTurn: (...args) => imperativeMethodsRef.current?.triggerSystemTurn?.(...args),
+      dropPendingReviewTriggers: (...args) => imperativeMethodsRef.current?.dropPendingReviewTriggers?.(...args),
+      sendUserMessage: (...args) => imperativeMethodsRef.current?.sendUserMessage?.(...args),
+      abortActiveStream: (...args) => imperativeMethodsRef.current?.abortActiveStream?.(...args),
+      flushPendingTriggers: (...args) => imperativeMethodsRef.current?.flushPendingTriggers?.(...args),
+      cancelActiveUpload: (...args) => imperativeMethodsRef.current?.cancelActiveUpload?.(...args),
+      cancelPendingWork: (...args) => imperativeMethodsRef.current?.cancelPendingWork?.(...args),
+      stopAcceptingWork: (...args) => imperativeMethodsRef.current?.stopAcceptingWork?.(...args),
+    }
+  }
+  useImperativeHandle(ref, () => stableImperativeHandleRef.current, [])
 
   const sendMessage = async () => {
     const trimmedInput = input.trim()
-    if (!trimmedInput || !projectId || uploading) return
+    if (
+      !trimmedInput
+      || !projectId
+      || !mountedRef.current
+      || !acceptingWorkRef.current
+      || streamInFlightRef.current
+      || uploadInFlightRef.current
+    ) return
 
     // chatbox 风格乐观清空：点发送即把消息转移到气泡、输入框立刻清空（不再等这一轮回答结束）。
     // 任一失败路径（上传失败 / 发送失败 / 中止）再把原文恢复回输入框，保留可重试体验。
@@ -811,13 +919,37 @@ const ChatPanel = forwardRef(function ChatPanel({
     let requestAttachedMaterialIds = selectedMaterialIds
     let transientAttachmentsPayload = []
     let preparationStage = 'documents'
+    let preparationFailed = false
 
     if (pendingDocumentAttachments.length > 0 || pendingImageAttachments.length > 0) {
+      const uploadToken = beginUpload(projectId)
+      if (!uploadToken) {
+        showInfo('项目正在删除，暂时不能发送附件')
+        restoreInputForRetry()
+        return
+      }
+      const uploadController = new AbortController()
+      const uploadRecord = {
+        token: uploadToken,
+        controller: uploadController,
+        ended: false,
+      }
+      uploadInFlightRef.current = uploadRecord
+      uploadAbortControllerRef.current = uploadController
       setUploading(true)
       try {
         if (persistentDocumentFiles.length > 0) {
-          const uploadedMaterials = await uploadDocumentFiles(persistentDocumentFiles)
-          if (uploadedMaterials.length > 0) {
+          const uploadedMaterials = await uploadDocumentFiles(
+            persistentDocumentFiles,
+            uploadController.signal,
+          )
+          if (!shouldContinueAfterUpload({
+            mounted: mountedRef.current,
+            accepting: acceptingWorkRef.current,
+          })) {
+            preparationFailed = true
+          }
+          if (!preparationFailed && uploadedMaterials.length > 0) {
             requestAttachedMaterialIds = mergeMaterialIds(selectedMaterialIds, uploadedMaterials)
             setSelectedMaterialIds(requestAttachedMaterialIds)
             setPendingAttachments(pendingImageAttachments)
@@ -825,32 +957,65 @@ const ChatPanel = forwardRef(function ChatPanel({
           }
         }
 
-        if (pendingImageAttachments.length > 0) {
+        if (!preparationFailed && pendingImageAttachments.length > 0) {
           preparationStage = 'images'
           transientAttachmentsPayload = await buildTransientAttachments(pendingImageAttachments)
+          if (!shouldContinueAfterUpload({
+            mounted: mountedRef.current,
+            accepting: acceptingWorkRef.current,
+          })) {
+            preparationFailed = true
+          }
         }
       } catch (error) {
-        const detail = error?.response?.data?.detail || error?.message || '未知错误'
-        const prefix = preparationStage === 'images' ? '处理图片失败: ' : '上传材料失败: '
-        showError(prefix + detail)
-        setUploading(false)
-        // 准备期失败（文档已入库但图片转换失败等）也清材料选择——与 turn-end 一致，
-        // 不在无可见 UI 的情况下留下"隐形已挂材料"带到下一条消息。文档已是持久材料、
-        // 仍在每轮系统清单里，重试照样可被模型读取。
-        setSelectedMaterialIds([])
-        restoreInputForRetry() // 上传失败：守卫式回填原文便于重试
+        preparationFailed = true
+        const cancelled = axios.isCancel?.(error)
+          || error?.name === 'CanceledError'
+          || error?.name === 'AbortError'
+        if (!cancelled && mountedRef.current && acceptingWorkRef.current) {
+          const detail = error?.response?.data?.detail || error?.message || '未知错误'
+          const prefix = preparationStage === 'images' ? '处理图片失败: ' : '上传材料失败: '
+          showError(prefix + detail)
+        }
+        if (mountedRef.current) {
+          // 准备期失败（文档已入库但图片转换失败等）也清材料选择——与 turn-end 一致，
+          // 不在无可见 UI 的情况下留下"隐形已挂材料"带到下一条消息。文档已是持久材料、
+          // 仍在每轮系统清单里，重试照样可被模型读取。
+          setSelectedMaterialIds([])
+        }
+      } finally {
+        // Ordering is deliberate: a local trigger flush must observe the upload CAS cleared,
+        // and global deletion guards must observe the producer token ended.
+        finishUploadRecord(uploadRecord)
+        if (mountedRef.current) setUploading(false)
+        flushPendingTriggersRef.current?.()
+      }
+      if (preparationFailed || !shouldContinueAfterUpload({
+        mounted: mountedRef.current,
+        accepting: acceptingWorkRef.current,
+      })) {
+        restoreInputForRetry()
         return
       }
-      setUploading(false)
     }
 
-    const streamOk = await startStream({
+    const result = tryStartStream({
       messageText: trimmedInput,
       systemTrigger: null,
       attachedMaterialIds: requestAttachedMaterialIds,
       transientAttachments: transientAttachmentsPayload,
       renderUserBubble: true,
     })
+    if (result.status !== 'started') {
+      if (result.status === 'cap_full') {
+        showInfo('最多同时生成 3 个项目，请等待其中一个完成')
+      } else if (result.status === 'deleting') {
+        showInfo('项目正在删除，暂时不能发送消息')
+      }
+      restoreInputForRetry()
+      return
+    }
+    const streamOk = await result.promise
     if (!streamOk) {
       restoreInputForRetry() // 发送失败 / 用户中止：守卫式回填原文便于重试
     }

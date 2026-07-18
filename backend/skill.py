@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import unicodedata
 import uuid
 from typing import Iterable, Optional
@@ -281,6 +282,14 @@ class SkillEngine:
         "specialized-research": "specialized",
         "technical-bid": "bid",
     }
+
+    RESEARCH_WRITING_DISCIPLINE = (
+        "## 研究类写作纪律（S4）\n"
+        "- 论点先行：每章每节第一句先给判断，不以背景铺陈开场。\n"
+        "- 证据服务论点：引用事实后紧跟解读，禁止连续两段以上只罗列事实。\n"
+        "- 每章回答 So-What：明确决策含义或行动指向。\n"
+        "- 深度优先于覆盖：三条证据链打穿，胜过十条资料罗列。"
+    )
 
     # R5: 共享分析框架菜单（横向对所有类型可用，v1 仅菜单一行；细节全文留 v2）。
     # 常驻 S1–S4 注入。token 由 test_build_methodology_block_token_budget 实测 ≤2k/轮。
@@ -957,6 +966,11 @@ class SkillEngine:
         self.skill_dir = skill_dir
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.registry_path = self.projects_dir / "registry.json"
+        # These locks deliberately protect only this process. Production currently runs one
+        # process/worker; a multi-worker deployment must replace them with cross-process locks.
+        self._registry_lock = threading.RLock()
+        self._material_locks: dict[str, threading.RLock] = {}
+        self._material_locks_guard = threading.Lock()
 
     def create_project(
         self,
@@ -995,6 +1009,25 @@ class SkillEngine:
         return (self.projects_dir / project_name).resolve()
 
     def _create_workspace_project(self, payload: dict) -> dict:
+        # Keep the duplicate checks, workspace initialization and registry append in one
+        # registry transaction. RLock is required because the helpers below also lock reads
+        # and writes defensively.
+        with self._registry_lock:
+            project_record = self._create_workspace_project_locked(payload)
+
+        # Initial uploads use the normal per-project material transaction. Do this after the
+        # registry transaction so another project's upload never forms a material->registry /
+        # registry->material lock-order cycle.
+        if payload["initial_material_paths"]:
+            self.add_materials(
+                project_record["id"],
+                payload["initial_material_paths"],
+                added_via="project_create",
+            )
+
+        return project_record
+
+    def _create_workspace_project_locked(self, payload: dict) -> dict:
         registry = self._load_registry()
         workspace_path = Path(payload["workspace_dir"]).expanduser().resolve()
         if not workspace_path.exists():
@@ -1044,14 +1077,6 @@ class SkillEngine:
         registry["projects"].append(project_record)
         self._save_registry(registry)
         self._save_materials(project_record, [])
-
-        if payload["initial_material_paths"]:
-            self.add_materials(
-                project_record["id"],
-                payload["initial_material_paths"],
-                added_via="project_create",
-            )
-
         return project_record
 
     def _initialize_project_structure(self, project_path: Path):
@@ -1244,6 +1269,20 @@ class SkillEngine:
         if not project_record:
             raise ValueError(f"项目 {project_ref} 不存在")
 
+        with self._material_lock_for(project_record["id"]):
+            # The project can be deleted after the optimistic lookup but before this lock is
+            # acquired. Re-resolve it inside the material transaction before touching files.
+            current_record = self.get_project_record(project_record["id"])
+            if not current_record:
+                raise ValueError(f"项目 {project_ref} 不存在")
+            return self._add_materials_locked(current_record, material_paths, added_via)
+
+    def _add_materials_locked(
+        self,
+        project_record: dict,
+        material_paths: Iterable[str],
+        added_via: str,
+    ) -> list[dict]:
         project_path = Path(project_record["project_dir"]).resolve()
         workspace_root = Path(project_record["workspace_dir"]).resolve()
         materials = self._load_materials(project_record)
@@ -1321,6 +1360,13 @@ class SkillEngine:
         if not project_record:
             raise ValueError(f"项目 {project_ref} 不存在")
 
+        with self._material_lock_for(project_record["id"]):
+            current_record = self.get_project_record(project_record["id"])
+            if not current_record:
+                raise ValueError(f"项目 {project_ref} 不存在")
+            self._remove_material_locked(current_record, material_id)
+
+    def _remove_material_locked(self, project_record: dict, material_id: str):
         materials = self._load_materials(project_record)
         target = next((item for item in materials if item["id"] == material_id), None)
         if not target:
@@ -1330,7 +1376,7 @@ class SkillEngine:
         # 关键：用 live-file 内容算 key（与 retain 一致），且必须在源文件还在时算，否则 hash 不上。
         converter = getattr(self, "_material_converter", None)
         if converter is not None:
-            target_path = self.get_material_path(project_ref, target["id"])
+            target_path = self.get_material_path(project_record["id"], target["id"])
             if target_path.exists():
                 converter.release(self._cache_key_for_material(target, target_path), target["id"])
 
@@ -1345,18 +1391,30 @@ class SkillEngine:
 
     def delete_project(self, project_ref: str):
         project_record = self.get_project_record(project_ref)
-        if project_record:
+        if not project_record:
+            raise ValueError(f"项目 {project_ref} 不存在")
+
+        # Material mutations use material->registry order, so deletion follows the same order.
+        # Keeping the per-project lock through rmtree also closes delete-vs-upload on the server,
+        # while unrelated projects retain independent material locks.
+        with self._material_lock_for(project_record["id"]):
+            current_record = self.get_project_record(project_record["id"])
+            if not current_record:
+                raise ValueError(f"项目 {project_ref} 不存在")
+            project_record = current_record
             self._release_project_material_caches(project_record)   # N6: free cache refs before deleting the project dir
             project_path = Path(project_record["project_dir"])
             if project_path.exists():
                 shutil.rmtree(project_path)
-            registry = self._load_registry()
-            registry["projects"] = [item for item in registry["projects"] if item["id"] != project_record["id"]]
-            self._save_registry(registry)
+            with self._registry_lock:
+                registry = self._load_registry()
+                registry["projects"] = [
+                    item
+                    for item in registry["projects"]
+                    if item["id"] != project_record["id"]
+                ]
+                self._save_registry(registry)
             return
-
-
-        raise ValueError(f"项目 {project_ref} 不存在")
 
     def _release_project_material_caches(self, project_record: dict) -> None:
         """N6: 删项目前，逐条释放材料的共享缓存引用——N6 缓存活在 projects_dir 之外
@@ -3051,6 +3109,8 @@ class SkillEngine:
         else:
             state, selected = self.read_confirmed_methodology_snapshot(project_path)
             instr = self._adhere_instruction(state, selected)
+        if stage == "S4" and self.METHODOLOGY_TONE[project_type] in {"analytical", "specialized"}:
+            instr = f"{instr}\n\n{self.RESEARCH_WRITING_DISCIPLINE}"
         if doc_params:
             # 条款样式指令 S1–S4 全阶段注入（spec §11.1 A1：S4 写条款时必须在场）
             if doc_params["clause_format"] is not None:
@@ -3114,38 +3174,73 @@ class SkillEngine:
         return payload
 
     def _load_registry(self) -> dict:
-        if not self.registry_path.exists():
-            return {"projects": []}
-        return json.loads(self.registry_path.read_text(encoding="utf-8"))
+        with self._registry_lock:
+            if not self.registry_path.exists():
+                return {"projects": []}
+            return json.loads(self.registry_path.read_text(encoding="utf-8"))
 
     def _save_registry(self, registry: dict):
-        self.registry_path.write_text(
-            json.dumps(registry, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with self._registry_lock:
+            self._atomic_write_json(self.registry_path, registry)
 
     def _touch_project(self, project_id: str):
-        registry = self._load_registry()
-        for project in registry["projects"]:
-            if project["id"] == project_id:
-                project["updated_at"] = datetime.now().isoformat(timespec="seconds")
-                break
-        self._save_registry(registry)
+        with self._registry_lock:
+            registry = self._load_registry()
+            for project in registry["projects"]:
+                if project["id"] == project_id:
+                    project["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                    break
+            self._save_registry(registry)
+
+    def _material_lock_for(self, project_id: str) -> threading.RLock:
+        # Lock objects intentionally stay for the engine lifetime: deleting an entry while a
+        # waiter still references it could create two live locks for one project id.
+        with self._material_locks_guard:
+            lock = self._material_locks.get(project_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._material_locks[project_id] = lock
+            return lock
 
     def _materials_path(self, project_record: dict) -> Path:
         return Path(project_record["project_dir"]) / "materials.json"
 
     def _load_materials(self, project_record: dict) -> list[dict]:
-        materials_path = self._materials_path(project_record)
-        if not materials_path.exists():
-            return []
-        return json.loads(materials_path.read_text(encoding="utf-8"))
+        with self._material_lock_for(project_record["id"]):
+            materials_path = self._materials_path(project_record)
+            if not materials_path.exists():
+                return []
+            return json.loads(materials_path.read_text(encoding="utf-8"))
 
     def _save_materials(self, project_record: dict, materials: list[dict]):
-        self._materials_path(project_record).write_text(
-            json.dumps(materials, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        with self._material_lock_for(project_record["id"]):
+            self._atomic_write_json(self._materials_path(project_record), materials)
+
+    @staticmethod
+    def _atomic_write_json(target: Path, payload) -> None:
+        """Publish JSON with a unique same-directory temp file and atomic replace."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=str(target.parent),
         )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.replace(tmp_path, target)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
 
     def _workspace_relative_path(self, source_path: Path, workspace_root: Path) -> Optional[str]:
         if self._is_within(source_path, workspace_root):

@@ -9,12 +9,12 @@ const sendStart = src.indexOf("const sendMessage = async");
 const sendEnd = src.indexOf("const handleSelectFiles");
 const sendMessageBody = src.slice(sendStart, sendEnd);
 
-test("sendMessage 点发送即乐观清空输入框（在 startStream 之前）", () => {
+test("sendMessage 点发送即乐观清空输入框（在同步 admission 之前）", () => {
   const clearIdx = sendMessageBody.indexOf("setInput('')");
-  const sendIdx = sendMessageBody.indexOf("startStream(");
+  const sendIdx = sendMessageBody.indexOf("tryStartStream(");
   assert.ok(clearIdx > -1, "sendMessage 必须乐观清空 setInput('')");
-  assert.ok(sendIdx > -1, "sendMessage 必须调用 startStream");
-  assert.ok(clearIdx < sendIdx, "乐观清空必须发生在 startStream 之前（点发送即清，不等回答结束）");
+  assert.ok(sendIdx > -1, "sendMessage 必须先走同步 tryStartStream admission");
+  assert.ok(clearIdx < sendIdx, "乐观清空必须发生在 admission 之前（点发送即清，不等回答结束）");
 });
 
 test("sendMessage 失败恢复走双重守卫：发送序号 + 输入框仍空，绝不覆盖新输入/新发送", () => {

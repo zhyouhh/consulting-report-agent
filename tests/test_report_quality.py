@@ -33,11 +33,55 @@ class ScanPlaceholdersTests(unittest.TestCase):
         hits = rq.scan_placeholders(long_line)
         self.assertLessEqual(len(hits[0][1]), 130)
 
+    def test_internal_citation_variants_are_detected(self):
+        text = "\n".join(
+            [
+                "结论 [DL-2026-01]",
+                "补充 [DL-001]",
+                "合并 [DL-2026-01/06]",
+                "同框 [DL-2026-01、DL-2026-03]",
+                "行内连写 [DL-001][DL-002]",
+            ]
+        )
+        hits = rq.scan_placeholders(text)
+        self.assertEqual([hit[0] for hit in hits], [1, 2, 3, 4, 5])
+        self.assertEqual(hits[0][2], "[DL-2026-01]")
+        self.assertEqual(hits[3][2], "[DL-2026-01、DL-2026-03]")
+        self.assertEqual(
+            rq.INTERNAL_CITATION_RE.findall("[DL-001][DL-002]"),
+            ["[DL-001]", "[DL-002]"],
+        )
+
+    def test_internal_citation_false_positives_and_cross_line_group_are_rejected(self):
+        text = "\n".join(
+            [
+                "型号 [DL-2026-01 型设备]",
+                "普通脚注 [注]",
+                "数字脚注 [1]",
+                "非规范小写 [dl-001]",
+                "跨行 [DL-2026-01",
+                "、DL-2026-02]",
+            ]
+        )
+        self.assertEqual(rq.scan_placeholders(text), [])
+        self.assertIsNone(
+            rq.INTERNAL_CITATION_RE.search("[DL-2026-01\n、DL-2026-02]")
+        )
+
+    def test_internal_citation_group_accepts_only_horizontal_separator_space(self):
+        self.assertIsNotNone(
+            rq.INTERNAL_CITATION_RE.fullmatch("[DL-2026-01\t， \tDL-002]")
+        )
+        self.assertIsNone(
+            rq.INTERNAL_CITATION_RE.fullmatch("[DL-2026-01\n，DL-002]")
+        )
+
 
 class GroundingTests(unittest.TestCase):
     def test_no_hits_yields_clean_note_wrapped(self):
         g = rq.build_placeholder_grounding([])
         self.assertIn("未发现占位符", g)
+        self.assertIn("内部资料编号标记（[DL-...]）", g)
         self.assertIn(tb.UNTRUSTED_DATA_OPEN, g)
         self.assertIn(tb.UNTRUSTED_DATA_CLOSE, g)
 
@@ -48,6 +92,11 @@ class GroundingTests(unittest.TestCase):
         self.assertIn("行 2", g)
         self.assertNotIn("<<<inject>>>", g)  # 定界符已中和
         self.assertIn("< < <inject> > >", g)
+
+    def test_internal_citation_category_named_in_hit_grounding(self):
+        g = rq.build_placeholder_grounding([(3, "结论 [DL-001]", "[DL-001]")])
+        self.assertIn("内部资料编号标记（[DL-...]）", g)
+        self.assertIn("行 3（[DL-001]）", g)
 
     def test_caps_at_50_lines(self):
         hits = [(i, f"TBD line {i}", "TBD") for i in range(1, 80)]

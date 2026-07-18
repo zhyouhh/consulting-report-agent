@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import ChatPanel from './ChatPanel'
+import ChatPanelPool from './ChatPanelPool'
 import Sidebar from './Sidebar'
 import WorkspacePanel from './WorkspacePanel'
 import { nextDrawerState, DRAWER_NONE, DRAWER_LEFT, DRAWER_RIGHT } from '../utils/deviceMode'
@@ -14,12 +14,13 @@ export default function MobileShell(props) {
     project, workspace, materials, workspaceRefreshToken, injectedPrompt, workspaceStageCode,
     onSelectProject, onCreateProject, onDeleteProject, onSettingsSaved,
     onLoggedOut, onOpenAdmin, onToggleTheme,
-    onMaterialsMerged, onMaterialDeleted, onProjectMutated, onCheckpointSet,
+    onMaterialsMerged, onPanelMaterialsMerged, onMaterialDeleted,
+    onProjectMutated, onPanelProjectMutated, onCheckpointSet,
     onInsertPrompt, onInjectedPromptConsumed,
-    autoStartProjectId, onAutoStartConsumed,
+    pendingAutoStartProjectIds, onAutoStartConsumed,
+    chatPanelPoolRef, busyProjectIds, onBusyIndicatorChange,
   } = props
 
-  const chatPanelRef = useRef(null)
   const workspacePanelRef = useRef(null)
   const [drawer, setDrawer] = useState(DRAWER_NONE)
   const closeAll = () => setDrawer(DRAWER_NONE)
@@ -69,14 +70,14 @@ export default function MobileShell(props) {
   const onShellTouchCancel = () => { touchStartRef.current = null }
 
   // 审查完成：触发主聊天汇报轮后关右抽屉，落到聊天。
-  const handleTriggerSystemTurn = (t, m) => { chatPanelRef.current?.triggerSystemTurn(t, m); closeAll() }
-  const handleDropPendingReviewTriggers = (t) => chatPanelRef.current?.dropPendingReviewTriggers(t)
+  const handleTriggerSystemTurn = (t, m) => { chatPanelPoolRef.current?.triggerSystemTurn(t, m); closeAll() }
+  const handleDropPendingReviewTriggers = (t) => chatPanelPoolRef.current?.dropPendingReviewTriggers(t)
   // 继续扩写/回退插入 prompt 后关右抽屉，否则输入框在抽屉背后像没反应。
   const handleInsertPrompt = (text) => { onInsertPrompt(text); closeAll() }
   // 阶段按钮「代发」（S1 确认大纲 / S7 归档）：代发成功后关右抽屉落回聊天看进展；
   // 忙时返回 false（不关抽屉），由按钮侧给出提示。
   const handleSendPrompt = (text) => {
-    const ok = chatPanelRef.current?.sendUserMessage(text) ?? false
+    const ok = chatPanelPoolRef.current?.sendUserMessage(text) ?? false
     if (ok) closeAll()
     return ok
   }
@@ -101,22 +102,27 @@ export default function MobileShell(props) {
     >
       {/* 聊天主区：复用 ChatPanel 自带顶栏（侧栏按钮/工作区按钮接抽屉）。safe-area 由本壳承担。 */}
       <div className="absolute inset-0 flex flex-col min-h-0" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
-        <ChatPanel
-          ref={chatPanelRef}
-          projectId={currentProjectId}
-          project={project}
-          settings={settings}
-          workspace={workspace}
-          materials={materials}
-          onMaterialsMerged={onMaterialsMerged}
-          onProjectMutated={onProjectMutated}
-          onToggleSidebar={toggleLeft}
-          onToggleWorkspacePanel={toggleRight}
-          injectedPrompt={injectedPrompt}
-          onInjectedPromptConsumed={onInjectedPromptConsumed}
-          autoStartProjectId={autoStartProjectId}
+        <ChatPanelPool
+          ref={chatPanelPoolRef}
+          activeProjectId={currentProjectId}
+          panelProps={{
+            settings,
+            onToggleSidebar: toggleLeft,
+            onToggleWorkspacePanel: toggleRight,
+            onOpenWorkspaceFile: handleOpenWorkspaceFile,
+          }}
+          activeOnlyProps={{
+            project,
+            workspace,
+            materials,
+            injectedPrompt,
+            onInjectedPromptConsumed,
+          }}
+          pendingAutoStartProjectIds={pendingAutoStartProjectIds}
           onAutoStartConsumed={onAutoStartConsumed}
-          onOpenWorkspaceFile={handleOpenWorkspaceFile}
+          onPanelMaterialsMerged={onPanelMaterialsMerged}
+          onPanelProjectMutated={onPanelProjectMutated}
+          onBusyIndicatorChange={onBusyIndicatorChange}
         />
       </div>
 
@@ -144,6 +150,7 @@ export default function MobileShell(props) {
           theme={theme}
           onToggleTheme={onToggleTheme}
           currentStageCode={workspaceStageCode}
+          busyProjectIds={busyProjectIds}
         />
       </div>
 
@@ -168,6 +175,8 @@ export default function MobileShell(props) {
           onSendPrompt={handleSendPrompt}
           onTriggerSystemTurn={handleTriggerSystemTurn}
           onDropPendingReviewTriggers={handleDropPendingReviewTriggers}
+          beginUpload={(projectId) => chatPanelPoolRef.current?.beginUpload(projectId) ?? null}
+          endUpload={(token) => chatPanelPoolRef.current?.endUpload(token)}
         />
       </div>
     </div>

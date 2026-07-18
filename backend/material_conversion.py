@@ -25,6 +25,13 @@ SOFFICE_TIMEOUT_SECONDS = 120
 ZIP_BASED_SUFFIXES = {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"}
 _ZIP_MAGIC = b"PK\x03\x04"
 
+# One handler/converter is built per project, but every converter for a user shares the same
+# cache directory. Locks therefore belong to the process, keyed by the canonical cache path
+# plus cache key, rather than to a converter instance. Production currently runs one process /
+# worker; multi-worker deployment requires a cross-process locking design.
+_CACHE_KEY_LOCKS: dict[tuple[Path, str], threading.Lock] = {}
+_CACHE_KEY_LOCKS_GUARD = threading.Lock()
+
 
 class MaterialConversionError(Exception):
     """转换失败（含 tombstone 命中）。caller 据此返回工具 error，不当成功正文。"""
@@ -53,8 +60,6 @@ class MaterialConverter:
         # 这里保留 resolver 供未来 converter 侧路由对称。不要删除。
         self._capability_resolver = capability_resolver
         self._image_cache_namespace = image_cache_namespace
-        self._locks: dict[str, threading.Lock] = {}
-        self._locks_guard = threading.Lock()
 
     def _content_hash(self, path: Path) -> str:
         h = hashlib.sha256()
@@ -64,11 +69,12 @@ class MaterialConverter:
         return h.hexdigest()
 
     def _lock_for(self, key: str) -> threading.Lock:
-        with self._locks_guard:
-            lock = self._locks.get(key)
+        lock_key = (self.cache_dir.resolve(), key)
+        with _CACHE_KEY_LOCKS_GUARD:
+            lock = _CACHE_KEY_LOCKS.get(lock_key)
             if lock is None:
                 lock = threading.Lock()
-                self._locks[key] = lock
+                _CACHE_KEY_LOCKS[lock_key] = lock
             return lock
 
     def _cache_paths(self, content_hash: str) -> tuple[Path, Path]:

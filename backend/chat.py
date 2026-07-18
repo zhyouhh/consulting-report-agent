@@ -133,6 +133,81 @@ LEGACY_EMPTY_ASSISTANT_FALLBACKS = frozenset({
     "（本轮" "无回复）",
     USER_VISIBLE_FALLBACK,
 })
+_DSML_MARKUP_PATTERN = re.compile(r"</?[|｜]{1,2}\s*DSML\s*[|｜]{1,2}")
+MAX_DSML_LEAK_RETRIES = 1
+_DSML_RETRY_PLACEHOLDER = "（上一条输出包含工具标记，已作废）"
+_DSML_FAILURE_FALLBACK = "刚才的输出出现了格式错误，本轮已终止，请重新发送一次你的指令。"
+_DSML_CORRECTIVE_MESSAGE = (
+    "上一条输出包含不应显示的工具格式标记，已作废。"
+    "请重新完成用户的请求：需要工具时只使用结构化工具调用；"
+    "否则只输出正常文本，不要输出 DSML 或工具标记。"
+)
+
+
+def _strip_dsml_markup(text: str) -> str:
+    """删除含 DSML 定界标记的整行；干净文本原样返回。
+
+    只有在命中标记时才重建字符串，因此无标记内容（包括普通的 ``DSML``
+    字样）保持逐字节不变。``splitlines(keepends=True)`` 保留存留行原有的
+    换行边界，只移除泄漏标记所在的行。
+    """
+    if not isinstance(text, str):
+        return text
+    matches = list(_DSML_MARKUP_PATTERN.finditer(text))
+    if not matches:
+        return text
+
+    # ``\s*`` 允许极端情况下的标记跨行；按 match span 判定相交行，
+    # 确保检测已命中时净化不会因分行而漏掉。
+    kept_lines = []
+    line_start = 0
+    for line in text.splitlines(keepends=True):
+        line_end = line_start + len(line)
+        if not any(match.start() < line_end and match.end() > line_start for match in matches):
+            kept_lines.append(line)
+        line_start = line_end
+    return "".join(kept_lines)
+
+
+def _sanitize_assistant_dsml_message(message: Dict) -> Dict:
+    """共用历史消费边界：净化 assistant content 与 text parts。
+
+    这个 helper 只处理 DSML，不代替 ``parts`` 的 scalar-only 形状校验。
+    没有命中时直接返回原 message，避免无故改写干净历史。
+    """
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return message
+
+    content = message.get("content")
+    cleaned_content = _strip_dsml_markup(content) if isinstance(content, str) else content
+    raw_parts = message.get("parts")
+    cleaned_parts = raw_parts
+    parts_changed = False
+    if isinstance(raw_parts, list):
+        rebuilt_parts = []
+        for part in raw_parts:
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                cleaned_text = _strip_dsml_markup(part["text"])
+                if cleaned_text != part["text"]:
+                    copied_part = dict(part)
+                    copied_part["text"] = cleaned_text
+                    rebuilt_parts.append(copied_part)
+                    parts_changed = True
+                    continue
+            rebuilt_parts.append(part)
+        if parts_changed:
+            cleaned_parts = rebuilt_parts
+
+    if cleaned_content == content and not parts_changed:
+        return message
+    cleaned_message = dict(message)
+    if isinstance(content, str):
+        cleaned_message["content"] = cleaned_content
+    if parts_changed:
+        cleaned_message["parts"] = cleaned_parts
+    return cleaned_message
+
+
 # 合成隔板：本轮链路里为「保持 user/model 严格交替」而注入的占位 assistant content，
 # 非模型真实叙述。_build_message_parts 据此剥离，避免它们污染时间线展示片段。
 # 两条字符串必须与 chat_stream 真实注入处逐字一致（见 chat.py 内 "本轮为纯转述" /
@@ -377,6 +452,13 @@ class ChatHandler:
     MAX_MISSING_WRITE_RETRIES = 2
     MAX_SELF_CORRECTION_RETRIES = 1
     MAX_SYSTEM_TRIGGER_NO_TOOLS_RETRIES = 1
+    _DIRECT_INDEX_REQUIRED_TOOL_ARGS = {
+        "write_file": ("file_path", "content"),
+        "read_file": ("file_path",),
+        "read_material_file": ("material_id",),
+        "web_search": ("query",),
+        "fetch_url": ("url",),
+    }
     NON_PLAN_WRITE_ALLOWED_STAGE_CODES = {"S4", "S5", "S6", "S7", "done"}
     QUALITY_HINT_TARGET_FILES = frozenset({"plan/data-log.md", "plan/analysis-notes.md"})
     QUALITY_HINT_STAGES = frozenset({"S2", "S3"})
@@ -438,6 +520,9 @@ class ChatHandler:
             raise ValueError(f"ChatHandler uid {uid!r} 与 SkillEngine uid {engine_uid!r} 不一致")
         self._turn_context = self._new_turn_context(can_write_non_plan=True)
         self._fetch_url_cache: Dict[tuple[str, str, str], Dict[str, object]] = {}
+        # 工具 schema 索引在第一次参数容错时才构建；不在 import 期生成，
+        # 且 properties/required 始终派生自当前 handler 的 _build_tools() 单一真值源。
+        self._tool_schema_index_cache: Dict[str, Dict[str, frozenset[str]]] | None = None
         from backend import url_guard
 
         http_client = url_guard.build_guarded_http_client(timeout=120.0)
@@ -1584,9 +1669,11 @@ class ChatHandler:
             role = msg.get("role")
             if role == "assistant":
                 content = msg.get("content")
-                if (isinstance(content, str) and content.strip()
-                        and content not in _SYNTHETIC_BARRIER_NOTES):
-                    parts.append({"type": "text", "text": content}); text_segments.append(content)
+                clean_content = _strip_dsml_markup(content) if isinstance(content, str) else content
+                if (isinstance(clean_content, str) and clean_content.strip()
+                        and clean_content not in _SYNTHETIC_BARRIER_NOTES):
+                    parts.append({"type": "text", "text": clean_content})
+                    text_segments.append(clean_content)
                 for tc in (msg.get("tool_calls") or []):
                     tc_id = tc.get("id")
                     if not tc_id:  # 对齐 _pair_tool_calls_with_results 的 `if tc_id:` 守卫
@@ -1611,9 +1698,15 @@ class ChatHandler:
                     result = {"status": "error", "raw": msg.get("content")}
                 parts[idx]["status"] = "success" if result.get("status") == "success" else "error"
                 parts[idx]["summary"] = self._sse_tool_summary(parts[idx]["tool"], result)
-        if isinstance(assistant_message, str) and assistant_message.strip():
-            if not (text_segments and text_segments[-1] == assistant_message):
-                parts.append({"type": "text", "text": assistant_message}); text_segments.append(assistant_message)
+        clean_assistant_message = (
+            _strip_dsml_markup(assistant_message)
+            if isinstance(assistant_message, str)
+            else assistant_message
+        )
+        if isinstance(clean_assistant_message, str) and clean_assistant_message.strip():
+            if not (text_segments and text_segments[-1] == clean_assistant_message):
+                parts.append({"type": "text", "text": clean_assistant_message})
+                text_segments.append(clean_assistant_message)
         return parts, "".join(text_segments)
 
     def _flush_pending_tool_calls(self, pending: "dict[str, str]", summary: str):
@@ -2784,6 +2877,7 @@ class ChatHandler:
         missing_write_retries = 0
         self_correction_retries = 0
         system_trigger_no_tools_retries = 0
+        dsml_leak_retries = 0
         # 流中断瞬态重试的 per-turn 总预算（防抖动网络下跨迭代无界重试）。
         stream_retry_attempts = 0
         assistant_message = ""
@@ -3125,7 +3219,9 @@ class ChatHandler:
                     iterations += 1
                     continue
 
-                assistant_tool_message = self._normalize_collected_assistant_tool_call_message(collected_message)
+                assistant_tool_message = _sanitize_assistant_dsml_message(
+                    self._normalize_collected_assistant_tool_call_message(collected_message)
+                )
                 current_turn_messages.append(assistant_tool_message)
                 for index, tool_call in enumerate(assistant_tool_message["tool_calls"]):
                     func_name = tool_call["function"]["name"]
@@ -3183,6 +3279,26 @@ class ChatHandler:
                 iterations += 1
             else:
                 candidate_message = collected_message["content"]
+                if _DSML_MARKUP_PATTERN.search(candidate_message):
+                    cleaned_candidate = _strip_dsml_markup(candidate_message)
+                    if dsml_leak_retries < MAX_DSML_LEAK_RETRIES:
+                        dsml_leak_retries += 1
+                        logger.info(
+                            "[self-heal] 检测到助手泄漏 DSML 工具标记，已净化并要求重试"
+                        )
+                        # 原始 DSML 绝不进 current_turn_messages：该列表既会回传
+                        # provider，又是 parts 的持久化输入。
+                        current_turn_messages.append({
+                            "role": "assistant",
+                            "content": cleaned_candidate or _DSML_RETRY_PLACEHOLDER,
+                        })
+                        current_turn_messages.append({
+                            "role": "user",
+                            "content": _DSML_CORRECTIVE_MESSAGE,
+                        })
+                        continue
+                    logger.info("[self-heal] DSML 工具标记重试耗尽，以净化文本收尾")
+                    candidate_message = cleaned_candidate or _DSML_FAILURE_FALLBACK
                 if (
                     (self_correction_loop_detected or self._looks_like_self_correction_loop(candidate_message))
                     and self_correction_retries < self.MAX_SELF_CORRECTION_RETRIES
@@ -3293,6 +3409,7 @@ class ChatHandler:
         iterations = 0
         missing_write_retries = 0
         self_correction_retries = 0
+        dsml_leak_retries = 0
         assistant_message = ""
         compressed = False
         policy = self._resolve_context_policy()
@@ -3379,7 +3496,9 @@ class ChatHandler:
 
             message = response.choices[0].message
             if message.tool_calls:
-                current_turn_messages.append(self._assistant_tool_call_message_from_response(message))
+                current_turn_messages.append(_sanitize_assistant_dsml_message(
+                    self._assistant_tool_call_message_from_response(message)
+                ))
                 for tool_call in message.tool_calls:
                     result = self._execute_tool(project_id, tool_call)
                     write_event = self._extract_successful_write_event(
@@ -3398,6 +3517,24 @@ class ChatHandler:
                 iterations += 1
             else:
                 candidate_message = message.content or ""
+                if _DSML_MARKUP_PATTERN.search(candidate_message):
+                    cleaned_candidate = _strip_dsml_markup(candidate_message)
+                    if dsml_leak_retries < MAX_DSML_LEAK_RETRIES:
+                        dsml_leak_retries += 1
+                        logger.info(
+                            "[self-heal] 检测到助手泄漏 DSML 工具标记，已净化并要求重试"
+                        )
+                        current_turn_messages.append({
+                            "role": "assistant",
+                            "content": cleaned_candidate or _DSML_RETRY_PLACEHOLDER,
+                        })
+                        current_turn_messages.append({
+                            "role": "user",
+                            "content": _DSML_CORRECTIVE_MESSAGE,
+                        })
+                        continue
+                    logger.info("[self-heal] DSML 工具标记重试耗尽，以净化文本收尾")
+                    candidate_message = cleaned_candidate or _DSML_FAILURE_FALLBACK
                 if (
                     self._looks_like_self_correction_loop(candidate_message)
                     and self_correction_retries < self.MAX_SELF_CORRECTION_RETRIES
@@ -3465,6 +3602,10 @@ class ChatHandler:
     ):
         request_lock = self._get_project_request_lock(project_id)
         with request_lock:
+            # StreamingResponse 可能在端点返回后才真正开始迭代；这段锁后复验封住
+            # “响应已建立、随后项目被删、旧 generator 再启动”的窗口，不调 provider、不烧额度。
+            if self.skill_engine.get_project_record(project_id) is None:
+                raise ValueError("项目已被删除")
             yield from self._chat_stream_unlocked(
                 project_id,
                 user_message,
@@ -4215,6 +4356,57 @@ class ChatHandler:
     def _get_tools(self):
         return self._build_tools()
 
+    def _get_tool_schema_index(self) -> Dict[str, Dict[str, frozenset[str]]]:
+        """惰性构建工具参数 schema 索引，供键名归一与必填预检共用。"""
+        cached = self._tool_schema_index_cache
+        if cached is not None:
+            return cached
+
+        index: Dict[str, Dict[str, frozenset[str]]] = {}
+        for tool in self._build_tools():
+            function = tool.get("function") if isinstance(tool, dict) else None
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name")
+            parameters = function.get("parameters")
+            if not isinstance(name, str) or not isinstance(parameters, dict):
+                continue
+            properties = parameters.get("properties")
+            required = parameters.get("required")
+            index[name] = {
+                "properties": frozenset(properties) if isinstance(properties, dict) else frozenset(),
+                "required": frozenset(required) if isinstance(required, list) else frozenset(),
+            }
+        self._tool_schema_index_cache = index
+        return index
+
+    @staticmethod
+    def _camel_to_snake_tool_arg_key(key: str) -> str:
+        first_pass = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", key)
+        return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", first_pass).lower()
+
+    def _normalize_tool_arg_keys(self, func_name: str, args: Dict) -> Dict:
+        """仅将能映射到当前工具 schema property 的 camelCase 键改为 snake_case。
+
+        已有 snake_case 值始终优先；未知键原样保留，由工具自身决定是否忽略。
+        """
+        schema = self._get_tool_schema_index().get(func_name)
+        properties = schema["properties"] if schema else frozenset()
+        if not properties:
+            return args
+
+        normalized = dict(args)
+        for key in list(args):
+            if not isinstance(key, str):
+                continue
+            snake_key = self._camel_to_snake_tool_arg_key(key)
+            if snake_key == key or snake_key not in properties:
+                continue
+            if snake_key not in normalized:
+                normalized[snake_key] = args[key]
+            normalized.pop(key, None)
+        return normalized
+
     def _build_tools(self):
         """定义可用工具"""
         return [
@@ -4796,11 +4988,19 @@ class ChatHandler:
         try:
             func_name = tool_call.function.name
             raw_arguments = tool_call.function.arguments
-            args = (
-                json.loads(raw_arguments)
-                if isinstance(raw_arguments, str)
-                else dict(raw_arguments or {})
-            )
+            args = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+            if not isinstance(args, dict):
+                return {"status": "error", "message": "参数必须是 JSON 对象。"}
+            args = self._normalize_tool_arg_keys(func_name, args)
+            for required_arg in self._DIRECT_INDEX_REQUIRED_TOOL_ARGS.get(func_name, ()):
+                if required_arg not in args:
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"缺少必需参数 {required_arg}，"
+                            "请按工具定义补全参数后重新调用"
+                        ),
+                    }
             if (
                 func_name == "advance_stage"
                 and args.get("checkpoint_key") == "s0_interview_done_at"
@@ -6388,6 +6588,7 @@ class ChatHandler:
         raw_messages = json.loads(conv_file.read_text(encoding="utf-8"))
         normalized = []
         for message in raw_messages:
+            message = _sanitize_assistant_dsml_message(message)
             role = message.get("role")
             if role not in {"user", "assistant"}:
                 continue
@@ -7081,6 +7282,9 @@ class ChatHandler:
         """
         del user_message
 
+        # 持久化最后一道防线：无论上游是纯文本还是夹带 tool_calls，
+        # assistant 可见文本都不得把 DSML 标记写进 conversation.json。
+        assistant_message = _strip_dsml_markup(assistant_message or "")
         had_legacy_stage_ack = "<stage-ack" in (assistant_message or "").lower()
         visible_content = _strip_legacy_stage_ack(assistant_message)
         self._maybe_emit_stage_claim_mismatch_notice(project_id, visible_content)

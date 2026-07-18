@@ -29,7 +29,7 @@ test("ChatPanel accepts auto-start props and fires trigger once per project", ()
   // fired ref 同步置位防 StrictMode 双执行 / 竞态重复触发
   assert.match(s, /autoStartFiredRef\.current === loadedProjectId\) return/);
   assert.match(s, /autoStartFiredRef\.current = loadedProjectId/);
-  assert.match(s, /onAutoStartConsumed\?\.\(\)/);
+  assert.match(s, /onAutoStartConsumed\?\.\(loadedProjectId\)/);
   assert.match(s, /triggerSystemTurn\('project_created'\)/);
 });
 
@@ -53,24 +53,25 @@ test("ChatPanel removes a fully-empty assistant placeholder after flushing the s
 
 test("App marks the freshly created project for auto-start and threads props to both shells", () => {
   const s = appSrc();
-  assert.match(s, /const \[autoStartProjectId, setAutoStartProjectId\] = useState\(null\)/);
-  // createProject 的 proceed 里置标记（先于 loadProjects 切换项目）
+  assert.match(s, /pendingAutoStartProjectIds, setPendingAutoStartProjectIds/);
+  assert.match(s, /useState\(\(\) => new Set\(\)\)/);
+  // createProject 的 proceed 里函数式追加标记（不能覆盖其它项目）
   const proceedBlock = s.match(/const proceed = async \(\) => \{[\s\S]*?\}/)?.[0] || "";
-  assert.match(proceedBlock, /setAutoStartProjectId\(createdProject\.id\)/);
-  // 两个壳都接线（桌面 ChatPanel + MobileShell）
-  const chatTag = sliceJsxTag(s, "<ChatPanel");
-  assert.match(chatTag, /autoStartProjectId=\{autoStartProjectId\}/);
+  assert.match(proceedBlock, /setPendingAutoStartProjectIds\(prev => new Set\(prev\)\.add\(createdProject\.id\)\)/);
+  // 两个壳都接线（桌面 Pool + MobileShell）
+  const chatTag = sliceJsxTag(s, "<ChatPanelPool");
+  assert.match(chatTag, /pendingAutoStartProjectIds=\{pendingAutoStartProjectIds\}/);
   assert.match(chatTag, /onAutoStartConsumed=/);
   const mobileTag = sliceJsxTag(s, "<MobileShell");
-  assert.match(mobileTag, /autoStartProjectId=\{autoStartProjectId\}/);
+  assert.match(mobileTag, /pendingAutoStartProjectIds=\{pendingAutoStartProjectIds\}/);
   assert.match(mobileTag, /onAutoStartConsumed=/);
 });
 
 test("MobileShell threads auto-start props down to its ChatPanel", () => {
   const s = mobileSrc();
-  assert.match(s, /autoStartProjectId, onAutoStartConsumed,/);
-  const chatTag = sliceJsxTag(s, "<ChatPanel");
-  assert.match(chatTag, /autoStartProjectId=\{autoStartProjectId\}/);
+  assert.match(s, /pendingAutoStartProjectIds, onAutoStartConsumed,/);
+  const chatTag = sliceJsxTag(s, "<ChatPanelPool");
+  assert.match(chatTag, /pendingAutoStartProjectIds=\{pendingAutoStartProjectIds\}/);
   assert.match(chatTag, /onAutoStartConsumed=\{onAutoStartConsumed\}/);
 });
 

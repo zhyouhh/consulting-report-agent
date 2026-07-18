@@ -1,3 +1,4 @@
+import inspect
 import os
 import subprocess
 import unittest
@@ -5,7 +6,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-from backend import report_tools
+from backend import report_quality, report_tools
 
 _W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
 
@@ -161,6 +162,52 @@ class BuildExportMarkdownTests(unittest.TestCase):
     def test_default_date_label_is_cn_format(self):
         text, _ = report_tools.build_export_markdown("# t\n\n正文。\n")
         self.assertRegex(text, r"\d{4}年\d{1,2}月\d{1,2}日")
+
+    def test_internal_citations_removed_from_title_and_body(self):
+        draft = (
+            "# [DL-2026-01] 数字化转型报告 [DL-002]\n\n"
+            "## 摘要\n\n"
+            "判断 [DL-001] 后文；合并 [DL-2026-01/06]；"
+            "同框 [DL-2026-01、DL-2026-03]。\n"
+        )
+        text, title = report_tools.build_export_markdown(draft, date_label="d")
+        self.assertEqual(title, "数字化转型报告")
+        self.assertIsNone(report_quality.INTERNAL_CITATION_RE.search(text))
+        self.assertIn("判断 后文；合并；同框。", text)
+
+    def test_internal_citation_strip_preserves_paragraph_boundaries(self):
+        source = "第一段\n[DL-2026-01]\n第二段"
+        stripped = report_tools._strip_internal_citation_markers(source)
+        self.assertEqual(stripped, "第一段\n\n第二段")
+
+    def test_internal_citation_strip_rejects_lookalikes(self):
+        source = "型号 [DL-2026-01 型设备]；脚注 [注] [1]。"
+        self.assertEqual(report_tools._strip_internal_citation_markers(source), source)
+
+    def test_internal_citation_strip_handles_62_occurrence_delivery_sample(self):
+        body = "\n".join(
+            f"第 {index} 项结论 [DL-{index:03d}] 后文。" for index in range(1, 63)
+        )
+        text, title = report_tools.build_export_markdown(
+            f"# 交付报告 [DL-2026-01]\n\n{body}\n",
+            date_label="d",
+        )
+        self.assertEqual(title, "交付报告")
+        self.assertIsNone(report_quality.INTERNAL_CITATION_RE.search(text))
+        self.assertEqual(text.count("项结论 后文。"), 62)
+
+    def test_report_tools_reuses_shared_horizontal_only_regex(self):
+        self.assertIs(report_tools.INTERNAL_CITATION_RE, report_quality.INTERNAL_CITATION_RE)
+        source = inspect.getsource(report_tools._strip_internal_citation_markers)
+        self.assertIn("INTERNAL_CITATION_RE.pattern", source)
+        self.assertIn(r'r"[ \t]?"', source)
+        self.assertNotIn(r"\\s?", source)
+
+        build_source = inspect.getsource(report_tools.build_export_markdown)
+        self.assertLess(
+            build_source.index("body = _strip_internal_citation_markers(body)"),
+            build_source.rindex("_neutralize_raw_openxml(body)"),
+        )
 
 
 class PostprocessDocxTests(unittest.TestCase):

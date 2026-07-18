@@ -1,5 +1,4 @@
 import React, { useState } from 'react'
-import axios from 'axios'
 import SettingsModal from './SettingsModal'
 import ProjectCreateModal from './ProjectCreateModal'
 import { describeConnectionMode } from '../utils/connectionMode'
@@ -31,6 +30,7 @@ export default function Sidebar({
   theme,
   onToggleTheme,
   currentStageCode,
+  busyProjectIds = new Set(),
 }) {
   const [showModal, setShowModal] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -92,6 +92,13 @@ export default function Sidebar({
                 size={15}
                 className={isActive ? 'text-white flex-shrink-0' : 'text-t3 flex-shrink-0'}
               />
+              {busyProjectIds.has(project.id) && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full bg-abright flex-shrink-0 animate-pulse"
+                  title="正在生成"
+                  aria-label="正在生成"
+                />
+              )}
               <div className="min-w-0 flex-1">
                 <div className={`text-13 truncate ${isActive ? 'font-medium text-white' : 'text-text'}`}>
                   {project.name}
@@ -144,7 +151,7 @@ export default function Sidebar({
                 </button>
               )}
               <button
-                onClick={async () => { try { await axios.post('/api/auth/logout') } catch (_) { /* ignore */ } onLoggedOut?.() }}
+                onClick={() => onLoggedOut?.()}
                 title="登出"
                 className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-t3 hover:bg-card2 hover:text-text"
               >

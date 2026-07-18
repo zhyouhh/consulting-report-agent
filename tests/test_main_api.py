@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
@@ -65,6 +66,117 @@ def _install_local_engine(engine):
                 main_module._engines["local"] = previous
 
     return _cleanup
+
+
+class ProjectDeleteConcurrencyTests(unittest.TestCase):
+    def _scope(self):
+        project_id = f"delete-{uuid.uuid4().hex}"
+        engine = mock.MagicMock(spec=SkillEngine)
+        engine.get_project_record.return_value = {"id": project_id, "name": project_id}
+        return main_module.ProjectScope(
+            uid="local",
+            project_id=project_id,
+            engine=engine,
+            project_record={"id": project_id, "name": project_id},
+            lock_key=tenant_project_key("local", project_id),
+        )
+
+    def test_delete_project_acquires_both_locks_and_releases_them(self):
+        scope = self._scope()
+        result = main_module.delete_project(scope)
+        self.assertEqual(result, {"status": "ok"})
+        scope.engine.delete_project.assert_called_once_with(scope.project_id)
+
+        request_lock = main_module._get_project_request_lock(scope.lock_key)
+        review_lock = main_module.get_independent_review_lock(scope.lock_key)
+        acquired = []
+
+        def acquire_from_another_thread():
+            request_ok = request_lock.acquire(timeout=0.2)
+            review_ok = review_lock.acquire(timeout=0.2)
+            acquired.extend([request_ok, review_ok])
+            if review_ok:
+                review_lock.release()
+            if request_ok:
+                request_lock.release()
+
+        thread = threading.Thread(target=acquire_from_another_thread)
+        thread.start()
+        thread.join(timeout=1)
+        self.assertEqual(acquired, [True, True])
+
+    def test_delete_project_returns_409_when_chat_lock_is_busy(self):
+        scope = self._scope()
+        busy_lock = mock.Mock()
+        busy_lock.acquire.return_value = False
+        with mock.patch("backend.main._get_project_request_lock", return_value=busy_lock), mock.patch(
+            "backend.main.DELETE_PROJECT_LOCK_TIMEOUT_SECONDS", 0.01
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                main_module.delete_project(scope)
+        self.assertEqual(caught.exception.status_code, 409)
+        scope.engine.delete_project.assert_not_called()
+        busy_lock.release.assert_not_called()
+
+    def test_delete_project_returns_409_when_review_lock_is_busy_and_releases_chat_lock(self):
+        scope = self._scope()
+        request_lock = threading.Lock()
+        review_lock = threading.Lock()
+        review_lock.acquire()
+        try:
+            with mock.patch("backend.main._get_project_request_lock", return_value=request_lock), mock.patch(
+                "backend.main.get_independent_review_lock", return_value=review_lock
+            ):
+                with self.assertRaises(HTTPException) as caught:
+                    main_module.delete_project(scope)
+            self.assertEqual(caught.exception.status_code, 409)
+            self.assertTrue(request_lock.acquire(blocking=False))
+            request_lock.release()
+            scope.engine.delete_project.assert_not_called()
+        finally:
+            review_lock.release()
+
+    def test_delete_project_preserves_http_exception_and_releases_locks(self):
+        scope = self._scope()
+        scope.engine.delete_project.side_effect = HTTPException(status_code=409, detail="conflict")
+        with self.assertRaises(HTTPException) as caught:
+            main_module.delete_project(scope)
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(caught.exception.detail, "conflict")
+
+    def test_chat_stream_precheck_does_not_create_handler_for_deleted_project(self):
+        engine = mock.MagicMock(spec=SkillEngine)
+        project_id = f"gone-{uuid.uuid4().hex}"
+        engine.get_project_record.side_effect = [
+            {"id": project_id, "name": project_id},
+            None,
+        ]
+        cleanup = _install_local_engine(engine)
+        self.addCleanup(cleanup)
+        client = TestClient(main_module.app)
+        key = ("local", project_id)
+        with main_module._settings_lock:
+            main_module._chat_handlers.pop(key, None)
+        with mock.patch("backend.main.get_chat_handler") as get_handler:
+            response = client.post(
+                "/api/chat/stream",
+                json={"project_id": project_id, "message_text": "continue"},
+            )
+        self.assertEqual(response.status_code, 404)
+        get_handler.assert_not_called()
+        with main_module._settings_lock:
+            self.assertNotIn(key, main_module._chat_handlers)
+
+    def test_chat_handler_rechecks_project_after_request_lock_before_provider_path(self):
+        handler = object.__new__(main_module.ChatHandler)
+        handler.uid = f"uid-{uuid.uuid4().hex}"
+        handler.skill_engine = mock.MagicMock(spec=SkillEngine)
+        handler.skill_engine.get_project_record.return_value = None
+        handler._chat_stream_unlocked = mock.Mock()
+
+        with self.assertRaisesRegex(ValueError, "项目已被删除"):
+            list(handler.chat_stream("gone", "continue"))
+        handler._chat_stream_unlocked.assert_not_called()
 
 
 class _LocalMockEngineMixin:
@@ -1938,6 +2050,46 @@ class GetConversationSanitizeTests(_LocalMockEngineMixin, unittest.TestCase):
         resp = self.client.get("/api/projects/demo/conversation")
         data = resp.json()
         self.assertIn("<!-- tool-log", data["messages"][0]["content"])
+
+    def test_get_conversation_strips_historical_dsml_from_assistant_content_and_parts(self):
+        dirty = (
+            "保留这行\n"
+            "<｜｜DSML｜｜tool_calls>\n"
+            "<｜｜DSML｜｜parameter name=\"filePath\">plan/outline.md"
+            "</｜｜DSML｜｜parameter>\n"
+            "</｜｜DSML｜｜tool_calls>\n"
+        )
+        self._write_conversation([
+            {"role": "user", "content": dirty},
+            {
+                "role": "assistant",
+                "content": dirty,
+                "parts": [
+                    {"type": "text", "text": dirty},
+                    {
+                        "type": "tool",
+                        "id": "c1",
+                        "tool": "read_file",
+                        "arg": "plan/outline.md",
+                        "status": "success",
+                        "summary": "",
+                    },
+                ],
+            },
+        ])
+
+        resp = self.client.get("/api/projects/demo/conversation")
+
+        self.assertEqual(resp.status_code, 200)
+        messages = resp.json()["messages"]
+        self.assertEqual(messages[0]["content"], dirty)
+        assistant = messages[1]
+        self.assertEqual(assistant["content"], "保留这行")
+        text_part = next(part for part in assistant["parts"] if part["type"] == "text")
+        self.assertEqual(text_part["text"], "保留这行\n")
+        serialized = json.dumps(assistant, ensure_ascii=False)
+        self.assertNotIn("filePath", serialized)
+        self.assertNotIn("<｜｜DSML", serialized)
 
     def test_get_conversation_returns_tool_events_with_reload_ids(self):
         """assistant 消息有 tool_events 字段 → 返回时原样附带，每元素补 reload-<i> id"""

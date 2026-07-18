@@ -52,7 +52,7 @@ test("ChatPanel.triggerSystemTurn queues triggers when busy and forwards metadat
   // triggerSystemTurn takes metadata and enqueues when loading/uploading instead of dropping.
   assert.match(src, /const triggerSystemTurn = useCallback\(\(triggerType, metadata = null\)/);
   assert.match(src, /enqueuePendingTrigger/);
-  assert.match(src, /flushNextPendingTrigger/);
+  assert.match(src, /flushPendingTriggers/);
   // The flushed trigger re-sends the original run-bound metadata.
   assert.match(src, /triggerMetadata: \{ run_id: item\.run_id, report_mtime_ns: item\.report_mtime_ns \}/);
 });

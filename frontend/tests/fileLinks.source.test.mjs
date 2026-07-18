@@ -91,10 +91,10 @@ test("App ensures the workspace panel is visible before opening a file (desktop)
   assert.match(handler, /setShowWorkspacePanel\(true\)/);
   // 面板收起时 ref 未挂载：setTimeout 排到 commit 后再调 openFile
   assert.match(handler, /setTimeout\(\(\) => workspacePanelRef\.current\?\.openFile\(path\), 0\)/);
-  // 桌面 ChatPanel 接线
-  const chatTagEnd = s.indexOf("/>", s.indexOf("<ChatPanel"));
-  const chatTag = s.slice(s.indexOf("<ChatPanel"), chatTagEnd);
-  assert.match(chatTag, /onOpenWorkspaceFile=\{handleOpenWorkspaceFile\}/);
+  // 桌面 Pool 把文件内链回调放进 panelProps，转发给活动 ChatPanel。
+  const poolTagEnd = s.indexOf("/>", s.indexOf("<ChatPanelPool"));
+  const poolTag = s.slice(s.indexOf("<ChatPanelPool"), poolTagEnd);
+  assert.match(poolTag, /onOpenWorkspaceFile: handleOpenWorkspaceFile/);
 });
 
 test("MobileShell opens the right drawer and threads openFile via its workspacePanelRef", () => {
@@ -107,6 +107,6 @@ test("MobileShell opens the right drawer and threads openFile via its workspaceP
   assert.match(handler, /nextDrawerState\(d, 'openRight'\)/);
   assert.match(handler, /workspacePanelRef\.current\?\.openFile\(path\)/);
   // ChatPanel 收内链回调；右抽屉 WorkspacePanel 挂 ref（常驻挂载，ref 始终可用）
-  assert.match(s, /onOpenWorkspaceFile=\{handleOpenWorkspaceFile\}/);
+  assert.match(s, /onOpenWorkspaceFile: handleOpenWorkspaceFile/);
   assert.match(s, /<WorkspacePanel\s*\n\s*ref=\{workspacePanelRef\}/);
 });

@@ -171,6 +171,8 @@ description: Use when writing consulting reports, strategy analysis, market rese
 - 正文首次成稿或续写，用 `append_report_draft(content)`；正文已有文字要改，先 `read_file`，再按意图使用 `edit_file(file_path, old_string, new_string)`
 - 不要对 `content/report_draft_v1.md` 使用 `write_file`
 - 持续同步摘要、图表、章节结构
+- 正文与附录**禁止出现** `[DL-...]` 内部编号标记——那是 `analysis-notes.md` 专用的内部追踪记号，不是给读者看的引用格式
+- 正文需要交代出处时用文字表述（如「据国家数据局 2024 年 12 月发布的指导意见」），或在文末「参考资料」章节集中列出
 
 **推进到 S5：** 用户明确要求开始质量审查时，调用 `advance_stage(checkpoint_key="review_started_at", action="set", reason="用户确认开始质量审查")`。用户明确回退时，调用同一 checkpoint 且 `action="clear"`。工具 success 后才能说已进入 S5 或已回退。
 

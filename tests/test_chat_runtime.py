@@ -278,6 +278,230 @@ class ChatRuntimeTests(unittest.TestCase):
             (2, 1, 6, "", (ip, 443)),
         ]
 
+    def test_tool_argument_normalization_uses_schema_and_prefers_snake_case(self):
+        handler = self._make_handler_with_project()
+        result = handler._execute_tool(
+            self.project_id,
+            self._make_tool_call(
+                "read_file",
+                json.dumps({
+                    "filePath": "plan/does-not-exist.md",
+                    "file_path": "plan/project-overview.md",
+                    "futureOption": True,
+                }),
+            ),
+        )
+        self.assertEqual(result["status"], "success")
+
+        normalized = handler._normalize_tool_arg_keys(
+            "read_file",
+            {
+                "filePath": "camel.md",
+                "file_path": "snake.md",
+                "futureOption": True,
+            },
+        )
+        self.assertEqual(normalized["file_path"], "snake.md")
+        self.assertNotIn("filePath", normalized)
+        self.assertTrue(normalized["futureOption"])
+
+    def test_tool_schema_index_is_lazy_and_matches_build_tools(self):
+        handler = self._make_handler_with_project()
+        self.assertIsNone(handler._tool_schema_index_cache)
+        with mock.patch.object(handler, "_build_tools", wraps=handler._build_tools) as build_tools:
+            index = handler._get_tool_schema_index()
+            self.assertEqual(build_tools.call_count, 1)
+            self.assertIs(handler._get_tool_schema_index(), index)
+            self.assertEqual(build_tools.call_count, 1)
+
+        declared = {
+            tool["function"]["name"]: {
+                "properties": frozenset(tool["function"]["parameters"]["properties"]),
+                "required": frozenset(tool["function"]["parameters"].get("required", [])),
+            }
+            for tool in handler._build_tools()
+        }
+        self.assertEqual(index, declared)
+        for tool_name, direct_args in handler._DIRECT_INDEX_REQUIRED_TOOL_ARGS.items():
+            self.assertLessEqual(set(direct_args), index[tool_name]["required"])
+
+    def test_execute_tool_rejects_non_object_arguments_and_prechecks_direct_indexes(self):
+        handler = self._make_handler_with_project()
+        for raw in ("[]", "null", '"text"'):
+            with self.subTest(raw=raw):
+                result = handler._execute_tool(
+                    self.project_id,
+                    self._make_tool_call("read_file", raw),
+                )
+                self.assertEqual(result, {
+                    "status": "error",
+                    "message": "参数必须是 JSON 对象。",
+                })
+
+        for tool_name, expected_arg in (
+            ("write_file", "file_path"),
+            ("read_file", "file_path"),
+            ("read_material_file", "material_id"),
+            ("web_search", "query"),
+            ("fetch_url", "url"),
+        ):
+            with self.subTest(tool_name=tool_name):
+                result = handler._execute_tool(
+                    self.project_id,
+                    self._make_tool_call(tool_name, "{}"),
+                )
+                self.assertEqual(result["status"], "error")
+                self.assertEqual(
+                    result["message"],
+                    f"缺少必需参数 {expected_arg}，请按工具定义补全参数后重新调用",
+                )
+
+    def test_strip_dsml_markup_and_history_sanitizer_leave_clean_text_byte_exact(self):
+        from backend.chat import _sanitize_assistant_dsml_message, _strip_dsml_markup
+
+        clean = "正常正文里可以讨论 DSML 这个词\r\n第二行\n"
+        self.assertEqual(_strip_dsml_markup(clean), clean)
+        message = {
+            "role": "assistant",
+            "content": clean,
+            "parts": [{"type": "text", "text": clean}],
+        }
+        self.assertIs(_sanitize_assistant_dsml_message(message), message)
+
+        dirty = (
+            "保留前文\n"
+            "<｜｜DSML｜｜tool_calls>\n"
+            "<｜｜DSML｜｜invoke name=\"read_file\">\n"
+            "<｜｜DSML｜｜parameter name=\"filePath\">plan/outline.md</｜｜DSML｜｜parameter>\n"
+            "</｜｜DSML｜｜invoke>\n"
+            "</｜｜DSML｜｜tool_calls>\n"
+            "保留后文\n"
+        )
+        self.assertEqual(_strip_dsml_markup(dirty), "保留前文\n保留后文\n")
+        self.assertEqual(
+            _strip_dsml_markup("<｜｜DSML\n｜｜tool_calls>\n保留\n"),
+            "保留\n",
+        )
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_stream_dsml_leak_is_sanitized_before_retry_context(self, mock_openai):
+        dirty = (
+            "<｜｜DSML｜｜tool_calls>\n"
+            "<｜｜DSML｜｜invoke name=\"read_file\">\n"
+            "<｜｜DSML｜｜parameter name=\"filePath\" string=\"true\">"
+            "plan/outline.md</｜｜DSML｜｜parameter>\n"
+            "</｜｜DSML｜｜invoke>\n"
+            "</｜｜DSML｜｜tool_calls>"
+        )
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            iter([self._make_chunk(content=dirty)]),
+            iter([self._make_chunk(content="已恢复正常回复。")]),
+        ]
+        handler = self._make_handler_with_project()
+
+        list(handler.chat_stream(self.project_id, "继续", max_iterations=2))
+
+        second_messages = mock_openai.return_value.chat.completions.create.call_args_list[1].kwargs["messages"]
+        second_payload = json.dumps(second_messages, ensure_ascii=False)
+        self.assertNotIn("<｜｜DSML", second_payload)
+        self.assertNotIn("filePath", second_payload)
+        self.assertIn("已作废", second_payload)
+        persisted = (self.project_dir / "conversation.json").read_text(encoding="utf-8")
+        self.assertIn("已恢复正常回复。", persisted)
+        self.assertNotIn("<｜｜DSML", persisted)
+
+    @mock.patch("backend.chat.OpenAI")
+    def test_chat_repeated_dsml_leak_persists_only_human_fallback_and_clean_parts(self, mock_openai):
+        dirty = (
+            "<｜｜DSML｜｜tool_calls>\n"
+            "<｜｜DSML｜｜parameter name=\"filePath\">plan/outline.md"
+            "</｜｜DSML｜｜parameter>\n"
+            "</｜｜DSML｜｜tool_calls>"
+        )
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            self._chat_completion(dirty),
+            self._chat_completion(dirty),
+        ]
+        handler = self._make_handler_with_project()
+
+        result = handler.chat(self.project_id, "继续", max_iterations=2)
+
+        self.assertEqual(
+            result["content"],
+            "刚才的输出出现了格式错误，本轮已终止，请重新发送一次你的指令。",
+        )
+        persisted = json.loads((self.project_dir / "conversation.json").read_text(encoding="utf-8"))
+        serialized = json.dumps(persisted, ensure_ascii=False)
+        self.assertNotIn("filePath", serialized)
+        self.assertNotIn("<｜｜DSML", serialized)
+        self.assertNotIn("</｜｜DSML", serialized)
+        assistant = next(message for message in persisted if message["role"] == "assistant")
+        self.assertTrue(assistant.get("parts"))
+        self.assertTrue(all("filePath" not in part.get("text", "") for part in assistant["parts"]))
+
+    def test_finalize_and_message_parts_strip_dsml_from_tool_call_text(self):
+        handler = self._make_handler_with_project()
+        dirty = "尝试读取\n<｜｜DSML｜｜invoke name=\"read_file\" filePath=\"x\">\n"
+        history = []
+        turn = [
+            {
+                "role": "assistant",
+                "content": dirty,
+                "tool_calls": [{
+                    "id": "c1",
+                    "function": {"name": "read_file", "arguments": '{"file_path":"x"}'},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": '{"status":"success"}'},
+        ]
+        self._finalize_assistant_for_test(
+            handler,
+            "完成。",
+            history=history,
+            current_turn_messages=turn,
+        )
+        serialized = json.dumps(history[-1], ensure_ascii=False)
+        self.assertNotIn("<｜｜DSML", serialized)
+        self.assertNotIn("filePath", serialized)
+        self.assertIn("尝试读取", serialized)
+
+    def test_load_conversation_strips_historical_dsml_from_provider_content_and_parts(self):
+        handler = self._make_handler_with_project()
+        dirty = (
+            "保留\n"
+            "<｜｜DSML｜｜parameter name=\"filePath\">plan/outline.md"
+            "</｜｜DSML｜｜parameter>\n"
+        )
+        (self.project_dir / "conversation.json").write_text(
+            json.dumps([
+                {"role": "user", "content": dirty},
+                {
+                    "role": "assistant",
+                    "content": dirty,
+                    "parts": [{"type": "text", "text": dirty}],
+                },
+            ], ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        loaded = handler._load_conversation(self.project_id)
+        assistant = next(message for message in loaded if message["role"] == "assistant")
+        self.assertEqual(assistant["content"], "保留\n")
+        self.assertEqual(assistant["parts"], [{"type": "text", "text": "保留\n"}])
+        provider_messages = handler._build_provider_conversation(
+            self.project_id,
+            loaded,
+            {"role": "user", "content": "next"},
+        )
+        provider_assistant_payload = json.dumps(
+            [message for message in provider_messages if message.get("role") == "assistant"],
+            ensure_ascii=False,
+        )
+        self.assertNotIn("filePath", provider_assistant_payload)
+        self.assertNotIn("<｜｜DSML", provider_assistant_payload)
+        # 用户自己输入的同样字面内容不属于 assistant 历史净化范围。
+        self.assertEqual(loaded[0]["content"], dirty)
+
     def _make_search_pool_config(self):
         provider = ManagedSearchProviderConfig(
             enabled=True,

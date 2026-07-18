@@ -17,6 +17,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from . import chart_assets
 from .config import get_base_path
+from .report_quality import INTERNAL_CITATION_RE
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +423,11 @@ def _neutralize_raw_openxml(body: str) -> str:
     return _RAW_OPENXML_ATTR_RE.sub(_RAW_OPENXML_NEUTRALIZED, body)
 
 
+def _strip_internal_citation_markers(text: str) -> str:
+    """剥除仅供内部追踪的 [DL-...] 标记；最多连带一个水平前导空白，不跨换行。"""
+    return re.sub(r"[ \t]?" + INTERNAL_CITATION_RE.pattern, "", text)
+
+
 def _split_leading_title(draft_text: str) -> tuple[str | None, str]:
     """只认首个非空行的 H1 作报告标题（canonical draft 契约：首行即 H1）——避免把
     正文/代码块里的 `# ` 行误当标题剥掉。返回 (title, body)；无标题时 body 原样。"""
@@ -460,6 +466,9 @@ def build_export_markdown(draft_text: str, *, date_label: str | None = None) -> 
     生成的可信常量块。
     """
     title, body = _split_leading_title(draft_text)
+    if title is not None:
+        title = _strip_internal_citation_markers(title).strip()
+    body = _strip_internal_citation_markers(body)
     display_title = title or _EXPORT_FALLBACK_TITLE
 
     cover_block = "\n".join(

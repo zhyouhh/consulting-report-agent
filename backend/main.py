@@ -32,6 +32,8 @@ from urllib.parse import urlparse
 from .chat import (
     ChatHandler,
     LEGACY_EMPTY_ASSISTANT_FALLBACKS,
+    _get_project_request_lock,
+    _sanitize_assistant_dsml_message,
     _strip_legacy_stage_ack,
     strip_tool_log_comments,
 )
@@ -948,7 +950,10 @@ _USER_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="use
 # DeepSeek reasoner 可中途思考 > 100s 不出字节 → CF 杀连接。对策：两条 SSE 流在空闲时发周期
 # ': keepalive' 注释帧（SSE 注释行被消费侧忽略，零语义影响）。心跳只在 HTTP SSE 帧层注入。
 SSE_HEARTBEAT_INTERVAL_SECONDS = 20.0
-_CHAT_STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="chat-stream")
+# 前端 cap=3 只约束单标签页；多用户/多标签页仍可能逼近 16，届时长流会排队但不丢。
+# 跨会话全局容量治理是后置项，不把本执行池扩容误写成容量问题已根治。
+_CHAT_STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="chat-stream")
+DELETE_PROJECT_LOCK_TIMEOUT_SECONDS = 5.0
 
 
 async def _sse_with_heartbeat(sync_gen_factory, interval=None):
@@ -1338,16 +1343,30 @@ def get_project_asset(asset_name: str, scope: ProjectScope = Depends(require_pro
 
 
 @app.delete("/api/projects/{project_id}")
-async def delete_project(scope: ProjectScope = Depends(require_project)):
+def delete_project(scope: ProjectScope = Depends(require_project)):
+    lock_key = scope.lock_key
+    request_lock = _get_project_request_lock(lock_key)
+    if not request_lock.acquire(timeout=DELETE_PROJECT_LOCK_TIMEOUT_SECONDS):
+        raise HTTPException(status_code=409, detail="项目正在生成内容，已停止的话请稍等几秒再删")
     try:
-        scope.engine.delete_project(scope.project_id)
-        with _settings_lock:
-            _chat_handlers.pop((scope.uid, scope.project_id), None)
-        return {"status": "ok"}
+        review_lock = get_independent_review_lock(lock_key)
+        if not review_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="项目正在进行独立审查，请等审查结束后再删除")
+        try:
+            scope.engine.delete_project(scope.project_id)
+            with _settings_lock:
+                _chat_handlers.pop((scope.uid, scope.project_id), None)
+            return {"status": "ok"}
+        finally:
+            review_lock.release()
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+    finally:
+        request_lock.release()
 
 
 _CHECKPOINT_ROUTES = {
@@ -1400,6 +1419,7 @@ async def get_conversation(scope: ProjectScope = Depends(require_project)):
     # v5: sanitize 历史 fallback assistant，避免旧占位气泡重新展示。
     sanitized = []
     for m in messages:
+        m = _sanitize_assistant_dsml_message(m)
         if m.get("role") == "assistant":
             raw = m.get("content") or ""
             if raw.strip() in LEGACY_EMPTY_ASSISTANT_FALLBACKS:
@@ -1460,10 +1480,17 @@ def chat_stream(request: Request, chat_request: ChatRequest, uid: str = Depends(
     # 归属校验在函数体（StreamingResponse 之前）：非属主 → require_project 抛 404，
     # 而不是把 404 埋进 SSE 流里。scope 解析失败直接以 HTTP 错误冒泡。
     scope = require_project(chat_request.project_id, uid)
+    lock_key = tenant_project_key(scope.uid, scope.project_id)
+    request_lock = _get_project_request_lock(lock_key)
+    # 在 StreamingResponse 建立前持同一项目锁复验并创建 handler：若 DELETE 已先完成，
+    # 这里直接 404，绝不为已删项目重新塞入 handler cache。
+    with request_lock:
+        if scope.engine.get_project_record(scope.project_id) is None:
+            raise HTTPException(status_code=404, detail="项目已被删除")
+        handler = get_chat_handler(scope.uid, scope.project_id)
 
     def generate():
         try:
-            handler = get_chat_handler(scope.uid, scope.project_id)
             # C5: thread run-bound trigger metadata end-to-end so the main agent can bind a
             # review report to the exact run that produced it (run_id/report_mtime_ns stay
             # opaque strings — pydantic already rejects raw ints; never coerce to Number).

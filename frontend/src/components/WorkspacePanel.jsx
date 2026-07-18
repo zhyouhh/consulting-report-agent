@@ -24,6 +24,8 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
   onSendPrompt,
   onTriggerSystemTurn,
   onDropPendingReviewTriggers,
+  beginUpload = () => null,
+  endUpload = () => {},
   width,
   isMobile = false,
 }, ref) {
@@ -299,6 +301,11 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
     // 切到别的项目仍可上传——否则 A 的慢上传会卡住 B 的按钮（codex 整分支 NIT）。
     if (!files.length || !projectId || materialUploading === projectId) return
     const requestProject = projectId
+    const uploadToken = beginUpload(requestProject)
+    if (!uploadToken) {
+      showError('项目正在删除，暂时不能导入材料')
+      return
+    }
     setMaterialUploading(requestProject)
     // 上传途中可能切了项目：结果与提示都只对仍激活的项目生效，避免把旧项目材料并进新项目列表
     // （成功路径），也避免在新项目界面弹旧项目的失败提示（失败路径，codex 红队 BLOCKER）。
@@ -326,10 +333,13 @@ const WorkspacePanel = forwardRef(function WorkspacePanel({
       if (!stillActive()) return
       showError('上传材料失败: ' + (error.response?.data?.detail || error.message))
     } finally {
+      endUpload(uploadToken)
       // 只清掉本次上传的标记，不误清其它项目正在进行的上传忙态。
-      setMaterialUploading(prev => (prev === requestProject ? null : prev))
+      if (mountedRef.current) {
+        setMaterialUploading(prev => (prev === requestProject ? null : prev))
+      }
     }
-  }, [projectId, materialUploading, onMaterialsMerged, onProjectMutated])
+  }, [projectId, materialUploading, onMaterialsMerged, onProjectMutated, beginUpload, endUpload])
 
   const handleSelectUploadFiles = (event) => {
     uploadMaterialFiles(event.target.files)

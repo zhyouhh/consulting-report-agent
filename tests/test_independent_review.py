@@ -162,6 +162,8 @@ class IndependentReviewAgentTests(unittest.TestCase):
         self.assertIn("空洞拔高", p)
         self.assertIn("模糊归因", p)
         self.assertIn("第一人称", p)
+        self.assertIn("正文出现 `[DL-...]` 等内部资料编号是半成品痕迹", p)
+        self.assertIn("改为正式引用表述或移入参考资料", p)
         self.assertNotIn("quality_check", p)
 
     def test_prompt_dimension5_blacklist_is_complete_per_spec(self):
@@ -1472,6 +1474,17 @@ class IndependentReviewAgentTests(unittest.TestCase):
         joined = "\n".join(m.get("content", "") for m in msgs if isinstance(m.get("content"), str))
         self.assertIn("UNTRUSTED_DATA", joined)
         self.assertIn("行 1", joined)
+
+    def test_internal_citation_injected_as_placeholder_grounding(self):
+        agent, store, run_id, project_id = self._make_agent_with_draft(
+            "结论 [DL-2026-01/06]\n正文"
+        )
+        msgs = self._capture_first_request_messages(agent, project_id, store, run_id)
+        joined = "\n".join(
+            m.get("content", "") for m in msgs if isinstance(m.get("content"), str)
+        )
+        self.assertIn("内部资料编号标记（[DL-...]）", joined)
+        self.assertIn("行 1（[DL-2026-01/06]）", joined)
 
     def test_placeholder_not_reinjected_on_resume(self):
         agent, store, run_id, project_id = self._make_agent_with_draft("X TBD")

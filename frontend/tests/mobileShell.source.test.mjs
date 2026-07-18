@@ -7,21 +7,22 @@ import path from "node:path";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const src = () => readFileSync(path.join(__dirname, "../src/components/MobileShell.jsx"), "utf-8");
 
-test("MobileShell 装配三面板 + chatPanelRef + 抽屉互斥", () => {
+test("MobileShell 装配三面板 + App poolRef + 抽屉互斥", () => {
   const s = src();
-  assert.match(s, /import ChatPanel from ['"]\.\/ChatPanel['"]/);
+  assert.match(s, /import ChatPanelPool from ['"]\.\/ChatPanelPool['"]/);
   assert.match(s, /import Sidebar from ['"]\.\/Sidebar['"]/);
   assert.match(s, /import WorkspacePanel from ['"]\.\/WorkspacePanel['"]/);
   assert.match(s, /from ['"]\.\.\/utils\/deviceMode['"]/);
   assert.match(s, /useRef\(null\)/);
-  assert.match(s, /ref=\{chatPanelRef\}/);
+  assert.match(s, /ref=\{chatPanelPoolRef\}/);
+  assert.doesNotMatch(s, /const chatPanelRef = useRef/);
   assert.match(s, /nextDrawerState/);
 });
 
-test("MobileShell: ChatPanel 顶栏 toggle 接抽屉（不新增顶栏）", () => {
+test("MobileShell: Pool panelProps 把 ChatPanel 顶栏 toggle 接抽屉（不新增顶栏）", () => {
   const s = src();
-  assert.match(s, /onToggleSidebar=\{toggleLeft\}/);
-  assert.match(s, /onToggleWorkspacePanel=\{toggleRight\}/);
+  assert.match(s, /onToggleSidebar: toggleLeft/);
+  assert.match(s, /onToggleWorkspacePanel: toggleRight/);
 });
 
 test("MobileShell: scrim 关闭 + 100dvh + safe-area", () => {
@@ -115,11 +116,11 @@ test("MobileShell: 右抽屉 WorkspacePanel isMobile + width100% + 审查汇报 
   assert.match(wpTag, /isMobile=\{true\}/);
   assert.match(wpTag, /width="100%"/);
   // 审查完成：触发主聊天汇报轮后关右抽屉
-  assert.match(s, /handleTriggerSystemTurn = \(t, m\) => \{ chatPanelRef\.current\?\.triggerSystemTurn\(t, m\); closeAll\(\) \}/);
+  assert.match(s, /handleTriggerSystemTurn = \(t, m\) => \{ chatPanelPoolRef\.current\?\.triggerSystemTurn\(t, m\); closeAll\(\) \}/);
   assert.match(s, /onTriggerSystemTurn=\{handleTriggerSystemTurn\}/);
   assert.match(s, /onDropPendingReviewTriggers=\{handleDropPendingReviewTriggers\}/);
-  // handleDropPendingReviewTriggers 真桥接到 chatPanelRef（防 handler 被清空/改名）
-  assert.match(s, /handleDropPendingReviewTriggers = \(t\) => chatPanelRef\.current\?\.dropPendingReviewTriggers\(t\)/);
+  // handleDropPendingReviewTriggers 真桥接到 App 持有的 poolRef（防 handler 被清空/改名）
+  assert.match(s, /handleDropPendingReviewTriggers = \(t\) => chatPanelPoolRef\.current\?\.dropPendingReviewTriggers\(t\)/);
   // 常驻挂载（强 guard）：右抽屉 wrapper 的 > 后必须直接跟 <WorkspacePanel（只空白、无 {cond && / 三元 门控）
   assert.match(s, /visibility: drawer === DRAWER_RIGHT \? 'visible' : 'hidden' \}\}\s*>\s*<WorkspacePanel\b/);
   // 左抽屉 Sidebar 同样 keep-mounted

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Toaster } from 'react-hot-toast'
 import Sidebar from './components/Sidebar'
 import Login from './components/Login'
-import ChatPanel from './components/ChatPanel'
+import ChatPanelPool from './components/ChatPanelPool'
 import WorkspacePanel from './components/WorkspacePanel'
 import ForcePasswordChange from './components/ForcePasswordChange'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -16,6 +16,7 @@ import { getInitialTheme, applyTheme, toggleTheme } from './utils/theme'
 import { isCoarsePointer } from './utils/deviceMode'
 import MobileShell from './components/MobileShell'
 import OnboardingTour from './components/OnboardingTour'
+import { runLogout } from './utils/chatPanelPoolCore'
 
 const WORKSPACE_WIDTH_STORAGE_KEY = 'cra:workspaceWidth'
 
@@ -37,8 +38,9 @@ function App() {
   })
   const [loading, setLoading] = useState(true)
   const [injectedPrompt, setInjectedPrompt] = useState(null)
-  // 刚创建、待自动开场的项目 id（project_created 系统轮）；ChatPanel 消费后清除。
-  const [autoStartProjectId, setAutoStartProjectId] = useState(null)
+  // 刚创建、待自动开场的项目集合。多个项目可并行创建/排队，不能用单值互相覆盖。
+  const [pendingAutoStartProjectIds, setPendingAutoStartProjectIds] = useState(() => new Set())
+  const [busyProjectIds, setBusyProjectIds] = useState(() => new Set())
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
   // 管理控制台已是独立页面（/admin，2026-07-06）：新标签打开，保住主应用内存态
@@ -56,16 +58,25 @@ function App() {
       typeof localStorage !== 'undefined' ? localStorage.getItem(WORKSPACE_WIDTH_STORAGE_KEY) : null,
     ),
   )
-  const activeProjectRef = useRef(currentProjectId)
+  const currentProjectIdRef = useRef(currentProjectId)
+  const authUserRef = useRef(authUser)
   const chatPanelRef = useRef(null)
   const workspacePanelRef = useRef(null)
   const containerRef = useRef(null)            // 主 flex 行：给 computeWorkspaceWidth 提供矩形
   const workspaceResizeCleanupRef = useRef(null) // 活跃拖动的 window 监听清理器
   const latestWorkspaceWidthRef = useRef(null)   // 拖动中最新宽度，松手时落 localStorage（避闭包旧值）
   const quotaRefreshSeqRef = useRef(0)   // 额度刷新请求序号：只让最后发起的 /me 回包落地（防同 uid 乱序覆盖）
+  const projectsRefreshSeqRef = useRef(0)
+  currentProjectIdRef.current = currentProjectId
+  authUserRef.current = authUser
 
   useEffect(() => {
-    setUnauthedHandler(() => setAuthUser(null))
+    setUnauthedHandler(() => {
+      chatPanelRef.current?.abortAll?.()
+      setAuthUser(null)
+      setPendingAutoStartProjectIds(new Set())
+      setBusyProjectIds(new Set())
+    })
     axios.get('/api/auth/me').then((r) => { setAuthUser(r.data) }).catch(() => {}).finally(() => setAuthChecked(true))
   }, [])
 
@@ -83,10 +94,6 @@ function App() {
     }
   }, [authUser?.uid, authUser?.must_change_password])
 
-  useEffect(() => {
-    activeProjectRef.current = currentProjectId
-  }, [currentProjectId])
-
   const initializeApp = async () => {
     await Promise.all([loadProjects(), loadSettings()])
   }
@@ -94,7 +101,7 @@ function App() {
   const applyProjectSelection = (nextProjects, preferredProjectId = null) => {
     const nextProjectId = reconcileCurrentProjectId(
       nextProjects,
-      preferredProjectId ?? activeProjectRef.current,
+      preferredProjectId ?? currentProjectIdRef.current,
     )
 
     setProjects(nextProjects)
@@ -112,6 +119,23 @@ function App() {
       alert('加载项目列表失败，请刷新页面重试')
     } finally {
       setLoading(false)
+    }
+  }
+
+  // 流生成期间的项目对账必须静默：顶层 loading 会卸载整个业务树，等价于杀掉所有后台流。
+  // seq + uid 双守卫防乱序回包，以及 A 登出后旧请求覆盖 B 会话。
+  const refreshProjectsSilently = async (preferredProjectId = null) => {
+    const seq = ++projectsRefreshSeqRef.current
+    const requestUid = authUserRef.current?.uid
+    try {
+      const res = await axios.get('/api/projects', { skipUnauthedHandler: true })
+      if (seq !== projectsRefreshSeqRef.current) return false
+      if (!requestUid || authUserRef.current?.uid !== requestUid) return false
+      applyProjectSelection(res.data, preferredProjectId)
+      return true
+    } catch (error) {
+      console.error('静默刷新项目失败:', error)
+      return false
     }
   }
 
@@ -146,7 +170,7 @@ function App() {
   // 统一的「项目被改动」回调：刷 workspace + 刷额度。聊天轮结束、独立审查后的系统轮、
   // 工作区文件保存/checkpoint 都经此 → 任一计费路径完成后 sidebar 额度都即时更新
   // （不止依赖 focus 兜底）。refreshAuthQuota 只动 cost 字段、不触发 initializeApp，安全。
-  const handleProjectMutated = () => {
+  const handleActiveProjectMutated = () => {
     setWorkspaceRefreshToken(prev => prev + 1)
     refreshAuthQuota()
   }
@@ -175,7 +199,7 @@ function App() {
       const res = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/workspace`)
       if (!shouldApplyProjectResponse({
         requestProject,
-        activeProject: activeProjectRef.current,
+        activeProject: currentProjectIdRef.current,
       })) {
         return
       }
@@ -184,7 +208,7 @@ function App() {
     } catch (error) {
       if (!shouldApplyProjectResponse({
         requestProject,
-        activeProject: activeProjectRef.current,
+        activeProject: currentProjectIdRef.current,
       })) {
         return
       }
@@ -204,7 +228,7 @@ function App() {
       const res = await axios.get(`/api/projects/${encodeURIComponent(requestProject)}/materials`)
       if (!shouldApplyProjectResponse({
         requestProject,
-        activeProject: activeProjectRef.current,
+        activeProject: currentProjectIdRef.current,
       })) {
         return
       }
@@ -212,7 +236,7 @@ function App() {
     } catch (error) {
       if (!shouldApplyProjectResponse({
         requestProject,
-        activeProject: activeProjectRef.current,
+        activeProject: currentProjectIdRef.current,
       })) {
         return
       }
@@ -231,8 +255,11 @@ function App() {
       const proceed = async () => {
         // 自动开场标记：ChatPanel 确认新项目会话为空后触发 project_created 系统轮
         //（模型主动开启需求确认提问），消费后经 onAutoStartConsumed 清除。
-        setAutoStartProjectId(createdProject.id)
-        await loadProjects(createdProject.id)
+        setPendingAutoStartProjectIds(prev => new Set(prev).add(createdProject.id))
+        setProjects(prev => [...prev.filter(project => project.id !== createdProject.id), createdProject])
+        setCurrentProjectId(createdProject.id)
+        setCurrentProject(createdProject)
+        await refreshProjectsSilently(createdProject.id)
         setWorkspaceRefreshToken(prev => prev + 1)
       }
       const wp = workspacePanelRef.current
@@ -246,21 +273,41 @@ function App() {
   }
 
   const deleteProject = async (projectId) => {
+    const admission = chatPanelRef.current?.tryBeginDelete?.(projectId)
+    if (admission?.status === 'uploading') {
+      alert('项目正在导入材料，请稍候再删')
+      return false
+    }
+    if (admission?.status === 'deleting') return false
+    if (!admission || admission.status !== 'started') {
+      alert('项目当前无法删除，请稍后重试')
+      return false
+    }
+    let forgotten = false
     try {
+      chatPanelRef.current?.abortProjectWork?.(projectId)
       await axios.delete(`/api/projects/${encodeURIComponent(projectId)}`)
-      if (currentProjectId === projectId) {
-        setCurrentProjectId(null)
-        setCurrentProject(null)
+      forgotten = true
+      setPendingAutoStartProjectIds(prev => {
+        const next = new Set(prev)
+        next.delete(projectId)
+        return next
+      })
+      const remainingProjects = projects.filter(project => project.id !== projectId)
+      applyProjectSelection(remainingProjects)
+      if (currentProjectIdRef.current === projectId) {
         setWorkspace(null)
         setWorkspaceProjectId(null)
         setMaterials([])
       }
-      await loadProjects()
+      void refreshProjectsSilently()
       return true
     } catch (error) {
       console.error('删除项目失败:', error)
-      alert('删除项目失败，请重试')
+      alert(error?.response?.data?.detail || '删除项目失败，请重试')
       return false
+    } finally {
+      chatPanelRef.current?.finishDelete?.(admission.token, { forgotten })
     }
   }
 
@@ -368,7 +415,7 @@ function App() {
     })
   }, [])
 
-  const handleMaterialsMerged = (incomingMaterials) => {
+  const handleActiveMaterialsMerged = (incomingMaterials) => {
     setMaterials(prev => mergeMaterials(prev, incomingMaterials))
     setWorkspace(prev => {
       if (!prev) {
@@ -379,6 +426,45 @@ function App() {
         materials: mergeMaterials(prev.materials || [], incomingMaterials),
       }
     })
+  }
+
+  // Pool 回调显式带 pid。后台项目完成时只刷新全局额度/项目摘要，绝不把材料或 workspace
+  // 写进当前项目视图；活动项目才委托既有的视图更新契约。
+  const handlePanelMaterialsMerged = (projectId, incomingMaterials) => {
+    if (projectId === currentProjectIdRef.current) {
+      handleActiveMaterialsMerged(incomingMaterials)
+    }
+    refreshAuthQuota()
+    void refreshProjectsSilently()
+  }
+
+  const handlePanelProjectMutated = (projectId) => {
+    if (projectId === currentProjectIdRef.current) {
+      handleActiveProjectMutated()
+    } else {
+      refreshAuthQuota()
+    }
+    void refreshProjectsSilently()
+  }
+
+  const consumeAutoStartProject = (projectId) => {
+    setPendingAutoStartProjectIds(prev => {
+      const next = new Set(prev)
+      next.delete(projectId)
+      return next
+    })
+  }
+
+  const handleLogoutIntent = () => {
+    void runLogout({
+      abortAll: () => chatPanelRef.current?.abortAll?.(),
+      requestLogout: () => axios.post('/api/auth/logout'),
+      clearSession: () => {
+        setAuthUser(null)
+        setPendingAutoStartProjectIds(new Set())
+        setBusyProjectIds(new Set())
+      },
+    }).catch(error => console.error('登出请求失败:', error))
   }
 
   const handleMaterialDeleted = (materialId) => {
@@ -425,19 +511,24 @@ function App() {
           materials={materials}
           workspaceRefreshToken={workspaceRefreshToken}
           injectedPrompt={injectedPrompt}
-          autoStartProjectId={autoStartProjectId}
-          onAutoStartConsumed={() => setAutoStartProjectId(null)}
+          pendingAutoStartProjectIds={pendingAutoStartProjectIds}
+          onAutoStartConsumed={consumeAutoStartProject}
+          chatPanelPoolRef={chatPanelRef}
+          busyProjectIds={busyProjectIds}
           workspaceStageCode={workspaceProjectId === currentProjectId ? workspace?.stage_code : undefined}
           onSelectProject={handleSelectProject}
           onCreateProject={createProject}
           onDeleteProject={deleteProject}
           onSettingsSaved={loadSettings}
-          onLoggedOut={() => setAuthUser(null)}
+          onLoggedOut={handleLogoutIntent}
           onOpenAdmin={openAdmin}
           onToggleTheme={onToggleTheme}
-          onMaterialsMerged={handleMaterialsMerged}
+          onMaterialsMerged={handleActiveMaterialsMerged}
+          onPanelMaterialsMerged={handlePanelMaterialsMerged}
           onMaterialDeleted={handleMaterialDeleted}
-          onProjectMutated={handleProjectMutated}
+          onProjectMutated={handleActiveProjectMutated}
+          onPanelProjectMutated={handlePanelProjectMutated}
+          onBusyIndicatorChange={setBusyProjectIds}
           onCheckpointSet={loadWorkspace}
           onInsertPrompt={(text) => setInjectedPrompt(text)}
           onInjectedPromptConsumed={() => setInjectedPrompt(null)}
@@ -454,31 +545,37 @@ function App() {
             onDeleteProject={deleteProject}
             onSettingsSaved={loadSettings}
             authUser={authUser}
-            onLoggedOut={() => setAuthUser(null)}
+            onLoggedOut={handleLogoutIntent}
             onOpenAdmin={openAdmin}
             theme={theme}
             onToggleTheme={onToggleTheme}
             currentStageCode={workspaceProjectId === currentProjectId ? workspace?.stage_code : undefined}
+            busyProjectIds={busyProjectIds}
           />
         )}
         {/* 可调区域（不含固定宽 Sidebar）：clamp 的 MIN_CHAT_WIDTH 须按这个区域预留。 */}
         <div ref={setContainerRef} className="flex flex-1 min-w-0">
-          <ChatPanel
+          <ChatPanelPool
             ref={chatPanelRef}
-            projectId={currentProjectId}
-            project={currentProject}
-            settings={settings}
-            workspace={workspace}
-            materials={materials}
-            onMaterialsMerged={handleMaterialsMerged}
-            onProjectMutated={handleProjectMutated}
-            onToggleSidebar={() => toggleSidebar()}
-            onToggleWorkspacePanel={handleToggleWorkspacePanel}
-            injectedPrompt={injectedPrompt}
-            onInjectedPromptConsumed={() => setInjectedPrompt(null)}
-            autoStartProjectId={autoStartProjectId}
-            onAutoStartConsumed={() => setAutoStartProjectId(null)}
-            onOpenWorkspaceFile={handleOpenWorkspaceFile}
+            activeProjectId={currentProjectId}
+            panelProps={{
+              settings,
+              onToggleSidebar: () => toggleSidebar(),
+              onToggleWorkspacePanel: handleToggleWorkspacePanel,
+              onOpenWorkspaceFile: handleOpenWorkspaceFile,
+            }}
+            activeOnlyProps={{
+              project: currentProject,
+              workspace,
+              materials,
+              injectedPrompt,
+              onInjectedPromptConsumed: () => setInjectedPrompt(null),
+            }}
+            pendingAutoStartProjectIds={pendingAutoStartProjectIds}
+            onAutoStartConsumed={consumeAutoStartProject}
+            onPanelMaterialsMerged={handlePanelMaterialsMerged}
+            onPanelProjectMutated={handlePanelProjectMutated}
+            onBusyIndicatorChange={setBusyProjectIds}
           />
           {showWorkspacePanel && (
             <>
@@ -497,14 +594,16 @@ function App() {
                 materials={materials}
                 refreshToken={workspaceRefreshToken}
                 width={workspaceWidth}
-                onMaterialsMerged={handleMaterialsMerged}
+                onMaterialsMerged={handleActiveMaterialsMerged}
                 onMaterialDeleted={handleMaterialDeleted}
-                onProjectMutated={handleProjectMutated}
+                onProjectMutated={handleActiveProjectMutated}
                 onCheckpointSet={loadWorkspace}
                 onInsertPrompt={(text) => setInjectedPrompt(text)}
                 onSendPrompt={(text) => chatPanelRef.current?.sendUserMessage(text) ?? false}
                 onTriggerSystemTurn={(triggerType, metadata) => chatPanelRef.current?.triggerSystemTurn(triggerType, metadata)}
                 onDropPendingReviewTriggers={(triggerType) => chatPanelRef.current?.dropPendingReviewTriggers(triggerType)}
+                beginUpload={(projectId) => chatPanelRef.current?.beginUpload(projectId) ?? null}
+                endUpload={(token) => chatPanelRef.current?.endUpload(token)}
               />
             </>
           )}
