@@ -11,7 +11,10 @@ Authorization 头透传，本服务不落盘不缓存、不跟随重定向。
 依赖：fastapi + uvicorn + httpx。
 """
 from __future__ import annotations
+import hashlib
+import json
 import os
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
@@ -32,6 +35,12 @@ DEFAULT_UPSTREAM_BASE_URL = "https://opencode.ai/zen/go"
 # 只转发上游需要的入站头（尤其 Authorization = new-api 发来的渠道 key）。
 # 刻意不转发 Accept-Encoding：交给 httpx 协商并透明解压，normalizer 只见解码后的文本。
 _FORWARD_REQUEST_HEADERS = ("authorization", "content-type", "accept")
+# opencode Go 自 2026-09-06 起要求每个请求带「每会话稳定」的 session id，缺了直接
+# 400 MissingSessionID（不会触发 new-api failover）。new-api 不透传客户端自定义头，
+# 故由本服务补：入站已带则沿用，否则从请求体的会话锚点派生。
+_SESSION_HEADER = "x-opencode-session"
+# opencode 文档要求客户端用自己的 UA 标识，而不是通用 HTTP 库名。
+_USER_AGENT = "cra-opencode-normalizer/1.1"
 # 逐跳头 + 由响应体重算的头，不回传给 new-api（RFC 7230 §6.1 + 内容相关头）。
 _STRIP_RESPONSE_HEADERS = {
     "content-length", "transfer-encoding", "connection", "content-encoding", "keep-alive",
@@ -60,12 +69,48 @@ class NormalizerSettings:
         )
 
 
-def _forward_headers(request: Request) -> dict:
+def _conversation_anchor(body: bytes) -> Optional[bytes]:
+    """chat 请求的会话锚点：model + 首条 user 消息（没有 user 消息时取首条消息）。
+
+    同一会话的后续轮次只在尾部追加消息，首条 user 不变 → 派生出同一个 session id，
+    opencode 据此把整段会话路由到同一后端、保住 prompt cache 命中。刻意不含 system：
+    CRA 的 system prompt 末尾拼了随工具调用变化的项目状态，算进来会让同一会话频繁换 session。
+    不同会话首条 user 完全相同时共用 session 无害——它只是路由提示，前缀相同反而利于缓存。
+    非 chat 形态返回 None。
+    """
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    anchor = next((m for m in messages if isinstance(m, dict) and m.get("role") == "user"),
+                  messages[0])
+    return json.dumps([payload.get("model"), anchor], ensure_ascii=False,
+                      sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _session_id(request: Request, body: bytes) -> str:
+    supplied = (request.headers.get(_SESSION_HEADER) or "").strip()
+    if supplied:
+        return supplied
+    anchor = _conversation_anchor(body)
+    if anchor is None:
+        return f"ses_{uuid.uuid4().hex}"
+    return f"ses_{hashlib.sha256(anchor).hexdigest()[:32]}"
+
+
+def _forward_headers(request: Request, body: bytes) -> dict:
     out = {}
     for name in _FORWARD_REQUEST_HEADERS:
         val = request.headers.get(name)
         if val is not None:
             out[name] = val
+    out[_SESSION_HEADER] = _session_id(request, body)
+    out["user-agent"] = _USER_AGENT
     return out
 
 
@@ -132,7 +177,7 @@ def create_app(settings: Optional[NormalizerSettings] = None,
         upstream_req = client.build_request(
             request.method, url,
             params=request.url.query or None,   # 原始 query string，保留重复/顺序
-            headers=_forward_headers(request),
+            headers=_forward_headers(request, body),
             content=body,
         )
         try:

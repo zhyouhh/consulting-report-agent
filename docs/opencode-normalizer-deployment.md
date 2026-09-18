@@ -9,6 +9,15 @@
 > 端到端门禁全过：ds专用 token 经**薄网关**全链实测 8/8 响应带 `prompt_cache_hit_tokens>0`，
 > new-api 渠道 61 `local_count=0`、cache>0（修复前 90/90 local_count、cache=0）。下面步骤为部署记录/复现用。
 
+> **2026-09-18 追加：补 `x-opencode-session` 头。** opencode Go 自 2026-09-06 起要求每个请求带
+> 「每会话稳定」的 `x-opencode-session`，缺了直接 400 `MissingSessionID`。new-api 对 400 不 failover，
+> 所以渠道 61 的全部流量（CRA 试用通道、data-news 评分）从 09-06 起全挂，一直到修复。new-api 不透传
+> 客户端自定义头，因此改由本服务补：入站已带就沿用，否则用 `ses_` + sha256(model + 首条 user 消息)
+> 前 32 位（不含 system，因为 CRA 的 system 末尾拼了会变的项目状态）；非 chat 请求用随机 uuid。UA 设为
+> `cra-opencode-normalizer/1.1`。已部署，并做过全链路验证（流式/非流式 200，同前缀第二次请求 cache hit 98%）。
+> 回滚用 `app.py.bak-session-20260918` + 镜像 tag `opencode-sse-normalizer:pre-session-20260918`，
+> 详见 `VPS-fix-private/notes/jp-app-01.md` 2026-09-18 条目。
+
 ## 为什么需要它
 
 opencode.ai/zen 在 **2026-07-01→07-02** 间把流式响应改成了非标准形态：把 `usage`

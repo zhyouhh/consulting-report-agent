@@ -403,6 +403,55 @@ class NormalizerAppTests(unittest.TestCase):
         self.assertEqual(seen["url"], "https://opencode.example/zen/go/v1/chat/completions?a=1&a=2")
         self.assertEqual(seen["auth"], "Bearer opencode-key")
 
+    def _capture_headers(self, requests):
+        """依次发 requests（(method, path, kwargs)），返回上游看到的每个请求头。"""
+        seen = []
+
+        def handler(req):
+            seen.append(req.headers)
+            return httpx.Response(200, headers={"content-type": "application/json"}, content=b"{}")
+        with self._client(handler) as c:
+            for method, path, kwargs in requests:
+                c.request(method, path, **kwargs)
+        return seen
+
+    def test_session_header_stable_across_turns_of_one_conversation(self):
+        system = {"role": "system", "content": "你是咨询助手\n\n项目状态：S1"}
+        user1 = {"role": "user", "content": "写一份行业报告"}
+        turn1 = {"model": "deepseek-v4-pro", "messages": [system, user1]}
+        # 后续轮次：尾部追加消息，且 system 末尾的项目状态已变
+        turn2 = {"model": "deepseek-v4-pro", "messages": [
+            {"role": "system", "content": "你是咨询助手\n\n项目状态：S2"},
+            user1, {"role": "assistant", "content": "好的"},
+            {"role": "user", "content": "继续"}]}
+        other = {"model": "deepseek-v4-pro", "messages": [
+            system, {"role": "user", "content": "另一个项目"}]}
+        h1, h2, h3 = self._capture_headers([
+            ("POST", "/v1/chat/completions", {"json": turn1}),
+            ("POST", "/v1/chat/completions", {"json": turn2}),
+            ("POST", "/v1/chat/completions", {"json": other}),
+        ])
+        self.assertTrue(h1["x-opencode-session"].startswith("ses_"))
+        self.assertEqual(h1["x-opencode-session"], h2["x-opencode-session"])
+        self.assertNotEqual(h1["x-opencode-session"], h3["x-opencode-session"])
+
+    def test_session_header_from_client_is_kept(self):
+        (h,) = self._capture_headers([
+            ("POST", "/v1/chat/completions",
+             {"headers": {"x-opencode-session": "ses_client"}, "json": {"messages": []}}),
+        ])
+        self.assertEqual(h["x-opencode-session"], "ses_client")
+
+    def test_session_header_present_for_non_chat_and_invalid_bodies(self):
+        h_get, h_bad, h_empty = self._capture_headers([
+            ("GET", "/v1/models", {}),
+            ("POST", "/v1/chat/completions", {"content": b"not json"}),
+            ("POST", "/v1/chat/completions", {"json": {"messages": []}}),
+        ])
+        for h in (h_get, h_bad, h_empty):
+            self.assertTrue(h["x-opencode-session"].startswith("ses_"))
+            self.assertTrue(h["user-agent"].startswith("cra-opencode-normalizer/"))
+
     def test_non_stream_response_passed_through_verbatim(self):
         body = json.dumps({"object": "list", "data": []}).encode()
 
