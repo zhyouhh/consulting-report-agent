@@ -107,7 +107,7 @@ PyInstaller 把所有 `datas` 收到 `_internal/` 下面，`sys._MEIPASS` 在运
 ### 试用通道
 
 - 面向普通同事，仅供快速试用，无服务质量承诺。
-- 默认模型：`deepseek-v4-pro`
+- 默认模型：`deepseek-v4.1-flash`
 - 默认地址：`https://newapi.z0y0h.work/client/v1`
 - 客户端不保存真实上游 key，真实凭证只存在服务端薄中转。
 - 发布包需要注入单独的客户端令牌文件 `managed_client_token.txt`。

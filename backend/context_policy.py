@@ -14,6 +14,7 @@ EXACT_MODEL_TIERS = {
     "gemini-3-flash": "tier_1m",
     "kimi-k2.5": "tier_256k",
     "deepseek-v4-pro": "tier_1m_eff_256k",
+    "deepseek-v4.1-flash": "tier_1m_eff_256k",
 }
 
 FAMILY_MODEL_TIERS = {

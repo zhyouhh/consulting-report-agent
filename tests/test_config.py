@@ -22,7 +22,7 @@ class SettingsPersistenceTests(unittest.TestCase):
     def test_default_settings_use_managed_mode(self):
         settings = Settings()
         self.assertEqual(settings.mode, "managed")
-        self.assertEqual(settings.managed_model, "deepseek-v4-pro")
+        self.assertEqual(settings.managed_model, "deepseek-v4.1-flash")
         self.assertTrue(settings.managed_base_url)
         self.assertIn("search.z0y0h.work", settings.managed_search_api_url)
 
@@ -84,6 +84,35 @@ class SettingsPersistenceTests(unittest.TestCase):
                 loaded = load_settings()
 
         self.assertEqual(loaded.mode, "managed")
+
+    def _load_from_payload(self, payload: dict):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            (config_dir / "config.json").write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch("backend.config.get_user_config_dir", return_value=config_dir):
+                return load_settings()
+
+    def test_v4_config_old_default_managed_model_migrates_to_new_default(self):
+        loaded = self._load_from_payload({"config_version": 4, "mode": "managed", "managed_model": "deepseek-v4-pro"})
+        self.assertEqual(loaded.managed_model, "deepseek-v4.1-flash")
+        self.assertEqual(loaded.model, "deepseek-v4.1-flash")
+        self.assertEqual(loaded.config_version, 5)
+
+    def test_v4_config_keeps_custom_mode_after_version_bump(self):
+        # v5 升版本不能把 v4 的 custom 用户当 legacy 强制回 managed
+        loaded = self._load_from_payload({"config_version": 4, "mode": "custom", "managed_model": "deepseek-v4-pro",
+                                          "custom_api_base": "https://custom.example/v1", "custom_model": "gpt-4.1-mini"})
+        self.assertEqual(loaded.mode, "custom")
+        self.assertEqual(loaded.model, "gpt-4.1-mini")
+        self.assertEqual(loaded.managed_model, "deepseek-v4.1-flash")
+
+    def test_v5_config_managed_model_is_not_rewritten(self):
+        loaded = self._load_from_payload({"config_version": 5, "mode": "managed", "managed_model": "deepseek-v4-pro"})
+        self.assertEqual(loaded.managed_model, "deepseek-v4-pro")
+
+    def test_v4_config_non_default_managed_model_is_not_rewritten(self):
+        loaded = self._load_from_payload({"config_version": 4, "mode": "managed", "managed_model": "deepseek-v4-flash"})
+        self.assertEqual(loaded.managed_model, "deepseek-v4-flash")
 
     def test_save_and_load_preserves_custom_context_limit_override(self):
         with tempfile.TemporaryDirectory() as tmpdir:

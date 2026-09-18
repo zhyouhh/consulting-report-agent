@@ -7,7 +7,7 @@
 
 - Web 试用站：`https://consulting.z0y0h.work`（账号隔离、金额配额、管理后台）
 - Windows 桌面分发：`dist\咨询报告助手\` 完整目录，不是裸 exe
-- 默认模型通道：managed `deepseek-v4-pro`；高级用户可激活自定义 OpenAI 兼容 API
+- 默认模型通道：managed `deepseek-v4.1-flash`；高级用户可激活自定义 OpenAI 兼容 API
 - macOS 可用于 Web 开发，不承诺正式桌面分发
 
 ## 现在已经能做什么

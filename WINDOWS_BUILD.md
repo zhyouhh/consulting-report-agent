@@ -12,7 +12,7 @@
 
 - 面向普通同事，仅供快速试用，无服务质量承诺。
 - 默认地址：`https://newapi.z0y0h.work/client/v1`
-- 默认模型：`deepseek-v4-pro`
+- 默认模型：`deepseek-v4.1-flash`
 - 前提：服务端薄中转已经部署完成。
 
 ### 自定义 API

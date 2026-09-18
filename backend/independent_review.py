@@ -89,7 +89,7 @@ INDEPENDENT_REVIEW_SYSTEM_PROMPT = """你是独立审查代理。你的任务是
 # 独立审查报告
 
 **审查时间**：[ISO 8601 当前时间]
-**审查代理**：DeepSeek V4 Pro · independent-review
+**审查代理**：independent-review
 **审查范围**：data-log / analysis-notes / report_draft_v1 / references / outline (+ research-plan)
 
 ---

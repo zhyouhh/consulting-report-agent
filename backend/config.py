@@ -7,12 +7,17 @@ import os
 import sys
 
 DEFAULT_MANAGED_BASE_URL = "https://newapi.z0y0h.work/client/v1"
-DEFAULT_MANAGED_MODEL = "deepseek-v4-pro"
+# 2026-09-18 由 deepseek-v4-pro 切到 v4.1-flash（opencode Go 渠道；更快更便宜，支持工具调用）。
+# 老配置里存的 pro 由 normalize_settings_payload 的 v5 迁移改写。
+DEFAULT_MANAGED_MODEL = "deepseek-v4.1-flash"
+PREVIOUS_DEFAULT_MANAGED_MODEL = "deepseek-v4-pro"
 DEFAULT_MANAGED_VISION_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 # 每模型单价（元/百万 token）：(命中, 未命中, 输出)。spec §6.1 上机实测口径。
 # vision 单价占位（按 deepseek 同档保守，可后填真实价）。
 DEFAULT_MANAGED_MODEL_PRICING: dict[str, tuple[float, float, float]] = {
     "deepseek-v4-pro": (0.025, 3.0, 6.0),
+    # DeepSeek 官方 2026-09 空闲时段价（高峰为 2 倍）
+    "deepseek-v4.1-flash": (0.02, 1.0, 4.0),
     "Qwen/Qwen3-VL-8B-Instruct": (0.025, 3.0, 6.0),
 }
 # 未知模型 fallback 单价（保守按 deepseek 三档）
@@ -33,7 +38,9 @@ MANAGED_CLIENT_TOKEN_FILENAME = "managed_client_token.txt"
 MANAGED_SEARCH_POOL_FILENAME = "managed_search_pool.json"
 SEARCH_RUNTIME_STATE_FILENAME = "search_runtime_state.json"
 SEARCH_CACHE_FILENAME = "search_cache.json"
-DESKTOP_CONFIG_VERSION = 4
+DESKTOP_CONFIG_VERSION = 5
+# < 此版本的配置视为 legacy：load 时 mode 强制回 managed（v4 起 mode 才是用户选择）
+LEGACY_MODE_CONFIG_VERSION = 4
 
 
 def get_base_path() -> Path:
@@ -376,7 +383,7 @@ def normalize_settings_payload(data: dict) -> dict:
     """兼容旧配置，并同步当前模式对应的运行时字段。"""
     normalized = dict(data)
     config_version = int(normalized.get("config_version", 0) or 0)
-    is_legacy_config = config_version < DESKTOP_CONFIG_VERSION
+    is_legacy_config = config_version < LEGACY_MODE_CONFIG_VERSION
     runtime_projects_dir = get_user_config_dir() / "projects"
     runtime_skill_dir = get_base_path() / "skill"
     runtime_managed_token = get_default_managed_client_token()
@@ -388,6 +395,10 @@ def normalize_settings_payload(data: dict) -> dict:
 
     normalized["managed_base_url"] = DEFAULT_MANAGED_BASE_URL   # 服务端只读，覆盖任何历史/客户端值
     normalized.setdefault("managed_model", DEFAULT_MANAGED_MODEL)
+    # v5：managed 模型在设置页只读，旧配置里的 pro 就是当时的默认值而非用户选择，随默认一起迁到新模型。
+    # 只迁一次：保存后 config_version=5，之后不再改写。
+    if config_version < 5 and normalized["managed_model"] == PREVIOUS_DEFAULT_MANAGED_MODEL:
+        normalized["managed_model"] = DEFAULT_MANAGED_MODEL
     normalized.setdefault("managed_vision_model", DEFAULT_MANAGED_VISION_MODEL)
     normalized.setdefault("vision_enabled", True)
     normalized.setdefault("managed_search_api_url", DEFAULT_MANAGED_SEARCH_API_URL)

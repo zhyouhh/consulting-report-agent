@@ -22,7 +22,7 @@
 
 - 仅供快速试用，无服务质量承诺
 - 推荐有条件使用自定义 API
-- 默认模型：`deepseek-v4-pro`
+- 默认模型：`deepseek-v4.1-flash`
 
 ### 自定义 API
 

@@ -8,7 +8,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 
-DEFAULT_ALLOWED_MODEL = "deepseek-v4-pro"
+DEFAULT_ALLOWED_MODEL = "deepseek-v4.1-flash"
 
 
 @dataclass

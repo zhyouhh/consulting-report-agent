@@ -82,6 +82,21 @@ class SettingsApiTests(AuthApiTestBase):
         s = self._load_local()
         self.assertEqual(s.managed_base_url, DEFAULT_MANAGED_BASE_URL)
 
+    def test_post_settings_ignores_client_managed_model(self):
+        # 开着旧设置页的用户回传迁移前的模型，不能把已迁移的 managed_model 写回旧值
+        from backend.config import DEFAULT_MANAGED_MODEL
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body(managed_model="deepseek-v4-pro"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._load_local().managed_model, DEFAULT_MANAGED_MODEL)
+
+    def test_post_settings_without_managed_model_ok(self):
+        body = _settings_body()
+        body.pop("managed_model")
+        resp = self.client.post("/api/settings", headers={"origin": "https://app.example.com"}, json=body)
+        self.assertEqual(resp.status_code, 200)
+
     # —— Task 4: 解锁 custom 模式 + 保存时校验 base ——
     def test_custom_mode_honored_for_current_config(self):
         from backend.config import normalize_settings_payload, DESKTOP_CONFIG_VERSION

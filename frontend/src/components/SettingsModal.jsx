@@ -6,7 +6,7 @@ const MANAGED_BASE_URL_DISPLAY = 'https://newapi.z0y0h.work/client/v1'
 
 const defaultForm = {
   mode: 'managed',
-  managed_model: 'deepseek-v4-pro',
+  managed_model: 'deepseek-v4.1-flash',
   custom_api_base: '',
   custom_api_key: '',
   custom_model: '',

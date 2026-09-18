@@ -32,7 +32,7 @@ class PackagingDocsTests(unittest.TestCase):
             self.assertIn("client token", content)
             self.assertIn(".venv", content)
             self.assertIn("PyInstaller", content)
-            self.assertIn("deepseek-v4-pro", content)
+            self.assertIn("deepseek-v4.1-flash", content)
             self.assertIn("Pandoc", content)
             self.assertIn("pandoc.exe", content)
 
@@ -56,7 +56,7 @@ class PackagingDocsTests(unittest.TestCase):
         self.assertIn("自定义 API", content)
         self.assertIn("Windows", content)
         self.assertIn("可审草稿", content)
-        self.assertIn("deepseek-v4-pro", content)
+        self.assertIn("deepseek-v4.1-flash", content)
         self.assertIn("Pandoc", content)
         self.assertNotIn("Word/PDF", content)
 

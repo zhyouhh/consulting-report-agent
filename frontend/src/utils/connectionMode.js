@@ -2,7 +2,7 @@ export function describeConnectionMode(settings = {}) {
   if (!settings.mode || settings.mode === "managed") {
     return {
       title: "试用通道",
-      subtitle: `仅供试用 · ${settings.managed_model || "deepseek-v4-pro"}`,
+      subtitle: `仅供试用 · ${settings.managed_model || "deepseek-v4.1-flash"}`,
       helper: "有自己的模型/API，可点击下方“连接设置”接入。",
     };
   }

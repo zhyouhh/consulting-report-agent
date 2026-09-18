@@ -29,7 +29,8 @@
 
 ## LLM 与聊天硬约束
 
-- 默认 managed 模型是 `deepseek-v4-pro`。带 tools 的 DeepSeek 请求不显式发
+- 默认 managed 模型是 `deepseek-v4.1-flash`（2026-09-18 起；此前 `deepseek-v4-pro`，老配置经
+  config v5 迁移）。带 tools 的 DeepSeek 请求不显式发
   `tool_choice="auto"`；tool-call follow-up 必须保留非空 `reasoning_content`；历史消息
   不回灌 SDK 的 null 字段。改 provider 序列化必须跑 DeepSeek targeted tests。
 - 工具参数以 `_build_tools()` schema 为真值：先校验 object，再做 schema 内

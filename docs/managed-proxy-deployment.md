@@ -36,8 +36,8 @@ Example runtime env:
 ```env
 MANAGED_PROXY_UPSTREAM_BASE_URL=http://127.0.0.1:3000/v1
 MANAGED_PROXY_UPSTREAM_API_KEY=<dedicated-upstream-key>
-MANAGED_PROXY_ALLOWED_MODELS=deepseek-v4-pro,Qwen/Qwen3-VL-8B-Instruct
-MANAGED_PROXY_SELECTABLE_MODELS=deepseek-v4-pro
+MANAGED_PROXY_ALLOWED_MODELS=deepseek-v4.1-flash,deepseek-v4-pro,Qwen/Qwen3-VL-8B-Instruct,deepseek-v4-flash
+MANAGED_PROXY_SELECTABLE_MODELS=deepseek-v4.1-flash
 MANAGED_PROXY_CLIENT_TOKEN=<dedicated-client-token>
 ```
 
@@ -89,7 +89,7 @@ curl -H "Authorization: Bearer <dedicated-client-token>" https://newapi.z0y0h.wo
 Expected:
 
 ```json
-{"object":"list","data":[{"id":"deepseek-v4-pro"}]}
+{"object":"list","data":[{"id":"deepseek-v4.1-flash"}]}
 ```
 
 ```bash
@@ -105,9 +105,9 @@ client = OpenAI(
 
 print([m.id for m in client.models.list().data])
 resp = client.chat.completions.create(
-    model="deepseek-v4-pro",
+    model="deepseek-v4.1-flash",
     messages=[{"role": "user", "content": "Reply with OK only."}],
-    max_tokens=8,
+    max_tokens=300,  # 推理模型：太小会把预算耗在思维链上、content 为空
 )
 print(resp.choices[0].message.content)
 PY
