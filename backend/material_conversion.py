@@ -41,6 +41,92 @@ class VisionUnavailable(Exception):
     """视觉转写不可用（custom 模式 / 关闭 / 无 endpoint）；caller 落 OCR 兜底。"""
 
 
+# 发给模型的图片：DeepSeek v4.1-flash 只收这几种格式；它会把图缩到 ~1024 token（2048² 实测封顶），
+# 更大的原图只白白撑大请求体（一轮最多 MAX_TRANSIENT_ATTACHMENTS 张一起发，网关 nginx 上限 50MB）。
+MODEL_IMAGE_MIMES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
+MODEL_IMAGE_MAX_BYTES = 3 * 1024 * 1024
+MODEL_IMAGE_MAX_SIDE = 2048
+# 解码前的像素总数上限（约 25MP，RGBA 展开 ~100MB）：挡住高压缩比的「解压炸弹」把单 worker 撑爆
+MODEL_IMAGE_MAX_DECODE_PIXELS = 25_000_000
+_PIL_FORMAT_MIMES = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp", "GIF": "image/gif"}
+
+
+_DOWNSCALE_SIDES = (MODEL_IMAGE_MAX_SIDE, 1536, 1024, 768)
+
+
+def model_ready_image_data_url_from_bytes(raw: bytes, mime: str) -> str | None:
+    """图片字节 → 可直接发模型的 data URL；做不到就返回 None（调用方不发原图，只留文字/清单）。
+
+    按文件头识别实际格式；格式受支持、校验通过且不超过 MODEL_IMAGE_MAX_BYTES 时原样；像素总数超
+    MODEL_IMAGE_MAX_DECODE_PIXELS 直接拒绝；其余用 Pillow 逐级缩小（长边 2048→768）并编码，
+    有透明通道先试 PNG，再退 JPEG（铺白底，q85→q70），取第一个不超过 MODEL_IMAGE_MAX_BYTES 的结果。
+    编码结果有硬上限：解码失败 / 缩到最小仍超限 → None，绝不把不支持或超限的原图发出去。"""
+    import base64
+    import io
+
+    mime = (mime or "").lower()
+    try:
+        from PIL import Image
+    except ImportError:   # 无 Pillow 无法校验/转码：只放行本就受支持且不超限的原图
+        if mime in MODEL_IMAGE_MIMES and len(raw) <= MODEL_IMAGE_MAX_BYTES:
+            return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+        return None
+    try:
+        # 先只读文件头：以实际格式为准（不信扩展名/声明 MIME），像素总数超限直接拒绝，不做完整解码
+        with Image.open(io.BytesIO(raw)) as probe:
+            actual_mime = _PIL_FORMAT_MIMES.get(probe.format or "")
+            width, height = probe.size
+        if width * height > MODEL_IMAGE_MAX_DECODE_PIXELS:
+            return None
+        if actual_mime and len(raw) <= MODEL_IMAGE_MAX_BYTES:
+            with Image.open(io.BytesIO(raw)) as check:
+                check.verify()   # 截断/损坏的小图在这里拦下，免得整轮被上游 400
+            return f"data:{actual_mime};base64,{base64.b64encode(raw).decode('ascii')}"
+        with Image.open(io.BytesIO(raw)) as src:
+            if src.format == "JPEG":
+                src.draft("RGB", (MODEL_IMAGE_MAX_SIDE, MODEL_IMAGE_MAX_SIDE))   # JPEG 按 DCT 缩放解码，省内存
+            src.load()
+            has_alpha = src.mode in ("RGBA", "LA") or (src.mode == "P" and "transparency" in src.info)
+            base = src.convert("RGBA" if has_alpha else "RGB")
+    except Exception:  # noqa: BLE001 解码/校验失败
+        return None
+    for side in _DOWNSCALE_SIDES:
+        img = base.copy()
+        img.thumbnail((side, side))
+        candidates = []
+        if has_alpha:
+            candidates.append(("PNG", "image/png", img, {"optimize": True}))
+            flat = Image.new("RGB", img.size, (255, 255, 255))
+            flat.paste(img, mask=img.getchannel("A"))
+            img = flat
+        candidates += [("JPEG", "image/jpeg", img, {"quality": 85}), ("JPEG", "image/jpeg", img, {"quality": 70})]
+        for fmt, out_mime, frame, options in candidates:
+            buf = io.BytesIO()
+            frame.save(buf, fmt, **options)
+            if buf.tell() <= MODEL_IMAGE_MAX_BYTES:
+                return f"data:{out_mime};base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+    return None
+
+
+def model_ready_image_data_url(path: Path, mime: str) -> str | None:
+    return model_ready_image_data_url_from_bytes(path.read_bytes(), mime)
+
+
+def model_ready_data_url(data_url: str) -> str | None:
+    """客户端直传的 data URL（兼容 transient 通道）同样规整；解析失败返回 None。"""
+    import base64
+    import binascii
+
+    header, sep, payload = (data_url or "").partition(",")
+    if not sep or not header.startswith("data:") or ";base64" not in header:
+        return None
+    try:
+        raw = base64.b64decode(payload, validate=False)
+    except (binascii.Error, ValueError):
+        return None
+    return model_ready_image_data_url_from_bytes(raw, header[5:].split(";", 1)[0])
+
+
 class MaterialConverter:
     def __init__(
         self,
@@ -200,9 +286,10 @@ class MaterialConverter:
         return self._markitdown_convert(path)                    # docx/pptx/xlsx/pdf/html/csv…
 
     def _image_data_url(self, path: Path, mime: str) -> str:
-        import base64
-        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-        return f"data:{mime};base64,{b64}"
+        data_url = model_ready_image_data_url(path, mime)
+        if data_url is None:
+            raise MaterialConversionError("图片格式不受支持或过大，无法交给视觉模型")
+        return data_url
 
     def _transcribe_raw(self, path: Path, mime: str) -> str:
         """vision→OCR→raise 的纯转写逻辑，不读写缓存（供持久与 transient 复用）。"""

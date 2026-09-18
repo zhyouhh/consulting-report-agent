@@ -1,7 +1,11 @@
+import tempfile
 import threading
 import unittest
 from pathlib import Path
 from backend.material_conversion import MaterialConverter
+
+# 真实 1x1 PNG：图片发给视觉模型前会做格式校验，假字节会被拒
+_REAL_PNG = __import__("base64").b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
 
 
 class ConverterConstructTests(unittest.TestCase):
@@ -343,7 +347,7 @@ class ImageTranscribeTests(unittest.TestCase):
     def test_textonly_uses_vision_and_caches(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            img = Path(tmp) / "a.png"; img.write_bytes(b"\x89PNG fake")
+            img = Path(tmp) / "a.png"; img.write_bytes(_REAL_PNG)
             conv = self._conv(tmp, multimodal=False, vision="VIS-OK")
             self.assertEqual(conv.transcribe_image(img, "image/png"), "VIS-OK")
             conv._vision_adapter = lambda *a: (_ for _ in ()).throw(AssertionError("不应重转"))
@@ -352,7 +356,7 @@ class ImageTranscribeTests(unittest.TestCase):
     def test_cache_miss_when_vision_namespace_changes(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            img = Path(tmp) / "a.png"; img.write_bytes(b"\x89PNG fake")
+            img = Path(tmp) / "a.png"; img.write_bytes(_REAL_PNG)
             self.assertEqual(self._conv(tmp, multimodal=False, vision="OLD", namespace="ns-A").transcribe_image(img, "image/png"), "OLD")
             self.assertEqual(self._conv(tmp, multimodal=False, vision="NEW", namespace="ns-B").transcribe_image(img, "image/png"), "NEW")
 
@@ -362,7 +366,7 @@ class ImageTranscribeTests(unittest.TestCase):
         string-concat 后两个 key 的 .md 路径必须不同，各自返回自己的转写。"""
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            img = Path(tmp) / "a.png"; img.write_bytes(b"\x89PNG fake")
+            img = Path(tmp) / "a.png"; img.write_bytes(_REAL_PNG)
             conv_a = self._conv(tmp, multimodal=False, vision="TXT-A", namespace="visM-gpt-4.1")
             conv_b = self._conv(tmp, multimodal=False, vision="TXT-B", namespace="visM-gpt-4.2")
             key_a = conv_a._cache_key(img, extra=conv_a.image_cache_extra)
@@ -380,7 +384,7 @@ class ImageTranscribeTests(unittest.TestCase):
     def test_vision_fail_falls_to_ocr(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            img = Path(tmp) / "a.png"; img.write_bytes(b"\x89PNG")
+            img = Path(tmp) / "a.png"; img.write_bytes(_REAL_PNG)
             def boom(*a): raise RuntimeError("vision down")
             from backend.material_conversion import MaterialConverter
             conv = MaterialConverter(cache_dir=Path(tmp), vision_adapter=boom,
@@ -391,7 +395,7 @@ class ImageTranscribeTests(unittest.TestCase):
         import tempfile
         from backend.material_conversion import MaterialConversionError
         with tempfile.TemporaryDirectory() as tmp:
-            img = Path(tmp) / "a.png"; img.write_bytes(b"\x89PNG")
+            img = Path(tmp) / "a.png"; img.write_bytes(_REAL_PNG)
             def boom(*a): raise RuntimeError("down")
             from backend.material_conversion import MaterialConverter
             conv = MaterialConverter(cache_dir=Path(tmp), vision_adapter=boom,
@@ -405,7 +409,7 @@ class ImageTranscribeTests(unittest.TestCase):
             from backend.material_conversion import MaterialConverter
             conv = MaterialConverter(cache_dir=Path(tmp)/"cache", vision_adapter=lambda *a: "图说Z",
                                      ocr_adapter=lambda p: "O", capability_resolver=lambda: False)
-            out = conv.transcribe_image_data_url("data:image/png;base64,Zg==", "image/png")
+            out = conv.transcribe_image_data_url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "image/png")
             self.assertEqual(out, "图说Z")
             residue = [f for f in os.listdir(Path(tmp)/"cache") if f.endswith((".md", ".error", ".refs"))]
             self.assertEqual(residue, [])
@@ -432,3 +436,92 @@ class ConverterHardeningTests(unittest.TestCase):
                                      ocr_adapter=lambda p: "O", capability_resolver=lambda: False)
             with self.assertRaises(MaterialConversionError):
                 conv.transcribe_image_data_url("data:image/png;base64,!!!notbase64!!!", "image/png")
+
+
+class ModelReadyImageTests(unittest.TestCase):
+    def _write(self, tmp, name, img, fmt):
+        path = Path(tmp) / name
+        img.save(path, fmt)
+        return path
+
+    def _decode(self, data_url):
+        import base64, io
+        from PIL import Image
+        header, b64 = data_url.split(",", 1)
+        return header, Image.open(io.BytesIO(base64.b64decode(b64)))
+
+    def test_small_supported_image_passes_through_byte_identical(self):
+        import base64
+        from PIL import Image
+        from backend.material_conversion import model_ready_image_data_url
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, "a.png", Image.new("RGB", (40, 20), (200, 0, 0)), "PNG")
+            url = model_ready_image_data_url(path, "image/png")
+            self.assertEqual(url, "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode())
+
+    def test_bmp_is_transcoded_to_jpeg(self):
+        from PIL import Image
+        from backend.material_conversion import model_ready_image_data_url
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, "a.bmp", Image.new("RGB", (40, 20), (0, 0, 200)), "BMP")
+            header, img = self._decode(model_ready_image_data_url(path, "image/bmp"))
+            self.assertEqual(header, "data:image/jpeg;base64")
+            self.assertEqual(img.size, (40, 20))
+
+    def test_oversized_image_output_respects_hard_byte_cap(self):
+        import base64
+        import os
+        from PIL import Image
+        from backend import material_conversion as mc
+        with tempfile.TemporaryDirectory() as tmp:
+            noise = Image.frombytes("RGBA", (3000, 1500), os.urandom(3000 * 1500 * 4))
+            path = self._write(tmp, "big.png", noise, "PNG")
+            self.assertGreater(path.stat().st_size, mc.MODEL_IMAGE_MAX_BYTES)
+            url = mc.model_ready_image_data_url(path, "image/png")
+            header, img = self._decode(url)
+            self.assertLessEqual(len(base64.b64decode(url.split(",", 1)[1])), mc.MODEL_IMAGE_MAX_BYTES)
+            self.assertLessEqual(max(img.size), mc.MODEL_IMAGE_MAX_SIDE)
+
+    def test_unsupported_transparent_image_is_reencoded_as_png(self):
+        from PIL import Image
+        from backend.material_conversion import model_ready_image_data_url
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Image.new("RGBA", (300, 200), (0, 128, 255, 100))
+            path = self._write(tmp, "a.tiff", img, "TIFF")
+            header, out = self._decode(model_ready_image_data_url(path, "image/tiff"))
+            self.assertEqual(header, "data:image/png;base64")
+            self.assertEqual(out.mode, "RGBA")
+
+    def test_undecodable_unsupported_image_is_not_sent(self):
+        from backend.material_conversion import model_ready_image_data_url
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "x.bmp"
+            path.write_bytes(b"not really a bmp")
+            self.assertIsNone(model_ready_image_data_url(path, "image/bmp"))
+
+    def test_transient_data_url_is_normalized_or_rejected(self):
+        import base64
+        from backend.material_conversion import model_ready_data_url
+        small = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        self.assertEqual(model_ready_data_url(small), small)
+        self.assertIsNone(model_ready_data_url("not-a-data-url"))
+
+    def test_decompression_bomb_is_rejected_before_decoding(self):
+        from PIL import Image
+        from backend import material_conversion as mc
+        with tempfile.TemporaryDirectory() as tmp:
+            side = int(mc.MODEL_IMAGE_MAX_DECODE_PIXELS ** 0.5) + 100
+            path = self._write(tmp, "bomb.png", Image.new("1", (side, side)), "PNG")   # 1-bit 大图，文件很小
+            self.assertLess(path.stat().st_size, mc.MODEL_IMAGE_MAX_BYTES)
+            self.assertIsNone(mc.model_ready_image_data_url(path, "image/png"))
+
+    def test_truncated_small_png_is_rejected(self):
+        import os
+        from PIL import Image
+        from backend.material_conversion import model_ready_image_data_url
+        with tempfile.TemporaryDirectory() as tmp:
+            full = self._write(tmp, "ok.png", Image.frombytes("RGB", (64, 64), os.urandom(64 * 64 * 3)), "PNG")
+            cut = Path(tmp) / "cut.png"
+            cut.write_bytes(full.read_bytes()[: full.stat().st_size // 2])
+            self.assertIsNone(model_ready_image_data_url(cut, "image/png"))
+

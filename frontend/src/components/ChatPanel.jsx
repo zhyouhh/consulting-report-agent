@@ -36,8 +36,11 @@ import { formatContextUsage, getContextUsagePercent } from '../utils/contextUsag
 import {
   buildPendingAttachment,
   fileToDataUrl,
+  MAX_IMAGES_PER_MESSAGE,
+  capImageAttachments,
   mergePendingAttachments,
   removePendingAttachment,
+  renamePastedFile,
   splitPendingAttachments,
 } from '../utils/pendingAttachments'
 import { shouldApplyProjectResponse } from '../utils/projectRequestOwnership'
@@ -104,7 +107,7 @@ const ChatPanel = forwardRef(function ChatPanel({
   const sendSeqRef = useRef(0)
   const connection = describeConnectionMode(settings || {})
   const workspaceSummary = summarizeWorkspace(workspace || {})
-  const { transientImages: pendingImageAttachments, persistentDocuments: pendingDocumentAttachments } = splitPendingAttachments(pendingAttachments)
+  const { transientImages: pendingImageAttachments, persistentUploads: pendingUploadAttachments } = splitPendingAttachments(pendingAttachments)
   const contextUsage = tokenUsage ? formatContextUsage(tokenUsage) : null
   const contextUsagePercent = tokenUsage ? getContextUsagePercent(tokenUsage) : null
   activeProjectIdRef.current = projectId
@@ -374,7 +377,11 @@ const ChatPanel = forwardRef(function ChatPanel({
       return
     }
 
-    const nextPendingAttachments = files.map(file => {
+    const { accepted, droppedImages } = capImageAttachments(pendingAttachmentsRef.current, files)
+    if (droppedImages > 0) {
+      showInfo(`每条消息最多附 ${MAX_IMAGES_PER_MESSAGE} 张图片，已忽略 ${droppedImages} 张`)
+    }
+    const nextPendingAttachments = accepted.map(file => {
       const attachment = buildPendingAttachment(file)
       if (attachment.kind === 'image') {
         return {
@@ -700,7 +707,8 @@ const ChatPanel = forwardRef(function ChatPanel({
         // 否则会留下用户看不见的"已挂材料"，悄悄带到下一条无关消息上。上传文档已是
         // 持久材料、每轮系统清单都在，重试照样能被模型读取，无需把选择恢复回来。
         setSelectedMaterialIds([])
-        // 失败/中止保留待发送附件队列（图片需经 transient 重发），成功才清空。
+        // 失败/中止保留待发送附件队列（未入库的仍可重发），成功才清空。已入库的文档/图片在材料清单里，
+        // 模型仍可读取（图片有后台转写），不再恢复成隐形勾选。
         if (!streamFailed) {
           clearPendingAttachmentQueue()
         }
@@ -915,13 +923,14 @@ const ChatPanel = forwardRef(function ChatPanel({
     }
     setInput('')
 
-    const persistentDocumentFiles = pendingDocumentAttachments.map(attachment => attachment.file)
+    // 文档与聊天框图片都先入材料库再挂到本轮（图片由主模型原生看图，后端后台转写供后续轮次记住）
+    const persistentUploadFiles = pendingUploadAttachments.map(attachment => attachment.file)
     let requestAttachedMaterialIds = selectedMaterialIds
     let transientAttachmentsPayload = []
     let preparationStage = 'documents'
     let preparationFailed = false
 
-    if (pendingDocumentAttachments.length > 0 || pendingImageAttachments.length > 0) {
+    if (pendingUploadAttachments.length > 0 || pendingImageAttachments.length > 0) {
       const uploadToken = beginUpload(projectId)
       if (!uploadToken) {
         showInfo('项目正在删除，暂时不能发送附件')
@@ -938,9 +947,9 @@ const ChatPanel = forwardRef(function ChatPanel({
       uploadAbortControllerRef.current = uploadController
       setUploading(true)
       try {
-        if (persistentDocumentFiles.length > 0) {
+        if (persistentUploadFiles.length > 0) {
           const uploadedMaterials = await uploadDocumentFiles(
-            persistentDocumentFiles,
+            persistentUploadFiles,
             uploadController.signal,
           )
           if (!shouldContinueAfterUpload({
@@ -952,6 +961,8 @@ const ChatPanel = forwardRef(function ChatPanel({
           if (!preparationFailed && uploadedMaterials.length > 0) {
             requestAttachedMaterialIds = mergeMaterialIds(selectedMaterialIds, uploadedMaterials)
             setSelectedMaterialIds(requestAttachedMaterialIds)
+            // 已入库的附件移出待发送队列，并释放图片预览占用的 blob URL
+            pendingUploadAttachments.forEach(revokeAttachmentPreview)
             setPendingAttachments(pendingImageAttachments)
             showSuccess(`已导入 ${uploadedMaterials.length} 份材料`)
           }
@@ -1055,6 +1066,7 @@ const ChatPanel = forwardRef(function ChatPanel({
       .filter(item => item.kind === 'file')
       .map(item => item.getAsFile())
       .filter(Boolean)
+      .map((file, index) => renamePastedFile(file, index))
 
     if (files.length === 0) {
       return
@@ -1337,7 +1349,7 @@ const ChatPanel = forwardRef(function ChatPanel({
                   </div>
                   <div className="truncate text-12 text-text">{attachment.displayName}</div>
                   <div className="mt-1 inline-flex rounded-chip bg-asoft border border-asoftb px-2 py-0.5 text-2xs text-asoftt">
-                    本轮临时
+                    {attachment.deliveryMode === 'persist' ? '发送前入库' : '本轮临时'}
                   </div>
                 </div>
               ) : (

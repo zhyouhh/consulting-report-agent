@@ -10,10 +10,8 @@ from backend.config import Settings
 from backend.skill import SkillEngine
 
 
-PNG_1X1_BASE64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
-    "/w8AAgMBgJ/l7wAAAABJRU5ErkJggg=="
-)
+# 有效的 1x1 PNG（原先那张 IDAT 校验和是坏的；图片发模型前会做 verify，坏图会被拒）
+PNG_1X1_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 
 
 class WorkspaceMaterialTests(unittest.TestCase):
@@ -675,6 +673,8 @@ class WorkspaceMaterialTests(unittest.TestCase):
             )
             material = engine.list_materials(project["id"])[0]
             handler = ChatHandler(settings, engine)
+            # 后台转写线程与本用例无关（只验原图组装），显式挡掉
+            handler._warm_image_transcript_async = mock.Mock()
 
             content = handler._build_user_content(
                 project["id"],

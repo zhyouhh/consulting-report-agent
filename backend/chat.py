@@ -1,4 +1,4 @@
-import base64
+import concurrent.futures
 import hashlib
 import ipaddress
 import json
@@ -274,6 +274,19 @@ S0_FIRST_TURN_ALLOWED_TOOLS = frozenset({
 # _get_request_max_tokens 直接发保守预算，不再为同一端点重复付一次失败请求。
 _OUTPUT_BUDGET_CLAMP_CACHE: set[str] = set()
 _CONVERSATION_STATE_LOCKS: dict[str, threading.RLock] = {}
+# 后台图片转写：全进程固定 2 个工作线程 + 有上限的等待队列（满了就不预热，历史轮次只留材料清单）
+_TRANSCRIPT_WARMUP_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="image-transcript-warmup"
+)
+_TRANSCRIPT_WARMUP_MAX_QUEUED = 24
+_transcript_warmup_queued = 0
+_transcript_warmup_cond = threading.Condition()
+
+
+def _wait_transcript_warmups(timeout: float = 10.0) -> bool:
+    """测试/运维用：等待已提交的后台转写全部结束。"""
+    with _transcript_warmup_cond:
+        return _transcript_warmup_cond.wait_for(lambda: _transcript_warmup_queued == 0, timeout=timeout)
 _CONVERSATION_STATE_LOCKS_GUARD = threading.Lock()
 _PROJECT_REQUEST_LOCKS: dict[str, threading.RLock] = {}
 _PROJECT_REQUEST_LOCKS_GUARD = threading.Lock()
@@ -533,6 +546,9 @@ class ChatHandler:
             legacy_image_cache_namespaces=(self._vision_cache_namespace(PREVIOUS_DEFAULT_MANAGED_VISION_MODEL),),
         )
         self.skill_engine.set_material_converter(self.material_converter)
+        # 原生看图时后台补转写的在途集合（同一材料在一轮的多次 provider 调用里只起一个线程）
+        self._transcript_warmups: set[tuple[str, str]] = set()
+        self._transcript_warmups_lock = threading.Lock()
 
     VISION_PROMPT_VERSION = "vp1"
     OCR_ENGINE_VERSION = "rapidocr-onnx-v1"
@@ -4340,7 +4356,10 @@ class ChatHandler:
           current turn transcribes (cached); history turn (include_images False) is CACHE-FIRST
           (peek only, never makes a new vision call on replay).
         """
+        from backend.material_limits import MAX_TRANSIENT_ATTACHMENTS
+
         note_lines = [user_message]
+        native_images = 0   # 本轮原图总数（材料图 + 兼容 transient 图共用 MAX_TRANSIENT_ATTACHMENTS 额度）
         image_parts: List[Dict] = []
         multimodal = self._main_model_supports_vision()
 
@@ -4392,19 +4411,33 @@ class ChatHandler:
             for material in resolved:
                 if material["media_kind"] != "image_like":
                     continue
-                if multimodal:
-                    if include_images:
-                        image_parts.append({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": self._build_material_data_url(project_id, material["id"]),
-                            },
-                        })
+                if multimodal and include_images:
+                    # 一轮原图数与原 transient 通道同上限；超出的只留清单（模型可 read_material_file）
+                    if native_images >= MAX_TRANSIENT_ATTACHMENTS:
+                        continue
+                    data_url = self._build_material_data_url(project_id, material["id"])
+                    if data_url is None:
+                        note_lines.append(f"（图片材料 {material['id']} 格式不受支持或过大，未随本轮发送原图）")
+                        continue
+                    native_images += 1
+                    image_parts.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": data_url,
+                        },
+                    })
+                    # 本轮原生看图，同时后台转写一份入缓存：之后的历史轮次不再带图，靠它记住图的内容
+                    self._warm_image_transcript_async(project_id, material)
                     continue
-                # text-only main model: inject transcript DATA block, NEVER image_url.
                 path = self.skill_engine.get_material_path(project_id, material["id"])
                 mime = material.get("mime_type") or "image/png"
-                if include_images:
+                if multimodal:
+                    # history turn（多模态主模型）：只回放后台转写的缓存，绝不新发视觉请求；未就绪则仅留清单
+                    text = self.material_converter.peek_image_transcript(path, mime)
+                    if not text:
+                        continue
+                # text-only main model: inject transcript DATA block, NEVER image_url.
+                elif include_images:
                     # current turn: transcribe (triggers + caches); any failure -> placeholder.
                     try:
                         text = self.material_converter.transcribe_image(path, mime) or "[图片未能解析]"
@@ -4429,12 +4462,21 @@ class ChatHandler:
 
         # 4) transient images: raw image_url only for multimodal main model on the current turn
         # (text-only transient images are handled via C4 attachment_transcripts above).
+        # 仅旧前端还会走此通道：与材料图共用每轮原图额度，并同样规整格式/体积。
         if multimodal and include_images:
+            from backend.material_conversion import model_ready_data_url
+
             for attachment in transient_attachments or []:
+                if native_images >= MAX_TRANSIENT_ATTACHMENTS:
+                    break
+                data_url = model_ready_data_url(attachment.get("data_url") or "")
+                if data_url is None:
+                    continue
+                native_images += 1
                 image_parts.append({
                     "type": "image_url",
                     "image_url": {
-                        "url": attachment["data_url"],
+                        "url": data_url,
                     },
                 })
 
@@ -4443,12 +4485,73 @@ class ChatHandler:
         content.extend(image_parts)
         return content
 
-    def _build_material_data_url(self, project_id: str, material_id: str) -> str:
+    def _warm_image_transcript_async(self, project_id: str, material: Dict) -> None:
+        """后台为图片材料生成转写缓存（不阻塞本轮）。仅 managed + vision_enabled：custom 模式没有
+        视觉模型，只剩服务器端 OCR，不值得为每张图后台跑。已有缓存/同材料在途则跳过；失败只记日志。"""
+        if self.settings.mode != "managed" or not self.settings.vision_enabled:
+            return
+        material_id = material["id"]
+        try:
+            path = self.skill_engine.get_material_path(project_id, material_id)
+            mime = material.get("mime_type") or "image/png"
+            if self.material_converter.peek_image_transcript(path, mime):
+                return
+        except Exception:  # noqa: BLE001 探测失败就不预热，本轮原图照常发送
+            return
+        global _transcript_warmup_queued
+        key = (project_id, material_id)
+        with self._transcript_warmups_lock:
+            if key in self._transcript_warmups:
+                return
+            with _transcript_warmup_cond:
+                if _transcript_warmup_queued >= _TRANSCRIPT_WARMUP_MAX_QUEUED:
+                    logger.warning("image transcript warmup queue full; skip material %s", material_id)
+                    return
+                _transcript_warmup_queued += 1
+            self._transcript_warmups.add(key)
+
+        def run() -> None:
+            global _transcript_warmup_queued
+            cache_key = None
+            try:
+                cache_key = self.skill_engine._cache_key_for_material(material, path)
+                self.material_converter.transcribe_image(path, mime)
+                self.skill_engine.retain_material_cache(project_id, material_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("background image transcript failed (project=%s material=%s)",
+                               project_id, material_id, exc_info=True)
+            finally:
+                # 转写期间材料/项目被删：删除路径释放时缓存（转写或失败 tombstone）尚未生成，
+                # 这里无论成败补一次 release，让刚写入的无引用缓存随即清掉，不留孤儿
+                if cache_key is not None:
+                    try:
+                        self.skill_engine.get_material(project_id, material_id)
+                    except Exception:  # noqa: BLE001 材料已不存在
+                        try:
+                            self.material_converter.release(cache_key, material_id)
+                        except Exception:  # noqa: BLE001
+                            pass
+                with self._transcript_warmups_lock:
+                    self._transcript_warmups.discard(key)
+                with _transcript_warmup_cond:
+                    _transcript_warmup_queued -= 1
+                    _transcript_warmup_cond.notify_all()
+
+        try:
+            _TRANSCRIPT_WARMUP_EXECUTOR.submit(run)
+        except RuntimeError:   # 解释器退出中 executor 已关闭
+            with self._transcript_warmups_lock:
+                self._transcript_warmups.discard(key)
+            with _transcript_warmup_cond:
+                _transcript_warmup_queued -= 1
+                _transcript_warmup_cond.notify_all()
+
+    def _build_material_data_url(self, project_id: str, material_id: str) -> str | None:
+        from backend.material_conversion import model_ready_image_data_url
+
         material = self.skill_engine.get_material(project_id, material_id)
         material_path = self.skill_engine.get_material_path(project_id, material_id)
-        encoded = base64.b64encode(material_path.read_bytes()).decode("ascii")
-        mime_type = material.get("mime_type") or "application/octet-stream"
-        return f"data:{mime_type};base64,{encoded}"
+        return model_ready_image_data_url(material_path, material.get("mime_type") or "")
 
     def _get_tools(self):
         return self._build_tools()

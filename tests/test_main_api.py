@@ -717,6 +717,27 @@ class WorkspaceApiTests(_LocalMockEngineMixin, unittest.TestCase):
         self.assertEqual(len(args[1]), 1)
         self.assertTrue(args[1][0].endswith("市场图表.png"))
 
+    def test_upload_same_named_files_are_staged_separately(self):
+        # 两张剪贴板 image.png 同批上传：暂存区不能互相覆盖，两份内容都要进 add_materials
+        self.engine.get_project_record.side_effect = None
+        self.engine.get_project_record.return_value = {
+            "id": "proj-demo", "name": "proj-demo", "workspace_dir": "D:/Workspaces/demo",
+        }
+        seen = {}
+
+        def capture(project_id, paths, added_via):
+            seen["contents"] = [Path(p).read_bytes() for p in paths]
+            return [{"id": "mat-a"}, {"id": "mat-b"}]
+
+        self.engine.add_materials.side_effect = capture
+        response = self.client.post(
+            "/api/projects/proj-demo/materials/upload",
+            files=[("files", ("image.png", BytesIO(b"first"), "image/png")),
+                   ("files", ("image.png", BytesIO(b"second"), "image/png"))],
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(seen["contents"], [b"first", b"second"])
+
     @mock.patch("backend.main.MAX_HEAVY_MATERIAL_BYTES", 10)
     def test_upload_oversized_file_returns_413(self):
         """Upload endpoint rejects files exceeding MAX_HEAVY_MATERIAL_BYTES with HTTP 413."""

@@ -19,6 +19,9 @@ from backend.skill import (
 )
 
 
+# 真实 1x1 PNG：图片发给视觉模型前会做格式校验，假字节会被拒
+_REAL_PNG = __import__("base64").b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+
 class SkillEngineTests(unittest.TestCase):
     def setUp(self):
         self.repo_skill_dir = Path(__file__).resolve().parents[1] / "skill"
@@ -238,7 +241,7 @@ class SkillEngineTests(unittest.TestCase):
             )
             engine.set_material_converter(conv)
             img = Path(tmp) / "c.png"
-            img.write_bytes(b"\x89PNG fake")
+            img.write_bytes(_REAL_PNG)
             m = engine.add_materials(pid, [str(img)], added_via="chat_upload")[0]
             conv.transcribe_image(engine.get_material_path(pid, m["id"]), "image/png")
             key = engine._cache_key_for_material(m, engine.get_material_path(pid, m["id"]))
@@ -261,7 +264,7 @@ class SkillEngineTests(unittest.TestCase):
                 image_cache_namespace="visM-vp1-ocr1",
             )
             engine.set_material_converter(conv)
-            img_bytes = b"\x89PNG identical-bytes"
+            img_bytes = _REAL_PNG
             s1 = Path(tmp) / "x.png"
             s1.write_bytes(img_bytes)
             s2 = Path(tmp) / "y.png"
@@ -292,7 +295,7 @@ class SkillEngineTests(unittest.TestCase):
         old = MaterialConverter(**converter_kwargs, image_cache_namespace="oldVis-vp1-ocr1")
         engine.set_material_converter(old)
         src = Path(tmp) / "x.png"
-        src.write_bytes(b"\x89PNG legacy-bytes")
+        src.write_bytes(_REAL_PNG)
         mat = engine.add_materials(pid, [str(src)], added_via="chat_upload")[0]
         old.transcribe_image(engine.get_material_path(pid, mat["id"]), "image/png")
         engine.retain_material_cache(pid, mat["id"])
@@ -303,6 +306,16 @@ class SkillEngineTests(unittest.TestCase):
                                 legacy_image_cache_namespaces=("oldVis-vp1-ocr1",))
         engine.set_material_converter(new)
         return engine, pid, mat, old_md
+
+    def test_gif_material_is_image_like(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+            project = engine.create_project(self._project_payload(Path(tmp) / "workspace"))
+            src = Path(tmp) / "anim.gif"
+            src.write_bytes(b"GIF89a fake")
+            mat = engine.add_materials(project["id"], [str(src)], added_via="chat_upload")[0]
+            self.assertEqual(mat["media_kind"], "image_like")
+            self.assertEqual(mat["mime_type"], "image/gif")
 
     def test_remove_material_releases_legacy_vision_namespace_cache(self):
         with tempfile.TemporaryDirectory() as tmp:

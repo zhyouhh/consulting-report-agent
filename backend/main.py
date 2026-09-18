@@ -816,9 +816,11 @@ async def upload_materials(
     staged_paths = []
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
-        for upload in files:
+        for index, upload in enumerate(files):
             safe_name = Path(upload.filename or "attachment").name
-            temp_path = tmpdir_path / safe_name
+            # 每个文件独立子目录：同批同名（如两张剪贴板 image.png）不能在暂存区互相覆盖
+            (tmpdir_path / str(index)).mkdir()
+            temp_path = tmpdir_path / str(index) / safe_name
             # Stream-accumulate to enforce size limit without buffering the whole file
             chunk_size = 256 * 1024  # 256 KB chunks
             total_bytes = 0
@@ -833,6 +835,7 @@ async def upload_materials(
                         f.close()
                         try:
                             temp_path.unlink(missing_ok=True)
+                            temp_path.parent.rmdir()
                         except Exception:
                             pass
                         raise HTTPException(

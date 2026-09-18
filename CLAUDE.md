@@ -30,7 +30,8 @@
 ## LLM 与聊天硬约束
 
 - 默认 managed 模型是 `deepseek-v4.1-flash`（2026-09-18 起，原生多模态：图片直送主模型，视觉转写也用它；
-  `deepseek-v4-pro` 同日退役，存量配置一律改写。计费按 DeepSeek 官方 flash 价，工作日高峰时段 ×2）。带 tools 的 DeepSeek 请求不显式发
+  `deepseek-v4-pro` 同日退役，存量配置一律改写。计费按 DeepSeek 官方 flash 价，工作日高峰时段 ×2）。
+  聊天框图片与文档一样入材料库；当轮原生看图 + 后台转写，后续轮次靠转写记住图的内容。带 tools 的 DeepSeek 请求不显式发
   `tool_choice="auto"`；tool-call follow-up 必须保留非空 `reasoning_content`；历史消息
   不回灌 SDK 的 null 字段。改 provider 序列化必须跑 DeepSeek targeted tests。
 - 工具参数以 `_build_tools()` schema 为真值：先校验 object，再做 schema 内

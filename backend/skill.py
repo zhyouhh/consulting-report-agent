@@ -183,7 +183,7 @@ class SkillEngine:
         re.MULTILINE,
     )
     _PLACEHOLDER_WORDS_RE = re.compile(r"[(（]?\s*(待记录|待补充|暂无)\s*[)）]?")
-    IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+    IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}  # bmp 等发模型前由 model_ready_image_data_url 转码
     TEXT_SUFFIXES = {".md", ".txt", ".csv"}
     STAGE_CHECKLIST_ITEMS = {
         "S0": [

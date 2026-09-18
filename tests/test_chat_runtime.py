@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import tempfile
@@ -194,7 +195,7 @@ class ChatRuntimeTests(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         img = Path(tmpdir.name) / name
-        img.write_bytes(b"\x89PNG\r\n\x1a\n fake image bytes")
+        img.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="))   # 真实 1x1 PNG：发模型前会做格式校验
         materials = handler.skill_engine.add_materials(
             self.project_id, [str(img)], added_via="chat_upload"
         )
@@ -212,8 +213,126 @@ class ChatRuntimeTests(unittest.TestCase):
     def test_persistent_image_material_multimodal_uses_image_url(self):
         h = self._h(mode="managed", managed_model="gemini-3-flash")
         mid = self._add_image_material(h, "chart.png")
-        content = h._build_user_content(self.project_id, "看图", [mid], include_images=True)
+        with mock.patch.object(h.material_converter, "transcribe_image", return_value="图说"):
+            content = h._build_user_content(self.project_id, "看图", [mid], include_images=True)
+            self._join_transcript_warmups()
         self.assertIn("image_url", str(content))
+
+    @staticmethod
+    def _join_transcript_warmups():
+        from backend.chat import _wait_transcript_warmups
+        assert _wait_transcript_warmups(timeout=10)
+
+    def test_multimodal_current_turn_warms_transcript_in_background(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4.1-flash")
+        mid = self._add_image_material(h, "chart.png")
+        with mock.patch.object(h.material_converter, "transcribe_image", return_value="图说Y") as transcribe, \
+                mock.patch.object(h.skill_engine, "retain_material_cache") as retain:
+            content = h._build_user_content(self.project_id, "看图", [mid], include_images=True)
+            self._join_transcript_warmups()
+        flat = str(content)
+        self.assertIn("image_url", flat)
+        self.assertNotIn("图说Y", flat)            # 本轮只发原图，不重复塞转写
+        transcribe.assert_called_once()
+        retain.assert_called_once_with(self.project_id, mid)
+        self.assertEqual(h._transcript_warmups, set())
+
+    def test_multimodal_warmup_skips_cached_or_inflight_and_custom_mode(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4.1-flash")
+        mid = self._add_image_material(h, "chart.png")
+        with mock.patch("backend.chat._TRANSCRIPT_WARMUP_EXECUTOR") as executor:
+            with mock.patch.object(h.material_converter, "peek_image_transcript", return_value="已缓存"):
+                h._build_user_content(self.project_id, "看图", [mid], include_images=True)
+            h._transcript_warmups.add((self.project_id, mid))
+            h._build_user_content(self.project_id, "看图", [mid], include_images=True)
+            h._transcript_warmups.clear()
+            h.settings.mode = "custom"
+            h.settings.custom_model = "gpt-4o"
+            h._build_user_content(self.project_id, "看图", [mid], include_images=True)
+        executor.submit.assert_not_called()
+
+    def test_multimodal_warmup_skips_when_global_queue_full(self):
+        from backend import chat as chat_mod
+        h = self._h(mode="managed", managed_model="deepseek-v4.1-flash")
+        mid = self._add_image_material(h, "chart.png")
+        with mock.patch("backend.chat._TRANSCRIPT_WARMUP_EXECUTOR") as executor, \
+                mock.patch.object(chat_mod, "_transcript_warmup_queued", chat_mod._TRANSCRIPT_WARMUP_MAX_QUEUED), \
+                mock.patch.object(h.material_converter, "peek_image_transcript", return_value=None):
+            h._build_user_content(self.project_id, "看图", [mid], include_images=True)
+        executor.submit.assert_not_called()
+        self.assertEqual(h._transcript_warmups, set())
+
+    def test_multimodal_current_turn_caps_native_images(self):
+        from backend.material_limits import MAX_TRANSIENT_ATTACHMENTS
+        h = self._h(mode="managed", managed_model="deepseek-v4.1-flash")
+        mids = [self._add_image_material(h, f"c{i}.png") for i in range(MAX_TRANSIENT_ATTACHMENTS + 2)]
+        # 每个材料内容不同，避免 add_materials 去重
+        with mock.patch.object(h, "_warm_image_transcript_async"), \
+                mock.patch.object(h, "_build_material_data_url", return_value="data:image/png;base64,AA=="):
+            content = h._build_user_content(self.project_id, "看图", mids, include_images=True)
+        self.assertEqual(sum(1 for part in content if part.get("type") == "image_url"), MAX_TRANSIENT_ATTACHMENTS)
+        for mid in mids:
+            self.assertIn(mid, content[0]["text"])    # 超出的仍在清单里
+
+    def test_transient_and_material_images_share_one_native_budget(self):
+        import base64
+        from backend.material_limits import MAX_TRANSIENT_ATTACHMENTS
+        h = self._h(mode="managed", managed_model="deepseek-v4.1-flash")
+        mids = [self._add_image_material(h, f"m{i}.png") for i in range(4)]
+        tiny = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        transient = [{"id": f"t{i}", "name": "x.png", "mime_type": "image/png", "data_url": tiny} for i in range(4)]
+        with mock.patch.object(h, "_warm_image_transcript_async"), \
+                mock.patch.object(h, "_build_material_data_url", return_value="data:image/png;base64,AA=="):
+            content = h._build_user_content(self.project_id, "看图", mids, transient_attachments=transient,
+                                            include_images=True)
+        self.assertEqual(sum(1 for part in content if part.get("type") == "image_url"), MAX_TRANSIENT_ATTACHMENTS)
+
+    def test_unsendable_material_image_is_noted_not_sent(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4.1-flash")
+        mid = self._add_image_material(h, "broken.png")
+        with mock.patch.object(h, "_warm_image_transcript_async") as warm, \
+                mock.patch.object(h, "_build_material_data_url", return_value=None):
+            content = h._build_user_content(self.project_id, "看图", [mid], include_images=True)
+        self.assertNotIn("image_url", str(content))
+        self.assertIn("未随本轮发送原图", content[0]["text"])
+        warm.assert_not_called()
+
+    def test_warmup_releases_cache_when_material_deleted_during_transcription(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4.1-flash")
+        mid = self._add_image_material(h, "chart.png")
+        material = h.skill_engine.get_material(self.project_id, mid)
+
+        def transcribe_then_delete(path, mime):
+            h.skill_engine.remove_material(self.project_id, mid)   # 用户在视觉请求途中删了材料
+            return "图说"
+
+        with mock.patch.object(h.material_converter, "peek_image_transcript", return_value=None), \
+                mock.patch.object(h.material_converter, "transcribe_image", side_effect=transcribe_then_delete), \
+                mock.patch.object(h.material_converter, "release") as release:
+            h._warm_image_transcript_async(self.project_id, material)
+            self._join_transcript_warmups()
+        self.assertTrue(any(call.args[1] == mid for call in release.call_args_list))
+
+    def test_multimodal_history_turn_replays_cached_transcript_without_new_call(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4.1-flash")
+        mid = self._add_image_material(h, "chart.png")
+        with mock.patch.object(h.material_converter, "peek_image_transcript", return_value="图说Z"), \
+                mock.patch.object(h.material_converter, "transcribe_image", side_effect=AssertionError("不应被调")):
+            content = h._build_user_content(self.project_id, "接着说", [mid], include_images=False)
+        flat = str(content)
+        self.assertIn("图说Z", flat)
+        self.assertNotIn("image_url", flat)
+
+    def test_multimodal_history_turn_without_cache_keeps_listing_only(self):
+        h = self._h(mode="managed", managed_model="deepseek-v4.1-flash")
+        mid = self._add_image_material(h, "chart.png")
+        with mock.patch.object(h.material_converter, "peek_image_transcript", return_value=None), \
+                mock.patch.object(h.material_converter, "transcribe_image", side_effect=AssertionError("不应被调")):
+            content = h._build_user_content(self.project_id, "接着说", [mid], include_images=False)
+        flat = str(content)
+        self.assertIn(mid, flat)                     # 材料清单仍在，模型可用 read_material_file 再读
+        self.assertNotIn("image_url", flat)
+        self.assertNotIn("未解析", flat)
 
     def test_history_missing_cache_injects_placeholder_not_new_vision_call(self):
         h = self._h(mode="managed", managed_model="deepseek-v4-pro")
@@ -3645,7 +3764,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "看图"},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}},
                 ],
             }
         ]
@@ -3680,7 +3799,7 @@ class ChatRuntimeTests(unittest.TestCase):
                     {
                         "name": "bug.png",
                         "mime_type": "image/png",
-                        "data_url": "data:image/png;base64,AAAA",
+                        "data_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
                     }
                 ],
             },
@@ -3692,7 +3811,7 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(provider_message["content"][1]["type"], "image_url")
         self.assertEqual(
             provider_message["content"][1]["image_url"]["url"],
-            "data:image/png;base64,AAAA",
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
         )
 
     @mock.patch("backend.chat.OpenAI")
@@ -3723,7 +3842,7 @@ class ChatRuntimeTests(unittest.TestCase):
         with mock.patch.object(h.material_converter, "_vision_adapter", lambda data_url, mime: "图说：营收上升"):
             persisted, events = h._build_persisted_user_message_with_transcripts(
                 project_id="pid", client_message_id="cmid-1", user_message="看下这张图", attached_material_ids=[],
-                transient_attachments=[{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,Zg=="}],
+                transient_attachments=[{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}],
             )
         self.assertEqual(persisted["content"], "看下这张图")
         self.assertEqual(persisted["attachment_transcripts"][0]["text"], "图说：营收上升")
@@ -3757,7 +3876,7 @@ class ChatRuntimeTests(unittest.TestCase):
         with mock.patch.object(h.material_converter, "_vision_adapter", _boom):
             persisted, events = h._build_persisted_user_message_with_transcripts(
                 project_id="pid", client_message_id="cmid-1", user_message="看下这张图", attached_material_ids=[],
-                transient_attachments=[{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,Zg=="}],
+                transient_attachments=[{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}],
             )
         self.assertEqual(persisted["content"], "看下这张图")
         self.assertEqual(persisted["attachment_transcripts"], [])
@@ -3775,7 +3894,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 mock.patch.object(h.material_converter, "_ocr_adapter", _fail):
             persisted, events = h._build_persisted_user_message_with_transcripts(
                 project_id="pid", client_message_id="cmid-1", user_message="看下这张图", attached_material_ids=[],
-                transient_attachments=[{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,Zg=="}],
+                transient_attachments=[{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}],
             )
         self.assertEqual(persisted["content"], "看下这张图")
         self.assertEqual(persisted["attachment_transcripts"][0]["status"], "failed")
@@ -4239,7 +4358,7 @@ class ChatRuntimeTests(unittest.TestCase):
                 self.project_id,
                 "看下这张图",
                 [],
-                [{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,Zg=="}],
+                [{"id": "att-1", "name": "a.png", "mime_type": "image/png", "data_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}],
             )
 
         self.assertTrue(spy.called)
@@ -16470,7 +16589,7 @@ class B2BillingSettleTests(ChatRuntimeTests):
                                 prompt_cache_miss_tokens=200, completion_tokens=30)
         resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="图片转述"))], usage=usage)
         with mock.patch.object(handler.client._raw.chat.completions, "create", return_value=resp):
-            out = handler._vision_transcribe("data:image/png;base64,AAAA", "image/png")
+            out = handler._vision_transcribe("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "image/png")
         self.assertIn("图片转述", out)
         row = accounts.get_usage_today(handler.uid, m.today_shanghai())
         self.assertEqual(row["cache_miss_tokens"], 200)   # 视觉真的 settle 了
