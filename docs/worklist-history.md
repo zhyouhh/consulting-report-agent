@@ -1,7 +1,27 @@
 # Worklist History
 
-本文件是 2026-03 至 2026-07 的计划、实施与部署流水账归档，不再作为当前待办来源。
+本文件是 2026-03 至 2026-09 的计划、实施与部署流水账归档，不再作为当前待办来源。
 现行待办只看 `docs/current-worklist.md`；系统机制只看 `docs/architecture.md`。
+
+## 2026-09-18 网关故障修复 + 默认模型切 v4.1-flash + 原生识图（✅ 已上线）
+
+**起因**：opencode Go 自 2026-09-06 起强制 `x-opencode-session`，渠道 61 全部 400（new-api 不对 400
+failover），试用通道停摆 12 天。`opencode_proxy` 统一补头后恢复（`b4da9c2`，部署 jp-app-01）。
+
+**完成**（`2e1ad11` / `04b68bd` / `107d5d9`）：
+- 默认 managed 模型 `deepseek-v4-pro` → `deepseek-v4.1-flash`；pro 退役（`RETIRED_MANAGED_MODELS` 存量配置
+  一律改写，网关 CRA 链路移出放行）；config v5/v6 迁移，`/api/settings` 不再采纳客户端的
+  `managed_model` / `managed_vision_model`。
+- 计费改 DeepSeek 官方 flash 价，工作日高峰 ×2（`unit_prices`）；fail-closed 估算认图片（每图 2048）。
+- 原生多模态：flash 进 `MULTIMODAL_MODEL_MARKERS`，视觉转写也用 flash；聊天框图片与文档一样入材料库，
+  当轮 `image_url`，后台 2 线程执行器转写供后续轮次回放；`model_ready_image_data_url` 统一规整
+  （实际格式探测、25MP 解码上限、≤3MB 原样否则缩放转码、每轮最多 6 张）；上传暂存按文件分子目录。
+
+**质量门**：后端 `1926 passed`、前端 `609 passed`、build 通过；Codex 多轮对抗审查至 APPROVED。
+生产 E2E（test 账号）：工具调用 + 缓存命中正常；粘贴图当轮答对、下一轮不挂图追问仍答对。
+
+**部署**：kr-web-01 回滚点 `/opt/cra-rollback-20260918-194315-v41flash`、`-212008-native-vision`、
+`-220918-chat-image-upload` + `frontend/dist.old`；网关侧见 `VPS-fix-private/notes/jp-app-01.md` 同日条目。
 
 ## 2026-07-18 拆除关键词意图门槛 + 草稿版本快照（✅ 已上线）
 

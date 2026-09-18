@@ -3,7 +3,7 @@
 本文件只维护仍需行动的事项；完成记录归 `docs/worklist-history.md` 与
 `docs/superpowers/cutover_report_*.md`。新增条目必须写清优先级或触发条件，完成后移出本文件。
 
-最后核对：2026-07-19。
+最后核对：2026-09-18。
 
 ## 优先处理
 
@@ -20,10 +20,16 @@
 3. **Windows 正式包烟测**
    - 重跑 `build.bat`，确认 `templates/docx/consulting_v1.docx` 进入 `_internal/templates/docx/`，
      并在打包态完成一次真实 docx 导出。
+   - 新包要带上 2026-09-18 的模型切换：默认 `deepseek-v4.1-flash`、原生识图、聊天框图片入材料库。
+     打包态验一次聊天框粘贴图片（当轮识图 + 下一轮不挂图追问仍记得）。老包目前靠网关 `/v1/models`
+     只列 flash 启动时 heal 切模型，识图仍走 Qwen3-VL 转写。
 
 ## 有触发条件再做
 
-- **S4 图表真模型 GUI E2E**：让 `deepseek-v4-pro` 在真实 S4 分别调用一次
+- **撤 Qwen3-VL 放行**：Windows 新包分发、老桌面端不再使用后，从 jp-app-01 managed_proxy
+  `MANAGED_PROXY_ALLOWED_MODELS` 与 new-api token『ds专用』`model_limits` 移除
+  `Qwen/Qwen3-VL-8B-Instruct`（Web 端 2026-09-18 起已不调用它）。
+- **S4 图表真模型 GUI E2E**：让 `deepseek-v4.1-flash` 在真实 S4 分别调用一次
   `create_chart` / `create_diagram`；在下一次图表相关改动或用户报告失败时执行。
 - **超长报告独立审查**：当前 >100k 字友好失败；真实长文需求重复出现后，再设计章节切片 +
   五维发现聚合，不提前做 map-reduce。

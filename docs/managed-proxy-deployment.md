@@ -50,7 +50,12 @@ N6 起：纯文本主模型上传图片时，App 走内部视觉模型 `Qwen/Qwe
 - **上游 new-api 前置条件**（否则 proxy 透传后 new-api 仍 403/503）：
   1. 上游 token（proxy 用的 `MANAGED_PROXY_UPSTREAM_API_KEY` 对应的 new-api token）若开了 `model_limits`，必须把 `Qwen/Qwen3-VL-8B-Instruct` 加进其 `model_limits`。
   2. 承载该模型的渠道（jp-app-01 当前为渠道 60『商业·硅基流动』）的 `group` 必须含该 token 的 group；直接改 `channels.group` 后还要在 `abilities` 表补 `(group, model, channel_id)` 路由行（new-api 的 abilities 不随重启重建，只随渠道经 UI/API 保存时重建），再重启 new-api。
-  - 改 new-api DB 前先 `cp one-api.db one-api.db.bak-<ts>`。
+  - 改 new-api DB 前先做一致性备份：`sqlite3 one-api.db ".backup 'one-api.db.bak-<ts>'"`（开着 WAL，单纯 `cp` 可能拿不到完整状态）。
+- **放行任何新模型都是这三处**（2026-09-18 加 `deepseek-v4.1-flash` 即按此流程，无需重启 new-api）：
+  1. new-api 承载渠道的 `models` 追加模型名，并在 `abilities` 表补 `(group, model, channel_id, enabled, priority, weight)` 行（照抄同渠道已有模型的行）；
+  2. token『ds专用』`model_limits` 追加模型名；
+  3. `proxy.env` 的 `MANAGED_PROXY_ALLOWED_MODELS` 追加（要让 CRA 客户端默认用它就放 `SELECTABLE_MODELS` 首位），然后同参数重建 managed_proxy 容器（env 只在启动时读）。
+  new-api 选路直接读库（未开内存缓存），改完即生效；`SelfUseModeEnabled=true` 不需要配倍率。
 
 ## Deploy Commands
 

@@ -77,7 +77,11 @@
 
 - `backend/material_conversion.py` 是 DI 叶子边界，不得 import chat/SkillEngine。
   文档先快照再 hash/转换；图片走 vision→OCR；缓存 key 文件名用字符串拼接，不用
-  `with_suffix`。
+  `with_suffix`。任何图片发给模型（主对话 `image_url` 或视觉转写）都必须经
+  `model_ready_image_data_url`：实际格式探测、25MP 解码上限、≤3MB 原样否则缩放转码，
+  返回 None 就不发原图；每轮原图（材料 + 旧 transient）共用 6 张额度。
+- 后台图片转写只走 `_warm_image_transcript_async`（固定 2 线程执行器 + 24 排队上限），
+  删除竞态在 finally 里补 release；历史轮次只 peek 缓存，绝不新发视觉请求。
 - 附件派生文本、图片转写、材料元数据都必须进入 `ATTACHMENT_DATA_*` 数据块并中和
   定界符；摘要 fail-closed 清附件块，raw 用户 `content` 与附件文本绝不混成意图。
 - registry、`materials.json`、conversion ref sidecar 都做锁内原子 RMW；当前安全模型只覆盖
