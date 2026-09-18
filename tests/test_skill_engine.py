@@ -280,6 +280,42 @@ class SkillEngineTests(unittest.TestCase):
             engine.remove_material(pid, b["id"])
             self.assertFalse(md_path.exists())  # no references -> deleted
 
+    def _legacy_namespace_fixture(self, tmp):
+        """旧视觉模型（legacy 命名空间）下转写并 retain 过的图片材料，之后换成新命名空间的 converter。"""
+        from backend.material_conversion import MaterialConverter
+
+        engine = SkillEngine(Path(tmp) / "projects", self.repo_skill_dir)
+        project = engine.create_project(self._project_payload(Path(tmp) / "workspace"))
+        pid = project["id"]
+        converter_kwargs = dict(cache_dir=Path(tmp) / "cache", vision_adapter=lambda *a: "图说",
+                                ocr_adapter=lambda p: "", capability_resolver=lambda: False)
+        old = MaterialConverter(**converter_kwargs, image_cache_namespace="oldVis-vp1-ocr1")
+        engine.set_material_converter(old)
+        src = Path(tmp) / "x.png"
+        src.write_bytes(b"\x89PNG legacy-bytes")
+        mat = engine.add_materials(pid, [str(src)], added_via="chat_upload")[0]
+        old.transcribe_image(engine.get_material_path(pid, mat["id"]), "image/png")
+        engine.retain_material_cache(pid, mat["id"])
+        old_key = engine._cache_key_for_material(mat, engine.get_material_path(pid, mat["id"]))
+        old_md, _ = old._cache_paths(old_key)
+        self.assertTrue(old_md.exists())
+        new = MaterialConverter(**converter_kwargs, image_cache_namespace="newVis-vp1-ocr1",
+                                legacy_image_cache_namespaces=("oldVis-vp1-ocr1",))
+        engine.set_material_converter(new)
+        return engine, pid, mat, old_md
+
+    def test_remove_material_releases_legacy_vision_namespace_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, pid, mat, old_md = self._legacy_namespace_fixture(tmp)
+            engine.remove_material(pid, mat["id"])
+            self.assertFalse(old_md.exists())   # 换视觉模型前的转写随最后一个引用一起删掉，不留孤儿
+
+    def test_delete_project_releases_legacy_vision_namespace_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, pid, mat, old_md = self._legacy_namespace_fixture(tmp)
+            engine.delete_project(pid)
+            self.assertFalse(old_md.exists())
+
     def _write_stage_gates_at_stage(self, project_dir: Path, stage_code: str):
         (project_dir / "plan" / "stage-gates.md").write_text(
             f"# Stage gates\n\n**阶段**: {stage_code}\n**状态**: 进行中\n",

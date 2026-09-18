@@ -1,6 +1,7 @@
 # tests/test_metering.py
 import math
 import unittest
+from datetime import datetime, timedelta, timezone
 from backend import metering
 from backend.config import DEFAULT_MANAGED_MODEL_PRICING, DEFAULT_MANAGED_MODEL
 
@@ -21,13 +22,43 @@ class PriceTests(unittest.TestCase):
         # round(1280*0.025) + 9*3 + 500*6 = 32 + 27 + 3000 = 3059
         self.assertEqual(cost, 3059)
 
-    def test_default_flash_model_has_own_cheaper_pricing(self):
-        # deepseek-v4.1-flash：p_hit=0.02 / p_miss=1 / p_out=4（DeepSeek 官方空闲价）
+    # 北京时间：2026-09-18 是周五，2026-09-19 周六
+    _OFF_PEAK = datetime(2026, 9, 18, 20, 0, tzinfo=timezone(timedelta(hours=8)))
+    _PEAK = datetime(2026, 9, 18, 10, 30, tzinfo=timezone(timedelta(hours=8)))
+
+    def test_default_flash_model_off_peak_official_price(self):
+        # deepseek-v4.1-flash 官方空闲价：p_hit=0.02 / p_miss=1 / p_out=4
         cost = metering.price_micro_yuan(DEFAULT_MANAGED_MODEL, hit=1280, miss=9, completion=500,
-                                         pricing=DEFAULT_MANAGED_MODEL_PRICING)
+                                         pricing=DEFAULT_MANAGED_MODEL_PRICING, at=self._OFF_PEAK)
         # round(1280*0.02) + 9*1 + 500*4 = 26 + 9 + 2000 = 2035
         self.assertEqual(DEFAULT_MANAGED_MODEL, "deepseek-v4.1-flash")
         self.assertEqual(cost, 2035)
+
+    def test_default_flash_model_peak_price_is_doubled(self):
+        cost = metering.price_micro_yuan(DEFAULT_MANAGED_MODEL, hit=1280, miss=9, completion=500,
+                                         pricing=DEFAULT_MANAGED_MODEL_PRICING, at=self._PEAK)
+        # round(1280*0.04) + 9*2 + 500*8 = 51 + 18 + 4000 = 4069
+        self.assertEqual(cost, 4069)
+
+    def test_peak_window_boundaries(self):
+        tz = timezone(timedelta(hours=8))
+        cases = {
+            datetime(2026, 9, 18, 8, 59, tzinfo=tz): False,
+            datetime(2026, 9, 18, 9, 0, tzinfo=tz): True,
+            datetime(2026, 9, 18, 11, 59, tzinfo=tz): True,
+            datetime(2026, 9, 18, 12, 0, tzinfo=tz): False,
+            datetime(2026, 9, 18, 14, 0, tzinfo=tz): True,
+            datetime(2026, 9, 18, 18, 0, tzinfo=tz): False,
+            datetime(2026, 9, 19, 10, 0, tzinfo=tz): False,   # 周六
+            datetime(2026, 9, 18, 2, 30, tzinfo=timezone.utc): True,   # UTC 02:30 = 北京 10:30
+        }
+        for at, expected in cases.items():
+            self.assertEqual(metering.is_peak_shanghai(at), expected, at)
+
+    def test_pro_is_retired_from_pricing_and_has_no_peak_multiplier(self):
+        self.assertNotIn("deepseek-v4-pro", DEFAULT_MANAGED_MODEL_PRICING)
+        self.assertEqual(metering.unit_prices("Qwen/Qwen3-VL-8B-Instruct", DEFAULT_MANAGED_MODEL_PRICING, at=self._PEAK),
+                         (0.025, 3.0, 6.0))
 
     def test_unknown_model_uses_safe_fallback_pricing(self):
         cost = metering.price_micro_yuan("some/unknown-model", hit=0, miss=1000, completion=0,
@@ -444,6 +475,26 @@ class FailClosedEstimateTests(MeteredNonStreamTests):
         self.assertIsNone(self.m.estimate_request_tokens_upper_bound(
             {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]}))
         self.assertIsNone(self.m.estimate_request_tokens_upper_bound({"messages": ["not-a-dict"]}))
+
+    def test_estimator_counts_images_for_model_with_registered_upper_bound(self):
+        text_only = self.m.estimate_request_tokens_upper_bound(
+            {"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "看图"}]})
+        two_images = self.m.estimate_request_tokens_upper_bound(
+            {"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "看图"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}},
+            ]}]})
+        # 每图按 2048 token 上界计（×margin），与 base64 长度无关
+        self.assertGreaterEqual(two_images - text_only, int(2 * 2048 * 1.15) - 5)
+        self.assertLess(two_images, 10_000)
+
+    def test_estimator_images_fall_back_to_ceiling_for_unregistered_model_or_unknown_part(self):
+        image_msg = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]
+        self.assertIsNone(self.m.estimate_request_tokens_upper_bound(
+            {"model": "Qwen/Qwen3-VL-8B-Instruct", "messages": image_msg}))
+        self.assertIsNone(self.m.estimate_request_tokens_upper_bound(
+            {"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": [{"type": "input_audio"}]}]}))
 
     def test_estimator_emoji_and_symbols_priced_higher_than_ascii(self):
         # Codex BLOCKER round2：emoji/非 ASCII 非 CJK 字符 token 密度高（实测 1-3/字符），

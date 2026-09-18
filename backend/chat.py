@@ -24,6 +24,8 @@ except Exception:
 from openai import OpenAI
 
 from .config import (
+    DEFAULT_MANAGED_VISION_MODEL,
+    PREVIOUS_DEFAULT_MANAGED_VISION_MODEL,
     Settings,
     get_search_cache_path,
     get_search_runtime_state_path,
@@ -81,6 +83,7 @@ MULTIMODAL_MODEL_MARKERS = (
     "vl",
     "claude-3",
     "claude-sonnet-4",
+    "deepseek-v4.1-flash",
 )
 
 # N6 C4: attachment-derived transcript markers — imported from trust_boundary (leaf module,
@@ -527,16 +530,17 @@ class ChatHandler:
             ocr_adapter=lambda path: self._ocr_image(path),                                   # filled by C2
             capability_resolver=lambda: self._main_model_supports_vision(),                  # filled by B3
             image_cache_namespace=self._vision_cache_namespace(),
+            legacy_image_cache_namespaces=(self._vision_cache_namespace(PREVIOUS_DEFAULT_MANAGED_VISION_MODEL),),
         )
         self.skill_engine.set_material_converter(self.material_converter)
 
     VISION_PROMPT_VERSION = "vp1"
     OCR_ENGINE_VERSION = "rapidocr-onnx-v1"
 
-    def _vision_cache_namespace(self) -> str:
+    def _vision_cache_namespace(self, model: str | None = None) -> str:
         import re
 
-        model = getattr(self.settings, "managed_vision_model", "Qwen/Qwen3-VL-8B-Instruct")
+        model = model or getattr(self.settings, "managed_vision_model", DEFAULT_MANAGED_VISION_MODEL)
         raw = f"{model}-{self.VISION_PROMPT_VERSION}-{self.OCR_ENGINE_VERSION}"
         return re.sub(r"[^A-Za-z0-9._-]", "_", raw)   # 默认模型名含 '/'，sanitize 防 cache_dir 被拆子目录
 

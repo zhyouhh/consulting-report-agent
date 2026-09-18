@@ -91,6 +91,14 @@ class SettingsApiTests(AuthApiTestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self._load_local().managed_model, DEFAULT_MANAGED_MODEL)
 
+    def test_post_settings_ignores_client_managed_vision_model(self):
+        from backend.config import DEFAULT_MANAGED_VISION_MODEL
+        resp = self.client.post("/api/settings",
+                                headers={"origin": "https://app.example.com"},
+                                json=_settings_body(managed_vision_model="Qwen/Qwen3-VL-8B-Instruct"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._load_local().managed_vision_model, DEFAULT_MANAGED_VISION_MODEL)
+
     def test_post_settings_without_managed_model_ok(self):
         body = _settings_body()
         body.pop("managed_model")

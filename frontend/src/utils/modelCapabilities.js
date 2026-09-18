@@ -9,6 +9,7 @@ const MULTIMODAL_MODEL_MARKERS = [
   "vl",
   "claude-3",
   "claude-sonnet-4",
+  "deepseek-v4.1-flash",
 ];
 
 // supportsImageAttachments — "can the app ACCEPT image uploads from the user?"

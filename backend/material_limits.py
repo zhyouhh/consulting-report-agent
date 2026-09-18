@@ -11,7 +11,7 @@ MAX_TRANSIENT_IMAGE_BYTES = 8 * 1024 * 1024  # 单图解码后 8MB
 ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"}
 
 # 视觉转写
-VISION_MAX_TOKENS = 1500
+VISION_MAX_TOKENS = 4000  # 视觉模型 v4.1-flash 带推理：转写实测推理 ~150-250 + 正文，1500 对长扫描件偏紧
 MAX_TRANSCRIPT_CHARS = 8000  # 转写文本持久化上限，超出截断
 
 

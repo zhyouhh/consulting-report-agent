@@ -96,7 +96,7 @@ class SettingsPersistenceTests(unittest.TestCase):
         loaded = self._load_from_payload({"config_version": 4, "mode": "managed", "managed_model": "deepseek-v4-pro"})
         self.assertEqual(loaded.managed_model, "deepseek-v4.1-flash")
         self.assertEqual(loaded.model, "deepseek-v4.1-flash")
-        self.assertEqual(loaded.config_version, 5)
+        self.assertEqual(loaded.config_version, 6)
 
     def test_v4_config_keeps_custom_mode_after_version_bump(self):
         # v5 升版本不能把 v4 的 custom 用户当 legacy 强制回 managed
@@ -106,9 +106,26 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertEqual(loaded.model, "gpt-4.1-mini")
         self.assertEqual(loaded.managed_model, "deepseek-v4.1-flash")
 
-    def test_v5_config_managed_model_is_not_rewritten(self):
-        loaded = self._load_from_payload({"config_version": 5, "mode": "managed", "managed_model": "deepseek-v4-pro"})
-        self.assertEqual(loaded.managed_model, "deepseek-v4-pro")
+    def test_retired_managed_model_is_rewritten_regardless_of_version(self):
+        for version in (4, 5, 6):
+            loaded = self._load_from_payload({"config_version": version, "mode": "managed",
+                                              "managed_model": "deepseek-v4-pro"})
+            self.assertEqual(loaded.managed_model, "deepseek-v4.1-flash", version)
+
+    def test_current_config_non_retired_managed_model_is_not_rewritten(self):
+        loaded = self._load_from_payload({"config_version": 6, "mode": "managed", "managed_model": "deepseek-v4-flash"})
+        self.assertEqual(loaded.managed_model, "deepseek-v4-flash")
+
+    def test_v5_config_old_default_vision_model_migrates_to_flash(self):
+        loaded = self._load_from_payload({"config_version": 5, "mode": "managed", "managed_model": "deepseek-v4.1-flash",
+                                          "managed_vision_model": "Qwen/Qwen3-VL-8B-Instruct"})
+        self.assertEqual(loaded.managed_vision_model, "deepseek-v4.1-flash")
+        self.assertEqual(loaded.config_version, 6)
+
+    def test_v6_config_vision_model_is_not_rewritten(self):
+        loaded = self._load_from_payload({"config_version": 6, "mode": "managed",
+                                          "managed_vision_model": "Qwen/Qwen3-VL-8B-Instruct"})
+        self.assertEqual(loaded.managed_vision_model, "Qwen/Qwen3-VL-8B-Instruct")
 
     def test_v4_config_non_default_managed_model_is_not_rewritten(self):
         loaded = self._load_from_payload({"config_version": 4, "mode": "managed", "managed_model": "deepseek-v4-flash"})
@@ -137,7 +154,7 @@ class SettingsPersistenceTests(unittest.TestCase):
             settings = Settings(
                 mode="managed",
                 managed_base_url="https://newapi.z0y0h.work/client/v1",
-                managed_model="deepseek-v4-pro",
+                managed_model="deepseek-v4.1-flash",
                 managed_client_token="outdated-config-token",
                 custom_api_base="https://custom.example/v1",
                 custom_api_key="secret",
@@ -153,7 +170,7 @@ class SettingsPersistenceTests(unittest.TestCase):
                 loaded = load_settings()
 
         self.assertEqual(loaded.api_base, "https://newapi.z0y0h.work/client/v1")
-        self.assertEqual(loaded.model, "deepseek-v4-pro")
+        self.assertEqual(loaded.model, "deepseek-v4.1-flash")
         self.assertEqual(loaded.api_key, "desktop-managed-token")
         self.assertEqual(loaded.custom_api_key, "secret")
 
@@ -566,7 +583,7 @@ class VisionSettingsTests(unittest.TestCase):
     def test_settings_has_vision_defaults(self):
         from backend.config import Settings
         s = Settings()
-        self.assertEqual(s.managed_vision_model, "Qwen/Qwen3-VL-8B-Instruct")
+        self.assertEqual(s.managed_vision_model, "deepseek-v4.1-flash")
         self.assertTrue(s.vision_enabled)
 
     def test_legacy_config_without_vision_fields_loads(self):
@@ -574,7 +591,7 @@ class VisionSettingsTests(unittest.TestCase):
         out = normalize_settings_payload({"mode": "managed"})
         self.assertIn("managed_vision_model", out)
         self.assertIn("vision_enabled", out)
-        self.assertEqual(out["managed_vision_model"], "Qwen/Qwen3-VL-8B-Instruct")
+        self.assertEqual(out["managed_vision_model"], "deepseek-v4.1-flash")
         self.assertTrue(out["vision_enabled"])
 
 

@@ -50,6 +50,7 @@ class MaterialConverter:
         ocr_adapter: Callable[[Path], str],           # (image_path) -> 文字
         capability_resolver: Callable[[], bool],      # () -> 主模型是否多模态（RESERVED，见下）
         image_cache_namespace: str = "default",       # = 视觉模型 id + prompt 版本 + OCR 版本（spec §6 缓存键）
+        legacy_image_cache_namespaces: tuple[str, ...] = (),   # 换过视觉模型后的旧命名空间：只用于删除时释放引用
     ):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -60,6 +61,9 @@ class MaterialConverter:
         # 这里保留 resolver 供未来 converter 侧路由对称。不要删除。
         self._capability_resolver = capability_resolver
         self._image_cache_namespace = image_cache_namespace
+        self._legacy_image_cache_namespaces = tuple(
+            ns for ns in legacy_image_cache_namespaces if ns and ns != image_cache_namespace
+        )
 
     def _content_hash(self, path: Path) -> str:
         h = hashlib.sha256()
@@ -221,6 +225,12 @@ class MaterialConverter:
         """图片缓存 key 的 extra 段（= 视觉模型/prompt/OCR 版本命名空间）。
         SkillEngine 据此用 cache_key_from_sha256 算图片 key，避免耦合私有字段。"""
         return "-img-" + self._image_cache_namespace
+
+    @property
+    def legacy_image_cache_extras(self) -> tuple[str, ...]:
+        """旧视觉模型命名空间的 extra 段。换模型后旧转写不再被读取，但其 .refs 仍记着材料 id——
+        删材料/删项目时要一并 release，否则旧缓存永远到不了引用归零、变成孤儿文件。"""
+        return tuple("-img-" + ns for ns in self._legacy_image_cache_namespaces)
 
     def peek_image_transcript(self, path: Path, mime: str) -> str | None:
         """只读缓存、不触发转写/不发请求（历史轮用）。命中返回文本，否则 None。"""

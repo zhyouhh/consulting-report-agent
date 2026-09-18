@@ -643,7 +643,7 @@ class SettingsUpdate(BaseModel):
     mode: Literal["managed", "custom"]
     managed_base_url: str | None = None   # 服务端只读：接收但忽略，永远用 DEFAULT_MANAGED_BASE_URL
     managed_model: str | None = None      # 服务端只读（设置页只读展示）：接收但忽略
-    managed_vision_model: Optional[str] = None
+    managed_vision_model: Optional[str] = None   # 服务端只读（设置页不暴露）：接收但忽略
     vision_enabled: Optional[bool] = None
     custom_api_base: str = ""
     custom_api_key: str = ""
@@ -683,10 +683,8 @@ async def update_settings(update: SettingsUpdate, uid: str = Depends(require_pas
     with _settings_lock:
         s = load_settings(uid)
         s.mode = update.mode
-        # managed_base_url / managed_model 服务端只读：忽略客户端值。managed_model 由默认值、
+        # managed_base_url / managed_model / managed_vision_model 服务端只读：忽略客户端值。managed_model 由默认值、
         # 配置迁移与 heal 决定；若采用客户端回传值，开着旧设置页的用户保存时会把已迁移的模型写回旧值。
-        if "managed_vision_model" in update.model_fields_set and update.managed_vision_model is not None:
-            s.managed_vision_model = update.managed_vision_model
         if "vision_enabled" in update.model_fields_set and update.vision_enabled is not None:
             s.vision_enabled = update.vision_enabled
         s.custom_api_base = update.custom_api_base

@@ -1389,7 +1389,7 @@ class SkillEngine:
         if converter is not None:
             target_path = self.get_material_path(project_record["id"], target["id"])
             if target_path.exists():
-                converter.release(self._cache_key_for_material(target, target_path), target["id"])
+                self._release_material_cache_refs(converter, target, target_path)
 
         if target["source_type"] == "imported":
             imported_path = Path(project_record["project_dir"]) / target["stored_rel_path"]
@@ -1446,7 +1446,7 @@ class SkillEngine:
                 path = self._resolve_material_path(project_record, material)
                 if not path.exists():
                     continue
-                converter.release(self._cache_key_for_material(material, path), material["id"])
+                self._release_material_cache_refs(converter, material, path)
             except Exception:  # noqa: BLE001 单个材料 release 失败不应阻断删项目
                 continue
 
@@ -1953,6 +1953,14 @@ class SkillEngine:
         )
         content_hash = self._content_sha256(material_path)
         return self._material_converter.cache_key_from_sha256(content_hash, extra)
+
+    def _release_material_cache_refs(self, converter, material: dict, material_path: Path) -> None:
+        """释放材料在共享缓存里的引用：当前 key，图片材料另加旧视觉模型命名空间下的 key。"""
+        converter.release(self._cache_key_for_material(material, material_path), material["id"])
+        if material.get("media_kind") == "image_like":
+            content_hash = self._content_sha256(material_path)
+            for extra in getattr(converter, "legacy_image_cache_extras", ()):
+                converter.release(converter.cache_key_from_sha256(content_hash, extra), material["id"])
 
     def _retain_material_cache(self, material: dict, material_path: Path) -> None:
         converter = getattr(self, "_material_converter", None)

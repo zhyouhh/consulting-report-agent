@@ -36,14 +36,14 @@ Example runtime env:
 ```env
 MANAGED_PROXY_UPSTREAM_BASE_URL=http://127.0.0.1:3000/v1
 MANAGED_PROXY_UPSTREAM_API_KEY=<dedicated-upstream-key>
-MANAGED_PROXY_ALLOWED_MODELS=deepseek-v4.1-flash,deepseek-v4-pro,Qwen/Qwen3-VL-8B-Instruct,deepseek-v4-flash
+MANAGED_PROXY_ALLOWED_MODELS=deepseek-v4.1-flash,Qwen/Qwen3-VL-8B-Instruct,deepseek-v4-flash
 MANAGED_PROXY_SELECTABLE_MODELS=deepseek-v4.1-flash
 MANAGED_PROXY_CLIENT_TOKEN=<dedicated-client-token>
 ```
 
 ## N6 视觉转写（2026-06-21 已上线 jp-app-01）
 
-N6 起：纯文本主模型上传图片时，App 走内部视觉模型 `Qwen/Qwen3-VL-8B-Instruct` 转写。薄网关改为「白名单透传」（new-api 按模型名路由），不再强改写 model：
+N6 起：纯文本主模型上传图片时，App 走内部视觉模型 `Qwen/Qwen3-VL-8B-Instruct` 转写。（2026-09-18 起默认主模型/视觉模型均为原生多模态的 `deepseek-v4.1-flash`；Qwen3-VL 仅为未升级的老桌面端保留放行。`deepseek-v4-pro` 同日退役、已移出放行。）薄网关改为「白名单透传」（new-api 按模型名路由），不再强改写 model：
 
 - `MANAGED_PROXY_ALLOWED_MODELS` 必须含视觉模型（可达）；`MANAGED_PROXY_SELECTABLE_MODELS` 仅列用户可选的主模型（视觉模型**不暴露**进 `/v1/models` 下拉）。`SELECTABLE` 缺省=ALLOWED（向后兼容）。
 - 新增 `GET /health` 暴露 `allowed_models`/`selectable_models` 供 ops preflight。

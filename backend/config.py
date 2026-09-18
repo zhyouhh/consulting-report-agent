@@ -7,19 +7,24 @@ import os
 import sys
 
 DEFAULT_MANAGED_BASE_URL = "https://newapi.z0y0h.work/client/v1"
-# 2026-09-18 由 deepseek-v4-pro 切到 v4.1-flash（opencode Go 渠道；更快更便宜，支持工具调用）。
-# 老配置里存的 pro 由 normalize_settings_payload 的 v5 迁移改写。
+# 2026-09-18 由 deepseek-v4-pro 切到 v4.1-flash（opencode Go 渠道；更快更便宜，支持工具调用与原生识图）。
 DEFAULT_MANAGED_MODEL = "deepseek-v4.1-flash"
-PREVIOUS_DEFAULT_MANAGED_MODEL = "deepseek-v4-pro"
-DEFAULT_MANAGED_VISION_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
-# 每模型单价（元/百万 token）：(命中, 未命中, 输出)。spec §6.1 上机实测口径。
-# vision 单价占位（按 deepseek 同档保守，可后填真实价）。
+# 网关已不再放行的 managed 模型：存量配置里出现一律改写为默认（不看 config_version）
+RETIRED_MANAGED_MODELS = frozenset({"deepseek-v4-pro"})
+# 2026-09-18 起视觉也由 v4.1-flash 原生承担（主对话直接看图 + read_material_file 转写），不再用 Qwen3-VL；
+# 老配置里存的 Qwen 由 normalize_settings_payload 的 v6 迁移改写。
+DEFAULT_MANAGED_VISION_MODEL = "deepseek-v4.1-flash"
+PREVIOUS_DEFAULT_MANAGED_VISION_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+# 每模型单价（元/百万 token）：(命中, 未命中, 输出)。
+# deepseek-v4.1-flash = DeepSeek 官方 2026-09 空闲时段价；高峰时段按 MANAGED_PEAK_PRICE_MULTIPLIER 翻倍
+# （metering.unit_prices 按结算时刻判定）。deepseek-v4-pro 已于 2026-09-18 退役，不再计价（误用走 fallback）。
 DEFAULT_MANAGED_MODEL_PRICING: dict[str, tuple[float, float, float]] = {
-    "deepseek-v4-pro": (0.025, 3.0, 6.0),
-    # DeepSeek 官方 2026-09 空闲时段价（高峰为 2 倍）
     "deepseek-v4.1-flash": (0.02, 1.0, 4.0),
-    "Qwen/Qwen3-VL-8B-Instruct": (0.025, 3.0, 6.0),
+    "Qwen/Qwen3-VL-8B-Instruct": (0.025, 3.0, 6.0),   # 占位价；仅未升级的老桌面端还会调用
 }
+# DeepSeek 官方高峰时段：北京时间周一至周五 9:00-12:00、14:00-18:00，单价为空闲价 ×2
+MANAGED_PEAK_PRICE_MULTIPLIER: dict[str, float] = {"deepseek-v4.1-flash": 2.0}
+MANAGED_PEAK_HOURS_SHANGHAI: tuple[tuple[int, int], ...] = ((9, 12), (14, 18))
 # 未知模型 fallback 单价（保守按 deepseek 三档）
 FALLBACK_MODEL_PRICING: tuple[float, float, float] = (0.025, 3.0, 6.0)
 # 全局默认日配额：¥5/天 = 5_000_000 微元
@@ -38,7 +43,7 @@ MANAGED_CLIENT_TOKEN_FILENAME = "managed_client_token.txt"
 MANAGED_SEARCH_POOL_FILENAME = "managed_search_pool.json"
 SEARCH_RUNTIME_STATE_FILENAME = "search_runtime_state.json"
 SEARCH_CACHE_FILENAME = "search_cache.json"
-DESKTOP_CONFIG_VERSION = 5
+DESKTOP_CONFIG_VERSION = 6
 # < 此版本的配置视为 legacy：load 时 mode 强制回 managed（v4 起 mode 才是用户选择）
 LEGACY_MODE_CONFIG_VERSION = 4
 
@@ -395,11 +400,14 @@ def normalize_settings_payload(data: dict) -> dict:
 
     normalized["managed_base_url"] = DEFAULT_MANAGED_BASE_URL   # 服务端只读，覆盖任何历史/客户端值
     normalized.setdefault("managed_model", DEFAULT_MANAGED_MODEL)
-    # v5：managed 模型在设置页只读，旧配置里的 pro 就是当时的默认值而非用户选择，随默认一起迁到新模型。
-    # 只迁一次：保存后 config_version=5，之后不再改写。
-    if config_version < 5 and normalized["managed_model"] == PREVIOUS_DEFAULT_MANAGED_MODEL:
+    # managed 模型在设置页只读（用户选不了），存量值只可能是历史默认；已退役的一律改写为当前默认，
+    # 否则网关 400。pro 于 2026-09-18 先成为旧默认（v5 迁移），同日退役。
+    if normalized["managed_model"] in RETIRED_MANAGED_MODELS:
         normalized["managed_model"] = DEFAULT_MANAGED_MODEL
     normalized.setdefault("managed_vision_model", DEFAULT_MANAGED_VISION_MODEL)
+    # v6：视觉模型同理（设置页不暴露，旧值就是当时的默认），Qwen3-VL 迁到原生多模态的 flash。
+    if config_version < 6 and normalized["managed_vision_model"] == PREVIOUS_DEFAULT_MANAGED_VISION_MODEL:
+        normalized["managed_vision_model"] = DEFAULT_MANAGED_VISION_MODEL
     normalized.setdefault("vision_enabled", True)
     normalized.setdefault("managed_search_api_url", DEFAULT_MANAGED_SEARCH_API_URL)
     normalized["managed_client_token"] = runtime_managed_token

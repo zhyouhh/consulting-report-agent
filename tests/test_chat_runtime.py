@@ -10101,6 +10101,8 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertTrue(h2._main_model_supports_vision())
         h3 = self._h(mode="custom", custom_model="unknown-llm")
         self.assertFalse(h3._main_model_supports_vision())             # unknown → conservative False
+        h4 = self._h(mode="managed", managed_model="deepseek-v4.1-flash")   # 默认模型原生多模态
+        self.assertTrue(h4._main_model_supports_vision())
 
 
 class KeywordTableRestructureTests(unittest.TestCase):
@@ -16222,7 +16224,8 @@ class VisionTranscribeTests(ChatRuntimeTests):
         self.assertIn("折线图", out)
         kwargs = m.call_args.kwargs
         self.assertEqual(kwargs["model"], h.settings.managed_vision_model)
-        self.assertEqual(kwargs["max_tokens"], 1500)  # VISION_MAX_TOKENS
+        from backend.material_limits import VISION_MAX_TOKENS
+        self.assertEqual(kwargs["max_tokens"], VISION_MAX_TOKENS)
 
     def test_vision_transcribe_custom_mode_unavailable_no_client_call(self):
         from backend.material_conversion import VisionUnavailable

@@ -6,7 +6,8 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from backend.config import FALLBACK_MODEL_PRICING
+from backend.config import (FALLBACK_MODEL_PRICING, MANAGED_PEAK_HOURS_SHANGHAI,
+                            MANAGED_PEAK_PRICE_MULTIPLIER)
 
 _SHANGHAI_TZ = timezone(timedelta(hours=8))
 
@@ -81,9 +82,27 @@ def extract_billing_usage(usage) -> BillingUsage | None:
     return BillingUsage(hit=hit_v, miss=miss_v, completion=completion_v)
 
 
-def price_micro_yuan(model: str, hit: int, miss: int, completion: int, pricing: dict) -> int:
-    """token×(元/百万token)=微元；单价表缺该模型时用 FALLBACK_MODEL_PRICING 保守计价。"""
-    p_hit, p_miss, p_out = pricing.get(model, FALLBACK_MODEL_PRICING)
+def is_peak_shanghai(at: datetime | None = None) -> bool:
+    """DeepSeek 官方高峰时段：北京时间周一至周五 MANAGED_PEAK_HOURS_SHANGHAI 内（左闭右开）。"""
+    now = (at or datetime.now(timezone.utc)).astimezone(_SHANGHAI_TZ)
+    if now.weekday() >= 5:
+        return False
+    return any(start <= now.hour < end for start, end in MANAGED_PEAK_HOURS_SHANGHAI)
+
+
+def unit_prices(model: str, pricing: dict, at: datetime | None = None) -> tuple[float, float, float]:
+    """该模型在 at 时刻（默认现在）的 (命中, 未命中, 输出) 单价；缺表用 FALLBACK_MODEL_PRICING 保守计价。"""
+    prices = pricing.get(model, FALLBACK_MODEL_PRICING)
+    multiplier = MANAGED_PEAK_PRICE_MULTIPLIER.get(model)
+    if multiplier and is_peak_shanghai(at):
+        return tuple(p * multiplier for p in prices)
+    return prices
+
+
+def price_micro_yuan(model: str, hit: int, miss: int, completion: int, pricing: dict,
+                     at: datetime | None = None) -> int:
+    """token×(元/百万token)=微元，按 at 时刻（默认结算时刻）的峰谷单价。"""
+    p_hit, p_miss, p_out = unit_prices(model, pricing, at)
     return round(hit * p_hit + miss * p_miss + completion * p_out)
 
 
@@ -96,6 +115,9 @@ _CJK_CHAR_RE = re.compile("[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]")
 _ASCII_CHAR_RE = re.compile("[\x00-\x7f]")
 _ESTIMATE_MARGIN = 1.15          # 估算余量：覆盖 tokenizer 波动
 _ESTIMATE_BASE_TOKENS = 2_000    # 每请求固定余量（消息结构开销）
+# 单张图片 prompt token 上界（按模型）。v4.1-flash 实测：图片先被缩放，512² 约 200、1024×768 约 510、
+# 2048² 与 4096×3072 同为约 1020——封顶 ~1024，取 2 倍余量。未登记的模型遇图片仍回落 ceiling。
+_IMAGE_PART_TOKEN_UPPER_BOUND = {"deepseek-v4.1-flash": 2_048}
 
 
 def _estimate_text_tokens(text: str) -> int:
@@ -113,14 +135,15 @@ def _estimate_text_tokens(text: str) -> int:
 def estimate_request_tokens_upper_bound(request_kwargs) -> int | None:
     """按 create(**kwargs) 的 messages+tools 估算 prompt token 上界。
 
-    返回 None = 无法可靠估算（无 messages / 消息含非文本 part（如 image_url）/ 序列化失败），
-    调用方回落到模型上下文上限封顶。刻意只认识「纯 dict + str content」的 provider message
-    形态（chat.py/_to_provider_message 的产物），其余 fail-open 到旧 ceiling——宁可多计不可少计。"""
+    返回 None = 无法可靠估算（无 messages / 消息含无法定界的 part / 序列化失败），调用方回落到模型
+    上下文上限封顶。只认识 chat.py/_to_provider_message 产出的形态：str content，或 text + image_url
+    part 列表（仅当该模型登记了单图上界）；其余 fail-open 到旧 ceiling——宁可多计不可少计。"""
     if not isinstance(request_kwargs, dict):
         return None
     messages = request_kwargs.get("messages")
     if not isinstance(messages, (list, tuple)) or not messages:
         return None
+    image_upper = _IMAGE_PART_TOKEN_UPPER_BOUND.get(request_kwargs.get("model"))
     total = 0
     try:
         for message in messages:
@@ -129,8 +152,17 @@ def estimate_request_tokens_upper_bound(request_kwargs) -> int | None:
             content = message.get("content")
             if isinstance(content, str):
                 total += _estimate_text_tokens(content)
+            elif isinstance(content, list) and image_upper:
+                for part in content:
+                    part_type = part.get("type") if isinstance(part, dict) else None
+                    if part_type == "text" and isinstance(part.get("text"), str):
+                        total += _estimate_text_tokens(part["text"])
+                    elif part_type == "image_url":
+                        total += image_upper
+                    else:
+                        return None
             elif content is not None:
-                return None   # 多模态/结构化 content → 交给模型 ceiling（视觉模型有显式锚）
+                return None   # 未登记单图上界的多模态/结构化 content → 交给模型 ceiling（视觉模型有显式锚）
             extras = {k: v for k, v in message.items() if k != "content"}
             if extras:
                 total += _estimate_text_tokens(json.dumps(extras, ensure_ascii=False, default=str))
@@ -303,7 +335,7 @@ class MeteredManagedClient:
                 # 已流出的 completion（中断前用户实际看到的输出）按 1 token/字符 ×margin 上界补计，
                 # 走输出价——只按 prompt 估算会漏掉「短 prompt + 长输出后断流」的输出成本（Codex BLOCKER）。
                 completion_billed = math.ceil(max(int(completion_chars or 0), 0) * _ESTIMATE_MARGIN)
-                p_hit, p_miss, p_out = self._pricing.get(model, FALLBACK_MODEL_PRICING)
+                p_hit, p_miss, p_out = unit_prices(model, self._pricing)
                 cost = round(prompt_billed * p_miss + completion_billed * p_out)
                 billed = prompt_billed + completion_billed
                 # failclosed 独立列：不进 cache_miss——幽灵 miss 会把管理面板命中率打烂（07-06 实测 -16pp）。
